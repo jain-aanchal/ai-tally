@@ -1,0 +1,80 @@
+-- otel_spans — primary span table (ai-tally telemetry store)
+-- Implements CTO-22. Spec §5.1.
+--
+-- Shared multi-tenant cluster (CTO-18): TenantId is FIRST in ORDER BY and is load-bearing —
+-- every read must be tenant-scoped or it scans the whole cluster.
+--
+-- Cost is Decimal64(8) (money, never Float64). Dual-track: EstimatedCost + ReconciledCost +
+-- CostSource. UserIdHashKeyVersion supports HMAC versioned-key rotation (CTO-74).
+-- High-value attributes are promoted to typed columns; the long tail stays in SpanAttributes.
+
+CREATE TABLE IF NOT EXISTS otel_spans
+(
+    TenantId               LowCardinality(String),
+    Timestamp              DateTime64(9)            CODEC(Delta, ZSTD(1)),
+    TraceId                String                   CODEC(ZSTD(1)),
+    SpanId                 String                   CODEC(ZSTD(1)),
+    ParentSpanId           String                   CODEC(ZSTD(1)),
+
+    ServiceName            LowCardinality(String),
+    SpanName               LowCardinality(String),
+    StatusCode             UInt8,
+    DurationNs             UInt64                   CODEC(T64, ZSTD(1)),
+
+    -- Business / attribution
+    FeatureTag             LowCardinality(String),
+    SessionId              String                   CODEC(ZSTD(1)),
+    UserIdHash             FixedString(64)          CODEC(ZSTD(1)),  -- HMAC-SHA256 hex
+    UserIdHashKeyVersion   LowCardinality(String),                  -- HMAC rotation (CTO-74)
+    IdempotencyKey         String                   CODEC(ZSTD(1)),
+
+    -- GenAI core (gen_ai.* semconv)
+    GenAiSystem            LowCardinality(String),
+    GenAiRequestModel      LowCardinality(String),
+    GenAiResponseModel     LowCardinality(String),
+    GenAiOperation         LowCardinality(String),
+    GenAiToolName          LowCardinality(String),
+    InputTokens            UInt32                   CODEC(T64, ZSTD(1)),
+    OutputTokens           UInt32                   CODEC(T64, ZSTD(1)),
+    CachedInputTokens      UInt32                   CODEC(T64, ZSTD(1)),
+
+    -- Cost (dual-track; Decimal64(8), NOT Float64)
+    EstimatedCost          Decimal64(8)             CODEC(ZSTD(1)),
+    ReconciledCost         Nullable(Decimal64(8))   CODEC(ZSTD(1)),
+    CostCurrency           LowCardinality(String),
+    CostSource             Enum8('estimated' = 1, 'reconciled' = 2),
+    PriceCatalogVersion    LowCardinality(String),
+
+    -- Agent context
+    AgentRunId             String                   CODEC(ZSTD(1)),
+    AgentStepIndex         UInt16,
+
+    -- Replay (Workflow 1)
+    ResolvedPromptHash     FixedString(64),
+    ResolvedContextRef     String,
+
+    -- Long tail
+    SpanAttributes         Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    SpanEvents             Array(Tuple(name String, ts DateTime64(9), attrs Map(String, String))),
+
+    -- Sampling
+    SampleRate             Float32 DEFAULT 1.0,
+
+    INDEX idx_trace_id     TraceId                  TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX idx_session_id   SessionId                TYPE bloom_filter(0.01)  GRANULARITY 4,
+    INDEX idx_user_id      UserIdHash               TYPE bloom_filter(0.01)  GRANULARITY 4,
+    INDEX idx_agent_run    AgentRunId               TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX idx_attr_keys    mapKeys(SpanAttributes)  TYPE bloom_filter(0.01)  GRANULARITY 4
+)
+ENGINE = MergeTree
+PARTITION BY toDate(Timestamp)
+ORDER BY (TenantId, FeatureTag, ServiceName, SpanName, Timestamp)
+-- Tiering: hot SSD -> warm volume at 7d, drop raw spans at 90d.
+-- NOTE: ClickHouse `TTL ... GROUP BY` requires its keys to be a prefix of the primary key, so we
+-- deliberately do NOT aggregate-on-expire here (toDate(Timestamp)/GenAiResponseModel are not a PK
+-- prefix). Long-horizon aggregates live in the rollup materialized views (CTO-24), which persist
+-- independently of this raw table's retention. Storage volumes ('warm') are configured in the
+-- ClickHouse storage policy (infra, CTO-94).
+TTL
+    toDateTime(Timestamp) + INTERVAL 7 DAY  TO VOLUME 'warm',
+    toDateTime(Timestamp) + INTERVAL 90 DAY DELETE;
