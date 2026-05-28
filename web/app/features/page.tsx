@@ -1,8 +1,19 @@
 import { Card } from "@/components/Card";
-import { diagnostics, features, margin } from "@/lib/features";
+import { apiGet } from "@/lib/api";
+import {
+  type AttributionDiagnostics,
+  type FeatureEconomics,
+  margin,
+} from "@/lib/features";
 import { formatUSD } from "@/lib/types";
 
-export default function FeaturesPage() {
+interface FeaturesPayload {
+  features: FeatureEconomics[];
+  diagnostics: AttributionDiagnostics;
+}
+
+export default async function FeaturesPage() {
+  const { features, diagnostics } = await apiGet<FeaturesPayload>("/api/features");
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold">Features</h1>

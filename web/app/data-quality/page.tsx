@@ -1,8 +1,10 @@
 import { Card } from "@/components/Card";
-import { classify, dq, type Health } from "@/lib/dq";
+import { apiGet } from "@/lib/api";
+import { classify, type DataQualityReport, type Health } from "@/lib/dq";
 import { formatUSD } from "@/lib/types";
 
-export default function DataQualityPage() {
+export default async function DataQualityPage() {
+  const dq = await apiGet<DataQualityReport>("/api/data-quality");
   const { overall, attribution, contextDrops, calibration, sampling } = dq;
 
   return (

@@ -1,9 +1,17 @@
 import { Card } from "@/components/Card";
-import { mockDataQuality, mockOutliers, mockRoi, mockSpend } from "@/lib/mock";
+import { apiGet } from "@/lib/api";
+import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 
-export default function HomePage() {
-  const s = mockSpend;
+interface HomePayload {
+  spend: SpendSummary;
+  outliers: CostOutlier[];
+  roi: FeatureRoi[];
+  dq: DataQuality;
+}
+
+export default async function HomePage() {
+  const { spend: s, outliers, roi, dq } = await apiGet<HomePayload>("/api/home");
   const hidden = s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = Math.round((hidden / s.totalMicroUsd) * 100);
 
@@ -25,7 +33,7 @@ export default function HomePage() {
 
         <Card title="Top cost outliers (24h)">
           <ul className="space-y-2 text-sm">
-            {mockOutliers.map((o) => (
+            {outliers.map((o) => (
               <li key={o.runId} className="flex items-center justify-between gap-3">
                 <span className="truncate font-mono text-gray-300">{o.runId}</span>
                 <span className="shrink-0">
@@ -48,7 +56,7 @@ export default function HomePage() {
               </tr>
             </thead>
             <tbody>
-              {mockRoi.map((r) => (
+              {roi.map((r) => (
                 <tr key={r.feature} className="border-t border-edge">
                   <td className="py-1.5">{r.feature}</td>
                   <td className="py-1.5 text-right">{formatUSD(r.costPerUserMicroUsd)}</td>
@@ -74,9 +82,9 @@ export default function HomePage() {
 
         <Card title="Data quality">
           <dl className="space-y-2 text-sm">
-            <Metric label="attribution rate" value={`${Math.round(mockDataQuality.attributionRate * 100)}%`} good />
-            <Metric label="context drops" value={String(mockDataQuality.contextDropCount)} good={mockDataQuality.contextDropCount === 0} />
-            <Metric label="estimate calibration" value={`${(mockDataQuality.estimateCalibration * 100).toFixed(1)}% off`} good={mockDataQuality.estimateCalibration < 0.03} />
+            <Metric label="attribution rate" value={`${Math.round(dq.attributionRate * 100)}%`} good />
+            <Metric label="context drops" value={String(dq.contextDropCount)} good={dq.contextDropCount === 0} />
+            <Metric label="estimate calibration" value={`${(dq.estimateCalibration * 100).toFixed(1)}% off`} good={dq.estimateCalibration < 0.03} />
           </dl>
         </Card>
       </div>

@@ -1,8 +1,10 @@
 import { Card } from "@/components/Card";
-import { pctDelta, projection } from "@/lib/estimate";
+import { apiGet } from "@/lib/api";
+import { pctDelta, type Projection } from "@/lib/estimate";
 import { formatUSD } from "@/lib/types";
 
-export default function EstimatePage() {
+export default async function EstimatePage() {
+  const projection = await apiGet<Projection>("/api/estimate");
   const { workload, pr, current, proposed, blowUpRisk, drivers, sample } = projection;
   const costDelta = pctDelta(current.monthlyCostMicroUsd, proposed.monthlyCostMicroUsd);
   const p99Delta = pctDelta(current.p99CostMicroUsd, proposed.p99CostMicroUsd);

@@ -1,16 +1,23 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card } from "@/components/Card";
-import { getRun, runs } from "@/lib/agents";
+// runs imported for generateStaticParams (build-time only); page reads via API at runtime.
+import { type AgentRun, runs as runsBuildtime } from "@/lib/agents";
+import { apiGet } from "@/lib/api";
 import { formatUSD } from "@/lib/types";
 
 export function generateStaticParams() {
-  return runs.map((r) => ({ runId: r.runId }));
+  return runsBuildtime.map((r) => ({ runId: r.runId }));
 }
 
 export default async function RunPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
-  const run = getRun(runId);
+  let run: AgentRun | null = null;
+  try {
+    run = await apiGet<AgentRun>(`/api/agents/runs/${encodeURIComponent(runId)}`);
+  } catch {
+    notFound();
+  }
   if (!run) notFound();
 
   const max = Math.max(...run.spans.map((s) => s.costMicroUsd));

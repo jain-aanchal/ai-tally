@@ -1,8 +1,10 @@
 import { Card } from "@/components/Card";
-import { comparison, deltaPct } from "@/lib/compare";
+import { apiGet } from "@/lib/api";
+import { type Comparison, deltaPct } from "@/lib/compare";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 
-export default function ComparePage() {
+export default async function ComparePage() {
+  const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
 
   return (
