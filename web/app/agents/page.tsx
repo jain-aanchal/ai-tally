@@ -1,10 +1,17 @@
 import Link from "next/link";
 import { Card } from "@/components/Card";
 import { Histogram } from "@/components/Histogram";
-import { agents, p99Ratio, runs } from "@/lib/agents";
+import { type AgentRun, type AgentSummary, p99Ratio } from "@/lib/agents";
+import { apiGet } from "@/lib/api";
 import { formatUSD } from "@/lib/types";
 
-export default function AgentsPage() {
+interface AgentsPayload {
+  agents: AgentSummary[];
+  runs: AgentRun[];
+}
+
+export default async function AgentsPage() {
+  const { agents, runs } = await apiGet<AgentsPayload>("/api/agents");
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold">Agents</h1>

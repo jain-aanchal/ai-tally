@@ -1,23 +1,32 @@
 import { Card } from "@/components/Card";
 import { Legend, StackedBarChart } from "@/components/StackedBarChart";
+import { apiGet } from "@/lib/api";
 import {
   LAYER_LABEL,
   LAYERS,
-  costSeries,
+  type CostSeries,
   estimatedTotal,
-  featureRows,
-  hiddenCostAlerts,
+  type FeatureCostRow,
+  type HiddenCostAlert,
+  type Layer,
   reconciledTotal,
   totalRange,
-  type Layer,
 } from "@/lib/cost";
 import { formatUSD, type SpendByLayer } from "@/lib/types";
 
-function sumLayer(rows: typeof featureRows, layer: Layer) {
+interface CostPayload {
+  series: CostSeries;
+  featureRows: FeatureCostRow[];
+  alerts: HiddenCostAlert[];
+}
+
+function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
 }
 
-export default function CostPage() {
+export default async function CostPage() {
+  const { series: costSeries, featureRows, alerts: hiddenCostAlerts } =
+    await apiGet<CostPayload>("/api/cost");
   const total = totalRange(costSeries);
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
@@ -89,7 +98,7 @@ export default function CostPage() {
   );
 }
 
-function FooterRow({ rows }: { rows: typeof featureRows }) {
+function FooterRow({ rows }: { rows: FeatureCostRow[] }) {
   const totals = LAYERS.reduce<SpendByLayer>(
     (acc, l) => {
       acc[l] = sumLayer(rows, l);
