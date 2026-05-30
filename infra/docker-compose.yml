@@ -1,0 +1,143 @@
+# ai-tally local infrastructure.
+#
+# Brings up the full backing stack on a laptop, applies the canonical DDL from db/, and runs the
+# Python ingest gateway. Mirrors the cloud topology so the move to managed services is config-only.
+#
+#   make up        # start everything
+#   make seed      # create a local tenant + API key + price catalog
+#   make logs      # tail the gateway
+#   make down      # stop (keep data)
+#   make nuke      # stop + wipe volumes (re-runs DDL on next up)
+#
+# Nothing here is production-hardened: single-node, default creds from .env, no TLS. Local only.
+
+name: ai-tally
+
+services:
+  # --- Telemetry store -------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: ai-tally-clickhouse
+    environment:
+      # NOTE: the official image runs /docker-entrypoint-initdb.d/*.sql against the `default`
+      # database, and our DDL is unqualified — so all tables live in `default`. We use `default`
+      # throughout rather than create a confusing empty `tally` db.
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"   # HTTP interface (clickhouse-connect)
+      - "${CLICKHOUSE_TCP_PORT:-9000}:9000"    # native protocol
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # Tiered storage policy: defines the `warm` volume that otel_spans' TTL moves parts to.
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      # DDL is applied alphabetically on first boot — numbered prefixes pin dependency order:
+      # spans table must exist before the rollup MVs that target it.
+      - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
+      - ../db/clickhouse/rollups.sql:/docker-entrypoint-initdb.d/02_rollups.sql:ro
+      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/03_last_touch_index.sql:ro
+      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/04_attribution.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- Control plane ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: ai-tally-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tally}
+      POSTGRES_USER: ${POSTGRES_USER:-tally}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tally}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../db/postgres/0001_control_plane.sql:/docker-entrypoint-initdb.d/0001_control_plane.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- Ingest buffer (Kafka API) ---------------------------------------------------------------
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: ai-tally-redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "${REDPANDA_PORT:-9092}:9092"
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- Object / warm storage (S3 API) ----------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    container_name: ai-tally-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-tally}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-tally-minio}
+    ports:
+      - "${MINIO_PORT:-9002}:9000"       # host 9002 -> S3 API (avoids CH native 9000 on host)
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- Ingest gateway (SDK batch -> enrich -> ClickHouse) --------------------------------------
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/gateway/Dockerfile
+    container_name: ai-tally-gateway
+    environment:
+      TALLY_CLICKHOUSE_HOST: clickhouse
+      TALLY_CLICKHOUSE_PORT: 8123
+      TALLY_CLICKHOUSE_DB: default
+      TALLY_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
+      TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
+      TALLY_POSTGRES_DSN: postgresql://${POSTGRES_USER:-tally}:${POSTGRES_PASSWORD:-tally}@postgres:5432/${POSTGRES_DB:-tally}
+      TALLY_REQUIRE_API_KEY: ${TALLY_REQUIRE_API_KEY:-false}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  clickhouse-data:
+  postgres-data:
+  redpanda-data:
+  minio-data:
