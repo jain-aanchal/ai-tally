@@ -16,6 +16,7 @@ htmlcov/
 # Env / secrets
 .env
 .env.*
+!.env.example
 *.local
 
 # OS / editor
