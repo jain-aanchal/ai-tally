@@ -25,7 +25,7 @@ describe("api routes", () => {
   });
 
   it("GET /api/agents returns agents + runs", async () => {
-    const body = await json<{ agents: unknown[]; runs: unknown[] }>(AgentsGET());
+    const body = await json<{ agents: unknown[]; runs: unknown[] }>(await AgentsGET());
     expect(body.agents.length).toBeGreaterThan(0);
     expect(body.runs.length).toBeGreaterThan(0);
   });
@@ -50,13 +50,13 @@ describe("api routes", () => {
   });
 
   it("GET /api/features returns features + diagnostics", async () => {
-    const body = await json<{ features: unknown[]; diagnostics: unknown }>(FeaturesGET());
+    const body = await json<{ features: unknown[]; diagnostics: unknown }>(await FeaturesGET());
     expect(body.features.length).toBeGreaterThan(0);
     expect(body.diagnostics).toBeDefined();
   });
 
   it("GET /api/data-quality returns a report", async () => {
-    const body = await json<{ overall: { attributionRate: number } }>(DataQualityGET());
+    const body = await json<{ overall: { attributionRate: number } }>(await DataQualityGET());
     expect(body.overall.attributionRate).toBeGreaterThan(0);
   });
 
