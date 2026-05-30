@@ -17,7 +17,7 @@ async function json<T = unknown>(res: Response): Promise<T> {
 
 describe("api routes", () => {
   it("GET /api/home returns the four cards", async () => {
-    const body = await json<{ spend: unknown; outliers: unknown[]; roi: unknown[]; dq: unknown }>(HomeGET());
+    const body = await json<{ spend: unknown; outliers: unknown[]; roi: unknown[]; dq: unknown }>(await HomeGET());
     expect(body.spend).toBeDefined();
     expect(Array.isArray(body.outliers)).toBe(true);
     expect(Array.isArray(body.roi)).toBe(true);
@@ -44,7 +44,7 @@ describe("api routes", () => {
   });
 
   it("GET /api/cost returns series + featureRows + alerts", async () => {
-    const body = await json<{ series: unknown; featureRows: unknown[]; alerts: unknown[] }>(CostGET());
+    const body = await json<{ series: unknown; featureRows: unknown[]; alerts: unknown[] }>(await CostGET());
     expect(body.series).toBeDefined();
     expect(body.featureRows.length).toBeGreaterThan(0);
   });
