@@ -31,7 +31,7 @@ cd infra
 make up        # build + start everything (first run pulls images, ~2-3 min)
 make seed      # create a local tenant + API key + feature tags
 make demo      # push a sample batch through the gateway into ClickHouse
-make ch        # SQL shell — try: SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY FeatureTag
+make ch        # SQL shell (default db) — try: SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY FeatureTag
 make down      # stop (keep data)   |   make nuke = stop + wipe volumes
 ```
 

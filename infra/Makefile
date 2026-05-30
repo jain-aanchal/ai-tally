@@ -35,7 +35,7 @@ test: ## Run gateway unit tests (pure mapping logic, no infra)
 	cd gateway && uv run --extra dev pytest -q
 
 ch: ## Open a ClickHouse SQL shell
-	$(COMPOSE) exec clickhouse clickhouse-client -u tally --password tally -d tally
+	$(COMPOSE) exec clickhouse clickhouse-client -u tally --password tally -d default
 
 psql: ## Open a Postgres shell
 	$(COMPOSE) exec postgres psql -U tally -d tally

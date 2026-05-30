@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  Tiered storage for the local stack.
+
+  otel_spans.sql's TTL moves expired parts `TO VOLUME 'warm'`, which only resolves if the table's
+  storage policy actually defines a volume named `warm`. The table specifies no explicit policy, so
+  it uses `default` — therefore we redefine the `default` policy here with two volumes:
+
+    hot  -> the built-in `default` disk (fresh inserts land here)
+    warm -> a second local disk (parts move here after the 7d TTL)
+
+  In production these map to SSD vs. cheaper object/block storage; locally both are just folders
+  under /var/lib/clickhouse so the TTL expression is valid and the table creates cleanly.
+-->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <warm>
+                <path>/var/lib/clickhouse/warm/</path>
+            </warm>
+        </disks>
+        <policies>
+            <default>
+                <volumes>
+                    <hot>
+                        <disk>default</disk>
+                    </hot>
+                    <warm>
+                        <disk>warm</disk>
+                    </warm>
+                </volumes>
+            </default>
+        </policies>
+    </storage_configuration>
+</clickhouse>

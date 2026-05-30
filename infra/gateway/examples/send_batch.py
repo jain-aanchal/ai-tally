@@ -6,7 +6,7 @@ Usage (after `make up`):
 
 Then check ClickHouse:
     curl 'http://localhost:8123/?user=tally&password=tally' \
-      --data-binary "SELECT FeatureTag, count(), sum(EstimatedCost) FROM tally.otel_spans GROUP BY FeatureTag"
+      --data-binary "SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY FeatureTag"
 """
 
 from __future__ import annotations
@@ -39,6 +39,10 @@ def make_span(feature: str, model: str, in_tok: int, out_tok: int) -> dict[str, 
         )
     )
     attrs["ServiceName"] = "demo-app"
+    # Real SDK spans carry trace/span ids from context; the gateway dedupes on (trace_id, span_id),
+    # so give each demo span its own pair (otherwise they collapse to one).
+    attrs["trace_id"] = uuid7().replace("-", "")
+    attrs["span_id"] = uuid7().replace("-", "")[:16]
     return attrs
 
 

@@ -19,7 +19,9 @@ services:
     image: clickhouse/clickhouse-server:24.8
     container_name: ai-tally-clickhouse
     environment:
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-tally}
+      # NOTE: the official image runs /docker-entrypoint-initdb.d/*.sql against the `default`
+      # database, and our DDL is unqualified — so all tables live in `default`. We use `default`
+      # throughout rather than create a confusing empty `tally` db.
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
@@ -30,6 +32,8 @@ services:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      # Tiered storage policy: defines the `warm` volume that otel_spans' TTL moves parts to.
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
       # DDL is applied alphabetically on first boot — numbered prefixes pin dependency order:
       # spans table must exist before the rollup MVs that target it.
       - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
@@ -114,7 +118,7 @@ services:
     environment:
       TALLY_CLICKHOUSE_HOST: clickhouse
       TALLY_CLICKHOUSE_PORT: 8123
-      TALLY_CLICKHOUSE_DB: ${CLICKHOUSE_DB:-tally}
+      TALLY_CLICKHOUSE_DB: default
       TALLY_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_POSTGRES_DSN: postgresql://${POSTGRES_USER:-tally}:${POSTGRES_PASSWORD:-tally}@postgres:5432/${POSTGRES_DB:-tally}
