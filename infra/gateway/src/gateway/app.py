@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from tally.enrichment import enrich_cost
 from tally.pricing import seed_catalog
+from tally.schema import GenAI
 from tally.timekeeping import assess
 from tally.wire import (
     BatchRequest,
@@ -273,6 +274,16 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         client_ts = span.get("timestamp_ns")
         client_ts_ns = client_ts if isinstance(client_ts, int) else batch.client_send_ts_ns
         skew = assess(client_ts_ns, server_recv_ns)
+        # Meter at HEAD — before the analytics sampling decision — so the billable trace count is
+        # exact regardless of sample_rate (CTO-84/85). Drops/sampling must never lower the bill.
+        trace_id = span.get("TraceId") or span.get("trace_id")
+        feature_tag = result.attributes.get(GenAI.FEATURE_TAG)
+        metering.record_span(
+            batch.tenant_id,
+            trace_id=trace_id if isinstance(trace_id, str) else None,
+            feature_tag=feature_tag if isinstance(feature_tag, str) else None,
+            ts_ns=skew.effective_ts_ns,
+        )
         rows.append(
             span_to_row(
                 result.attributes,
@@ -320,6 +331,37 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     )
     idempotency.record(batch, resp)
     return JSONResponse(_response_dict(resp), status_code=200)
+
+
+@app.get("/v1/usage")
+def get_usage(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+    period: str | None = None,
+) -> JSONResponse:
+    """Current-period (or ``?period=YYYY-MM``) usage vs. plan limit for the caller's tenant.
+
+    Consumed by the dashboard ("usage vs. plan limit") and billing (CTO-86). Tenant resolves from
+    the API key when auth is on, else from the ``X-Tenant-Id`` header (local dev).
+    """
+    settings = app.state.settings
+    auth: ApiKeyAuth = app.state.auth
+    metering: UsageRollup = app.state.metering
+
+    if settings.require_api_key:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        token = authorization.split(" ", 1)[1].strip()
+        tenant_id = auth.tenant_for_key(token)
+        if tenant_id is None:
+            raise HTTPException(status_code=403, detail="invalid api key")
+    else:
+        tenant_id = x_tenant_id
+        if not tenant_id:
+            raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
+
+    record = metering.usage(tenant_id, period)
+    return JSONResponse(record.as_dict(), status_code=200)
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:
