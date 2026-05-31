@@ -40,6 +40,7 @@ from gateway.backpressure import Backpressure
 from gateway.config import get_settings
 from gateway.errors import ErrorCode
 from gateway.mapping import span_to_row
+from gateway.metering import UsageRollup
 from gateway.protocol import (
     SUPPORTED_PROTOCOLS,
     capabilities,
@@ -70,6 +71,9 @@ async def lifespan(app: FastAPI):
     # unknown-tag flag is disabled for now — schema + PII checks are always on.
     app.state.validator = SpanValidator(max_span_bytes=settings.max_span_bytes)
     app.state.backpressure = Backpressure(soft_limit=settings.backpressure_soft_limit)
+    # HEAD-path billing meter (CTO-84/85/86): counts distinct traces + feature tags before any
+    # sampling/shed so the bill is exact regardless of analytics sample rate.
+    app.state.metering = UsageRollup()
     app.state.in_flight = 0
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
@@ -255,6 +259,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
 
     # --- validate (per item) + enrich + map spans ---
     validator: SpanValidator = app.state.validator
+    metering: UsageRollup = app.state.metering
     rows: list[tuple[object, ...]] = []
     drift_count = 0
     for index, span in enumerate(batch.resource_spans):
