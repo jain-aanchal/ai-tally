@@ -1,10 +1,11 @@
 import { Card } from "@/components/Card";
 import {
   PartialDataBanner,
+  StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
-import { deriveDataState } from "@/lib/dataState";
+import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { pctDelta, type Projection } from "@/lib/estimate";
 import { formatUSD } from "@/lib/types";
 
@@ -17,10 +18,17 @@ export default async function EstimatePage() {
   const riskSeverity =
     blowUpRisk >= 0.3 ? "bad" : blowUpRisk >= 0.1 ? "warn" : "good";
 
-  // No reconciliation boundary on this what-if surface — only empty/partial apply.
+  // This projection samples a reconciled historical window — surface that window's freshness so a
+  // forecast off a stale baseline is never shown as fresh (CTO-80).
+  const reconciledThrough = boundaryFromMinutesAgo(projection.reconcilerLastRunMinutesAgo);
   const noBaseline = current.monthlyCostMicroUsd === 0;
   const thinSample = sample.used > 0 && sample.pathologicalIncluded === 0;
-  const state = deriveDataState({ isEmpty: noBaseline, isPartial: thinSample });
+  const state = deriveDataState({
+    isEmpty: noBaseline,
+    isPartial: thinSample,
+    reconciledThrough,
+  });
+  const asOf = asOfLabel(reconciledThrough);
 
   const body = (
     <div className="space-y-6">
@@ -96,11 +104,16 @@ export default async function EstimatePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Estimate</h1>
-        <p className="mt-1 text-sm text-muted">
-          Workload: <span className="font-mono text-gray-300">{workload}</span>
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Estimate</h1>
+          <p className="mt-1 text-sm text-muted">
+            Workload: <span className="font-mono text-gray-300">{workload}</span>
+          </p>
+        </div>
+        {state !== "empty" && asOf && (
+          <StaleBadge asOf={asOf} age={relativeAge(reconciledThrough)} stale={state === "stale"} />
+        )}
       </div>
 
       {state === "partial" && <PartialDataBanner missing="tail-weighted sampling" />}

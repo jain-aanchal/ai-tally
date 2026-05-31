@@ -16,6 +16,13 @@ export function p99Ratio(a: AgentSummary): number {
   return a.p50MicroUsd === 0 ? 0 : a.p99MicroUsd / a.p50MicroUsd;
 }
 
+/**
+ * Minutes since the reconciler last trued-up these per-agent cost numbers. Agents presents
+ * reconciled cost (cost/day, p50/p99), so it carries the same freshness signal as Cost/Features
+ * and must surface staleness the same way (CTO-80, "never show stale as fresh").
+ */
+export const RECONCILER_LAST_RUN_MINUTES_AGO = 23;
+
 export interface RunSpan {
   spanId: string;
   parentSpanId: string | null;

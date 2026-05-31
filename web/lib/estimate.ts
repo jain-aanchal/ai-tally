@@ -24,6 +24,11 @@ export interface Projection {
     pathologicalIncluded: number;
     ciHalfWidthPct: number; // on p99
   };
+  /**
+   * Minutes since the reconciler last trued-up the historical window this projection samples.
+   * An estimate built on a stale baseline must not be presented as fresh (CTO-80).
+   */
+  reconcilerLastRunMinutesAgo: number;
 }
 
 export function pctDelta(cur: number, prop: number): number {
@@ -56,4 +61,5 @@ export const projection: Projection = {
     pathologicalIncluded: 18,
     ciHalfWidthPct: 0.18,
   },
+  reconcilerLastRunMinutesAgo: 51,
 };

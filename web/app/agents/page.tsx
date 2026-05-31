@@ -2,27 +2,36 @@ import Link from "next/link";
 import { Card } from "@/components/Card";
 import {
   PartialDataBanner,
+  StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
 import { Histogram } from "@/components/Histogram";
 import { type AgentRun, type AgentSummary, p99Ratio } from "@/lib/agents";
 import { apiGet } from "@/lib/api";
-import { deriveDataState } from "@/lib/dataState";
+import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { formatUSD } from "@/lib/types";
 
 interface AgentsPayload {
   agents: AgentSummary[];
   runs: AgentRun[];
+  reconcilerLastRunMinutesAgo: number;
 }
 
 export default async function AgentsPage() {
-  const { agents, runs } = await apiGet<AgentsPayload>("/api/agents");
+  const { agents, runs, reconcilerLastRunMinutesAgo } =
+    await apiGet<AgentsPayload>("/api/agents");
 
-  // Agents has no reconciliation boundary — only empty/partial states apply.
+  // Agents presents reconciled per-agent cost, so it carries a freshness boundary like Cost/Features.
+  const reconciledThrough = boundaryFromMinutesAgo(reconcilerLastRunMinutesAgo);
   const noAgents = agents.length === 0 || agents.every((a) => a.costPerDayMicroUsd === 0);
   const someEmptyAgents =
     agents.some((a) => a.runsPerDay === 0) && agents.some((a) => a.runsPerDay > 0);
-  const state = deriveDataState({ isEmpty: noAgents, isPartial: someEmptyAgents });
+  const state = deriveDataState({
+    isEmpty: noAgents,
+    isPartial: someEmptyAgents,
+    reconciledThrough,
+  });
+  const asOf = asOfLabel(reconciledThrough);
 
   const body = (
     <div className="space-y-6">
@@ -92,7 +101,12 @@ export default async function AgentsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Agents</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">Agents</h1>
+        {state !== "empty" && asOf && (
+          <StaleBadge asOf={asOf} age={relativeAge(reconciledThrough)} stale={state === "stale"} />
+        )}
+      </div>
 
       {state === "partial" && <PartialDataBanner missing="telemetry for some agents" />}
 

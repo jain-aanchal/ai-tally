@@ -23,6 +23,15 @@ export function ageMs(reconciledThrough: string, now: number = Date.now()): numb
   return now - Date.parse(reconciledThrough);
 }
 
+/**
+ * Build a reconciliation-boundary ISO timestamp from "minutes since the reconciler last ran".
+ * Surfaces that don't carry an explicit boundary date (Agents, Compare, Estimate) report freshness
+ * as a minutes-ago number instead; this converts it so they share the same stale/fresh logic.
+ */
+export function boundaryFromMinutesAgo(minutesAgo: number, now: number = Date.now()): string {
+  return new Date(now - minutesAgo * 60_000).toISOString();
+}
+
 /** A far-past sentinel boundary means nothing has reconciled yet (pre-data), not stale. */
 export function isSentinelBoundary(reconciledThrough: string): boolean {
   const t = Date.parse(reconciledThrough);
