@@ -1,5 +1,10 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
+import { deriveDataState } from "@/lib/dataState";
 import { pctDelta, type Projection } from "@/lib/estimate";
 import { formatUSD } from "@/lib/types";
 
@@ -12,15 +17,13 @@ export default async function EstimatePage() {
   const riskSeverity =
     blowUpRisk >= 0.3 ? "bad" : blowUpRisk >= 0.1 ? "warn" : "good";
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Estimate</h1>
-        <p className="mt-1 text-sm text-muted">
-          Workload: <span className="font-mono text-gray-300">{workload}</span>
-        </p>
-      </div>
+  // No reconciliation boundary on this what-if surface — only empty/partial apply.
+  const noBaseline = current.monthlyCostMicroUsd === 0;
+  const thinSample = sample.used > 0 && sample.pathologicalIncluded === 0;
+  const state = deriveDataState({ isEmpty: noBaseline, isPartial: thinSample });
 
+  const body = (
+    <div className="space-y-6">
       {pr && (
         <div className="rounded-xl border border-edge bg-panel p-4 text-sm">
           <span className="text-muted">Estimating PR </span>
@@ -88,6 +91,25 @@ export default async function EstimatePage() {
           <Diag k="sampling strategy" v="tail-weighted (recommended)" good />
         </dl>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold">Estimate</h1>
+        <p className="mt-1 text-sm text-muted">
+          Workload: <span className="font-mono text-gray-300">{workload}</span>
+        </p>
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="tail-weighted sampling" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Estimate">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }

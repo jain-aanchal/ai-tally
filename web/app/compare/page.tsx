@@ -1,21 +1,24 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
 import { type Comparison, deltaPct } from "@/lib/compare";
+import { deriveDataState } from "@/lib/dataState";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 
 export default async function ComparePage() {
   const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Compare</h1>
-        <p className="mt-1 text-sm text-muted">
-          Workload: <span className="font-mono text-gray-300">{workload}</span>
-        </p>
-      </div>
+  // No reconciliation boundary on this what-if surface — only empty/partial apply.
+  const noBaseline = current.monthlyCostMicroUsd === 0 || candidates.length === 0;
+  const noReplay = diagnostics.samplesReplayed === 0 && diagnostics.samplesAvailable > 0;
+  const state = deriveDataState({ isEmpty: noBaseline, isPartial: noReplay });
 
+  const body = (
+    <div className="space-y-6">
       <Card title="Candidates vs. current">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -64,6 +67,25 @@ export default async function ComparePage() {
           <Diag k="context fidelity" v={diagnostics.contextFidelity} good />
         </dl>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold">Compare</h1>
+        <p className="mt-1 text-sm text-muted">
+          Workload: <span className="font-mono text-gray-300">{workload}</span>
+        </p>
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="the replay sampler" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Compare">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }

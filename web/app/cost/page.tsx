@@ -1,6 +1,12 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  StaleBadge,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { Legend, StackedBarChart } from "@/components/StackedBarChart";
 import { apiGet } from "@/lib/api";
+import { asOfLabel, deriveDataState, relativeAge, someZero } from "@/lib/dataState";
 import {
   LAYER_LABEL,
   LAYERS,
@@ -31,10 +37,22 @@ export default async function CostPage() {
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
 
-  return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Cost</h1>
+  const layerTotals = LAYERS.reduce<Record<Layer, number>>(
+    (acc, l) => {
+      acc[l] = sumLayer(featureRows, l);
+      return acc;
+    },
+    { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
+  );
+  const state = deriveDataState({
+    isEmpty: total === 0,
+    isPartial: someZero({ ...layerTotals }),
+    reconciledThrough: costSeries.reconciledThrough,
+  });
+  const asOf = asOfLabel(costSeries.reconciledThrough);
 
+  const body = (
+    <div className="space-y-6">
       <Card title="Cost by layer — last 14 days">
         <div className="mb-2 flex items-baseline gap-3 text-sm">
           <span className="text-2xl font-semibold">{formatUSD(total)}</span>
@@ -94,6 +112,29 @@ export default async function CostPage() {
           </table>
         </div>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">Cost</h1>
+        {state !== "empty" && asOf && (
+          <StaleBadge
+            asOf={asOf}
+            age={relativeAge(costSeries.reconciledThrough)}
+            stale={state === "stale"}
+          />
+        )}
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="a cost layer connector" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Cost">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }
