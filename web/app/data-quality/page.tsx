@@ -1,5 +1,11 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  StaleBadge,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
+import { asOfLabel, deriveDataState, relativeAge } from "@/lib/dataState";
 import { classify, type DataQualityReport, type Health } from "@/lib/dq";
 import { formatUSD } from "@/lib/types";
 
@@ -7,15 +13,21 @@ export default async function DataQualityPage() {
   const dq = await apiGet<DataQualityReport>("/api/data-quality");
   const { overall, attribution, contextDrops, calibration, sampling } = dq;
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Data Quality</h1>
-        <p className="mt-1 text-sm text-muted">
-          Every number we show, and how confident you can be in it. Honest under uncertainty.
-        </p>
-      </div>
+  // Latest reconciled calibration day is the freshness boundary; absence ⇒ pre-data.
+  const reconciledThrough = calibration.length > 0 ? calibration[calibration.length - 1].date : "1970-01-01";
+  const noData =
+    attribution.length === 0 && calibration.length === 0 && overall.attributionRate === 0;
+  const someUnattributed =
+    attribution.some((a) => a.events7d === 0) && attribution.some((a) => a.events7d > 0);
+  const state = deriveDataState({
+    isEmpty: noData,
+    isPartial: someUnattributed,
+    reconciledThrough,
+  });
+  const asOf = asOfLabel(reconciledThrough);
 
+  const body = (
+    <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <KpiCard
           label="Attribution rate"
@@ -157,6 +169,30 @@ export default async function DataQualityPage() {
           </tbody>
         </table>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Data Quality</h1>
+          <p className="mt-1 text-sm text-muted">
+            Every number we show, and how confident you can be in it. Honest under uncertainty.
+          </p>
+        </div>
+        {state !== "empty" && asOf && (
+          <StaleBadge asOf={asOf} age={relativeAge(reconciledThrough)} stale={state === "stale"} />
+        )}
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="a value-event source for every feature" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Data Quality">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }
