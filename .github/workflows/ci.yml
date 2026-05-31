@@ -42,6 +42,24 @@ jobs:
       - name: Test
         run: uv run pytest
 
+  edge-proxy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/edge-proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: infra/edge-proxy/go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: Test (race + latency budget)
+        run: go test -race ./...
+
   web:
     runs-on: ubuntu-latest
     defaults:
