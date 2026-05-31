@@ -32,6 +32,7 @@ import type {
   SampleByStratum,
 } from "./dq";
 import type { AgentRun, AgentSummary, RunSpan } from "./agents";
+import { CONNECTORS, type ConnectorActivity } from "./connectors";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -564,5 +565,59 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
     const agentMedian = median(peers.map((p) => micro(p.cost)));
     const spans = (await fetchSpansFor(db, tenant, [runId]))[runId] ?? [];
     return buildRun(agg, spans, agentMedian);
+  });
+}
+
+// Connector activity (CTO-63/68): which supported cost/revenue sources are actually producing data.
+// Cost sources are read off otel_spans cost layers; revenue sources off business_events.Source. The
+// result is keyed by connector id so applyActivity() can mark each catalog entry connected/available.
+export async function queryConnectorActivity(): Promise<ConnectorActivity | null> {
+  return tryLive(async (db, tenant) => {
+    const records: Record<string, number> = {};
+    const lastAt: Record<string, string> = {};
+
+    // Cost layers from telemetry. Map each layer back to the connector that feeds it.
+    const layerToId = new Map<Layer, string>();
+    for (const c of CONNECTORS) {
+      if (c.liveKey.kind === "cost-layer") layerToId.set(c.liveKey.layer, c.id);
+    }
+    const costRows = await rows<{ layer: Layer; n: string; last: string | null }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, count() AS n, toString(max(Timestamp)) AS last
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
+       GROUP BY layer`,
+      tenant,
+    );
+    for (const r of costRows) {
+      const id = layerToId.get(r.layer);
+      if (!id) continue;
+      const n = parseInt(r.n, 10) || 0;
+      if (n <= 0) continue;
+      records[id] = (records[id] ?? 0) + n;
+      if (r.last && (!lastAt[id] || r.last > lastAt[id])) lastAt[id] = r.last;
+    }
+
+    // Revenue/CDP sources from business_events. Source value matches the connector id.
+    const knownSources = new Set(
+      CONNECTORS.filter((c) => c.liveKey.kind === "revenue-source").map((c) => c.id),
+    );
+    const revRows = await rows<{ src: string; n: string; last: string | null }>(
+      db,
+      `SELECT lower(Source) AS src, count() AS n, toString(max(OccurredAt)) AS last
+       FROM business_events
+       WHERE TenantId = {tenant:String}
+       GROUP BY src`,
+      tenant,
+    );
+    for (const r of revRows) {
+      if (!knownSources.has(r.src)) continue;
+      const n = parseInt(r.n, 10) || 0;
+      if (n <= 0) continue;
+      records[r.src] = (records[r.src] ?? 0) + n;
+      if (r.last) lastAt[r.src] = r.last;
+    }
+
+    return { records, lastAt };
   });
 }
