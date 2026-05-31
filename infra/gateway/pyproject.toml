@@ -21,6 +21,7 @@ dev = [
 
 [tool.uv.sources]
 # The gateway reuses the SDK's wire/enrichment/timekeeping/pricing logic directly.
+# Distribution name is `tally-sdk`; the import package is `tally`.
 tally-sdk = { path = "../../sdk/python", editable = true }
 
 [build-system]

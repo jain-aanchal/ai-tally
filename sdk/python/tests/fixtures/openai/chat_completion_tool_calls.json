@@ -1,0 +1,53 @@
+{
+  "id": "chatcmpl-Bx7Qe2tools0000000000000",
+  "object": "chat.completion",
+  "created": 1740000200,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "tool_calls": [
+          {
+            "id": "call_abc123weather",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Paris, FR\"}"
+            }
+          },
+          {
+            "id": "call_def456time",
+            "type": "function",
+            "function": {
+              "name": "get_current_time",
+              "arguments": "{\"timezone\": \"Europe/Paris\"}"
+            }
+          }
+        ]
+      },
+      "logprobs": null,
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 88,
+    "completion_tokens": 42,
+    "total_tokens": 130,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "audio_tokens": 0
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0,
+      "audio_tokens": 0,
+      "accepted_prediction_tokens": 0,
+      "rejected_prediction_tokens": 0
+    }
+  },
+  "service_tier": "default",
+  "system_fingerprint": "fp_tools00"
+}

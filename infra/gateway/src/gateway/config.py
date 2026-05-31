@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     # Idempotency window (seconds) for (tenant_id, batch_id) dedup.
     idempotency_ttl_s: int = 24 * 3600
 
+    # Per-tenant rate limit (token bucket) + monthly span quota (CTO-33). Process-local enforcement;
+    # cluster-wide fairness is a later concern (CTO-30). Defaults are generous for local dev.
+    rate_limit_rps: float = 500.0
+    rate_limit_burst: float = 2000.0
+    monthly_quota_spans: int = 50_000_000
+
+    # Per-span payload cap (bytes) for boundary validation (CTO-34).
+    max_span_bytes: int = 64 * 1024
+
+    # Backpressure (CTO-36): concurrent in-flight ingest requests at/above which the gateway
+    # tightens client flow-control hints and sheds the overflow of a batch as retryable.
+    backpressure_soft_limit: int = 64
+
 
 _settings: Settings | None = None
 
