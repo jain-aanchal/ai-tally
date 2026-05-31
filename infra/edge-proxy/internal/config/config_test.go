@@ -87,3 +87,60 @@ func TestInvalidScalars(t *testing.T) {
 		t.Error("expected error for negative duration")
 	}
 }
+
+func TestDefaultModeIsPassthrough(t *testing.T) {
+	cfg, err := FromEnv(envMap(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != ModePassthrough {
+		t.Errorf("Mode = %q, want passthrough", cfg.Mode)
+	}
+	if cfg.SelfHosted {
+		t.Error("SelfHosted should default to false")
+	}
+	if cfg.BrokerTTL != DefaultBrokerTTL {
+		t.Errorf("BrokerTTL = %s, want %s", cfg.BrokerTTL, DefaultBrokerTTL)
+	}
+}
+
+func TestBrokerModeRequiresBrokerFile(t *testing.T) {
+	_, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_MODE": "broker"}))
+	if err == nil {
+		t.Fatal("expected error: broker mode without EDGE_PROXY_BROKER_FILE")
+	}
+}
+
+func TestBrokerModeAccepted(t *testing.T) {
+	cfg, err := FromEnv(envMap(map[string]string{
+		"EDGE_PROXY_MODE":          "broker",
+		"EDGE_PROXY_BROKER_FILE":   "/etc/ai-tally/keys.json",
+		"EDGE_PROXY_BROKER_TTL":    "90s",
+		"EDGE_PROXY_SELF_HOSTED":   "true",
+		"EDGE_PROXY_TELEMETRY_URL": "https://ingest.ai-tally.com/v1/edge",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != ModeBroker {
+		t.Errorf("Mode = %q, want broker", cfg.Mode)
+	}
+	if cfg.BrokerFile != "/etc/ai-tally/keys.json" {
+		t.Errorf("BrokerFile = %q", cfg.BrokerFile)
+	}
+	if cfg.BrokerTTL != 90*time.Second {
+		t.Errorf("BrokerTTL = %s, want 90s", cfg.BrokerTTL)
+	}
+	if !cfg.SelfHosted {
+		t.Error("SelfHosted should be true")
+	}
+	if cfg.TelemetryURL != "https://ingest.ai-tally.com/v1/edge" {
+		t.Errorf("TelemetryURL = %q", cfg.TelemetryURL)
+	}
+}
+
+func TestInvalidMode(t *testing.T) {
+	if _, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_MODE": "sideways"})); err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+}

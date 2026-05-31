@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge-proxy.fullname" . }}
+  labels:
+    {{- include "edge-proxy.labels" . | nindent 4 }}
+data:
+  # Non-secret runtime configuration. The provider keys live only in the Secret (broker mode).
+  EDGE_PROXY_LISTEN: ":{{ .Values.service.port }}"
+  EDGE_PROXY_UPSTREAM: {{ .Values.proxy.upstream | quote }}
+  EDGE_PROXY_TENANT_HEADER: {{ .Values.proxy.tenantHeader | quote }}
+  EDGE_PROXY_REQUIRE_TENANT: {{ .Values.proxy.requireTenant | quote }}
+  EDGE_PROXY_UPSTREAM_TIMEOUT: {{ .Values.proxy.upstreamTimeout | quote }}
+  EDGE_PROXY_MODE: {{ .Values.proxy.mode | quote }}
+  EDGE_PROXY_BROKER_TTL: {{ .Values.proxy.brokerTTL | quote }}
+  EDGE_PROXY_SELF_HOSTED: {{ .Values.proxy.selfHosted | quote }}
+  EDGE_PROXY_TELEMETRY_URL: {{ .Values.proxy.telemetryURL | quote }}
+  {{- if eq .Values.proxy.mode "broker" }}
+  EDGE_PROXY_BROKER_FILE: "{{ .Values.broker.mountPath }}/{{ .Values.broker.secretKey }}"
+  {{- end }}

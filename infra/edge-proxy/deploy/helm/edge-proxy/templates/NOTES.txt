@@ -1,0 +1,36 @@
+edge-proxy {{ .Chart.AppVersion }} is deploying as release "{{ .Release.Name }}".
+
+Mode: {{ .Values.proxy.mode }}{{ if .Values.proxy.selfHosted }} (self-hosted){{ end }}
+Upstream: {{ .Values.proxy.upstream }}
+
+1. Wait for the pods to become ready:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+2. Reach the proxy in-cluster at:
+
+   http://{{ include "edge-proxy.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+   Or port-forward to try it locally:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "edge-proxy.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+3. Point your application at it:
+{{- if eq .Values.proxy.mode "broker" }}
+
+   export OPENAI_BASE_URL=http://localhost:{{ .Values.service.port }}/v1
+   # Broker mode: send ONLY the ai-tally tenant key. Do NOT send a provider Authorization header —
+   # the proxy mints the provider credential from the broker key-file and injects it.
+   #   header on each request:  {{ .Values.proxy.tenantHeader }}: tk_live_yourtenant
+{{- else }}
+
+   export OPENAI_BASE_URL=http://localhost:{{ .Values.service.port }}/v1
+   # Passthrough mode: your app sends its own provider Authorization header as usual, plus:
+   #   header on each request:  {{ .Values.proxy.tenantHeader }}: tk_live_yourtenant
+{{- end }}
+
+{{- if and (eq .Values.proxy.mode "broker") (not .Values.broker.existingSecret) }}
+
+NOTE: you supplied broker keys inline (broker.inline). For production, render them from your KMS
+into a Secret and reference it via broker.existingSecret so provider keys never live in values.yaml.
+{{- end }}

@@ -49,8 +49,98 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_TENANT_HEADER` | `X-Tenant-Key` | control header carrying the tenant id (stripped before upstream) |
 | `EDGE_PROXY_REQUIRE_TENANT` | `false` | reject requests missing the tenant header with `400` |
 | `EDGE_PROXY_UPSTREAM_TIMEOUT` | `10m` | per-request bound (generous: completions stream for minutes) |
+| `EDGE_PROXY_MODE` | `passthrough` | `passthrough` (app sends the provider key) or `broker` (provider key stays in KMS — see below) |
+| `EDGE_PROXY_BROKER_FILE` | — | path to the KMS-export JSON; **required** when `EDGE_PROXY_MODE=broker` |
+| `EDGE_PROXY_BROKER_TTL` | `5m` | how long a minted credential is reused before re-minting |
+| `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
+| `EDGE_PROXY_TELEMETRY_URL` | — | collector endpoint for metadata-only `TraceRecord`s; empty disables shipping |
 
 `/healthz` is the one path the proxy owns (liveness); everything else is forwarded.
+
+## Self-host & BYO-deployment (CTO-43)
+
+The same single binary runs inside a regulated customer's own VPC. Two things change for that
+audience: **how the provider key is handled**, and **how telemetry is shipped**.
+
+### Key-broker mode
+
+In the cloud default (`passthrough`) the customer's app sends the provider key on each request and
+the proxy forwards it untouched. Regulated customers don't want that key in their application code
+at all. **Broker mode** keeps the provider key in the customer's KMS: the app sends *only* an
+ai-tally tenant key, and the proxy mints a short-lived provider credential and injects it on the way
+upstream. The minted token is applied to the outgoing request header only — never logged, never put
+in a `TraceRecord` — preserving the same in-memory-only guarantee as passthrough. An unknown tenant
+fails closed with `403`; a broker outage fails closed with `502` (never an unauthenticated upstream
+call).
+
+The broker reads a KMS-export file mapping tenant key → provider `Authorization` header:
+
+```json
+{
+  "tenants": {
+    "tk_live_acme":   "Bearer sk-acmes-real-provider-key",
+    "tk_live_globex": "Bearer sk-globexs-real-provider-key"
+  }
+}
+```
+
+See [`deploy/keys.example.json`](deploy/keys.example.json). In production this is rendered from your
+KMS at deploy time (init container / mounted secret), never committed.
+
+```bash
+cd infra/edge-proxy
+EDGE_PROXY_MODE=broker \
+EDGE_PROXY_BROKER_FILE=./deploy/keys.example.json \
+EDGE_PROXY_REQUIRE_TENANT=true \
+EDGE_PROXY_SELF_HOSTED=true \
+go run ./cmd/edge-proxy
+# the app now sends ONLY:  X-Tenant-Key: tk_live_acme  (no Authorization header)
+```
+
+### Telemetry parity
+
+A self-hosted proxy emits the **same** metadata-only records as the cloud proxy — same fields, same
+wire shape — differing only in a `deployment` label (`self-host` vs `cloud`). Set
+`EDGE_PROXY_TELEMETRY_URL` to your ai-tally collector to enable shipping; leave it empty to run the
+proxy fully dark. Parity is guaranteed by a single serialization path (`telemetry.Encode`) asserted
+by `TestParitySelfHostMatchesCloud`; `TestEncodeCarriesNoBodyContent` whitelists the allowed fields
+so no prompt/completion/key field can ever sneak into the envelope.
+
+### Container image
+
+A multi-stage [`Dockerfile`](Dockerfile) builds a fully static binary and ships it on `scratch` — no
+shell, package manager, or OS surface — running as a non-root numeric uid (~10 MB image):
+
+```bash
+docker build -t ai-tally-edge-proxy:dev infra/edge-proxy
+docker run --rm -p 8088:8088 \
+  -e EDGE_PROXY_MODE=broker \
+  -e EDGE_PROXY_BROKER_FILE=/etc/edge-proxy/keys.json \
+  -v "$PWD/infra/edge-proxy/deploy/keys.example.json:/etc/edge-proxy/keys.json:ro" \
+  ai-tally-edge-proxy:dev
+```
+
+### Helm chart
+
+[`deploy/helm/edge-proxy`](deploy/helm/edge-proxy) packages the proxy for Kubernetes (Deployment +
+Service + ConfigMap, optional HPA, locked-down non-root pod, `/healthz` probes). Broker keys come
+from either an inline value (dev) or — recommended — a Secret you render from your KMS out-of-band:
+
+```bash
+# dev / quick trial: inline keys (renders a Secret for you)
+helm install edge-proxy infra/edge-proxy/deploy/helm/edge-proxy \
+  --set proxy.telemetryURL=https://ingest.ai-tally.com/v1/traces \
+  --set-file broker.inline=infra/edge-proxy/deploy/keys.example.json
+
+# production: reference a Secret you manage (provider keys never touch values.yaml or git)
+kubectl create secret generic edge-proxy-broker --from-file=keys.json=./from-kms.json
+helm install edge-proxy infra/edge-proxy/deploy/helm/edge-proxy \
+  --set broker.existingSecret=edge-proxy-broker \
+  --set proxy.telemetryURL=https://ingest.ai-tally.com/v1/traces
+```
+
+Every `proxy.*` value maps onto one `EDGE_PROXY_*` env var from the table above; see
+[`values.yaml`](deploy/helm/edge-proxy/values.yaml) for the full set.
 
 ## Run
 

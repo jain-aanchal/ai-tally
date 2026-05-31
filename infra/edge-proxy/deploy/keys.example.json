@@ -1,0 +1,7 @@
+{
+  "_comment": "KMS-export consumed by edge-proxy in broker mode (EDGE_PROXY_MODE=broker). Maps an ai-tally tenant key to the provider Authorization header value the proxy injects on that tenant's behalf. This file is the ONLY place the provider key lives; the customer's application code never sees it and sends only the X-Tenant-Key header. In production this is rendered from your KMS at deploy time (e.g. an init container or a mounted secret), never committed. The values below are obviously-fake placeholders.",
+  "tenants": {
+    "tk_live_acme": "Bearer sk-REPLACE-with-acme-provider-key",
+    "tk_live_globex": "Bearer sk-REPLACE-with-globex-provider-key"
+  }
+}

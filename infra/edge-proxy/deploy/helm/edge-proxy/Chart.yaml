@@ -1,0 +1,20 @@
+apiVersion: v2
+name: edge-proxy
+description: |
+  ai-tally self-hostable edge proxy (CTO-43). A transparent OpenAI reverse proxy that runs inside
+  the customer's own VPC. Supports passthrough mode (the app sends the provider key) and key-broker
+  mode (the provider key stays in the customer's KMS; the app sends only an ai-tally tenant key and
+  the proxy mints a short-lived credential). Ships metadata-only telemetry — never prompt or
+  completion content — to an ai-tally collector.
+type: application
+# Chart version: bump on any template change. App version tracks the proxy binary / Go module.
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - openai
+  - proxy
+  - observability
+  - self-hosted
+home: https://github.com/jain-aanchal/ai-tally
+sources:
+  - https://github.com/jain-aanchal/ai-tally/tree/main/infra/edge-proxy
