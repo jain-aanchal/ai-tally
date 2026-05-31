@@ -15,19 +15,22 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"time"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
+	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/keybroker"
 )
 
 // Proxy is an http.Handler that forwards to a configured upstream and emits telemetry copies.
 type Proxy struct {
-	cfg  config.Config
-	rp   *httputil.ReverseProxy
-	sink Sink
-	now  func() time.Time
+	cfg    config.Config
+	rp     *httputil.ReverseProxy
+	sink   Sink
+	broker keybroker.Broker
+	now    func() time.Time
 }
 
 // Option customizes a Proxy at construction.
@@ -48,6 +51,18 @@ func WithTransport(rt http.RoundTripper) Option {
 	return func(p *Proxy) {
 		if rt != nil {
 			p.rp.Transport = rt
+		}
+	}
+}
+
+// WithBroker enables key-broker mode (CTO-43): instead of forwarding the client's Authorization
+// header, the proxy mints a short-lived provider credential from the broker for the request's
+// tenant and injects it. Used for self-hosted deployments where the provider key lives in the
+// customer's KMS and must never reach their application code.
+func WithBroker(b keybroker.Broker) Option {
+	return func(p *Proxy) {
+		if b != nil {
+			p.broker = b
 		}
 	}
 }
@@ -98,6 +113,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := p.now()
+
+	// Broker mode: mint a short-lived provider credential for this tenant from the customer's KMS
+	// and inject it, replacing whatever (if anything) the client sent. The minted token is applied
+	// only to the outgoing request header — never logged or recorded in the TraceRecord — preserving
+	// the in-memory-only key guarantee. A miss (unknown tenant / broker down) fails the request
+	// rather than forwarding an unauthenticated call.
+	if p.broker != nil {
+		cred, err := p.broker.Mint(r.Context(), tenant)
+		if err != nil {
+			var unknown keybroker.ErrUnknownTenant
+			if errors.As(err, &unknown) {
+				http.Error(w, `{"error":"unknown tenant"}`+"\n", http.StatusForbidden)
+			} else {
+				http.Error(w, `{"error":"key broker unavailable"}`+"\n", http.StatusBadGateway)
+			}
+			return
+		}
+		r.Header.Set("Authorization", cred.Authorization)
+	}
 
 	var reqBytes int64
 	if r.Body != nil {

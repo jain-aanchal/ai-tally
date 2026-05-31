@@ -1,0 +1,97 @@
+# Default values for the ai-tally edge-proxy chart.
+# Everything the proxy reads is an env var (it is deliberately stateless), so this file is mostly a
+# thin, well-documented mapping onto those vars plus standard Kubernetes deployment knobs.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/jain-aanchal/ai-tally-edge-proxy
+  pullPolicy: IfNotPresent
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8088
+
+# --- proxy configuration (maps onto EDGE_PROXY_* env vars) -------------------------------------
+proxy:
+  # Provider origin requests are forwarded to.
+  upstream: https://api.openai.com
+  # Control header carrying the ai-tally tenant key; stripped before the request leaves for upstream.
+  tenantHeader: X-Tenant-Key
+  # Reject requests missing the tenant header with 400. Recommended true in broker mode.
+  requireTenant: true
+  # Per-request bound. Generous because completions stream for minutes.
+  upstreamTimeout: 10m
+
+  # passthrough | broker
+  #   passthrough — the customer app sends the provider key on each request (cloud default).
+  #   broker      — the provider key stays in KMS; the app sends only the tenant key and the proxy
+  #                 mints a short-lived credential. Requires broker.keys below.
+  mode: broker
+  # How long a minted credential is reused before re-minting (broker mode only).
+  brokerTTL: 5m
+
+  # Marks this as a customer-VPC deployment; labels emitted telemetry as "self-host" so the cloud
+  # collector can distinguish self-hosted ingest from cloud. Leave true for self-hosted installs.
+  selfHosted: true
+
+  # Collector endpoint the proxy POSTs metadata-only TraceRecords to. Empty disables telemetry
+  # shipping entirely (the proxy still works; it just emits nothing).
+  telemetryURL: ""
+
+# --- key broker (broker mode only) -------------------------------------------------------------
+broker:
+  # The KMS-export mapping tenant key -> provider Authorization header. Two ways to supply it:
+  #
+  #   1. inline (dev / quick trials): paste the JSON here and the chart renders a Secret for you.
+  #   2. existingSecret: reference a Secret you manage out-of-band (rendered from your KMS at deploy
+  #      time, e.g. via an external-secrets operator). This keeps the provider key out of values.yaml
+  #      and out of git — the recommended production path.
+  #
+  # The file format is: {"tenants": {"tk_live_acme": "Bearer sk-...", ...}}
+  inline: ""
+  existingSecret: ""
+  # Key within the Secret that holds the JSON, and the path it is mounted at in the container.
+  secretKey: keys.json
+  mountPath: /etc/edge-proxy
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 128Mi
+
+# The proxy is stateless and CPU-bound on the hot path; scale horizontally under load.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# The image runs as a non-root numeric uid (65532) on scratch; lock the pod down to match.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

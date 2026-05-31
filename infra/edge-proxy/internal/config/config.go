@@ -14,6 +14,19 @@ import (
 	"time"
 )
 
+// Mode selects how the customer's provider key reaches the upstream.
+type Mode string
+
+const (
+	// ModePassthrough is the default cloud behavior: the customer's app sends the provider key on
+	// each request's Authorization header and the proxy forwards it untouched, never reading it.
+	ModePassthrough Mode = "passthrough"
+	// ModeBroker is the self-host / regulated-customer behavior (CTO-43): the provider key stays in
+	// the customer's KMS, the app sends only an ai-tally tenant key, and the proxy mints a
+	// short-lived token from the broker and injects it on the way upstream.
+	ModeBroker Mode = "broker"
+)
+
 // Config is the fully-resolved, validated proxy configuration.
 type Config struct {
 	// ListenAddr is the address the proxy binds (e.g. ":8088").
@@ -27,6 +40,22 @@ type Config struct {
 	RequireTenant bool
 	// UpstreamTimeout bounds a single forwarded request end-to-end (0 = no timeout, for streaming).
 	UpstreamTimeout time.Duration
+
+	// --- BYO-deployment / key-broker (CTO-43) ---
+
+	// Mode selects passthrough (default) or broker key handling.
+	Mode Mode
+	// BrokerFile is the path to the JSON KMS-export consumed in broker mode (required when Mode is
+	// broker). The file maps ai-tally tenant key -> provider Authorization header value.
+	BrokerFile string
+	// BrokerTTL bounds how long a minted credential is reused before re-minting.
+	BrokerTTL time.Duration
+	// SelfHosted marks this as a customer-VPC deployment; it labels emitted telemetry so the cloud
+	// can distinguish self-hosted ingest. Defaults to false (cloud).
+	SelfHosted bool
+	// TelemetryURL, if set, is the collector endpoint the proxy POSTs metadata-only TraceRecords
+	// to. Empty disables telemetry shipping (NopSink), as in the CTO-39 core.
+	TelemetryURL string
 }
 
 // Defaults applied when the corresponding env var is unset.
@@ -37,6 +66,8 @@ const (
 	// DefaultUpstreamTimeout is generous because LLM completions are slow and may stream for
 	// minutes; the proxy must not be the thing that cuts a long generation short.
 	DefaultUpstreamTimeout = 10 * time.Minute
+	// DefaultBrokerTTL bounds minted-token reuse in broker mode.
+	DefaultBrokerTTL = 5 * time.Minute
 )
 
 // Env is a minimal indirection over os.Getenv so tests can supply a fixed environment.
@@ -48,6 +79,9 @@ func FromEnv(lookup Env) (Config, error) {
 		ListenAddr:      firstNonEmpty(lookup("EDGE_PROXY_LISTEN"), DefaultListenAddr),
 		TenantHeader:    firstNonEmpty(lookup("EDGE_PROXY_TENANT_HEADER"), DefaultTenantHeader),
 		UpstreamTimeout: DefaultUpstreamTimeout,
+		Mode:            ModePassthrough,
+		BrokerTTL:       DefaultBrokerTTL,
+		TelemetryURL:    lookup("EDGE_PROXY_TELEMETRY_URL"),
 	}
 
 	rawUpstream := firstNonEmpty(lookup("EDGE_PROXY_UPSTREAM"), DefaultUpstream)
@@ -82,6 +116,39 @@ func FromEnv(lookup Env) (Config, error) {
 			return Config{}, fmt.Errorf("EDGE_PROXY_UPSTREAM_TIMEOUT must be >= 0, got %s", d)
 		}
 		cfg.UpstreamTimeout = d
+	}
+
+	if v := lookup("EDGE_PROXY_SELF_HOSTED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_SELF_HOSTED %q: %w", v, err)
+		}
+		cfg.SelfHosted = b
+	}
+
+	if v := lookup("EDGE_PROXY_MODE"); v != "" {
+		switch Mode(v) {
+		case ModePassthrough, ModeBroker:
+			cfg.Mode = Mode(v)
+		default:
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_MODE %q (want passthrough|broker)", v)
+		}
+	}
+
+	if v := lookup("EDGE_PROXY_BROKER_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_BROKER_TTL %q: %w", v, err)
+		}
+		if d < 0 {
+			return Config{}, fmt.Errorf("EDGE_PROXY_BROKER_TTL must be >= 0, got %s", d)
+		}
+		cfg.BrokerTTL = d
+	}
+
+	cfg.BrokerFile = lookup("EDGE_PROXY_BROKER_FILE")
+	if cfg.Mode == ModeBroker && cfg.BrokerFile == "" {
+		return Config{}, fmt.Errorf("EDGE_PROXY_MODE=broker requires EDGE_PROXY_BROKER_FILE")
 	}
 
 	return cfg, nil
