@@ -10,6 +10,11 @@ import { GET as CostGET } from "./cost/route";
 import { GET as FeaturesGET } from "./features/route";
 import { GET as DataQualityGET } from "./data-quality/route";
 import { GET as EstimateGET } from "./estimate/route";
+import { GET as OnboardingGET, POST as OnboardingPOST } from "./onboarding/route";
+import {
+  GET as FirstTraceGET,
+  POST as FirstTracePOST,
+} from "./onboarding/first-trace/route";
 import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
@@ -65,6 +70,31 @@ describe("api routes", () => {
     const body = await json<{ workload: string; blowUpRisk: number }>(EstimateGET());
     expect(body.workload).toBeTypeOf("string");
     expect(body.blowUpRisk).toBeGreaterThanOrEqual(0);
+  });
+
+  it("GET /api/onboarding returns progress + creds (no OpenAI key leaked)", async () => {
+    const body = await json<{
+      progress: { signedUpAt: number };
+      creds: { tenantKey: string; proxyBaseUrl: string };
+    }>(await OnboardingGET());
+    expect(body.progress.signedUpAt).toBeGreaterThan(0);
+    expect(body.creds.tenantKey).toBeTypeOf("string");
+    expect(body.creds.proxyBaseUrl).toContain("/v1");
+  });
+
+  it("POST /api/onboarding rejects an unknown funnel stage", async () => {
+    const bad = await OnboardingPOST(
+      new Request("http://test/x", { method: "POST", body: JSON.stringify({ stage: "nope" }) }),
+    );
+    expect(bad.status).toBe(400);
+  });
+
+  it("POST /api/onboarding/first-trace marks the trace received", async () => {
+    const res = await FirstTracePOST();
+    const body = await json<{ received: boolean }>(res);
+    expect(body.received).toBe(true);
+    const poll = await json<{ received: boolean }>(await FirstTraceGET());
+    expect(poll.received).toBe(true);
   });
 
   it("GET /api/guardrails returns rules + refresh window", async () => {
