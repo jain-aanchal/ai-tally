@@ -32,6 +32,11 @@ export interface Comparison {
     excludedRateLimited: number;
     replayCostMicroUsd: MicroUSD;
     contextFidelity: "resolved-context replay (no live retrieval)" | "live retrieval";
+    /**
+     * Minutes since the reconciler last trued-up the baseline traffic this comparison is built
+     * from. A projection off a stale baseline must not be presented as fresh (CTO-80).
+     */
+    reconcilerLastRunMinutesAgo: number;
   };
 }
 
@@ -89,5 +94,6 @@ export const comparison: Comparison = {
     excludedRateLimited: 312,
     replayCostMicroUsd: 14_200_000,
     contextFidelity: "resolved-context replay (no live retrieval)",
+    reconcilerLastRunMinutesAgo: 36,
   },
 };

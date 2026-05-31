@@ -1,21 +1,29 @@
 import { Card } from "@/components/Card";
 import {
   PartialDataBanner,
+  StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
 import { type Comparison, deltaPct } from "@/lib/compare";
-import { deriveDataState } from "@/lib/dataState";
+import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 
 export default async function ComparePage() {
   const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
 
-  // No reconciliation boundary on this what-if surface — only empty/partial apply.
+  // This projection is built off reconciled baseline traffic — surface that baseline's freshness so
+  // a comparison off a stale window is never shown as fresh (CTO-80).
+  const reconciledThrough = boundaryFromMinutesAgo(diagnostics.reconcilerLastRunMinutesAgo);
   const noBaseline = current.monthlyCostMicroUsd === 0 || candidates.length === 0;
   const noReplay = diagnostics.samplesReplayed === 0 && diagnostics.samplesAvailable > 0;
-  const state = deriveDataState({ isEmpty: noBaseline, isPartial: noReplay });
+  const state = deriveDataState({
+    isEmpty: noBaseline,
+    isPartial: noReplay,
+    reconciledThrough,
+  });
+  const asOf = asOfLabel(reconciledThrough);
 
   const body = (
     <div className="space-y-6">
@@ -72,11 +80,16 @@ export default async function ComparePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Compare</h1>
-        <p className="mt-1 text-sm text-muted">
-          Workload: <span className="font-mono text-gray-300">{workload}</span>
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Compare</h1>
+          <p className="mt-1 text-sm text-muted">
+            Workload: <span className="font-mono text-gray-300">{workload}</span>
+          </p>
+        </div>
+        {state !== "empty" && asOf && (
+          <StaleBadge asOf={asOf} age={relativeAge(reconciledThrough)} stale={state === "stale"} />
+        )}
       </div>
 
       {state === "partial" && <PartialDataBanner missing="the replay sampler" />}

@@ -24,10 +24,13 @@ describe("api routes", () => {
     expect(body.dq).toBeDefined();
   });
 
-  it("GET /api/agents returns agents + runs", async () => {
-    const body = await json<{ agents: unknown[]; runs: unknown[] }>(await AgentsGET());
+  it("GET /api/agents returns agents + runs + reconciler freshness", async () => {
+    const body = await json<{ agents: unknown[]; runs: unknown[]; reconcilerLastRunMinutesAgo: number }>(
+      await AgentsGET(),
+    );
     expect(body.agents.length).toBeGreaterThan(0);
     expect(body.runs.length).toBeGreaterThan(0);
+    expect(body.reconcilerLastRunMinutesAgo).toBeTypeOf("number");
   });
 
   it("GET /api/agents/runs/:runId returns the run, 404 on miss", async () => {

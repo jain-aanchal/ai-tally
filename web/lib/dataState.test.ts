@@ -3,6 +3,7 @@ import {
   allZero,
   asOfLabel,
   ageMs,
+  boundaryFromMinutesAgo,
   deriveDataState,
   isSentinelBoundary,
   isStale,
@@ -12,6 +13,23 @@ import {
 } from "./dataState";
 
 const NOW = Date.parse("2026-05-30T12:00:00Z");
+
+describe("boundaryFromMinutesAgo", () => {
+  it("produces a boundary that reads fresh when within the 2h window", () => {
+    const boundary = boundaryFromMinutesAgo(23, NOW);
+    expect(isStale(boundary, NOW)).toBe(false);
+    expect(deriveDataState({ isEmpty: false, isPartial: false, reconciledThrough: boundary, now: NOW })).toBe("fresh");
+  });
+  it("produces a boundary that reads stale past the 2h window", () => {
+    const boundary = boundaryFromMinutesAgo(3 * 60, NOW); // 3h ago
+    expect(isStale(boundary, NOW)).toBe(true);
+    expect(deriveDataState({ isEmpty: false, isPartial: false, reconciledThrough: boundary, now: NOW })).toBe("stale");
+  });
+  it("stale outranks partial (never present stale as fresh)", () => {
+    const boundary = boundaryFromMinutesAgo(180, NOW);
+    expect(deriveDataState({ isEmpty: false, isPartial: true, reconciledThrough: boundary, now: NOW })).toBe("stale");
+  });
+});
 
 describe("isSentinelBoundary", () => {
   it("treats the 1970 epoch sentinel as pre-data, not a real boundary", () => {
