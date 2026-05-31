@@ -27,6 +27,7 @@ from tally.wire import (
     BusinessEvent,
     IdempotencyCache,
     IdentityLink,
+    PartialError,
     Sampling,
     Status,
     uuid7,
@@ -38,6 +39,7 @@ from gateway.errors import ErrorCode
 from gateway.mapping import span_to_row
 from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
+from gateway.validation import SpanValidator, span_item_id
 
 logger = logging.getLogger("tally.gateway")
 
@@ -55,6 +57,9 @@ async def lifespan(app: FastAPI):
         burst=settings.rate_limit_burst,
         monthly_quota=settings.monthly_quota_spans,
     )
+    # Known feature tags aren't loaded yet (per-tenant Postgres lookup is a follow-up), so the
+    # unknown-tag flag is disabled for now — schema + PII checks are always on.
+    app.state.validator = SpanValidator(max_span_bytes=settings.max_span_bytes)
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
     app.state.store.close()
@@ -167,12 +172,22 @@ async def ingest_batch(
     batch = batch.deduplicated()
     server_recv_ns = time.time_ns()
 
-    # --- enrich + map spans ---
+    # --- validate (per item) + enrich + map spans ---
+    validator: SpanValidator = app.state.validator
     rows: list[tuple[object, ...]] = []
+    partial_errors: list[PartialError] = []
     drift_count = 0
-    for span in batch.resource_spans:
-        if not isinstance(span, dict):
+    for index, span in enumerate(batch.resource_spans):
+        item_id = span_item_id(span, index) if isinstance(span, dict) else f"#{index}"
+        verdict = validator.validate(span)
+        if not verdict.accepted:
+            partial_errors.append(
+                PartialError(item_id=item_id, code=verdict.rejection.value, message=verdict.message)
+            )
             continue
+        for flag in verdict.flags:  # accepted-but-flagged (e.g. UNKNOWN_FEATURE_TAG)
+            partial_errors.append(PartialError(item_id=item_id, code=flag.value, message=""))
+        assert isinstance(span, dict)  # narrowed by verdict.accepted
         result = enrich_cost(span, catalog, tenant_id=batch.tenant_id)
         if result.drift_exceeded:
             drift_count += 1
@@ -188,6 +203,15 @@ async def ingest_batch(
             )
         )
 
+    # If every span was rejected (and there were spans), nothing to write — REJECTED, no retry.
+    rejected_only = bool(batch.resource_spans) and not rows
+    if rejected_only:
+        resp = BatchResponse(
+            batch_id=batch.batch_id, status=Status.REJECTED, partial_errors=partial_errors
+        )
+        idempotency.record(batch, resp)
+        return JSONResponse(_response_dict(resp), status_code=422)
+
     # --- write ---
     try:
         accepted = store.insert_spans(rows)
@@ -202,7 +226,15 @@ async def ingest_batch(
     if drift_count:
         logger.info("catalog drift on %d/%d spans (batch %s)", drift_count, len(rows), batch.batch_id)
 
-    resp = BatchResponse(batch_id=batch.batch_id, status=Status.ACCEPTED, accepted_spans=accepted)
+    # Some items rejected/flagged but others written → PARTIAL; otherwise clean ACCEPTED.
+    fatal = [e for e in partial_errors if e.code != ErrorCode.UNKNOWN_FEATURE_TAG.value]
+    status = Status.PARTIAL if fatal else Status.ACCEPTED
+    resp = BatchResponse(
+        batch_id=batch.batch_id,
+        status=status,
+        accepted_spans=accepted,
+        partial_errors=partial_errors,
+    )
     idempotency.record(batch, resp)
     return JSONResponse(_response_dict(resp), status_code=200)
 
@@ -212,5 +244,8 @@ def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, 
         "batch_id": resp.batch_id,
         "status": resp.status.value,
         "accepted_spans": resp.accepted_spans,
+        "partial_errors": [
+            {"item_id": e.item_id, "code": e.code, "message": e.message} for e in resp.partial_errors
+        ],
         "replayed": replayed,
     }

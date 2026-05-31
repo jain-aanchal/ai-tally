@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     rate_limit_burst: float = 2000.0
     monthly_quota_spans: int = 50_000_000
 
+    # Per-span payload cap (bytes) for boundary validation (CTO-34).
+    max_span_bytes: int = 64 * 1024
+
 
 _settings: Settings | None = None
 
