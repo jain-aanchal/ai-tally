@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 const NAV: { label: string; href: string }[] = [
+  { label: "Get started", href: "/onboarding" },
   { label: "Home", href: "/" },
   { label: "Cost", href: "/cost" },
   { label: "Features", href: "/features" },
