@@ -24,22 +24,27 @@ Algorithm (per spec §7.1):
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Protocol
 
+# Identity graph primitives are now a first-class component (CTO-67); re-exported here so the
+# stitcher's public surface (and its tests) keep importing them from ``tally.stitcher``.
+from tally.identity import (
+    IdentityEdge,
+    IdentityGraph,
+    IdentityType,
+)
+
+__all__ = [
+    "IdentityEdge",
+    "IdentityGraph",
+    "IdentityType",
+]
+
 # --- types ---------------------------------------------------------------------------------------
-
-
-class IdentityType(str, Enum):
-    USER_ID = "user_id"
-    ANONYMOUS_ID = "anonymous_id"
-    SESSION_ID = "session_id"
-    EMAIL = "email"
-    EXTERNAL_ID = "external_id"
 
 
 class AttributionConfidence(str, Enum):
@@ -53,20 +58,6 @@ class ValueType(str, Enum):
     COUNT = "count"
     MRR = "mrr"
     REFUND = "refund"
-
-
-@dataclass(frozen=True, slots=True)
-class IdentityEdge:
-    """An edge in the identity graph (hashed identities only)."""
-
-    a: str
-    a_type: IdentityType
-    b: str
-    b_type: IdentityType
-    observed_at: datetime
-    source: str = "sdk"
-    confidence: float = 1.0
-    key_version: str = "v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,61 +123,6 @@ class UnattributedRecord:
     occurred_at: datetime
     reason: str  # 'no_trace_in_window' | 'feature_tag_no_rule' | etc.
     last_checked_at: datetime
-
-
-# --- identity graph ------------------------------------------------------------------------------
-
-
-class IdentityGraph:
-    """Undirected (symmetric) transitive identity graph over hashed IDs.
-
-    Edges keyed by ``(tenant_id, identity)`` so traversal is tenant-scoped (no cross-tenant leak).
-    """
-
-    def __init__(self) -> None:
-        self._adj: dict[tuple[str, str], set[tuple[str, IdentityEdge]]] = defaultdict(set)
-
-    def add_edge(self, tenant_id: str, edge: IdentityEdge) -> None:
-        # store both directions so the graph is undirected at traversal time
-        self._adj[(tenant_id, edge.a)].add((edge.b, edge))
-        self._adj[(tenant_id, edge.b)].add((edge.a, edge))
-
-    def resolve(
-        self,
-        tenant_id: str,
-        start: str,
-        *,
-        max_depth: int = 2,
-        as_of: datetime | None = None,
-    ) -> set[str]:
-        """Return all identities reachable from ``start`` within ``max_depth`` hops.
-
-        Edges with ``observed_at > as_of`` are ignored (avoids "leaking" later edges into a
-        historical attribution).
-        """
-        seen: set[str] = {start}
-        frontier: list[tuple[str, int]] = [(start, 0)]
-        while frontier:
-            node, depth = frontier.pop()
-            if depth >= max_depth:
-                continue
-            for neighbour, edge in self._adj.get((tenant_id, node), set()):
-                if as_of is not None and edge.observed_at > as_of:
-                    continue
-                if neighbour in seen:
-                    continue
-                seen.add(neighbour)
-                frontier.append((neighbour, depth + 1))
-        return seen
-
-    def edge_type_between(
-        self, tenant_id: str, a: str, b: str
-    ) -> IdentityType | None:
-        """If a single edge links ``a`` and ``b`` directly, return the *other side*'s type."""
-        for neighbour, edge in self._adj.get((tenant_id, a), set()):
-            if neighbour == b:
-                return edge.b_type if edge.a == a else edge.a_type
-        return None
 
 
 # --- touch store ---------------------------------------------------------------------------------
