@@ -22,10 +22,24 @@ Five workflows on one shared data spine:
 
 ```
 sdk/python/        Python SDK (OTel gen_ai.* + cost/feature/identity extensions)
+infra/gateway/     Ingest gateway (FastAPI: auth → enrich cost → ClickHouse)
+infra/edge-proxy/  Zero-code edge proxy (Go) + BYO-deployment Helm chart
+infra/             docker-compose stack (ClickHouse, Postgres, Redpanda, MinIO) + Makefile
 db/clickhouse/     ClickHouse DDL (telemetry store)
+db/postgres/       Postgres control-plane schema
+web/               Next.js dashboard (the five workflows)
 ```
 
-More components (edge proxy, ingest gateway, web app) land as they're built.
+## Running it
+
+To bring up the whole stack on a laptop and see ingested telemetry in the dashboard, follow
+**[RUNNING.md](./RUNNING.md)** — a verified end-to-end runbook (send a batch → gateway → ClickHouse
+→ web UI). Short version:
+
+```bash
+cd infra && make up && make seed && make demo   # stack + tenant + sample telemetry
+cd web && npm install && npm run dev            # dashboard at http://localhost:3000
+```
 
 ## Development
 
