@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Per-span payload cap (bytes) for boundary validation (CTO-34).
     max_span_bytes: int = 64 * 1024
 
+    # Backpressure (CTO-36): concurrent in-flight ingest requests at/above which the gateway
+    # tightens client flow-control hints and sheds the overflow of a batch as retryable.
+    backpressure_soft_limit: int = 64
+
 
 _settings: Settings | None = None
 

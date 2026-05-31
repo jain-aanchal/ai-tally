@@ -29,11 +29,13 @@ from tally.wire import (
     IdentityLink,
     PartialError,
     Sampling,
+    ServerHints,
     Status,
     uuid7,
 )
 
 from gateway.auth import ApiKeyAuth
+from gateway.backpressure import Backpressure
 from gateway.config import get_settings
 from gateway.errors import ErrorCode
 from gateway.mapping import span_to_row
@@ -60,12 +62,27 @@ async def lifespan(app: FastAPI):
     # Known feature tags aren't loaded yet (per-tenant Postgres lookup is a follow-up), so the
     # unknown-tag flag is disabled for now — schema + PII checks are always on.
     app.state.validator = SpanValidator(max_span_bytes=settings.max_span_bytes)
+    app.state.backpressure = Backpressure(soft_limit=settings.backpressure_soft_limit)
+    app.state.in_flight = 0
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
     app.state.store.close()
 
 
 app = FastAPI(title="ai-tally ingest gateway", version="0.1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _in_flight_gauge(request: Request, call_next: Any) -> Any:
+    """Track concurrent ingest requests so backpressure can read live load (CTO-36)."""
+    is_ingest = request.url.path == "/v1/batches"
+    if is_ingest:
+        app.state.in_flight = getattr(app.state, "in_flight", 0) + 1
+    try:
+        return await call_next(request)
+    finally:
+        if is_ingest:
+            app.state.in_flight = max(0, getattr(app.state, "in_flight", 1) - 1)
 
 
 def _parse_batch(payload: dict[str, Any]) -> BatchRequest:
@@ -172,10 +189,23 @@ async def ingest_batch(
     batch = batch.deduplicated()
     server_recv_ns = time.time_ns()
 
+    # --- backpressure: under load, shed the batch's overflow (retryable) + tighten client hints ---
+    backpressure: Backpressure = app.state.backpressure
+    shed = backpressure.evaluate(getattr(app.state, "in_flight", 1), len(batch.resource_spans))
+    hints = shed.hints
+    partial_errors: list[PartialError] = []
+    if shed.overloaded and shed.keep < len(batch.resource_spans):
+        overflow = batch.resource_spans[shed.keep :]
+        batch.resource_spans = batch.resource_spans[: shed.keep]
+        for index, span in enumerate(overflow, start=shed.keep):
+            item_id = span_item_id(span, index) if isinstance(span, dict) else f"#{index}"
+            partial_errors.append(
+                PartialError(item_id=item_id, code=ErrorCode.RATE_LIMITED.value, message="shed under load")
+            )
+
     # --- validate (per item) + enrich + map spans ---
     validator: SpanValidator = app.state.validator
     rows: list[tuple[object, ...]] = []
-    partial_errors: list[PartialError] = []
     drift_count = 0
     for index, span in enumerate(batch.resource_spans):
         item_id = span_item_id(span, index) if isinstance(span, dict) else f"#{index}"
@@ -207,7 +237,10 @@ async def ingest_batch(
     rejected_only = bool(batch.resource_spans) and not rows
     if rejected_only:
         resp = BatchResponse(
-            batch_id=batch.batch_id, status=Status.REJECTED, partial_errors=partial_errors
+            batch_id=batch.batch_id,
+            status=Status.REJECTED,
+            partial_errors=partial_errors,
+            server_hints=hints,
         )
         idempotency.record(batch, resp)
         return JSONResponse(_response_dict(resp), status_code=422)
@@ -219,7 +252,7 @@ async def ingest_batch(
         store.insert_identity_links(batch.tenant_id, batch.identity_links)
     except Exception:  # noqa: BLE001 - surface as retryable, keep the gateway alive
         logger.exception("clickhouse insert failed")
-        resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY)
+        resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
         idempotency.record(batch, resp)
         return JSONResponse(_response_dict(resp), status_code=503)
 
@@ -234,12 +267,14 @@ async def ingest_batch(
         status=status,
         accepted_spans=accepted,
         partial_errors=partial_errors,
+        server_hints=hints,
     )
     idempotency.record(batch, resp)
     return JSONResponse(_response_dict(resp), status_code=200)
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:
+    hints = resp.server_hints or ServerHints()
     return {
         "batch_id": resp.batch_id,
         "status": resp.status.value,
@@ -247,5 +282,11 @@ def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, 
         "partial_errors": [
             {"item_id": e.item_id, "code": e.code, "message": e.message} for e in resp.partial_errors
         ],
+        "server_hints": {
+            "flush_interval_ms": hints.flush_interval_ms,
+            "max_batch_size": hints.max_batch_size,
+            "sample_rate_override": hints.sample_rate_override,
+            "retry_after_ms": hints.retry_after_ms,
+        },
         "replayed": replayed,
     }
