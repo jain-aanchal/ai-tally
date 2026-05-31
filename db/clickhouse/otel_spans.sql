@@ -69,12 +69,17 @@ CREATE TABLE IF NOT EXISTS otel_spans
 ENGINE = MergeTree
 PARTITION BY toDate(Timestamp)
 ORDER BY (TenantId, FeatureTag, ServiceName, SpanName, Timestamp)
--- Tiering: hot SSD -> warm volume at 7d, drop raw spans at 90d.
+-- Tiering (CTO-29): hot SSD -> warm volume at 7d -> cold volume at 30d -> drop raw at 90d.
+-- This TTL is GENERATED from tally.storage_tiering.DEFAULT_POLICY (render_ttl_clause), the single
+-- source of truth that also classifies a span's tier at query time, so DDL and logic can't drift.
 -- NOTE: ClickHouse `TTL ... GROUP BY` requires its keys to be a prefix of the primary key, so we
 -- deliberately do NOT aggregate-on-expire here (toDate(Timestamp)/GenAiResponseModel are not a PK
--- prefix). Long-horizon aggregates live in the rollup materialized views (CTO-24), which persist
--- independently of this raw table's retention. Storage volumes ('warm') are configured in the
--- ClickHouse storage policy (infra, CTO-94).
+-- prefix). The surviving long-horizon aggregate lives in the rollup materialized views (CTO-24,
+-- daily_feature_rollup), which persist independently of this raw table's retention — so trends and
+-- late billing true-ups keep working after the raw span is dropped. Storage volumes ('warm',
+-- 'cold') are configured in the ClickHouse storage policy (infra, CTO-94). Per-tenant retention
+-- overrides (enterprise = longer) compile to a multiIf DELETE expression — see storage_tiering.sql.
 TTL
     toDateTime(Timestamp) + INTERVAL 7 DAY  TO VOLUME 'warm',
+    toDateTime(Timestamp) + INTERVAL 30 DAY TO VOLUME 'cold',
     toDateTime(Timestamp) + INTERVAL 90 DAY DELETE;

@@ -15,6 +15,7 @@ import {
   GET as FirstTraceGET,
   POST as FirstTracePOST,
 } from "./onboarding/first-trace/route";
+import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -94,5 +95,31 @@ describe("api routes", () => {
     expect(body.received).toBe(true);
     const poll = await json<{ received: boolean }>(await FirstTraceGET());
     expect(poll.received).toBe(true);
+  });
+
+  it("GET /api/guardrails returns rules + refresh window", async () => {
+    const body = await json<{ rules: unknown[]; configRefreshSeconds: number }>(
+      await GuardrailsGET(),
+    );
+    expect(body.rules.length).toBeGreaterThan(0);
+    expect(body.configRefreshSeconds).toBeGreaterThan(0);
+  });
+
+  it("PUT /api/guardrails echoes a valid rule, rejects an unconstrained one", async () => {
+    const ok = await GuardrailsPUT(
+      new Request("http://test/x", {
+        method: "PUT",
+        body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn", maxSteps: 10 }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+
+    const bad = await GuardrailsPUT(
+      new Request("http://test/x", {
+        method: "PUT",
+        body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn" }),
+      }),
+    );
+    expect(bad.status).toBe(422);
   });
 });
