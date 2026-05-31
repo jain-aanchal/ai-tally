@@ -39,6 +39,12 @@ from gateway.backpressure import Backpressure
 from gateway.config import get_settings
 from gateway.errors import ErrorCode
 from gateway.mapping import span_to_row
+from gateway.protocol import (
+    SUPPORTED_PROTOCOLS,
+    capabilities,
+    negotiate,
+    otlp_traces_to_spans,
+)
 from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
 from gateway.validation import SpanValidator, span_item_id
@@ -130,11 +136,56 @@ def readyz() -> JSONResponse:
     return JSONResponse({"ready": ready, "checks": checks}, status_code=200 if ready else 503)
 
 
-@app.post("/v1/batches")
-async def ingest_batch(
+@app.get("/v1/capabilities")
+def capabilities_endpoint() -> dict[str, Any]:
+    """Advertise supported protocols, ceilings, and optional features for client negotiation."""
+    settings = app.state.settings
+    limiter: RateLimiter = app.state.limiter
+    return capabilities(
+        max_batch_size=getattr(limiter, "burst", 0) or settings.rate_limit_burst,
+        max_span_bytes=settings.max_span_bytes,
+    )
+
+
+@app.post("/v1/otlp/traces")
+async def ingest_otlp_traces(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
+    """OTLP/HTTP JSON fallback: translate ExportTraceServiceRequest → native spans, then ingest.
+
+    Lets any OpenTelemetry SDK ship gen_ai spans without the ai-tally SDK. Tenant comes from the
+    api key (auth on) or the ``X-Tenant-Id`` header (auth off, local dev).
+    """
+    otlp = await request.json()
+    spans = otlp_traces_to_spans(otlp)
+    tenant = request.headers.get("x-tenant-id", "")
+    batch = _parse_batch(
+        {"tenant_id": tenant, "sdk_version": "otlp-http", "resource_spans": spans}
+    )
+    return await _run_pipeline(batch, authorization)
+
+
+@app.post("/v1/batches")
+async def ingest_batch(
+    request: Request,
+    protocol_version: str | None = Header(default=None, alias="X-Ingest-Protocol"),
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    payload = await request.json()
+    # --- version negotiation: an unrecognized explicit protocol is a clean 400, not a guess. ---
+    negotiated = negotiate(protocol_version)
+    if negotiated is None:
+        raise _error(
+            400,
+            ErrorCode.INVALID_SCHEMA,
+            f"unsupported ingest protocol '{protocol_version}'; supported: {list(SUPPORTED_PROTOCOLS)}",
+        )
+    batch = _parse_batch(payload)
+    return await _run_pipeline(batch, authorization)
+
+
+async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONResponse:
     settings = app.state.settings
     store: ClickHouseStore = app.state.store
     auth: ApiKeyAuth = app.state.auth
@@ -142,8 +193,6 @@ async def ingest_batch(
     idempotency: IdempotencyCache = app.state.idempotency
     limiter: RateLimiter = app.state.limiter
 
-    payload = await request.json()
-    batch = _parse_batch(payload)
     claimed_tenant = batch.tenant_id
 
     # --- auth: resolve tenant + scope ---
