@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     # tightens client flow-control hints and sheds the overflow of a batch as retryable.
     backpressure_soft_limit: int = 64
 
+    # Ingest burst buffer (CTO-37). When enabled, accepted span rows are enqueued to an in-memory
+    # burst buffer (Kafka in prod) and written to ClickHouse by a background drain loop, so a burst
+    # or a briefly-slow ClickHouse never makes the gateway return 5xx on the hot path. Off by default
+    # to preserve the synchronous write path; flip on per-deployment.
+    ingest_buffered: bool = False
+    # High-water mark (rows) past which the buffer sheds overflow as retryable (never 5xx).
+    ingest_buffer_capacity: int = 200_000
+    # Rows drained to ClickHouse per cycle, and idle poll interval between drains.
+    ingest_buffer_drain_batch: int = 2_000
+    ingest_buffer_poll_interval_s: float = 0.05
+
 
 _settings: Settings | None = None
 

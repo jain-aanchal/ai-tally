@@ -39,6 +39,7 @@ from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
 from gateway.config import get_settings
 from gateway.errors import ErrorCode
+from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
 from gateway.metering import UsageRollup
 from gateway.protocol import (
@@ -75,8 +76,23 @@ async def lifespan(app: FastAPI):
     # sampling/shed so the bill is exact regardless of analytics sample rate.
     app.state.metering = UsageRollup()
     app.state.in_flight = 0
+    # Ingest burst buffer (CTO-37): when enabled, spans are written to ClickHouse off the hot path by
+    # a background drain loop, so a burst can't produce 5xx. Disabled → synchronous write (None).
+    app.state.ingest_buffer = None
+    if settings.ingest_buffered:
+        buffer = AsyncIngestBuffer(
+            app.state.store,
+            capacity=settings.ingest_buffer_capacity,
+            drain_batch=settings.ingest_buffer_drain_batch,
+            poll_interval_s=settings.ingest_buffer_poll_interval_s,
+        )
+        await buffer.start()
+        app.state.ingest_buffer = buffer
+        logger.info("ingest buffer enabled (capacity=%d)", settings.ingest_buffer_capacity)
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
+    if app.state.ingest_buffer is not None:
+        await app.state.ingest_buffer.stop()  # flush buffered rows before closing the store
     app.state.store.close()
 
 
@@ -311,15 +327,41 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         return JSONResponse(_response_dict(resp), status_code=422)
 
     # --- write ---
-    try:
-        accepted = store.insert_spans(rows)
-        store.insert_business_events(batch.tenant_id, batch.business_events)
-        store.insert_identity_links(batch.tenant_id, batch.identity_links)
-    except Exception:  # noqa: BLE001 - surface as retryable, keep the gateway alive
-        logger.exception("clickhouse insert failed")
-        resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
-        idempotency.record(batch, resp)
-        return JSONResponse(_response_dict(resp), status_code=503)
+    buffer: AsyncIngestBuffer | None = app.state.ingest_buffer
+    if buffer is not None:
+        # Buffered path (CTO-37): hand spans to the burst buffer (drained to ClickHouse off the hot
+        # path) and ack immediately, so a burst or a slow ClickHouse never yields a 5xx. Overflow past
+        # the buffer's high-water mark is shed as retryable partial errors — backpressure, not failure.
+        produced = buffer.produce_rows(batch.tenant_id, rows)
+        accepted = produced.accepted
+        for i in range(produced.rejected):
+            partial_errors.append(
+                PartialError(
+                    item_id=f"#buffer-overflow-{i}",
+                    code=ErrorCode.RATE_LIMITED.value,
+                    message="ingest buffer at capacity; retry",
+                )
+            )
+        # Business events / identity links are low-volume metadata, not the burst hot path, so they
+        # still write synchronously; a ClickHouse outage on these is surfaced as retryable.
+        try:
+            store.insert_business_events(batch.tenant_id, batch.business_events)
+            store.insert_identity_links(batch.tenant_id, batch.identity_links)
+        except Exception:  # noqa: BLE001 - keep the gateway alive
+            logger.exception("clickhouse insert (events/links) failed")
+            resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
+            idempotency.record(batch, resp)
+            return JSONResponse(_response_dict(resp), status_code=503)
+    else:
+        try:
+            accepted = store.insert_spans(rows)
+            store.insert_business_events(batch.tenant_id, batch.business_events)
+            store.insert_identity_links(batch.tenant_id, batch.identity_links)
+        except Exception:  # noqa: BLE001 - surface as retryable, keep the gateway alive
+            logger.exception("clickhouse insert failed")
+            resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
+            idempotency.record(batch, resp)
+            return JSONResponse(_response_dict(resp), status_code=503)
 
     if drift_count:
         logger.info("catalog drift on %d/%d spans (batch %s)", drift_count, len(rows), batch.batch_id)
