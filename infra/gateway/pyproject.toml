@@ -9,7 +9,7 @@ dependencies = [
     "clickhouse-connect>=0.7.16",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.4",
-    "tally",
+    "tally-sdk",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +21,8 @@ dev = [
 
 [tool.uv.sources]
 # The gateway reuses the SDK's wire/enrichment/timekeeping/pricing logic directly.
-tally = { path = "../../sdk/python", editable = true }
+# Distribution name is `tally-sdk`; the import package is `tally`.
+tally-sdk = { path = "../../sdk/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]
