@@ -1,0 +1,66 @@
+-- Storage tiering & TTL reference (ai-tally telemetry store)
+-- Implements CTO-29. Spec §5.1, Appendix A.
+--
+-- This file documents the tiering contract. The authoritative TTL clause lives on otel_spans
+-- (otel_spans.sql) and is GENERATED from tally.storage_tiering.DEFAULT_POLICY.render_ttl_clause(),
+-- the single source of truth that ALSO classifies a span's tier at query time. Keeping generation
+-- and classification in one Python module means the table DDL and the runtime logic can't drift.
+--
+-- Tier ladder (default policy):
+--   age <  7d  -> HOT      (fast SSD volume, full row-granular queries)
+--   age <  30d -> WARM     (cheaper volume; last-month deep dives)
+--   age <  90d -> COLD     (object-store-backed volume; rare late true-ups)
+--   age >= 90d -> AGGREGATE (raw row dropped; only daily_feature_rollup survives)
+--
+-- The storage policy below names the 'warm'/'cold' volumes the TTL MOVE clauses target. Disk paths
+-- and the actual mounts are infra (ClickHouse Cloud storage policy, CTO-94); shown here for shape.
+
+-- Example storage policy (configured cluster-side, not applied by migrations):
+--
+--   <storage_configuration>
+--     <disks>
+--       <hot><path>/var/lib/clickhouse/hot/</path></hot>
+--       <warm><path>/mnt/warm/</path></warm>
+--       <cold><type>s3</type><endpoint>...</endpoint></cold>   <!-- CTO-28 object storage -->
+--     </disks>
+--     <policies>
+--       <tiered>
+--         <volumes>
+--           <hot><disk>hot</disk></hot>
+--           <warm><disk>warm</disk></warm>
+--           <cold><disk>cold</disk></cold>
+--         </volumes>
+--       </tiered>
+--     </policies>
+--   </storage_configuration>
+--
+-- otel_spans then sets `SETTINGS storage_policy = 'tiered'` (applied with the volume mounts, infra).
+
+-- ---------------------------------------------------------------------------------------------- --
+-- Surviving aggregate after raw-drop.
+-- daily_feature_rollup (rollups.sql, CTO-24) is keyed by (TenantId, FeatureTag, Day,
+-- GenAiResponseModel) — exactly tally.storage_tiering.WARM_AGGREGATE_DIMENSIONS. Because the MV
+-- writes on ingest (independent of otel_spans' TTL), the per-(tenant, feature, day, model) sums
+-- needed for trends + reconciliation remain queryable long after the 90d raw horizon. Verify with:
+--
+--   -- raw span gone after 90d:
+--   SELECT count() FROM otel_spans
+--   WHERE TenantId = {t} AND Timestamp < now() - INTERVAL 90 DAY;   -- expect 0
+--   -- aggregate still present:
+--   SELECT sum(EstimatedCost) FROM daily_feature_rollup
+--   WHERE TenantId = {t} AND Day < today() - 90;                    -- expect > 0
+
+-- ---------------------------------------------------------------------------------------------- --
+-- Per-tenant retention override (enterprise = longer raw retention).
+-- ClickHouse TTL is table-level, so an override can't be a separate clause — the raw-drop interval
+-- is compiled into a multiIf on TenantId by
+-- tally.storage_tiering.render_tenant_ttl_delete_expression(store). With an 'ent' tenant kept 365d
+-- and an 'alpha' tenant kept 180d over the default 90d, the generated DELETE clause is:
+--
+--   ALTER TABLE otel_spans MODIFY TTL
+--       toDateTime(Timestamp) + INTERVAL 7 DAY  TO VOLUME 'warm',
+--       toDateTime(Timestamp) + INTERVAL 30 DAY TO VOLUME 'cold',
+--       toDateTime(Timestamp) + multiIf(
+--           TenantId = 'alpha', INTERVAL 180 DAY,
+--           TenantId = 'ent',   INTERVAL 365 DAY,
+--           INTERVAL 90 DAY) DELETE;
