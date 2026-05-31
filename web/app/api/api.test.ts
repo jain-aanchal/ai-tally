@@ -10,6 +10,7 @@ import { GET as CostGET } from "./cost/route";
 import { GET as FeaturesGET } from "./features/route";
 import { GET as DataQualityGET } from "./data-quality/route";
 import { GET as EstimateGET } from "./estimate/route";
+import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -67,5 +68,31 @@ describe("api routes", () => {
     const body = await json<{ workload: string; blowUpRisk: number }>(EstimateGET());
     expect(body.workload).toBeTypeOf("string");
     expect(body.blowUpRisk).toBeGreaterThanOrEqual(0);
+  });
+
+  it("GET /api/guardrails returns rules + refresh window", async () => {
+    const body = await json<{ rules: unknown[]; configRefreshSeconds: number }>(
+      await GuardrailsGET(),
+    );
+    expect(body.rules.length).toBeGreaterThan(0);
+    expect(body.configRefreshSeconds).toBeGreaterThan(0);
+  });
+
+  it("PUT /api/guardrails echoes a valid rule, rejects an unconstrained one", async () => {
+    const ok = await GuardrailsPUT(
+      new Request("http://test/x", {
+        method: "PUT",
+        body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn", maxSteps: 10 }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+
+    const bad = await GuardrailsPUT(
+      new Request("http://test/x", {
+        method: "PUT",
+        body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn" }),
+      }),
+    );
+    expect(bad.status).toBe(422);
   });
 });
