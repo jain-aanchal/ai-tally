@@ -105,8 +105,13 @@ def test_buffered_burst_is_accepted_and_persisted() -> None:
             assert body["status"] == "accepted"
             assert body["accepted_spans"] == 40  # buffered, acked immediately
             total += 40
-        # The background drain loop writes them to ClickHouse off the hot path.
-        assert _wait_for(lambda: len(store.spans) == total), f"only {len(store.spans)}/{total} drained"
+        # The buffered spans land in ClickHouse off the hot path. We drive drain_once() from the
+        # test thread (idempotent + lock-guarded against the background loop) so the assertion is
+        # deterministic rather than racing the loop's poll cadence on a slow CI runner.
+        buf = app.state.ingest_buffer
+        assert _wait_for(lambda: buf.drain_once() == 0 and len(store.spans) == total), (
+            f"only {len(store.spans)}/{total} drained"
+        )
 
 
 def test_burst_returns_no_5xx_even_when_clickhouse_down() -> None:

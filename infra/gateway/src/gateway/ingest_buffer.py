@@ -78,7 +78,8 @@ class AsyncIngestBuffer:
         self._capacity = capacity
         self._drain_batch = drain_batch
         self._poll = poll_interval_s
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # guards buffer queue mutations
+        self._consume_lock = threading.Lock()  # serializes store writes + dedup if drained concurrently
         self._task: asyncio.Task[None] | None = None
         self._stop: asyncio.Event | None = None
         self._dropped = 0
@@ -122,12 +123,15 @@ class AsyncIngestBuffer:
             drained = self._buffer.drain(self._drain_batch)
         if not drained:
             return 0
-        try:
-            return self._consumer.consume(drained)
-        except Exception:
-            with self._lock:
-                self._buffer.produce(drained)  # at-least-once: put it back for the next attempt
-            raise
+        # Serialize the store write + dedup so a test-thread drain and the background loop can't
+        # interleave (double-write / corrupt the dedup set) if both call drain_once concurrently.
+        with self._consume_lock:
+            try:
+                return self._consumer.consume(drained)
+            except Exception:
+                with self._lock:
+                    self._buffer.produce(drained)  # at-least-once: put it back for the next attempt
+                raise
 
     async def start(self) -> None:
         """Launch the background drain loop (idempotent)."""
