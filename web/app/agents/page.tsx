@@ -1,8 +1,13 @@
 import Link from "next/link";
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { Histogram } from "@/components/Histogram";
 import { type AgentRun, type AgentSummary, p99Ratio } from "@/lib/agents";
 import { apiGet } from "@/lib/api";
+import { deriveDataState } from "@/lib/dataState";
 import { formatUSD } from "@/lib/types";
 
 interface AgentsPayload {
@@ -12,10 +17,15 @@ interface AgentsPayload {
 
 export default async function AgentsPage() {
   const { agents, runs } = await apiGet<AgentsPayload>("/api/agents");
-  return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Agents</h1>
 
+  // Agents has no reconciliation boundary — only empty/partial states apply.
+  const noAgents = agents.length === 0 || agents.every((a) => a.costPerDayMicroUsd === 0);
+  const someEmptyAgents =
+    agents.some((a) => a.runsPerDay === 0) && agents.some((a) => a.runsPerDay > 0);
+  const state = deriveDataState({ isEmpty: noAgents, isPartial: someEmptyAgents });
+
+  const body = (
+    <div className="space-y-6">
       <Card title="Agent cost — distribution is the story">
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-muted">
@@ -77,6 +87,20 @@ export default async function AgentsPage() {
             ))}
         </ul>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-xl font-semibold">Agents</h1>
+
+      {state === "partial" && <PartialDataBanner missing="telemetry for some agents" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Agents">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }

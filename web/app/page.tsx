@@ -1,5 +1,17 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  StaleBadge,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
+import {
+  allZero,
+  asOfLabel,
+  deriveDataState,
+  relativeAge,
+  someZero,
+} from "@/lib/dataState";
 import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 
@@ -13,13 +25,18 @@ interface HomePayload {
 export default async function HomePage() {
   const { spend: s, outliers, roi, dq } = await apiGet<HomePayload>("/api/home");
   const hidden = s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
-  const hiddenPct = Math.round((hidden / s.totalMicroUsd) * 100);
+  const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
 
-  return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Home</h1>
+  const layers: Record<string, number> = { ...s.byLayer };
+  const state = deriveDataState({
+    isEmpty: s.totalMicroUsd === 0 && allZero(layers),
+    isPartial: someZero(layers),
+    reconciledThrough: s.reconciledThrough,
+  });
+  const asOf = asOfLabel(s.reconciledThrough);
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+  const grid = (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card title="Spend — last 30 days">
           <div className="text-3xl font-semibold">{formatUSD(s.totalMicroUsd)}</div>
           <div className="mt-2 text-sm text-muted">
@@ -88,6 +105,24 @@ export default async function HomePage() {
           </dl>
         </Card>
       </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">Home</h1>
+        {state !== "empty" && asOf && (
+          <StaleBadge asOf={asOf} age={relativeAge(s.reconciledThrough)} stale={state === "stale"} />
+        )}
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="a cost layer connector" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Home">{grid}</SyntheticPreviewBanner>
+      ) : (
+        grid
+      )}
     </div>
   );
 }

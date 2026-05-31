@@ -1,5 +1,11 @@
 import { Card } from "@/components/Card";
+import {
+  PartialDataBanner,
+  StaleBadge,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
+import { deriveDataState, relativeAge, STALE_AFTER_MS } from "@/lib/dataState";
 import {
   type AttributionDiagnostics,
   type FeatureEconomics,
@@ -14,10 +20,23 @@ interface FeaturesPayload {
 
 export default async function FeaturesPage() {
   const { features, diagnostics } = await apiGet<FeaturesPayload>("/api/features");
-  return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Features</h1>
 
+  // Features has no reconciliation date; the reconciler's last-run minutes is its freshness signal.
+  const reconciledThrough = new Date(
+    Date.now() - diagnostics.reconcilerLastRunMinutesAgo * 60_000,
+  ).toISOString();
+  const noEconomics = features.length === 0 || features.every((f) => f.costPerUserMicroUsd === 0);
+  const someUnattributed =
+    features.some((f) => f.valueEvent === null) && features.some((f) => f.valueEvent !== null);
+  const state = deriveDataState({
+    isEmpty: noEconomics,
+    isPartial: someUnattributed,
+    reconciledThrough,
+  });
+  const reconcilerStale = diagnostics.reconcilerLastRunMinutesAgo * 60_000 > STALE_AFTER_MS;
+
+  const body = (
+    <div className="space-y-6">
       <Card title="Unit economics — per feature">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -93,11 +112,38 @@ export default async function FeaturesPage() {
             <dl className="space-y-1.5 text-sm">
               <Diag k="late-arriving events (7d)" v={diagnostics.lateArrivalEvents7d.toLocaleString()} />
               <Diag k="median lag" v={`${diagnostics.lateArrivalMedianHours.toFixed(1)}h`} />
-              <Diag k="reconciler last ran" v={`${diagnostics.reconcilerLastRunMinutesAgo} min ago`} good />
+              <Diag
+                k="reconciler last ran"
+                v={`${diagnostics.reconcilerLastRunMinutesAgo} min ago`}
+                good={!reconcilerStale}
+              />
             </dl>
           </div>
         </div>
       </Card>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">Features</h1>
+        {state !== "empty" && (
+          <StaleBadge
+            asOf={relativeAge(reconciledThrough)}
+            age={relativeAge(reconciledThrough)}
+            stale={state === "stale"}
+          />
+        )}
+      </div>
+
+      {state === "partial" && <PartialDataBanner missing="value-event tracking for every feature" />}
+
+      {state === "empty" ? (
+        <SyntheticPreviewBanner workflow="Features">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
     </div>
   );
 }

@@ -145,11 +145,28 @@ class PartialError:
 
 
 @dataclass(frozen=True, slots=True)
+class ServerHints:
+    """Flow-control advice the gateway returns so a conformant client can self-tune (CTO-36).
+
+    The client should treat these as the new ceiling until the next response updates them: flush no
+    more often than ``flush_interval_ms``, send no more than ``max_batch_size`` items per batch,
+    apply ``sample_rate_override`` when present (gateway-directed shedding), and — on a retryable
+    response — wait ``retry_after_ms`` before resending.
+    """
+
+    flush_interval_ms: int = 5000
+    max_batch_size: int = 1000
+    sample_rate_override: float | None = None
+    retry_after_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class BatchResponse:
     batch_id: str
     status: Status = Status.ACCEPTED
     partial_errors: list[PartialError] = field(default_factory=list)
     accepted_spans: int = 0
+    server_hints: ServerHints | None = None
 
 
 # --- JSON codec ----------------------------------------------------------------------------------
