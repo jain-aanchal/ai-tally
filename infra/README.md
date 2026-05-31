@@ -16,8 +16,10 @@ the move to managed services later is a config change, not a rewrite.
 The canonical DDL in [`../db`](../db) is mounted into the containers and applied automatically on
 first boot — `otel_spans` and the rollup MVs into ClickHouse, the control-plane schema into Postgres.
 
-> The Go edge proxy (transparent OpenAI passthrough) is intentionally **not** part of the local
-> stack — the SDK ingestion path covers end-to-end flow without it. It's a later, optional addition.
+> The Go edge proxy (transparent OpenAI passthrough) lives in [`edge-proxy/`](./edge-proxy) and is
+> intentionally **not** wired into this Docker stack — the SDK ingestion path covers end-to-end flow
+> without it, and the proxy is a standalone, stateless binary you run wherever the customer's
+> traffic egresses. See its README for the p99 < 3ms latency budget and trust invariants.
 
 ## Prerequisites
 
