@@ -34,7 +34,9 @@ from tally.wire import (
 
 from gateway.auth import ApiKeyAuth
 from gateway.config import get_settings
+from gateway.errors import ErrorCode
 from gateway.mapping import span_to_row
+from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
 
 logger = logging.getLogger("tally.gateway")
@@ -48,6 +50,11 @@ async def lifespan(app: FastAPI):
     app.state.auth = ApiKeyAuth(settings)
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
+    app.state.limiter = RateLimiter(
+        rps=settings.rate_limit_rps,
+        burst=settings.rate_limit_burst,
+        monthly_quota=settings.monthly_quota_spans,
+    )
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
     app.state.store.close()
@@ -70,6 +77,11 @@ def _parse_batch(payload: dict[str, Any]) -> BatchRequest:
         )
     except (KeyError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"malformed batch: {exc}") from exc
+
+
+def _error(status_code: int, code: ErrorCode, message: str) -> HTTPException:
+    """An HTTPException whose detail carries a stable wire error code clients can branch on."""
+    return HTTPException(status_code=status_code, detail={"code": code.value, "message": message})
 
 
 @app.get("/healthz")
@@ -106,21 +118,46 @@ async def ingest_batch(
     auth: ApiKeyAuth = app.state.auth
     catalog = app.state.catalog
     idempotency: IdempotencyCache = app.state.idempotency
+    limiter: RateLimiter = app.state.limiter
 
     payload = await request.json()
     batch = _parse_batch(payload)
+    claimed_tenant = batch.tenant_id
 
-    # --- auth: resolve tenant ---
+    # --- auth: resolve tenant + scope ---
     if settings.require_api_key:
         if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="missing bearer token")
+            raise _error(401, ErrorCode.UNAUTHENTICATED, "missing bearer token")
         token = authorization.split(" ", 1)[1].strip()
-        tenant_id = auth.tenant_for_key(token)
-        if tenant_id is None:
-            raise HTTPException(status_code=403, detail="invalid api key")
-        batch.tenant_id = tenant_id  # trust the key's tenant, not the body
+        result = auth.authenticate(token)
+        if result is None:
+            raise _error(401, ErrorCode.UNAUTHENTICATED, "invalid or revoked api key")
+        if not result.can_write:
+            raise _error(403, ErrorCode.FORBIDDEN_SCOPE, f"scope '{result.scope}' cannot write spans")
+        # A key is tenant-bound: a body claiming a *different* tenant is refused, never silently
+        # re-tagged. (Empty/own tenant in the body is fine.)
+        if claimed_tenant and claimed_tenant != result.tenant_id:
+            raise _error(403, ErrorCode.TENANT_MISMATCH, "key is not bound to the requested tenant")
+        batch.tenant_id = result.tenant_id  # the key's tenant is authoritative
     elif not batch.tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id required when auth is disabled")
+
+    # --- rate limit + monthly quota (one unit per span) ---
+    decision = limiter.check(batch.tenant_id, max(1, len(batch.resource_spans)))
+    if not decision.allowed:
+        # Both RATE_LIMITED and QUOTA_EXCEEDED are 429 so a conformant client backs off honoring
+        # Retry-After; the body's error.code lets it distinguish a transient cap from a spent quota.
+        retry_after_s = max(1, round(decision.retry_after_s))
+        return JSONResponse(
+            {
+                "batch_id": batch.batch_id,
+                "status": Status.REJECTED.value,
+                "error": {"code": decision.code.value if decision.code else "", "message": decision.message},
+                "retry_after_ms": decision.retry_after_ms,
+            },
+            status_code=429,
+            headers={"Retry-After": str(retry_after_s)},
+        )
 
     # --- idempotency: replayed batch returns the original response ---
     cached = idempotency.check_or_store(batch)
