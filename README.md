@@ -64,3 +64,5 @@ Tickets follow a Context / Acceptance criteria / Out-of-scope format and are pic
 ai-tally is licensed under the [Apache License, Version 2.0](LICENSE). Required
 attribution notices for the project and any third-party dependencies live in
 [NOTICE](NOTICE).
+
+We follow the [Contributor Covenant](CODE_OF_CONDUCT.md) Code of Conduct.
