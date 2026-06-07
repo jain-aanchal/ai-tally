@@ -1,5 +1,7 @@
 # ai-tally
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Cost-and-value observability for AI products. See what your AI actually costs — all-in — and what it returns.
 
 Five workflows on one shared data spine:
@@ -56,3 +58,9 @@ uv run pytest
 
 Early development. Decisions and the full system spec live in the project tracker.
 Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
+
+## License
+
+ai-tally is licensed under the [Apache License, Version 2.0](LICENSE). Required
+attribution notices for the project and any third-party dependencies live in
+[NOTICE](NOTICE).
