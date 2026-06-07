@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.object_storage (CTO-28): S3 addressing, offload decision, retention."""
 
 from __future__ import annotations

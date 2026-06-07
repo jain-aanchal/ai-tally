@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tamper-evident usage ledger: hash chain, reconciliation, idempotent export (CTO-87)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Local guardrail engine — protect budget without ever corrupting customer state.
 
 Implements CTO-51.

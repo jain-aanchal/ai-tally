@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Object storage (S3) addressing + offload policy (CTO-28 / spec §5.3).
 
 Large or auxiliary blobs don't belong inline in ClickHouse — they bloat the hot store and slow

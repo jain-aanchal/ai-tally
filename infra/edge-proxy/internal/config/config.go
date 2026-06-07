@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Package config loads the edge-proxy runtime configuration from the environment.
 //
 // The proxy is deliberately stateless: every knob comes from an env var so the same binary

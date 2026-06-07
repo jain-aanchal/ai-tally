@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for zero-touch tenant bootstrap (CTO-88).
 
 These assert the spec invariants without any Postgres/KMS: a signup deterministically plans the

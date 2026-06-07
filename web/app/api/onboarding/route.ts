@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
 import { FUNNEL_STAGES, type FunnelStage } from "@/lib/onboarding";

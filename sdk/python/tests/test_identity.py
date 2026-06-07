@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Identity graph: transitive bounded-depth resolution, ingestion, key-version bridge (CTO-67)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for plan tiers + graceful usage-limit enforcement (CTO-89)."""
 
 from __future__ import annotations

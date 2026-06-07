@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CTO-41 — provider extractor framework, exercised against recorded OpenAI fixtures."""
 
 from __future__ import annotations

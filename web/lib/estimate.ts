@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data for the pre-deploy Estimate workflow (CTO-71/72/73).
 
 import type { MicroUSD } from "./types";

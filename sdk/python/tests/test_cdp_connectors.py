@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.cdp_connectors (CTO-68): CDP/revenue webhook connectors."""
 
 from __future__ import annotations

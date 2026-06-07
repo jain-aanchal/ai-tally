@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attribution stitcher — bridge async business events to traces.
 
 Implements CTO-69 / spec §7.

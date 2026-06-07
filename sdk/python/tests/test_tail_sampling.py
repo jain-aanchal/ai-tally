@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tail-weighted estimation sampling: tail over-indexing, mandatory includes, determinism."""
 
 from __future__ import annotations

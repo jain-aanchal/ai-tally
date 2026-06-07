@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tamper-evident audit log + short-lived access tokens for privileged admin actions.
 
 Implements CTO-75 (Access control + audit log).

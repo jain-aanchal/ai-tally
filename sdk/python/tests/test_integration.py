@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """End-to-end integration: start_trace -> record_llm_call -> conformant span with cost."""
 
 from __future__ import annotations

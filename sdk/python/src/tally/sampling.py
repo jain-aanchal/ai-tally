@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Deterministic, stratified, whole-trace sampling — with billing decoupled from sampling.
 
 Implements CTO-50.

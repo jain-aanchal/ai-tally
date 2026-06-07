@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Package keybroker implements the optional key-broker mode for the self-hostable edge proxy
 // (CTO-43).
 //

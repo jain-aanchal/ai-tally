@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Package telemetry ships the proxy's metadata-only TraceRecords to an ai-tally collector.
 //
 // This is the real Sink that CTO-39 left as a NopSink. It exists here (rather than in package

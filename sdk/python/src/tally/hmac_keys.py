@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Per-tenant HMAC versioned-key scheme — Option B rotation (CTO-74 / spec §14.2, §10).
 
 User IDs are never stored raw — they're HMAC-SHA256'd under a **per-tenant** key so a hash can't be

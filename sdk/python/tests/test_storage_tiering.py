@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.storage_tiering (CTO-29): tier classification + TTL DDL generation."""
 
 from __future__ import annotations

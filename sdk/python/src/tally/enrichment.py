@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Server-side cost enrichment.
 
 Implements CTO-35. Spec §12.3.

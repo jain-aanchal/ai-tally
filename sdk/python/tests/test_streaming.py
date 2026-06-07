@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SSE tee + token reconstruction: completeness, tool calls, partial drops, latency (CTO-40)."""
 
 from __future__ import annotations

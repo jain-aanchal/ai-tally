@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data for the Cost workflow (CTO-65/66). Typed for the eventual API.
 
 import type { MicroUSD, SpendByLayer } from "./types";

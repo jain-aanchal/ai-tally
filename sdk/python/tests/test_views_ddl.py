@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Structural validation for the rollup MV, last_touch_index, and attribution DDL.
 
 CTO-24/25/26. ClickHouse isn't available in CI, so we assert the spec-load-bearing invariants:

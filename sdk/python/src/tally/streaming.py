@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SSE stream tee + token reconstruction (CTO-40 / spec §4.2).
 
 A streaming LLM response must reach the customer's client with **zero added latency**, while we

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data for the Data Quality surface (CTO-79). Typed for the eventual API.
 
 export type Health = "good" | "warn" | "bad";

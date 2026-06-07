@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Identity graph + resolution — transitive, bounded depth (CTO-67 / spec §7 identity correction).
 
 Attribution's highest-value case — anonymous→authenticated conversion — only works with an identity

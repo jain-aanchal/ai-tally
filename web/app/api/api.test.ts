@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Route-handler smoke tests — call the GET functions directly (no fetch round-trip).
 
 import { describe, expect, it } from "vitest";

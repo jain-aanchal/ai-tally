@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Provider extractor framework — versioned, pluggable, fixture-tested.
 
 Implements CTO-41.

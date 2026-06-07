@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the pluggable eval framework (CTO-61)."""
 
 from __future__ import annotations

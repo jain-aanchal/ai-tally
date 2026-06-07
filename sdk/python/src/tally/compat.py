@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Provider compatibility matrix — generated from registered instrumentors.
 
 Implements CTO-44. The matrix is built from instrumentor capabilities, not hand-maintained prose,

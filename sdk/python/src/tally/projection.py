@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Projection engine + blow-up risk score for pre-deploy estimation (CTO-72, spec §9 W3).
 
 Pre-deploy estimation answers "if I ship this prompt/model change, what happens to cost?" The

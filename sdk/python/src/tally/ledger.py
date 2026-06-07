@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tamper-evident usage ledger + invoice export (CTO-87).
 
 Billing has to be defensible. When a customer disputes an invoice we need to show, line by line,

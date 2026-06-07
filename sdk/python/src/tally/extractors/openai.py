@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """OpenAI Chat Completions extractor — version 1 (``openai_v1``).
 
 Implements CTO-41.

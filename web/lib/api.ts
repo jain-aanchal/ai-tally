@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Typed API fetcher for server components.
 //
 // Pages fetch over HTTP so swapping to a real backend later is just a base-URL change. In server

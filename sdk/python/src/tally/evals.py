@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pluggable eval framework — attach a quality signal to cost comparisons.
 
 Implements CTO-61 (spec §9 W1).

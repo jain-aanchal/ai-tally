@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """TallyClient — the SDK entrypoint.
 
 Ties the spine together: schema (CTO-47) + safety (CTO-45) + context (CTO-46) + sampling (CTO-50)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """OpenAI instrumentor — extracts usage from a Chat Completions response.
 
 Works with both the SDK's object responses and plain dicts, so it can be tested with a fake client

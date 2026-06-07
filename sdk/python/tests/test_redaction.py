@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.redaction (CTO-76): redactors, payload policy, deletion plans."""
 
 from __future__ import annotations

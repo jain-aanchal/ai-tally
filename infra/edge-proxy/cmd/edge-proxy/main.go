@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Command edge-proxy runs ai-tally's transparent OpenAI reverse proxy (CTO-39).
 //
 // Customers set OPENAI_BASE_URL to this proxy's address and add an X-Tenant-Key header; requests

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Clock-skew handling for ingest timestamps.
 
 Implements CTO-38. Spec §12.9.

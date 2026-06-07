@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared instrumentation machinery: provider interface, span builder, call wrapper."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the cost connector framework + v1 connectors (CTO-63)."""
 
 from __future__ import annotations

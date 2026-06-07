@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export function Placeholder({ title, ticket }: { title: string; ticket: string }) {
   return (
     <div className="space-y-3">
