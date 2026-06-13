@@ -37,6 +37,12 @@ type Config struct {
 	// TenantHeader names the control header carrying the ai-tally tenant key (default X-Tenant-Key).
 	// It is stripped before the request leaves for the upstream provider.
 	TenantHeader string
+	// FeatureTagHeader names an optional control header carrying a per-request feature/agent tag
+	// (default X-Tally-Feature-Tag). Like TenantHeader, it is stripped before the request leaves for
+	// the upstream provider; its value is recorded on the TraceRecord so downstream telemetry can
+	// segment traffic by feature (CTO-104). Unlike the tenant key, the feature tag is purely
+	// informational — missing/empty is fine and never rejected.
+	FeatureTagHeader string
 	// RequireTenant rejects requests missing TenantHeader with 400 when true.
 	RequireTenant bool
 	// UpstreamTimeout bounds a single forwarded request end-to-end (0 = no timeout, for streaming).
@@ -61,9 +67,10 @@ type Config struct {
 
 // Defaults applied when the corresponding env var is unset.
 const (
-	DefaultListenAddr   = ":8088"
-	DefaultUpstream     = "https://api.openai.com"
-	DefaultTenantHeader = "X-Tenant-Key"
+	DefaultListenAddr       = ":8088"
+	DefaultUpstream         = "https://api.openai.com"
+	DefaultTenantHeader     = "X-Tenant-Key"
+	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"
 	// DefaultUpstreamTimeout is generous because LLM completions are slow and may stream for
 	// minutes; the proxy must not be the thing that cuts a long generation short.
 	DefaultUpstreamTimeout = 10 * time.Minute
@@ -77,12 +84,13 @@ type Env func(key string) string
 // FromEnv resolves and validates a Config from the given lookup function.
 func FromEnv(lookup Env) (Config, error) {
 	cfg := Config{
-		ListenAddr:      firstNonEmpty(lookup("EDGE_PROXY_LISTEN"), DefaultListenAddr),
-		TenantHeader:    firstNonEmpty(lookup("EDGE_PROXY_TENANT_HEADER"), DefaultTenantHeader),
-		UpstreamTimeout: DefaultUpstreamTimeout,
-		Mode:            ModePassthrough,
-		BrokerTTL:       DefaultBrokerTTL,
-		TelemetryURL:    lookup("EDGE_PROXY_TELEMETRY_URL"),
+		ListenAddr:       firstNonEmpty(lookup("EDGE_PROXY_LISTEN"), DefaultListenAddr),
+		TenantHeader:     firstNonEmpty(lookup("EDGE_PROXY_TENANT_HEADER"), DefaultTenantHeader),
+		FeatureTagHeader: firstNonEmpty(lookup("EDGE_PROXY_FEATURE_TAG_HEADER"), DefaultFeatureTagHeader),
+		UpstreamTimeout:  DefaultUpstreamTimeout,
+		Mode:             ModePassthrough,
+		BrokerTTL:        DefaultBrokerTTL,
+		TelemetryURL:     lookup("EDGE_PROXY_TELEMETRY_URL"),
 	}
 
 	rawUpstream := firstNonEmpty(lookup("EDGE_PROXY_UPSTREAM"), DefaultUpstream)
