@@ -129,6 +129,28 @@ until ClickHouse returns. Knobs (all `TALLY_`-prefixed): `INGEST_BUFFER_CAPACITY
 rows past this are shed as *retryable*, never 5xx), `INGEST_BUFFER_DRAIN_BATCH` (`2000`),
 `INGEST_BUFFER_POLL_INTERVAL_S` (`0.05`).
 
+## Step 5: real traffic via Aider
+
+`make demo` posts a hand-crafted batch. To see ai-tally with **real agent
+traffic** — same path a customer's app would take — run the Aider fixture
+demo:
+
+```bash
+export OPENAI_API_KEY=sk-...   # or ANTHROPIC_API_KEY + PROVIDER=anthropic
+cd infra && make aider-demo
+```
+
+Aider edits a small Python fixture across three multi-turn tasks. All LLM
+requests transit the ai-tally edge proxy with `X-Tally-Feature-Tag:
+aider-demo`, and the dashboard auto-opens to `/agents?tag=aider-demo` showing
+the just-recorded runs.
+
+Full walkthrough — including the cross-provider variant, what each task does,
+and the architecture diagram — is in
+[examples/aider-demo/README.md](examples/aider-demo/README.md).
+
+When you're done: `make aider-demo-stop` kills the background proxy.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -145,6 +167,8 @@ rows past this are shed as *retryable*, never 5xx), `INGEST_BUFFER_DRAIN_BATCH` 
 | `make up` | Start the full stack (build gateway image) |
 | `make seed` | Create the `local-dev` tenant + API key |
 | `make demo` | Send a sample batch through the gateway into ClickHouse |
+| `make aider-demo` | Run Aider against a fixture repo through the edge proxy (needs `OPENAI_API_KEY`) |
+| `make aider-demo-stop` | Kill the background edge proxy started by `aider-demo` |
 | `make ps` / `make logs` | Status / tail gateway logs |
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
 | `make down` | Stop the stack (keep data volumes) |
