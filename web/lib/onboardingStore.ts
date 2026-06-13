@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Server-only in-memory onboarding store backing the live first-trace detector and funnel sink.
 //
 // In production these are control-plane rows + an ingest signal. In the prototype we keep a single

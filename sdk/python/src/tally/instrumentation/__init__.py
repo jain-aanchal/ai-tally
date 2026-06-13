@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Auto-instrumentation — provider call wrappers that emit conformant spans.
 
 Implements CTO-48 (OpenAI first).

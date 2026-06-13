@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.tenant_isolation (CTO-30): admission, scope guard, resource groups, promotion."""
 
 from __future__ import annotations

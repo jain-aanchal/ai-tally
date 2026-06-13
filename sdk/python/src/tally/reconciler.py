@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Reconciler — cloud-billing true-up (CTO-64).
 
 We bill and display two cost tracks and keep them honest by never conflating them:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """PII redaction + per-tenant payload policy + right-to-deletion planning (CTO-76).
 
 Why this module exists

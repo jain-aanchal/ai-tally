@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Structural validation for the Postgres control-plane schema (CTO-27).
 
 No Postgres in CI; we assert the spec invariants: all required tables exist, secrets are KMS

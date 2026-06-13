@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from tally.wire import (
     BatchRequest,
     BatchResponse,

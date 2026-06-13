@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.backups (CTO-77): policy, schedule, restore-drill RTO/RPO, env, runbook."""
 
 from __future__ import annotations

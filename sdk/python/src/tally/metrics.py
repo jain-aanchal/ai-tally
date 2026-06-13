@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Operational metrics computed over spans.
 
 Implements CTO-83: ``agent_run.cross_process_ratio`` — the trigger metric for promoting a tenant's

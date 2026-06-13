@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { apiGet } from "@/lib/api";
 import type { FunnelEvent, OnboardingProgress, TenantProxyCredentials } from "@/lib/onboarding";
 

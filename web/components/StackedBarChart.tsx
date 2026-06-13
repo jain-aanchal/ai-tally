@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Hand-rolled SVG stacked-bar chart by layer over time, with a vertical boundary
 // separating reconciled (past) from estimated (recent). No chart library; deterministic.
 

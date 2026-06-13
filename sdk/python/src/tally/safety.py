@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SDK safety boundary — the never-crash-host invariant.
 
 THE INVARIANT (CTO-45): the SDK must never raise into the customer's code path. Every internal

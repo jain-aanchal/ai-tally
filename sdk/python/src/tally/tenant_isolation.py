@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Multi-tenant isolation — query admission, tenant-scope enforcement, resource caps (CTO-30).
 
 A shared multi-tenant cluster (CTO-18) has one non-negotiable rule: **one tenant must never starve

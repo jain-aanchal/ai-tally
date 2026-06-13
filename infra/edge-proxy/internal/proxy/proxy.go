@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Package proxy implements ai-tally's transparent edge reverse proxy (CTO-39).
 //
 // A customer points OPENAI_BASE_URL at this proxy and adds an X-Tenant-Key header. Every request

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Connectors workflow (CTO-63 cost sources + CTO-68 revenue/CDP sources).
 //
 // The backend ships pluggable connector frameworks (tally.cost_connectors, tally.cdp_connectors):

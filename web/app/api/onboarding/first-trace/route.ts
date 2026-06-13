@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
 import { getProgress, markFirstTrace } from "@/lib/onboardingStore";

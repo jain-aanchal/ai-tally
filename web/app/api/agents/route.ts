@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
 import { agents, RECONCILER_LAST_RUN_MINUTES_AGO, runs } from "@/lib/agents";

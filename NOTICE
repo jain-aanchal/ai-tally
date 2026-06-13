@@ -1,0 +1,50 @@
+ai-tally
+Copyright 2026 Aanchal Jain
+
+This product includes software developed as part of the ai-tally project.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-------------------------------------------------------------------------------
+Third-party notices
+-------------------------------------------------------------------------------
+
+The ai-tally web dashboard depends on the following third-party components.
+A full per-package license inventory lives in docs/third-party-licenses.md.
+
+ClickHouse JS client (@clickhouse/client, @clickhouse/client-common)
+  Copyright ClickHouse, Inc.
+  Licensed under the Apache License, Version 2.0.
+  https://github.com/ClickHouse/clickhouse-js
+
+sharp + detect-libc
+  Copyright Lovell Fuller and contributors.
+  Licensed under the Apache License, Version 2.0.
+  https://github.com/lovell/sharp
+
+@swc/helpers
+  Copyright the SWC project contributors.
+  Licensed under the Apache License, Version 2.0.
+  https://github.com/swc-project/swc
+
+caniuse-lite (browser compatibility data, CC-BY-4.0)
+  Copyright the caniuse.com contributors.
+  Licensed under the Creative Commons Attribution 4.0 International License.
+  https://github.com/browserslist/caniuse-lite
+
+@img/sharp-libvips-* (prebuilt libvips binaries, dynamically linked)
+  libvips is licensed under the GNU Lesser General Public License v3.0 or
+  later. ai-tally distributes these binaries unmodified as transitive
+  dependencies of sharp; users who wish to replace them may do so under the
+  terms of the LGPL.
+  https://github.com/libvips/libvips

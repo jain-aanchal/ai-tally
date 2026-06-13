@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Backup & disaster-recovery policy logic — schedule, restore-drill, IR runbook (CTO-77).
 
 Durability is a promise we make about *other people's data*. This module is the pure-logic layer

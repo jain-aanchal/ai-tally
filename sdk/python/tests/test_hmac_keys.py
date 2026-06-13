@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.hmac_keys (CTO-74): per-tenant HMAC versioned keys + Option B rotation."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Price scraper scaffold — pluggable fetchers, diff, and a human-review gate.
 
 Implements CTO-53.

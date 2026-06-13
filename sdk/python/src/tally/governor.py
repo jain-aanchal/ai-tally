@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Per-provider rate-limit governor for bulk replay.
 
 Implements CTO-60. Spec §9 W1.

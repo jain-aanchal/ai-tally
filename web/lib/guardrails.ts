@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Guardrail config model + helpers for the config UI (CTO-58). Typed like the eventual control-plane
 // API (Postgres, CTO-27); the SDK guardrail engine (CTO-51) consumes the same shapes.
 //

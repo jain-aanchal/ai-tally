@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data + helpers for the Cross-provider Compare workflow (CTO-62). Typed for the eventual API.
 
 import type { MicroUSD } from "./types";

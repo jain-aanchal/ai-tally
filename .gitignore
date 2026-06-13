@@ -26,3 +26,6 @@ htmlcov/
 
 # uv
 uv.lock
+
+# Claude Code worktrees
+.claude/worktrees/

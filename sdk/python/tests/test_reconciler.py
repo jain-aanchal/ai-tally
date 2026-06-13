@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Reconciler: tag→feature mapping, shared-cost allocation, billing-lag gating, deltas (CTO-64)."""
 
 from __future__ import annotations

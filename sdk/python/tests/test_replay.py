@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the context-faithful replay engine (CTO-59)."""
 
 from __future__ import annotations

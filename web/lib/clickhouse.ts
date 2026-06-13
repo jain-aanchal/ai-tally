@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Live ClickHouse reads for the dashboard (server-only).
 //
 // The Route Handlers call these and fall back to mock data when ClickHouse is unreachable (no

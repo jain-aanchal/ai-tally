@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the attribution stitcher (CTO-69, spec §7)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tally.stripe_billing (CTO-90): metered billing, lifecycle, invoices."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Shared empty / partial / stale UI for every workflow (CTO-80, spec 13.8 "never show stale as
 // fresh"). One implementation, applied identically across all five surfaces.
 

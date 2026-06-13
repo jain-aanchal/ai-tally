@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Guided-onboarding model + helpers (CTO-91). The activation funnel that makes self-serve work:
 // signup → copy the proxy config → first trace arrives (<5 min) → first dashboard (<24h).
 //

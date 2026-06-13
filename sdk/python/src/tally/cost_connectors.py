@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Cost connector framework + v1 connectors.
 
 Implements CTO-63. Spec section 9 W5.

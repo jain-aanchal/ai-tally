@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Versioned + audited per-tenant price overrides (CTO-54)."""
 
 from __future__ import annotations

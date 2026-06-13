@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CDP / revenue connectors — Segment, Rudderstack, Stripe, HubSpot (CTO-68).
 
 Why this module exists

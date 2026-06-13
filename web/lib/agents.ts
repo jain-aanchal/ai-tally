@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data + helpers for the Agents workflow (CTO-55/56/57). Typed like the eventual API.
 
 import type { MicroUSD } from "./types";

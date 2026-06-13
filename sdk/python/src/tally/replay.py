@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Replay engine — context-faithful pre-deploy model comparison, no live retrieval.
 
 Implements CTO-59.

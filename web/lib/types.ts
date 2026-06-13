@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Shared UI types. These mirror the SDK/wire shapes (micro-USD integers for money) so swapping
 // mock data for real API responses later is a drop-in.
 

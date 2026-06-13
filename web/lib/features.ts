@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data for the Features / Business attribution workflow (CTO-70). Typed for the eventual API.
 
 import type { MicroUSD } from "./types";

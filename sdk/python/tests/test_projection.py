@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Projection engine: p99 headline, blow-up risk + CI, driver breakdown, determinism (CTO-72)."""
 
 from __future__ import annotations

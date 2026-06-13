@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Per-tenant price overrides — versioned + audited (CTO-54, spec §6).
 
 Enterprise / committed-use customers negotiate custom provider rates; their cost must reflect their

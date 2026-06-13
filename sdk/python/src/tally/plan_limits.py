@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Plan tiers + graceful usage-limit enforcement + upgrade prompts (CTO-89).
 
 Why this module exists

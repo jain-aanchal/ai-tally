@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Shared state-derivation for the "never show stale as fresh" requirement (CTO-80, spec 13.8).
 //
 // Every workflow surface derives one of four DataStates from the data it already receives, and

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FlatCompat } from "@eslint/eslintrc";

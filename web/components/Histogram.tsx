@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Tiny inline log-scale distribution histogram (no chart lib).
 export function Histogram({ buckets }: { buckets: number[] }) {
   const max = Math.max(1, ...buckets);

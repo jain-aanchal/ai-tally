@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Zero-touch tenant bootstrap for self-serve signup (CTO-88 / spec §15).
 
 Self-serve GTM needs a new customer to go from "click signup" to "send my first trace" with **zero

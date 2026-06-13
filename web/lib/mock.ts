@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Mock data for the UI. Typed identically to the eventual API responses so wiring real endpoints
 // later is a drop-in replacement. Clearly fake numbers.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Structural validation of the otel_spans DDL (CTO-22).
 
 We can't stand up ClickHouse in CI here, so this asserts the invariants the spec makes

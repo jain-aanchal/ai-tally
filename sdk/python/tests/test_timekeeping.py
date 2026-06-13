@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from tally.timekeeping import (
     NS_PER_SECOND,
     assess,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Storage tiering & TTL policy (CTO-29 / spec §5.1, Appendix A).
 
 Keeping every raw span on hot SSD forever is the dominant storage cost. We tier by age:

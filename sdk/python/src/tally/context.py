@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Context propagation — trace_id + feature_tag that survive async boundaries.
 
 The make-or-break piece (CTO-46): if context is lost across an ``await`` / thread / background

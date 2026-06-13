@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tail-weighted sampling for pre-deploy estimation (CTO-71, spec §9 W3).
 
 Pre-deploy estimation answers "what will switching model/prompt cost and how will quality move?" by

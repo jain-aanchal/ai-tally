@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Price catalog — versioned, multi-provider rate table + cost computation.
 
 Implements CTO-52.

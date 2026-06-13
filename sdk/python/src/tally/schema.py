@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Span schema — OpenTelemetry ``gen_ai.*`` semantic conventions plus ai-tally extensions.
 
 A single namespace (``gen_ai.*``). We do not fork the convention; our additions are namespaced

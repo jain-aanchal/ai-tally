@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { Card } from "@/components/Card";
 import { apiGet } from "@/lib/api";
 import type { GuardrailRule } from "@/lib/guardrails";
