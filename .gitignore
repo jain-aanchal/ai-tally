@@ -29,3 +29,4 @@ uv.lock
 
 # Claude Code worktrees
 .claude/worktrees/
+.aider.*
