@@ -14,10 +14,21 @@ export function StackedBarChart({ series }: { series: CostSeries }) {
   const plotW = W - PAD_L - PAD_R;
   const plotH = H - PAD_T - PAD_B;
   const n = series.days.length;
+  if (n === 0) {
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="no data" className="w-full">
+        <text x={W / 2} y={H / 2} fontSize="12" fill="#8a93a6" textAnchor="middle">
+          no data for this filter yet
+        </text>
+      </svg>
+    );
+  }
   const barW = (plotW / n) * 0.7;
   const step = plotW / n;
 
-  const maxTotal = Math.max(...series.days.map(totalForDay));
+  // Guard against an all-zero series (filtered view with no cost): avoid dividing
+  // by zero in the height calc, which produces NaN and a React warning per <rect>.
+  const maxTotal = Math.max(1, ...series.days.map(totalForDay));
 
   // boundary x: just after the last reconciled day
   const reconciledIdx = series.days.findIndex((d) => d.date > series.reconciledThrough);
