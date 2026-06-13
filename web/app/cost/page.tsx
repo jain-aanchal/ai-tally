@@ -31,9 +31,16 @@ function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
 }
 
-export default async function CostPage() {
+export default async function CostPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ tag?: string }>;
+}) {
+  // Forward ?tag= to the API so the breakdown is pre-filtered to one feature (CTO-104).
+  const sp = (await searchParams) ?? {};
+  const query = sp.tag ? `?tag=${encodeURIComponent(sp.tag)}` : "";
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } =
-    await apiGet<CostPayload>("/api/cost");
+    await apiGet<CostPayload>(`/api/cost${query}`);
   const total = totalRange(costSeries);
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);

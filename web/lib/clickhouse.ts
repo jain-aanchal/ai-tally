@@ -221,16 +221,18 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
 
 // --- Cost workflow ------------------------------------------------------------------------------
 
-export async function queryCostSeries(): Promise<CostSeries | null> {
+export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSeries | null> {
   return tryLive(async (db, tenant) => {
-    const out = await rows<{ day: string; layer: Layer; cost: string }>(
+    const tag = filter?.tag ?? "";
+    const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+    const out = await rowsP<{ day: string; layer: Layer; cost: string }>(
       db,
       `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 14 DAY
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 14 DAY ${tagClause}
        GROUP BY day, layer
        ORDER BY day`,
-      tenant,
+      { tenant, tag },
     );
     // Pivot into one CostDayPoint per calendar day (fill gaps with zero layers).
     const byDay = new Map<string, CostDayPoint>();
@@ -253,15 +255,17 @@ export async function queryCostSeries(): Promise<CostSeries | null> {
   });
 }
 
-export async function queryFeatureCostRows(): Promise<FeatureCostRow[] | null> {
+export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<FeatureCostRow[] | null> {
   return tryLive(async (db, tenant) => {
-    const out = await rows<{ feature: string; layer: Layer; cost: string }>(
+    const tag = filter?.tag ?? "";
+    const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+    const out = await rowsP<{ feature: string; layer: Layer; cost: string }>(
       db,
       `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != ''
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != '' ${tagClause}
        GROUP BY feature, layer`,
-      tenant,
+      { tenant, tag },
     );
     const byFeature = new Map<string, FeatureCostRow>();
     for (const r of out) {
@@ -489,16 +493,20 @@ function buildRun(agg: RunAgg, spans: RunSpan[], agentMedian: number): AgentRun 
 }
 
 /** Per-agent summaries + the top expensive runs (with span trees), built from otel_spans. */
-export async function queryAgents(): Promise<{ agents: AgentSummary[]; runs: AgentRun[] } | null> {
+export async function queryAgents(filter?: { tag?: string; run?: string }): Promise<{ agents: AgentSummary[]; runs: AgentRun[] } | null> {
   return tryLive(async (db, tenant) => {
-    const aggs = await rows<RunAgg>(
+    const tag = filter?.tag ?? "";
+    const run = filter?.run ?? "";
+    const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+    const runClause = run ? "AND TraceId = {run:String}" : "";
+    const aggs = await rowsP<RunAgg>(
       db,
       `SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost,
               count() AS steps, max(StatusCode) AS maxStatus, toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != ''
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != '' ${tagClause} ${runClause}
        GROUP BY TraceId`,
-      tenant,
+      { tenant, tag, run },
     );
     if (aggs.length === 0) return { agents: [], runs: [] };
 
