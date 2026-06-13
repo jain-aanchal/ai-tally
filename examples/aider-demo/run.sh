@@ -53,14 +53,20 @@ start_proxy() {
 }
 start_proxy
 
-# 4. Point Aider at the proxy and inject the feature-tag header. We use
-#    OPENAI_API_BASE (Aider reads it via the openai sdk).
-export OPENAI_API_BASE="http://localhost:$PROXY_PORT/v1"
-export OPENAI_BASE_URL="http://localhost:$PROXY_PORT/v1"
-# Aider doesn't expose per-request headers natively; we use the OpenAI SDK env
-# OPENAI_DEFAULT_HEADERS (newer aider builds) AND set a curl-style fallback via
-# the proxy's tenant header so the feature tag still lands on every request.
-export OPENAI_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
+# 4. Point Aider at the proxy and pick a model that matches the provider.
+#    Aider speaks OpenAI protocol by default; for Anthropic we explicitly select
+#    a Claude model so it speaks Anthropic protocol to the proxy upstream.
+if [[ "$PROVIDER" == "anthropic" ]]; then
+  # Aider uses LiteLLM under the hood; LiteLLM requires the provider prefix.
+  AIDER_MODEL="${AIDER_MODEL:-anthropic/claude-sonnet-4-5}"
+  export ANTHROPIC_API_BASE="http://localhost:$PROXY_PORT"
+  export ANTHROPIC_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
+else
+  AIDER_MODEL="${AIDER_MODEL:-gpt-4o}"
+  export OPENAI_API_BASE="http://localhost:$PROXY_PORT/v1"
+  export OPENAI_BASE_URL="http://localhost:$PROXY_PORT/v1"
+  export OPENAI_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
+fi
 
 # 5. Run each task. Parses Aider's "Tokens: …" cost line for the per-task summary.
 declare -a trace_ids=()
@@ -79,14 +85,20 @@ for task_file in "$here"/tasks/*.txt; do
     echo "ERROR: aider not on PATH. Install with: pip install aider-chat"; exit 1
   fi
   ( cd "$here/target-repo" && \
-    aider --no-git --yes --no-stream --message-file "$task_file" \
+    aider --no-git --yes --no-stream --model "$AIDER_MODEL" \
+          --message-file "$task_file" \
           string_utils.py test_string_utils.py >"$log" 2>&1 ) || {
-    echo "  (aider exited non-zero — continuing; see $log)"
+    echo "  ⚠ aider exited non-zero. Last 20 lines of output:"
+    tail -n 20 "$log" | sed 's/^/    /'
+    echo "    (full log: $log)"
   }
   dur=$(( $(date +%s) - start ))
   # Aider prints "Tokens: 1.2k sent, 300 received. Cost: $0.018 message, $0.018 session."
-  cost=$(grep -oE 'Cost: \$[0-9.]+ message' "$log" | tail -1 | grep -oE '[0-9.]+' || echo 0)
-  turns=$(grep -cE '^(>|aider>)' "$log" || echo 1)
+  cost=$(grep -oE 'Cost: \$[0-9.]+ message' "$log" | tail -1 | grep -oE '[0-9.]+' || true)
+  cost=${cost:-0}
+  turns=$(grep -cE '^(>|aider>)' "$log" || true)
+  turns=${turns:-0}
+  [ "$turns" -gt 0 ] 2>/dev/null || turns=1
   printf "   [%ds · %s turns · \$%s]\n" "$dur" "$turns" "${cost:-0}"
   total_cost_usd=$(awk "BEGIN{printf \"%.4f\", $total_cost_usd + ${cost:-0}}")
   total_turns=$((total_turns + turns))
@@ -111,7 +123,10 @@ for task_file in "$here"/tasks/*.txt; do
 done
 
 # 6. Summary block + auto-open Workflow 1.
-last_trace="${trace_ids[-1]:-}"
+last_trace=""
+if [[ ${#trace_ids[@]} -gt 0 ]]; then
+  last_trace="${trace_ids[$((${#trace_ids[@]} - 1))]}"
+fi
 echo
 echo "─── make aider-demo: done ────────────────────────────────────"
 printf "  %d tasks · %d turns · \$%s total\n" "$i" "$total_turns" "$total_cost_usd"
