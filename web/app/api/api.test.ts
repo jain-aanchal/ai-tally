@@ -17,6 +17,7 @@ import {
   POST as FirstTracePOST,
 } from "./onboarding/first-trace/route";
 import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
+import { GET as AttributionGET } from "./attribution/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -109,6 +110,27 @@ describe("api routes", () => {
     );
     expect(body.rules.length).toBeGreaterThan(0);
     expect(body.configRefreshSeconds).toBeGreaterThan(0);
+  });
+
+  it("GET /api/attribution falls back to mock when ClickHouse is unreachable", async () => {
+    const body = await json<{
+      isMock: boolean;
+      perProvider: { provider: string }[];
+      filters: { tag: string | null; outcome: string | null };
+    }>(
+      await AttributionGET(
+        new Request("http://test/api/attribution?tag=chatbot-demo&outcome=positive_feedback"),
+      ),
+    );
+    // CI / fresh-clone: gateway isn't running, so the route falls back to the
+    // mock report. Real `make chatbot-demo` runs go through queryAttribution.
+    expect(body.isMock).toBe(true);
+    expect(body.perProvider.map((p) => p.provider).sort()).toEqual([
+      "anthropic",
+      "openai",
+    ]);
+    expect(body.filters.tag).toBe("chatbot-demo");
+    expect(body.filters.outcome).toBe("positive_feedback");
   });
 
   it("PUT /api/guardrails echoes a valid rule, rejects an unconstrained one", async () => {
