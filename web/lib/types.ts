@@ -6,7 +6,21 @@ export type MicroUSD = number; // integer micro-dollars (1e-6 USD)
 
 export function formatUSD(micro: MicroUSD): string {
   const usd = micro / 1_000_000;
-  return usd.toLocaleString("en-US", { style: "currency", currency: "USD" });
+  // Per-call AI costs are routinely sub-cent. The default 2-decimal currency
+  // format would floor $0.0032 to "$0.00" and erase the signal. Scale precision
+  // to the value: small numbers get up to 4 decimals, large ones stay at 2.
+  const abs = Math.abs(usd);
+  let fractionDigits: number;
+  if (abs === 0) fractionDigits = 2;
+  else if (abs < 0.01) fractionDigits = 4;
+  else if (abs < 1) fractionDigits = 3;
+  else fractionDigits = 2;
+  return usd.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  });
 }
 
 export interface SpendByLayer {

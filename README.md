@@ -43,6 +43,18 @@ cd infra && make up && make seed && make demo   # stack + tenant + sample teleme
 cd web && npm install && npm run dev            # dashboard at http://localhost:3000
 ```
 
+Want to see real agent traffic, not just a seeded batch? Run the Aider
+fixture demo — it drives Aider against a small Python repo through the edge
+proxy and pre-filters the dashboard to those traces:
+
+```bash
+export OPENAI_API_KEY=sk-...
+cd infra && make aider-demo                     # ~3 min, three multi-turn tasks
+```
+
+See [examples/aider-demo/README.md](examples/aider-demo/README.md) for the
+walkthrough.
+
 ## Development
 
 The Python SDK uses [uv](https://docs.astral.sh/uv/), `ruff`, and `pytest`.

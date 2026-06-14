@@ -33,7 +33,7 @@ describe("api routes", () => {
 
   it("GET /api/agents returns agents + runs + reconciler freshness", async () => {
     const body = await json<{ agents: unknown[]; runs: unknown[]; reconcilerLastRunMinutesAgo: number }>(
-      await AgentsGET(),
+      await AgentsGET(new Request("http://test/api/agents") as never),
     );
     expect(body.agents.length).toBeGreaterThan(0);
     expect(body.runs.length).toBeGreaterThan(0);
@@ -54,7 +54,9 @@ describe("api routes", () => {
   });
 
   it("GET /api/cost returns series + featureRows + alerts", async () => {
-    const body = await json<{ series: unknown; featureRows: unknown[]; alerts: unknown[] }>(await CostGET());
+    const body = await json<{ series: unknown; featureRows: unknown[]; alerts: unknown[] }>(
+      await CostGET(new Request("http://test/api/cost") as never),
+    );
     expect(body.series).toBeDefined();
     expect(body.featureRows.length).toBeGreaterThan(0);
   });

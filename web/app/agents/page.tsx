@@ -18,9 +18,19 @@ interface AgentsPayload {
   reconcilerLastRunMinutesAgo: number;
 }
 
-export default async function AgentsPage() {
+export default async function AgentsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ tag?: string; run?: string }>;
+}) {
+  // Forward ?tag= / ?run= to the API so the table is pre-filtered (CTO-104 deep links).
+  const sp = (await searchParams) ?? {};
+  const qs = new URLSearchParams();
+  if (sp.tag) qs.set("tag", sp.tag);
+  if (sp.run) qs.set("run", sp.run);
+  const query = qs.toString() ? `?${qs.toString()}` : "";
   const { agents, runs, reconcilerLastRunMinutesAgo } =
-    await apiGet<AgentsPayload>("/api/agents");
+    await apiGet<AgentsPayload>(`/api/agents${query}`);
 
   // Agents presents reconciled per-agent cost, so it carries a freshness boundary like Cost/Features.
   const reconciledThrough = boundaryFromMinutesAgo(reconcilerLastRunMinutesAgo);

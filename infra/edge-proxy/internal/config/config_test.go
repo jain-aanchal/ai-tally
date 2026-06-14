@@ -140,6 +140,26 @@ func TestBrokerModeAccepted(t *testing.T) {
 	}
 }
 
+func TestFeatureTagHeaderDefault(t *testing.T) {
+	cfg, err := FromEnv(envMap(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FeatureTagHeader != DefaultFeatureTagHeader {
+		t.Errorf("FeatureTagHeader = %q, want %q", cfg.FeatureTagHeader, DefaultFeatureTagHeader)
+	}
+}
+
+func TestFeatureTagHeaderOverride(t *testing.T) {
+	cfg, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_FEATURE_TAG_HEADER": "X-Feature"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FeatureTagHeader != "X-Feature" {
+		t.Errorf("FeatureTagHeader = %q", cfg.FeatureTagHeader)
+	}
+}
+
 func TestInvalidMode(t *testing.T) {
 	if _, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_MODE": "sideways"})); err == nil {
 		t.Fatal("expected error for invalid mode")

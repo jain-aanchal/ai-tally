@@ -14,8 +14,12 @@ import (
 type TraceRecord struct {
 	// TenantKey is the ai-tally tenant identifier from the control header (X-Tenant-Key).
 	TenantKey string
-	Method    string
-	Path      string
+	// FeatureTag is the per-request feature/agent identifier from the control header
+	// (X-Tally-Feature-Tag). Optional and informational only — empty when the caller didn't tag
+	// the request. Downstream telemetry uses this to segment cost and traces by feature (CTO-104).
+	FeatureTag string
+	Method     string
+	Path       string
 	// StatusCode is the upstream response status relayed to the client (0 if the upstream failed
 	// before any status, e.g. connection refused — see Failed).
 	StatusCode int

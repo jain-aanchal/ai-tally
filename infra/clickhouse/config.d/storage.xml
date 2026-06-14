@@ -8,9 +8,10 @@
 
     hot  -> the built-in `default` disk (fresh inserts land here)
     warm -> a second local disk (parts move here after the 7d TTL)
+    cold -> a third local disk (parts move here after the 30d TTL, deleted at 90d)
 
-  In production these map to SSD vs. cheaper object/block storage; locally both are just folders
-  under /var/lib/clickhouse so the TTL expression is valid and the table creates cleanly.
+  In production these map to SSD vs. cheaper object/block storage; locally all three are just
+  folders under /var/lib/clickhouse so the TTL expression is valid and the table creates cleanly.
 -->
 <clickhouse>
     <storage_configuration>
@@ -18,6 +19,9 @@
             <warm>
                 <path>/var/lib/clickhouse/warm/</path>
             </warm>
+            <cold>
+                <path>/var/lib/clickhouse/cold/</path>
+            </cold>
         </disks>
         <policies>
             <default>
@@ -28,6 +32,9 @@
                     <warm>
                         <disk>warm</disk>
                     </warm>
+                    <cold>
+                        <disk>cold</disk>
+                    </cold>
                 </volumes>
             </default>
         </policies>

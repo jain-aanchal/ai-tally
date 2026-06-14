@@ -10,7 +10,15 @@ import { type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 
-export default async function ComparePage() {
+export default async function ComparePage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ tag?: string }>;
+}) {
+  // Parse ?tag= for URL stability across the CTO-104 deep-link set. The /api/compare data is
+  // mock-only today, so the filter is captured but doesn't yet narrow the comparison — CTO-105
+  // will wire it through to a tag-scoped replay.
+  await searchParams;
   const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
 

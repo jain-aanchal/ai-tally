@@ -1,0 +1,7 @@
+Add a new function `most_common_word(s: str) -> str | None` to string_utils.py
+that returns the single most-common word in `s` (using the existing word_count
+logic), or None when the input has no words. Ties break in favor of the word
+that appears first.
+
+Add three tests for it in test_string_utils.py covering: the empty-string case,
+a clear winner, and a tie. Confirm `pytest -q` is green.

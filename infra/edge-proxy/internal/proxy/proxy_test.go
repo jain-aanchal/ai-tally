@@ -305,6 +305,55 @@ func TestStreamingPassThrough(t *testing.T) {
 	}
 }
 
+// TestFeatureTagHeaderRecordedAndStripped is CTO-104's structural guarantee: a per-request
+// feature tag arriving on X-Tally-Feature-Tag is captured on the TraceRecord and stripped from
+// the upstream-bound request — mirroring the tenant-header contract.
+func TestFeatureTagHeaderRecordedAndStripped(t *testing.T) {
+	var sawFeatureHeader bool
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawFeatureHeader = r.Header["X-Tally-Feature-Tag"]
+		w.WriteHeader(http.StatusOK)
+	})
+	front, sink := newTestProxy(t, false, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Tenant-Key", "tk_live_acme")
+	req.Header.Set("X-Tally-Feature-Tag", "aider-demo")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if sawFeatureHeader {
+		t.Error("X-Tally-Feature-Tag leaked to upstream")
+	}
+	if got := sink.last().FeatureTag; got != "aider-demo" {
+		t.Errorf("FeatureTag = %q, want %q", got, "aider-demo")
+	}
+}
+
+// TestFeatureTagHeaderAbsent: when the caller omits the header, FeatureTag is empty and the
+// request still succeeds — feature tagging is purely opt-in, never required.
+func TestFeatureTagHeaderAbsent(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	front, sink := newTestProxy(t, false, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Tenant-Key", "tk_live_acme")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := sink.last().FeatureTag; got != "" {
+		t.Errorf("FeatureTag = %q, want empty", got)
+	}
+}
+
 // TestTraceRecordCarriesNoBodyContent is a structural guard: the telemetry type must not gain a
 // field that could hold prompt/completion/key content. If someone adds a `Body string`, this fails.
 func TestTraceRecordCarriesNoBodyContent(t *testing.T) {

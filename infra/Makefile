@@ -2,7 +2,9 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop gateway-shell test ch psql
+
+EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -30,6 +32,18 @@ seed: ## Create a local tenant + API key + feature tags in Postgres
 
 demo: ## Send a sample batch through the gateway into ClickHouse
 	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py
+
+aider-demo: ## Run Aider against a fixture repo through the edge proxy (needs OPENAI_API_KEY)
+	@curl -sf http://localhost:8080/healthz >/dev/null || { \
+	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
+	@PROVIDER=$${PROVIDER:-openai} bash ../examples/aider-demo/run.sh
+
+aider-demo-stop: ## Stop the background edge proxy started by aider-demo
+	@if [ -f $(EDGE_PROXY_PID) ]; then \
+	  kill $$(cat $(EDGE_PROXY_PID)) 2>/dev/null || true; \
+	  rm -f $(EDGE_PROXY_PID); \
+	  echo "edge-proxy stopped"; \
+	else echo "no edge-proxy PID file at $(EDGE_PROXY_PID)"; fi
 
 test: ## Run gateway unit tests (pure mapping logic, no infra)
 	cd gateway && uv run --extra dev pytest -q

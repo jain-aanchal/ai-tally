@@ -1,0 +1,6 @@
+Refactor string_utils.py to share a single private `_normalize(s: str) -> str`
+helper that lowercases and strips non-alphanumeric characters. Use it from
+both `is_palindrome` and `word_count` so the normalization rules live in
+exactly one place. Update test_string_utils.py to add one test asserting that
+`_normalize` exists and that `word_count("It's IT")` returns `{"its": 1, "it": 1}`.
+Keep `pytest -q` green.

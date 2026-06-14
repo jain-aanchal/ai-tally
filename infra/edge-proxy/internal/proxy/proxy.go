@@ -112,6 +112,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"missing tenant key"}`+"\n", http.StatusBadRequest)
 		return
 	}
+	// Feature tag is optional: capture if present, never reject when absent.
+	var featureTag string
+	if p.cfg.FeatureTagHeader != "" {
+		featureTag = r.Header.Get(p.cfg.FeatureTagHeader)
+	}
 
 	start := p.now()
 
@@ -139,9 +144,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = &countingReadCloser{inner: r.Body, n: &reqBytes}
 	}
 
-	// Strip our control header so the upstream provider never sees ai-tally internals. Everything
+	// Strip our control headers so the upstream provider never sees ai-tally internals. Everything
 	// else (including the customer's Authorization key) is forwarded unmodified.
 	r.Header.Del(p.cfg.TenantHeader)
+	if p.cfg.FeatureTagHeader != "" {
+		r.Header.Del(p.cfg.FeatureTagHeader)
+	}
 
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	// Mark whether the upstream was reachable so the telemetry copy can distinguish a real 502
@@ -151,6 +159,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	p.sink.Record(TraceRecord{
 		TenantKey:  tenant,
+		FeatureTag: featureTag,
 		Method:     r.Method,
 		Path:       r.URL.Path,
 		StatusCode: rec.status,

@@ -37,6 +37,7 @@ const (
 type wireRecord struct {
 	Deployment  Deployment `json:"deployment"`
 	TenantKey   string     `json:"tenant_key"`
+	FeatureTag  string     `json:"feature_tag"`
 	Method      string     `json:"method"`
 	Path        string     `json:"path"`
 	StatusCode  int        `json:"status_code"`
@@ -51,6 +52,7 @@ func toWire(dep Deployment, rec proxy.TraceRecord) wireRecord {
 	return wireRecord{
 		Deployment:  dep,
 		TenantKey:   rec.TenantKey,
+		FeatureTag:  rec.FeatureTag,
 		Method:      rec.Method,
 		Path:        rec.Path,
 		StatusCode:  rec.StatusCode,

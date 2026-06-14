@@ -78,7 +78,8 @@ func TestEncodeCarriesNoBodyContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed := map[string]bool{
-		"deployment": true, "tenant_key": true, "method": true, "path": true,
+		"deployment": true, "tenant_key": true, "feature_tag": true,
+		"method": true, "path": true,
 		"status_code": true, "req_bytes": true, "resp_bytes": true,
 		"duration_ns": true, "started_at_ns": true, "failed": true,
 	}

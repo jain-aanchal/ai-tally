@@ -1,0 +1,3 @@
+Make the failing tests in test_string_utils.py pass by implementing the
+functions in string_utils.py. Keep the implementations small and pure —
+no new dependencies. Run `pytest -q` at the end to confirm everything is green.
