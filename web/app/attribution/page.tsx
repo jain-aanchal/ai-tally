@@ -93,7 +93,7 @@ export default async function AttributionPage({ searchParams }: PageProps) {
         )}
         <p className="mt-3 text-xs text-muted">
           Intervals are Wilson 95% on the conversion rate — small samples produce
-          wide bands, by design. Two providers "tie" when their bands overlap.
+          wide bands, by design. Two providers &ldquo;tie&rdquo; when their bands overlap.
         </p>
       </Card>
 

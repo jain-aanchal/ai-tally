@@ -116,14 +116,16 @@ export function mockReport(filters: AttributionFilters): AttributionReport {
     buildProviderRow("openai", 25, 5, 850_000),
     buildProviderRow("anthropic", 25, 7, 720_000),
   ];
-  const totals = {
-    sessions: perProvider.reduce((s, p) => s + p.sessions, 0),
-    conversions: perProvider.reduce((s, p) => s + p.conversions, 0),
-    costMicroUsd: perProvider.reduce((s, p) => s + p.costMicroUsd, 0),
-    costPerConversionMicroUsd: 0,
+  const sessions = perProvider.reduce((s, p) => s + p.sessions, 0);
+  const conversions = perProvider.reduce((s, p) => s + p.conversions, 0);
+  const costMicroUsd = perProvider.reduce((s, p) => s + p.costMicroUsd, 0);
+  const totals: AttributionReport["totals"] = {
+    sessions,
+    conversions,
+    costMicroUsd,
+    costPerConversionMicroUsd:
+      conversions > 0 ? Math.round(costMicroUsd / conversions) : null,
   };
-  totals.costPerConversionMicroUsd =
-    totals.conversions > 0 ? Math.round(totals.costMicroUsd / totals.conversions) : null;
   return { filters, perProvider, totals, isMock: true };
 }
 
