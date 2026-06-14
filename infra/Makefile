@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop chatbot-demo chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -44,6 +44,20 @@ aider-demo-stop: ## Stop the background edge proxy started by aider-demo
 	  rm -f $(EDGE_PROXY_PID); \
 	  echo "edge-proxy stopped"; \
 	else echo "no edge-proxy PID file at $(EDGE_PROXY_PID)"; fi
+
+CHATBOT_PID := /tmp/ai-tally-chatbot.pid
+
+chatbot-demo: ## Run the Vercel AI chatbot demo (needs OPENAI_API_KEY, ANTHROPIC_API_KEY)
+	@curl -sf http://localhost:8080/healthz >/dev/null || { \
+	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
+	@bash ../examples/vercel-chatbot/run.sh
+
+chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-demo
+	@if [ -f $(CHATBOT_PID) ]; then \
+	  kill $$(cat $(CHATBOT_PID)) 2>/dev/null || true; \
+	  rm -f $(CHATBOT_PID); \
+	  echo "chatbot dev server stopped"; \
+	else echo "no chatbot PID file at $(CHATBOT_PID)"; fi
 
 test: ## Run gateway unit tests (pure mapping logic, no infra)
 	cd gateway && uv run --extra dev pytest -q
