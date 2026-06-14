@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
 import { costSeries, featureRows, hiddenCostAlerts } from "@/lib/cost";
 import { queryCostSeries, queryFeatureCostRows } from "@/lib/clickhouse";
@@ -7,11 +7,12 @@ import { queryCostSeries, queryFeatureCostRows } from "@/lib/clickhouse";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   // Optional ?tag=<feature> filter (CTO-104): narrows both the series and the feature-row table to
   // a single feature tag. When the filter is set we never fall back to unfiltered mock — that would
   // misrepresent the filtered view as real data.
-  const tag = req.nextUrl.searchParams.get("tag") ?? "";
+  // Use the standard URL API rather than NextRequest.nextUrl so unit tests can pass plain Request.
+  const tag = new URL(req.url).searchParams.get("tag") ?? "";
   const hasFilter = Boolean(tag);
   const [series, rows] = await Promise.all([
     queryCostSeries({ tag }),

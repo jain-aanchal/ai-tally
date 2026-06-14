@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
 import { agents, RECONCILER_LAST_RUN_MINUTES_AGO, runs } from "@/lib/agents";
 import { queryAgents } from "@/lib/clickhouse";
@@ -8,12 +8,14 @@ import { queryAgents } from "@/lib/clickhouse";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   // Optional URL filters (CTO-104): /api/agents?tag=aider-demo&run=<trace>. Empty values pass
   // through and the SQL clause is dropped. When a filter is set and live data is unavailable,
   // return empty rather than the unfiltered mock (which would mislead the demo).
-  const tag = req.nextUrl.searchParams.get("tag") ?? "";
-  const run = req.nextUrl.searchParams.get("run") ?? "";
+  // Use the standard URL API rather than NextRequest.nextUrl so unit tests can pass plain Request.
+  const { searchParams } = new URL(req.url);
+  const tag = searchParams.get("tag") ?? "";
+  const run = searchParams.get("run") ?? "";
   const hasFilter = Boolean(tag || run);
   const live = await queryAgents({ tag, run });
   return NextResponse.json({
