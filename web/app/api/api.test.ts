@@ -78,7 +78,9 @@ describe("api routes", () => {
   });
 
   it("GET /api/estimate returns a projection", async () => {
-    const body = await json<{ workload: string; blowUpRisk: number }>(EstimateGET());
+    const body = await json<{ workload: string; blowUpRisk: number }>(
+      await EstimateGET(new Request("http://test/api/estimate") as never),
+    );
     expect(body.workload).toBeTypeOf("string");
     expect(body.blowUpRisk).toBeGreaterThanOrEqual(0);
   });
