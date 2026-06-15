@@ -63,7 +63,7 @@ export default async function HomePage() {
           </div>
         </Card>
 
-        <Card title="Top cost outliers (24h)">
+        <Card title="Top cost outliers (30d)">
           <ul className="space-y-2 text-sm">
             {outliers.map((o) => (
               <li key={o.runId} className="flex items-center justify-between gap-3">
