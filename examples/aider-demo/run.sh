@@ -68,6 +68,11 @@ else
   export OPENAI_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
 fi
 
+# Strip the LiteLLM provider prefix (e.g. "anthropic/claude-sonnet-4-5" →
+# "claude-sonnet-4-5") for the gateway-facing model attribute — the price
+# catalog keys models without the prefix. CTO-106.
+TALLY_MODEL="${AIDER_MODEL#*/}"
+
 # 5. Run each task. Parses Aider's "Tokens: …" cost line for the per-task summary.
 declare -a trace_ids=()
 total_cost_usd=0
@@ -96,6 +101,19 @@ for task_file in "$here"/tasks/*.txt; do
   # Aider prints "Tokens: 1.2k sent, 300 received. Cost: $0.018 message, $0.018 session."
   cost=$(grep -oE 'Cost: \$[0-9.]+ message' "$log" | tail -1 | grep -oE '[0-9.]+' || true)
   cost=${cost:-0}
+  # Parse the per-message token counts so the gateway can recompute authoritative
+  # cost from the catalog (CTO-106). "1.2k sent" → 1200, "300 received" → 300.
+  toks_line=$(grep -oE 'Tokens: [0-9.]+k? sent, [0-9.]+k? received' "$log" | tail -1 || true)
+  input_tokens=$(echo "$toks_line" | sed -nE 's/.*Tokens: ([0-9.]+)k? sent.*/\1/p')
+  if echo "$toks_line" | grep -qE 'Tokens: [0-9.]+k sent'; then
+    input_tokens=$(awk "BEGIN{printf \"%d\", ${input_tokens:-0} * 1000}")
+  fi
+  output_tokens=$(echo "$toks_line" | sed -nE 's/.*, ([0-9.]+)k? received.*/\1/p')
+  if echo "$toks_line" | grep -qE ', [0-9.]+k received'; then
+    output_tokens=$(awk "BEGIN{printf \"%d\", ${output_tokens:-0} * 1000}")
+  fi
+  input_tokens=${input_tokens:-0}
+  output_tokens=${output_tokens:-0}
   turns=$(grep -cE '^(>|aider>)' "$log" || true)
   turns=${turns:-0}
   [ "$turns" -gt 0 ] 2>/dev/null || turns=1
@@ -116,7 +134,10 @@ for task_file in "$here"/tasks/*.txt; do
     --trace-id "$trace_id" \
     --cost-usd "${cost:-0}" \
     --turns "$turns" \
-    --provider "$PROVIDER" >/dev/null
+    --provider "$PROVIDER" \
+    --model "$TALLY_MODEL" \
+    --input-tokens "$input_tokens" \
+    --output-tokens "$output_tokens" >/dev/null
 
   bash "$here/reset.sh"
   rm -f "$log"
