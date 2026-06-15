@@ -184,6 +184,43 @@ Walkthrough, configuration knobs, and the upstream patch list are in
 
 When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
 
+## Step 7: real revenue via Stripe
+
+The chatbot demo emits synthetic conversion events so `/attribution` has
+something to show. For **real** revenue numbers — Value/user, Margin/user, and
+margin % per provider — connect Stripe (CTO-110). The gateway exposes a
+verified webhook ingest at:
+
+```
+POST http://localhost:8080/v1/stripe/webhook?tenant=<your-tenant-id>
+```
+
+To wire it up:
+
+1. Open `/connectors` in the dashboard and use the **Stripe revenue** tile to
+   paste your signing secret (`whsec_…`). The raw secret is persisted on the
+   gateway and never round-tripped back to the browser.
+2. In the Stripe Dashboard → Developers → Webhooks, point a new endpoint at
+   the URL above and subscribe to four events:
+   `checkout.session.completed`, `invoice.paid`, `charge.refunded`,
+   `customer.subscription.deleted`.
+3. For local testing, run `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=local-dev`
+   and paste the printed `whsec_…` into the tile.
+4. (Optional) Backfill history with the helper:
+
+   ```bash
+   cd infra/gateway
+   uv run python scripts/backfill_stripe.py \
+       --tenant local-dev --days 30 \
+       --stripe-key sk_live_xxx        # or sk_test_xxx
+   ```
+
+   The script is safe to re-run — idempotency is keyed on Stripe's event id.
+
+Once events start landing, `/attribution` lights up two new columns:
+**Value/user** and **Margin/user** (with margin % below). Cells stay `—`
+until enough events arrive — we never fabricate numbers from absent data.
+
 ## Live updates
 
 Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the
