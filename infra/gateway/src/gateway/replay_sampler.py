@@ -23,7 +23,7 @@ import json
 import math
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Sequence
 from uuid import UUID, uuid4
 

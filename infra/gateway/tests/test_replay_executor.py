@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
 
 from tally.pricing import seed_catalog
 
@@ -17,7 +16,6 @@ from gateway.replay_executor import (
     CandidateResponse,
     MAX_CONCURRENT_PER_TENANT,
     ReplayExecutor,
-    ReplayResult,
 )
 from gateway.replay_store import (
     InMemoryReplayBlobStore,
@@ -205,7 +203,7 @@ def test_replay_does_not_retry_on_4xx() -> None:
     exec_, rows = _make_executor(client=bad_client)
     sid = uuid4()
     key = _seed_blob(exec_.blob_store, "t1", sid)
-    result = asyncio.run(exec_.replay_sample(
+    asyncio.run(exec_.replay_sample(
         tenant_id="t1", sample_id=sid, object_key=key,
         candidate_provider="anthropic", candidate_model="claude-haiku-4-5",
         daily_budget_usd=Decimal("5.00"),
