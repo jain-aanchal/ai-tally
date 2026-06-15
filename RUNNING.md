@@ -221,6 +221,59 @@ Once events start landing, `/attribution` lights up two new columns:
 **Value/user** and **Margin/user** (with margin % below). Cells stay `—`
 until enough events arrive — we never fabricate numbers from absent data.
 
+## Step 8: real cross-provider projections via replay
+
+Workflows 2 (Compare) and 5 (Estimate) used to scale a mock projection off
+the user's live current-model spend. **Opt in to replay** to back those
+projections with real cross-provider calls instead (CTO-113).
+
+1. **Enable replay sampling** for the local tenant:
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/tenant/replay/config \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{"enabled": true, "sample_rate": 0.05, "daily_budget_usd": 5.0}'
+   ```
+
+   - `enabled` defaults to `false` for every tenant — no surprises.
+   - `sample_rate` is the fraction of ingested spans we capture (default 5%).
+   - `daily_budget_usd` is a **hard cap** on the replay executor's spend per
+     tenant per day. A bug in replay must never burn $10k overnight — the
+     executor checks today's spend before every candidate call and skips
+     with `excluded_budget=True` when projected next-call cost would push the
+     day over.
+
+2. **Drive traffic** (`make chatbot-demo` or `make aider-demo`). The gateway
+   stratifies the batch by `(feature_tag, token-quintile)` so small-but-
+   expensive runs aren't drowned out, scrubs PII (emails, API keys, postal
+   addresses), and writes the resolved request envelope to object storage.
+
+3. **Request a projection** — the dashboard does this automatically from
+   `/compare` and `/estimate`, but you can hit the gateway directly to see
+   the raw output:
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/replay \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{
+       "candidate_models": [
+         {"provider": "anthropic", "model": "claude-haiku-4-5"},
+         {"provider": "openai",    "model": "gpt-5-mini"}
+       ],
+       "sample_size": 50
+     }'
+   ```
+
+   Returns per-candidate `projected_monthly_cost_micro_usd`, `p50_latency_ms`,
+   `p95_latency_ms`, `error_rate`, `samples_replayed`, and
+   `excluded_budget_count`. Diagnostics carry the v1 honesty string
+   `"resolved-context replay (no live retrieval)"` so the dashboard never
+   claims a fidelity tier it doesn't have.
+
+`/compare` and `/estimate` report `replay_source: "replay"` when the
+projection is replay-backed and `"mock"` when it falls back to the rescaled
+mock (tenant hasn't opted in yet, or the gateway is unreachable).
+
 ## Live updates
 
 Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the

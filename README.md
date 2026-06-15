@@ -102,6 +102,27 @@ Discovery is fail-soft: if both providers are unreachable and the cache file
 doesn't exist, the gateway boots with an empty list and a warning. The demos
 fall back to their hardcoded defaults.
 
+## Replay-backed estimation
+
+Workflows 2 (Cross-provider compare) and 5 (Pre-deploy estimate) used to be
+mock projections rescaled off the user's real current-model spend. They're now
+backed by **real cross-provider replay** (CTO-113): the gateway captures an
+opt-in 5% sample of spans, scrubs PII (emails, API keys, postal addresses),
+stores the resolved request envelope in object storage, and replays it against
+candidate models on demand.
+
+Per-tenant opt-in — default off; nothing is sampled until a tenant flips
+`enabled=true` via `POST /v1/tenant/replay/config`. A daily budget cap
+(default $5/day) hard-stops the replay executor from running away. The
+diagnostics block on `/api/compare` carries the honest fidelity string
+`"resolved-context replay (no live retrieval)"` so the dashboard never claims
+a tier it doesn't have.
+
+When a tenant has no opted-in samples (or the gateway is unreachable), the
+`/api/compare` and `/api/estimate` routes fall back to the rescaled-mock path
+they had before — `replay_source` in each response distinguishes the two
+branches.
+
 ## Status
 
 Early development. Decisions and the full system spec live in the project tracker.
