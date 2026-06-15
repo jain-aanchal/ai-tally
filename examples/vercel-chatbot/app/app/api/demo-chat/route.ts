@@ -15,8 +15,9 @@ import {
   sessionUserHash,
 } from "@/lib/tally";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// ai-tally: Next.js 16 cacheComponents rejects route segment config
+// (`runtime`, `dynamic`). POST routes are dynamic by default; Node runtime
+// is the default for this template.
 
 interface DemoChatBody {
   sessionId: string;
@@ -31,8 +32,10 @@ interface DemoChatBody {
 }
 
 const DEFAULT_OPENAI_MODEL = process.env.TALLY_OPENAI_MODEL ?? "gpt-4o-mini";
+// claude-3-5-haiku-latest was retired by Anthropic; the current cheapest model
+// in the 4-series family is claude-haiku-4-5. Override via TALLY_ANTHROPIC_MODEL.
 const DEFAULT_ANTHROPIC_MODEL =
-  process.env.TALLY_ANTHROPIC_MODEL ?? "claude-3-5-haiku-latest";
+  process.env.TALLY_ANTHROPIC_MODEL ?? "claude-haiku-4-5";
 
 interface ProviderResult {
   text: string;

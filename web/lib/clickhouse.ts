@@ -505,12 +505,24 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
     const run = filter?.run ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
     const runClause = run ? "AND TraceId = {run:String}" : "";
+    // Agent identity comes from ServiceName (e.g. "aider", "vercel-chatbot-demo"),
+    // not FeatureTag (which is the workflow-3 dimension — that's the /features view).
+    // ?tag= still narrows agents to runs that produced a given feature.
     const aggs = await rowsP<RunAgg>(
       db,
-      `SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost,
-              count() AS steps, max(StatusCode) AS maxStatus, toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
+      `SELECT TraceId AS runId,
+              any(ServiceName) AS agent,
+              sum(EstimatedCost) AS cost,
+              count() AS steps,
+              max(StatusCode) AS maxStatus,
+              toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != '' ${tagClause} ${runClause}
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND ServiceName != ''
+         AND ServiceName != 'unknown'
+         ${tagClause}
+         ${runClause}
        GROUP BY TraceId`,
       { tenant, tag, run },
     );
@@ -663,7 +675,7 @@ export async function queryAttribution(
     const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string }>(
       db,
       `SELECT
-         coalesce(s.SpanAttributes['chatbot.real_provider'], 'unknown') AS provider,
+         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
          uniqExact(s.SessionId) AS sessions,
          sum(s.EstimatedCost) AS cost
        FROM otel_spans s
@@ -680,7 +692,7 @@ export async function queryAttribution(
     const conversionRows = await rowsP<{ provider: string; conversions: string }>(
       db,
       `SELECT
-         coalesce(s.SpanAttributes['chatbot.real_provider'], 'unknown') AS provider,
+         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
          uniqExact(b.BusinessEventId) AS conversions
        FROM business_events b
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId

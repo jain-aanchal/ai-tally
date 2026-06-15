@@ -134,7 +134,7 @@ export async function postSpan(input: SpanInput): Promise<void> {
 
   const span: Record<string, unknown> = {
     // structural
-    ServiceName: "vercel-chatbot-demo",
+    ServiceName: "vercel-chatbot",
     SpanName: "chat.completion",
     trace_id: hexId(16),
     span_id: hexId(8),
@@ -162,7 +162,7 @@ export async function postSpan(input: SpanInput): Promise<void> {
 
   const batch = {
     tenant_id: TENANT,
-    sdk_version: "vercel-chatbot-demo/0.1",
+    sdk_version: "vercel-chatbot/0.1",
     batch_id: uuidish(),
     resource_spans: [span],
   };
@@ -204,11 +204,11 @@ export async function postCdpEvent(input: EventInput): Promise<void> {
     value_amount_micro: input.valueMicroUsd ?? null,
     value_currency: "USD",
     value_type: input.type === "conversion" ? "monetary" : "count",
-    source: "vercel-chatbot-demo",
+    source: "vercel-chatbot",
   };
   const batch = {
     tenant_id: TENANT,
-    sdk_version: "vercel-chatbot-demo/0.1",
+    sdk_version: "vercel-chatbot/0.1",
     batch_id: uuidish(),
     resource_spans: [],
     business_events: [event],

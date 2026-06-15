@@ -5,8 +5,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { type CdpEventType, postCdpEvent } from "@/lib/tally";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// ai-tally: see demo-chat/route.ts — Next.js 16 cacheComponents rejects
+// runtime/dynamic route segment exports.
 
 interface Body {
   sessionId: string;

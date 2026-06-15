@@ -13,6 +13,16 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // ai-tally: the synthetic traffic driver hits these endpoints without a
+  // session — they're self-contained demo routes that don't touch user data.
+  // Skip the auth gate so the driver's POSTs reach the route and emit spans.
+  if (
+    pathname.startsWith("/api/demo-chat") ||
+    pathname.startsWith("/api/demo-event")
+  ) {
+    return NextResponse.next();
+  }
+
   const token = await getToken({
     req: request,
     secret: process.env.AUTH_SECRET,

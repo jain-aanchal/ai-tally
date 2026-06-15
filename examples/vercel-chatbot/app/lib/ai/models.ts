@@ -1,11 +1,17 @@
-export const DEFAULT_CHAT_MODEL = "moonshotai/kimi-k2.5";
+// ai-tally: model list reflects what the demo can actually call. Once the
+// runtime stopped using the Vercel AI Gateway, the template's stock IDs
+// (deepseek/, moonshotai/, openai/gpt-oss-*, xai/) all became unreachable —
+// the picker would happily select them and every send would 404. Listing the
+// real OpenAI + Anthropic models we route through @ai-sdk/* keeps the UI
+// honest. CTO-109 will replace this with a runtime fetch of the live model
+// list per provider.
+export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-5";
 
 export const titleModel = {
-  id: "moonshotai/kimi-k2.5",
-  name: "Kimi K2.5",
-  provider: "moonshotai",
+  id: "anthropic/claude-haiku-4-5",
+  name: "Claude Haiku 4.5",
+  provider: "anthropic",
   description: "Fast model for title generation",
-  gatewayOrder: ["fireworks", "bedrock"],
 };
 
 export type ModelCapabilities = {
@@ -23,43 +29,40 @@ export type ChatModel = {
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
 };
 
+// ai-tally: every entry must resolve through lib/ai/providers.ts. Anthropic
+// IDs are prefixed `anthropic/` so resolve() routes them to @ai-sdk/anthropic;
+// OpenAI IDs route to @ai-sdk/openai. Adding a model here without a matching
+// resolver branch produces a runtime 404.
 export const chatModels: ChatModel[] = [
   {
-    id: "deepseek/deepseek-v3.2",
-    name: "DeepSeek V3.2",
-    provider: "deepseek",
-    description: "Fast and capable model with tool use",
-    gatewayOrder: ["bedrock", "deepinfra"],
+    id: "anthropic/claude-sonnet-4-5",
+    name: "Claude Sonnet 4.5",
+    provider: "anthropic",
+    description: "Anthropic flagship — best quality, mid latency",
   },
   {
-    id: "moonshotai/kimi-k2.5",
-    name: "Kimi K2.5",
-    provider: "moonshotai",
-    description: "Moonshot AI flagship model",
-    gatewayOrder: ["fireworks", "bedrock"],
+    id: "anthropic/claude-haiku-4-5",
+    name: "Claude Haiku 4.5",
+    provider: "anthropic",
+    description: "Fast, cheap, smart enough for most chat turns",
   },
   {
-    id: "openai/gpt-oss-20b",
-    name: "GPT OSS 20B",
+    id: "anthropic/claude-opus-4-8",
+    name: "Claude Opus 4.8",
+    provider: "anthropic",
+    description: "Anthropic's most capable model — slower, pricier",
+  },
+  {
+    id: "openai/gpt-4o-mini",
+    name: "GPT-4o mini",
     provider: "openai",
-    description: "Compact reasoning model",
-    gatewayOrder: ["groq", "bedrock"],
-    reasoningEffort: "low",
+    description: "OpenAI cheap-and-fast — needs OPENAI_API_KEY with credit",
   },
   {
-    id: "openai/gpt-oss-120b",
-    name: "GPT OSS 120B",
+    id: "openai/gpt-4o",
+    name: "GPT-4o",
     provider: "openai",
-    description: "Open-source 120B parameter model",
-    gatewayOrder: ["fireworks", "bedrock"],
-    reasoningEffort: "low",
-  },
-  {
-    id: "xai/grok-4.1-fast-non-reasoning",
-    name: "Grok 4.1 Fast",
-    provider: "xai",
-    description: "Fast non-reasoning model with tool use",
-    gatewayOrder: ["xai"],
+    description: "OpenAI flagship multimodal — needs OPENAI_API_KEY with credit",
   },
 ];
 

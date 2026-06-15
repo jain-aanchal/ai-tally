@@ -18,6 +18,8 @@
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.84",
+    "@ai-sdk/openai": "^3.0.71",
     "@ai-sdk/provider": "^3.0.3",
     "@ai-sdk/react": "3.0.118",
     "@codemirror/lang-python": "^6.1.6",

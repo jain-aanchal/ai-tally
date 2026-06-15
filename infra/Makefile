@@ -56,8 +56,12 @@ chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-
 	@if [ -f $(CHATBOT_PID) ]; then \
 	  kill $$(cat $(CHATBOT_PID)) 2>/dev/null || true; \
 	  rm -f $(CHATBOT_PID); \
+	fi
+	@pids=$$(lsof -ti :3001 2>/dev/null); \
+	if [ -n "$$pids" ]; then \
+	  kill -9 $$pids 2>/dev/null || true; \
 	  echo "chatbot dev server stopped"; \
-	else echo "no chatbot PID file at $(CHATBOT_PID)"; fi
+	else echo "nothing listening on :3001"; fi
 
 test: ## Run gateway unit tests (pure mapping logic, no infra)
 	cd gateway && uv run --extra dev pytest -q

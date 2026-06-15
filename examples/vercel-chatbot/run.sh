@@ -41,6 +41,21 @@ else
     (cd "${APP_DIR}" && pnpm install --silent --prefer-offline) || \
       (cd "${APP_DIR}" && npm install --silent --no-audit --no-fund)
   fi
+  # NextAuth ships in the Vercel template and refuses to boot without
+  # AUTH_SECRET, even though we don't rely on real auth for the demo. Pin a
+  # constant so the chatbot starts cleanly; sessions still get fake user IDs.
+  export AUTH_SECRET="${AUTH_SECRET:-ai-tally-chatbot-demo-not-a-real-secret}"
+  # The template's drizzle layer uses Postgres for guest users + chat history.
+  # We reuse the ai-tally Postgres but isolate the chatbot's tables in their
+  # own `chatbot_demo` database so they don't collide with the control plane.
+  export POSTGRES_URL="${POSTGRES_URL:-postgres://tally:tally@localhost:5432/chatbot_demo}"
+  # Push schema if the User table is missing (first-run bootstrap).
+  if ! PGPASSWORD=tally psql -h localhost -U tally -d chatbot_demo -tAc \
+      "SELECT to_regclass('public.\"User\"')" 2>/dev/null | grep -q User; then
+    echo "  · pushing chatbot schema to chatbot_demo…"
+    (cd "${APP_DIR}" && pnpm --silent exec drizzle-kit push >>"${LOG_FILE}" 2>&1) || \
+      err "drizzle-kit push failed — see ${LOG_FILE}"
+  fi
   TALLY_GATEWAY_URL="${TALLY_GATEWAY_URL:-${GATEWAY_URL}/v1/batches}" \
   TALLY_TENANT="${TALLY_TENANT:-local-dev}" \
     nohup pnpm --dir "${APP_DIR}" exec next dev --turbo --port 3001 \
@@ -58,7 +73,9 @@ fi
 echo "→ Driving synthetic traffic…"
 DRIVER_ARGS=()
 if [ $# -gt 0 ] && [ "$1" = "--" ]; then shift; DRIVER_ARGS=("$@"); fi
-(cd "${APP_DIR}" && pnpm --silent exec tsx "${HERE}/scripts/drive-traffic.ts" "${DRIVER_ARGS[@]}")
+# Bash 3.2 (macOS default) under `set -u` rejects "${arr[@]}" for an empty
+# array. The ${arr[@]+...} guard expands only when the array has elements.
+(cd "${APP_DIR}" && pnpm --silent exec tsx "${HERE}/scripts/drive-traffic.ts" ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"})
 
 echo ""
 print_links
