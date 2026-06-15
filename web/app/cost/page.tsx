@@ -7,7 +7,7 @@ import {
 } from "@/components/DataStateBanner";
 import { Legend, StackedBarChart } from "@/components/StackedBarChart";
 import { apiGet } from "@/lib/api";
-import { asOfLabel, deriveDataState, relativeAge, someZero } from "@/lib/dataState";
+import { asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
 import {
   LAYER_LABEL,
   LAYERS,
@@ -19,6 +19,7 @@ import {
   reconciledTotal,
   totalRange,
 } from "@/lib/cost";
+import { queryEnabledConnectors } from "@/lib/tenant";
 import { formatUSD, type SpendByLayer } from "@/lib/types";
 
 interface CostPayload {
@@ -39,8 +40,11 @@ export default async function CostPage({
   // Forward ?tag= to the API so the breakdown is pre-filtered to one feature (CTO-104).
   const sp = (await searchParams) ?? {};
   const query = sp.tag ? `?tag=${encodeURIComponent(sp.tag)}` : "";
-  const { series: costSeries, featureRows, alerts: hiddenCostAlerts } =
-    await apiGet<CostPayload>(`/api/cost${query}`);
+  const [{ series: costSeries, featureRows, alerts: hiddenCostAlerts }, enabledLayers] =
+    await Promise.all([
+      apiGet<CostPayload>(`/api/cost${query}`),
+      queryEnabledConnectors(),
+    ]);
   const total = totalRange(costSeries);
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
@@ -52,9 +56,11 @@ export default async function CostPage({
     },
     { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
   );
+  // Connector-aware partiality (CTO-107): a layer the tenant never enabled isn't a gap.
+  const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
   const state = deriveDataState({
     isEmpty: total === 0,
-    isPartial: someZero({ ...layerTotals }),
+    isPartial: trippedLayers.length > 0,
     reconciledThrough: costSeries.reconciledThrough,
   });
   const asOf = asOfLabel(costSeries.reconciledThrough);
@@ -136,7 +142,7 @@ export default async function CostPage({
         )}
       </div>
 
-      {state === "partial" && <PartialDataBanner missing="a cost layer connector" />}
+      {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
       {state === "empty" ? (
         <SyntheticPreviewBanner workflow="Cost">{body}</SyntheticPreviewBanner>

@@ -11,6 +11,7 @@ import {
   relativeAge,
   someZero,
   STALE_AFTER_MS,
+  zeroEnabledLayers,
 } from "./dataState";
 
 const NOW = Date.parse("2026-05-30T12:00:00Z");
@@ -126,5 +127,24 @@ describe("labels", () => {
   });
   it("ageMs is positive for past boundaries", () => {
     expect(ageMs("2026-05-30T10:00:00Z", NOW)).toBeGreaterThan(0);
+  });
+});
+
+describe("zeroEnabledLayers (CTO-107)", () => {
+  it("stays silent when only the enabled layer has data", () => {
+    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm"])).toEqual([]);
+  });
+  it("fires for an enabled layer reporting zero", () => {
+    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
+  });
+  it("stays silent when every enabled layer has data", () => {
+    expect(zeroEnabledLayers({ llm: 100, vector: 100 }, ["llm", "vector"])).toEqual([]);
+  });
+  it("returns empty when no connectors are declared (LLM-only demos)", () => {
+    expect(zeroEnabledLayers({}, [])).toEqual([]);
+  });
+  it("ignores layers that aren't declared, even when zero", () => {
+    // tools is zero but never declared — it's by-design partial, not a real gap.
+    expect(zeroEnabledLayers({ llm: 5, vector: 0, tools: 0 }, ["llm"])).toEqual([]);
   });
 });

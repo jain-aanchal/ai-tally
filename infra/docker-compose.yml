@@ -59,6 +59,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ../db/postgres/0001_control_plane.sql:/docker-entrypoint-initdb.d/0001_control_plane.sql:ro
+      - ../db/postgres/0002_tenant_connectors.sql:/docker-entrypoint-initdb.d/0002_tenant_connectors.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s

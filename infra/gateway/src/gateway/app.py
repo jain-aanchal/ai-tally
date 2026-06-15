@@ -50,6 +50,7 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
+from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.validation import SpanValidator, span_item_id
 
 logger = logging.getLogger("tally.gateway")
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
+    app.state.tenant_connectors = TenantConnectorStore(settings)
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -469,6 +471,87 @@ def get_usage(
 
     record = metering.usage(tenant_id, period)
     return JSONResponse(record.as_dict(), status_code=200)
+
+
+def _resolve_tenant_for_control_plane(
+    authorization: str | None, x_tenant_id: str | None
+) -> str:
+    """Shared tenant-resolution for read/write control-plane endpoints.
+
+    Same pattern as :func:`get_usage`: bearer key when auth is on, ``X-Tenant-Id`` header in dev.
+    Refuses ambiguity so the caller can never accidentally cross tenants.
+    """
+    settings = app.state.settings
+    auth: ApiKeyAuth = app.state.auth
+    if settings.require_api_key:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        token = authorization.split(" ", 1)[1].strip()
+        tenant_id = auth.tenant_for_key(token)
+        if tenant_id is None:
+            raise HTTPException(status_code=403, detail="invalid api key")
+        return tenant_id
+    if not x_tenant_id:
+        raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
+    return x_tenant_id
+
+
+@app.get("/v1/tenant/connectors")
+def list_tenant_connectors(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """List declared cost-layer connectors for the caller's tenant (CTO-107).
+
+    The dashboard consumes this to decide whether the "Partial data" banner should fire: only
+    *enabled* layers count as a real gap when they report zero. Layers the tenant never enabled
+    don't appear in the response and don't contribute to partiality.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantConnectorStore = app.state.tenant_connectors
+    rows = store.list(tenant_id)
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "connectors": [r.as_dict() for r in rows],
+            "enabled_layers": [r.layer for r in rows if r.enabled],
+        },
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/connectors")
+async def set_tenant_connector(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Enable or disable one cost-layer connector for the caller's tenant.
+
+    Body: ``{"layer": "vector", "enabled": true, "notes": "optional"}``. Idempotent — re-enabling an
+    already-enabled connector is a no-op, disabling an absent one stamps a tombstone row.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    layer = body.get("layer")
+    enabled = body.get("enabled")
+    notes = body.get("notes")
+    if not isinstance(layer, str) or layer not in ALLOWED_LAYERS:
+        raise HTTPException(
+            status_code=422, detail=f"layer must be one of {sorted(ALLOWED_LAYERS)}"
+        )
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=422, detail="enabled must be a boolean")
+    if notes is not None and not isinstance(notes, str):
+        raise HTTPException(status_code=422, detail="notes must be a string when provided")
+    store: TenantConnectorStore = app.state.tenant_connectors
+    row = store.set(tenant_id, layer, enabled=enabled, notes=notes)
+    return JSONResponse({"tenant_id": tenant_id, "connector": row.as_dict()}, status_code=200)
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:

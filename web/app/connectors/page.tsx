@@ -8,6 +8,8 @@ import {
   type ConnectorStatus,
   connectedCount,
 } from "@/lib/connectors";
+import { queryEnabledConnectors } from "@/lib/tenant";
+import { ConnectorToggle } from "./ConnectorToggle";
 
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
@@ -44,7 +46,13 @@ function StateBadge({ row }: { row: ConnectorStatus }) {
   );
 }
 
-function ConnectorTable({ rows }: { rows: ConnectorStatus[] }) {
+function ConnectorTable({
+  rows,
+  enabledLayers,
+}: {
+  rows: ConnectorStatus[];
+  enabledLayers: readonly string[];
+}) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -55,27 +63,41 @@ function ConnectorTable({ rows }: { rows: ConnectorStatus[] }) {
             <th className="py-1 text-left font-medium">Status</th>
             <th className="py-1 text-right font-medium">Records (30d)</th>
             <th className="py-1 text-right font-medium">Last sync</th>
+            <th className="py-1 text-right font-medium">Banner</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} className="border-t border-edge align-top">
-              <td className="py-2">
-                <div className="font-medium">{r.name}</div>
-                <div className="max-w-prose text-xs text-muted">{r.description}</div>
-              </td>
-              <td className="py-2 text-muted">{r.feeds}</td>
-              <td className="py-2">
-                <StateBadge row={r} />
-              </td>
-              <td className="py-2 text-right tabular-nums">
-                {r.records > 0 ? r.records.toLocaleString() : "—"}
-              </td>
-              <td className="py-2 text-right tabular-nums text-muted">
-                {r.lastAt ? relativeAge(r.lastAt) : "—"}
-              </td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            // Only cost-layer connectors participate in the per-tenant declaration; revenue
+            // connectors have their own connectivity story that doesn't drive the layer banner.
+            const layer = r.liveKey.kind === "cost-layer" ? r.liveKey.layer : null;
+            const isEnabled = layer ? enabledLayers.includes(layer) : false;
+            return (
+              <tr key={r.id} className="border-t border-edge align-top">
+                <td className="py-2">
+                  <div className="font-medium">{r.name}</div>
+                  <div className="max-w-prose text-xs text-muted">{r.description}</div>
+                </td>
+                <td className="py-2 text-muted">{r.feeds}</td>
+                <td className="py-2">
+                  <StateBadge row={r} />
+                </td>
+                <td className="py-2 text-right tabular-nums">
+                  {r.records > 0 ? r.records.toLocaleString() : "—"}
+                </td>
+                <td className="py-2 text-right tabular-nums text-muted">
+                  {r.lastAt ? relativeAge(r.lastAt) : "—"}
+                </td>
+                <td className="py-2 text-right">
+                  {layer ? (
+                    <ConnectorToggle layer={layer} initialEnabled={isEnabled} />
+                  ) : (
+                    <span className="text-xs text-muted">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -83,7 +105,10 @@ function ConnectorTable({ rows }: { rows: ConnectorStatus[] }) {
 }
 
 export default async function ConnectorsPage() {
-  const { connectors, live } = await apiGet<ConnectorsPayload>("/api/connectors");
+  const [{ connectors, live }, enabledLayers] = await Promise.all([
+    apiGet<ConnectorsPayload>("/api/connectors"),
+    queryEnabledConnectors(),
+  ]);
   const connected = connectedCount(connectors);
 
   const body = (
@@ -94,7 +119,7 @@ export default async function ConnectorsPage() {
         return (
           <Card key={s.category} title={`${s.title} — ${n}/${rows.length} connected`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
-            <ConnectorTable rows={rows} />
+            <ConnectorTable rows={rows} enabledLayers={enabledLayers} />
           </Card>
         );
       })}
