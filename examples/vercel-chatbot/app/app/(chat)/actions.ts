@@ -29,9 +29,9 @@ export async function generateTitleFromUserMessage({
     model: getTitleModel(),
     system: titlePrompt,
     prompt: getTextFromMessage(message),
-    providerOptions: {
-      gateway: { order: titleModel.gatewayOrder },
-    },
+    // ai-tally: CTO-105 swapped Vercel AI Gateway for direct SDK providers,
+    // so `providerOptions.gateway` no longer applies. getTitleModel() already
+    // returns a real provider client; nothing else is needed here.
   });
   return text
     .replace(/^[#*"\s]+/, "")

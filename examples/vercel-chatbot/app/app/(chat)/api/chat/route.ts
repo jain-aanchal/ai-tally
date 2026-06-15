@@ -44,6 +44,16 @@ import type { ChatMessage } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
+// ai-tally: instrumentation for the real chatbot UI route. The synthetic
+// driver hits /api/demo-chat; manual browser sessions land here, and without
+// this they'd never produce telemetry. resolveProvider() infers the real
+// provider from the picker's "<provider>/<model>" id; falls back to anthropic
+// because that's the local-demo default in lib/ai/providers.ts.
+import { postSpan, sessionUserHash } from "@/lib/tally";
+
+function resolveRealProvider(modelId: string): "openai" | "anthropic" {
+  return modelId.startsWith("openai/") ? "openai" : "anthropic";
+}
 
 export const maxDuration = 60;
 
@@ -236,6 +246,35 @@ export async function POST(request: Request) {
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,
             functionId: "stream-text",
+          },
+          // ai-tally: emit a span per completed turn so the manual chatbot UI
+          // (not just the synthetic driver) produces dashboard telemetry. The
+          // last user message text drives feature-tag classification; usage
+          // tokens drive the gateway's cost computation. Failure here is
+          // swallowed inside postSpan — never breaks the user's stream.
+          onFinish: async ({ usage, text }) => {
+            const lastUserMessage = [...modelMessages]
+              .reverse()
+              .find((m) => m.role === "user");
+            const promptText =
+              typeof lastUserMessage?.content === "string"
+                ? lastUserMessage.content
+                : Array.isArray(lastUserMessage?.content)
+                  ? lastUserMessage.content
+                      .filter((p) => "text" in p)
+                      .map((p) => (p as { text: string }).text)
+                      .join(" ")
+                  : text ?? "";
+            await postSpan({
+              sessionId: id,
+              userHash: sessionUserHash(session.user.id ?? id),
+              realProvider: resolveRealProvider(chatModel),
+              realModel: chatModel,
+              promptText,
+              inputTokens: usage?.inputTokens ?? 0,
+              outputTokens: usage?.outputTokens ?? 0,
+              runId: id,
+            });
           },
         });
 
