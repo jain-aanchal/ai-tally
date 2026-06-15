@@ -185,7 +185,6 @@ When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
 | `Database tally does not exist` | Gateway pointed at the wrong DB. Use `TALLY_CLICKHOUSE_DB=default` (the compose gateway already does). |
 | Dashboard shows the **"mock data"** badge | A page's ClickHouse query failed and fell back to mock. Check `make logs` and that step 3's count is non-zero. |
 | Dashboard empty despite ingested rows | Tenant mismatch — the UI reads `local-dev`. Post with `tenant_id: local-dev` (or set `TALLY_TENANT_ID` for the web app). |
-| **"Partial data"** banner | Expected: only LLM spans exist, so vector/tools/compute cost layers are zero until those connectors are wired. Not an error. |
 
 ## Make targets (run from `infra/`)
 
