@@ -8,7 +8,7 @@
 #          bash examples/aider-demo/aider-live.sh -- string_utils.py test_string_utils.py
 #
 # Watch live updates at:   http://localhost:3000/agents?tag=aider-live
-# (refresh after each Aider response — the page does not stream)
+# (the dashboard auto-refreshes every few seconds; no manual reload needed)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -111,7 +111,7 @@ echo
 echo "─── aider-live: ai-tally edge-proxy + emit loop ready ────────────"
 echo "  feature.tag = $FEATURE_TAG    model = $AIDER_MODEL"
 echo "  dashboard:    http://localhost:3000/agents?tag=$FEATURE_TAG"
-echo "  refresh that tab after each Aider response to see live updates."
+echo "  the tab auto-refreshes — leave it open while you work."
 echo "─────────────────────────────────────────────────────────────────"
 echo
 
