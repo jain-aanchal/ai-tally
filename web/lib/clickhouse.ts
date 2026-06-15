@@ -159,9 +159,10 @@ export async function queryOutliers(): Promise<CostOutlier[] | null> {
     const out = await rows<{ runId: string; agent: string; cost: string; mult: string | null }>(
       db,
       `WITH runs AS (
-         SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost
+         SELECT TraceId AS runId, any(ServiceName) AS agent, sum(EstimatedCost) AS cost
          FROM otel_spans
-         WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 24 HOUR
+         WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
+           AND ServiceName != '' AND ServiceName != 'unknown'
          GROUP BY TraceId
        )
        SELECT runId, agent, cost,
