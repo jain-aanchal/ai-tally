@@ -80,6 +80,28 @@ uv run ruff check .
 uv run pytest
 ```
 
+## Model auto-discovery
+
+On startup the gateway hits `GET /v1/models` on every provider whose API key it
+has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), classifies each id into a coarse
+family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `embedding`), and
+writes the result to `.tally/models.json` with a 24 h TTL. The demos read that
+file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()`
+(Node), so when a provider retires a SKU — `claude-3-5-haiku-latest` was the
+case that prompted this — the next boot picks up the replacement automatically.
+
+Knobs:
+
+- `TALLY_MODELS_REFRESH=1` — bypass the 24 h TTL and refetch on the next boot.
+- `TALLY_PINNED_MODELS=<path>` — skip discovery entirely, load the lineup from
+  that file (useful for CI runs that must be hermetic).
+- `TALLY_MODELS_CACHE=<path>` — Node-side override for where `resolveLatest()`
+  reads the cache from.
+
+Discovery is fail-soft: if both providers are unreachable and the cache file
+doesn't exist, the gateway boots with an empty list and a warning. The demos
+fall back to their hardcoded defaults.
+
 ## Status
 
 Early development. Decisions and the full system spec live in the project tracker.

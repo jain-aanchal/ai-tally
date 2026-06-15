@@ -45,6 +45,12 @@ curl -s localhost:8080/healthz     # {"status":"ok"}
 > The gateway waits for ClickHouse + Postgres to pass health checks before it boots, so a brief
 > "starting" is normal.
 
+> On first boot the gateway also hits `GET /v1/models` on every provider whose API key it has and
+> writes the result to `.tally/models.json` (CTO-109). Subsequent boots reuse that file for 24 h —
+> set `TALLY_MODELS_REFRESH=1` to force a refetch, or `TALLY_PINNED_MODELS=<path>` to skip discovery
+> entirely. If both providers are unreachable, boot still succeeds — you'll just see a warning in
+> the gateway log and the demos fall back to their hardcoded model defaults.
+
 The composed gateway already sets `TALLY_CLICKHOUSE_DB=default` (the official ClickHouse image loads
 unqualified DDL into the `default` database — see the note in `infra/docker-compose.yml`). Running
 the gateway *by hand* with the library default `TALLY_CLICKHOUSE_DB=tally` will fail with
