@@ -55,6 +55,20 @@ cd infra && make aider-demo                     # ~3 min, three multi-turn tasks
 See [examples/aider-demo/README.md](examples/aider-demo/README.md) for the
 walkthrough.
 
+Want to exercise the business-outcome attribution workflow? Run the chatbot
+demo — it boots the Vercel AI Chatbot template on `:3001`, drives synthetic
+chat sessions across OpenAI and Anthropic, and lights up the
+`/attribution` view with $/conversion per provider:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+cd infra && make chatbot-demo                   # ~2 min, 50 scripted sessions
+```
+
+See [examples/vercel-chatbot/README.md](examples/vercel-chatbot/README.md)
+for the walkthrough.
+
 ## Development
 
 The Python SDK uses [uv](https://docs.astral.sh/uv/), `ruff`, and `pytest`.

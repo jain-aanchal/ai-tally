@@ -151,6 +151,33 @@ and the architecture diagram — is in
 
 When you're done: `make aider-demo-stop` kills the background proxy.
 
+## Step 6: chatbot + conversion attribution
+
+Aider is the right shape for agent-loop and cross-provider visibility (steps
+1–3 of the five workflows). For **workflow 4 — business-outcome
+attribution** — run the chatbot demo. It vendors the Vercel AI SDK chatbot
+template, drives 50 synthetic sessions split across OpenAI and Anthropic,
+and emits conversion events (thumbs-up + session-engaged) so the
+`/attribution` view can show $/conversion per provider.
+
+```bash
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+cd infra && make chatbot-demo
+```
+
+The chatbot boots on `:3001` (avoiding the dashboard on `:3000`). The driver
+posts spans straight to the gateway from the chatbot's `/api/chat` route, so
+this exercises the **gateway-POST ingestion path** — distinct from Aider's
+edge-proxy path. After ~2 minutes, the dashboard auto-opens to
+`/attribution?tag=chatbot-demo&outcome=positive_feedback`.
+
+Walkthrough, configuration knobs, and the upstream patch list are in
+[examples/vercel-chatbot/README.md](examples/vercel-chatbot/README.md) and
+[examples/vercel-chatbot/PATCHES.md](examples/vercel-chatbot/PATCHES.md).
+
+When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -169,6 +196,8 @@ When you're done: `make aider-demo-stop` kills the background proxy.
 | `make demo` | Send a sample batch through the gateway into ClickHouse |
 | `make aider-demo` | Run Aider against a fixture repo through the edge proxy (needs `OPENAI_API_KEY`) |
 | `make aider-demo-stop` | Kill the background edge proxy started by `aider-demo` |
+| `make chatbot-demo` | Run the Vercel AI chatbot demo (needs `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
+| `make chatbot-demo-stop` | Kill the background chatbot dev server started by `chatbot-demo` |
 | `make ps` / `make logs` | Status / tail gateway logs |
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
 | `make down` | Stop the stack (keep data volumes) |

@@ -34,6 +34,12 @@ import type {
 } from "./dq";
 import type { AgentRun, AgentSummary, RunSpan } from "./agents";
 import { CONNECTORS, type ConnectorActivity } from "./connectors";
+import {
+  type AttributionFilters,
+  type AttributionReport,
+  buildProviderRow,
+  emptyReport,
+} from "./attribution";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -499,12 +505,24 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
     const run = filter?.run ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
     const runClause = run ? "AND TraceId = {run:String}" : "";
+    // Agent identity comes from ServiceName (e.g. "aider", "vercel-chatbot-demo"),
+    // not FeatureTag (which is the workflow-3 dimension — that's the /features view).
+    // ?tag= still narrows agents to runs that produced a given feature.
     const aggs = await rowsP<RunAgg>(
       db,
-      `SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost,
-              count() AS steps, max(StatusCode) AS maxStatus, toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
+      `SELECT TraceId AS runId,
+              any(ServiceName) AS agent,
+              sum(EstimatedCost) AS cost,
+              count() AS steps,
+              max(StatusCode) AS maxStatus,
+              toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != '' ${tagClause} ${runClause}
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND ServiceName != ''
+         AND ServiceName != 'unknown'
+         ${tagClause}
+         ${runClause}
        GROUP BY TraceId`,
       { tenant, tag, run },
     );
@@ -628,5 +646,92 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
     }
 
     return { records, lastAt };
+  });
+}
+
+// --- Attribution (Workflow 4) --------------------------------------------------------------------
+
+/**
+ * $/conversion per provider, joined from otel_spans (cost) ⋈ business_events
+ * (outcomes) on UserIdHash. The chatbot demo's lib/tally.ts derives one stable
+ * UserIdHash per session — when a session converts, its events share that
+ * hash, so the join is direct.
+ *
+ * Filters are URL-driven (?tag=, ?provider=, ?outcome=) — see lib/attribution.ts.
+ * Returns null on any ClickHouse error so the API can fall back to the mock
+ * report (CI / fresh-clone friendliness).
+ */
+export async function queryAttribution(
+  filters: AttributionFilters,
+): Promise<AttributionReport | null> {
+  return tryLive(async (db, tenant) => {
+    const outcomeName = filters.outcome ?? "conversion";
+    const tagSql = filters.tag ? `AND s.FeatureTag = {tag:String}` : "";
+    const providerSql = filters.provider
+      ? `AND s.SpanAttributes['chatbot.real_provider'] = {provider:String}`
+      : "";
+
+    // sessions per provider (distinct session ids carrying a real_provider attr).
+    const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string }>(
+      db,
+      `SELECT
+         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
+         uniqExact(s.SessionId) AS sessions,
+         sum(s.EstimatedCost) AS cost
+       FROM otel_spans s
+       WHERE s.TenantId = {tenant:String}
+         AND s.Timestamp >= now() - INTERVAL 30 DAY
+         ${tagSql}
+         ${providerSql}
+       GROUP BY provider`,
+      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+    );
+
+    // Conversions per provider: a business_event whose UserIdHash matches a
+    // span's UserIdHash (the demo derives both from sessionId, so 1:1 on the join).
+    const conversionRows = await rowsP<{ provider: string; conversions: string }>(
+      db,
+      `SELECT
+         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
+         uniqExact(b.BusinessEventId) AS conversions
+       FROM business_events b
+       INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+       WHERE b.TenantId = {tenant:String}
+         AND b.EventName = {outcome:String}
+         AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         ${tagSql}
+         ${providerSql}
+       GROUP BY provider`,
+      {
+        tenant,
+        outcome: outcomeName,
+        tag: filters.tag ?? "",
+        provider: filters.provider ?? "",
+      },
+    );
+
+    const convByProvider = new Map<string, number>();
+    for (const r of conversionRows) {
+      convByProvider.set(r.provider, parseInt(r.conversions, 10) || 0);
+    }
+    const perProvider = sessionsRows.map((r) => {
+      const sessions = parseInt(r.sessions, 10) || 0;
+      const conversions = convByProvider.get(r.provider) ?? 0;
+      const costMicro = micro(r.cost);
+      return buildProviderRow(r.provider, sessions, conversions, costMicro);
+    });
+    perProvider.sort((a, b) => b.sessions - a.sessions);
+
+    const totals = {
+      sessions: perProvider.reduce((s, p) => s + p.sessions, 0),
+      conversions: perProvider.reduce((s, p) => s + p.conversions, 0),
+      costMicroUsd: perProvider.reduce((s, p) => s + p.costMicroUsd, 0),
+      costPerConversionMicroUsd: null as number | null,
+    };
+    totals.costPerConversionMicroUsd =
+      totals.conversions > 0 ? Math.round(totals.costMicroUsd / totals.conversions) : null;
+
+    if (perProvider.length === 0) return emptyReport(filters);
+    return { filters, perProvider, totals, isMock: false };
   });
 }

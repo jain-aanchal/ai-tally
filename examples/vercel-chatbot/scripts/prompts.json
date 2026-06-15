@@ -1,0 +1,122 @@
+[
+  {
+    "id": "support-billing",
+    "tag": "chatbot.support",
+    "opener": "My subscription billing is broken — I was charged twice this month. Can you help me get a refund?",
+    "followups": [
+      "What information do you need from me?",
+      "I have the order number, it's 482910. The duplicate was on the 14th.",
+      "How long does the refund take?",
+      "Will I get an email confirmation?",
+      "Thanks. Anything else I should do on my end?"
+    ]
+  },
+  {
+    "id": "support-stuck",
+    "tag": "chatbot.support",
+    "opener": "I'm stuck — my dashboard won't load and the error says 'session expired' but I just logged in.",
+    "followups": [
+      "I've already tried clearing my cache.",
+      "Same problem in incognito.",
+      "I'm on Chrome on macOS, latest version.",
+      "Should I try a different browser?",
+      "Got it, that worked. Any idea why it broke?"
+    ]
+  },
+  {
+    "id": "code-regex",
+    "tag": "chatbot.code",
+    "opener": "Write me a regex in JavaScript that matches a US phone number, with optional country code and any common separators.",
+    "followups": [
+      "Can you make it stricter so it rejects letters in the middle?",
+      "How about extracting just the digits afterward?",
+      "Show me a small test suite with 5 cases.",
+      "What's the time complexity here?",
+      "Refactor as a const arrow function with a named export."
+    ]
+  },
+  {
+    "id": "code-sql",
+    "tag": "chatbot.code",
+    "opener": "I have a Postgres table `orders(id, user_id, amount, created_at)`. Write me a SQL query that returns the top 10 users by total order amount in the last 90 days.",
+    "followups": [
+      "How would I add a tie-breaker on most-recent order date?",
+      "Make it a window function instead.",
+      "Add an index recommendation.",
+      "What does the EXPLAIN ANALYZE look like for a 10M-row table?",
+      "Rewrite this as a materialized view that refreshes nightly."
+    ]
+  },
+  {
+    "id": "code-debug",
+    "tag": "chatbot.code",
+    "opener": "I'm getting a TypeError: cannot read properties of undefined (reading 'map') in this React function — what's going wrong?",
+    "followups": [
+      "Here's the snippet: const x = data.items.map(i => i.name)",
+      "How do I add a loading state too?",
+      "What's the cleanest pattern with React Query?",
+      "Should the fallback be null or an empty array?",
+      "Now show me the same pattern with Suspense."
+    ]
+  },
+  {
+    "id": "brainstorm-naming",
+    "tag": "chatbot.brainstorm",
+    "opener": "Brainstorm some product names for a developer tool that helps debug LLM cost surprises in production.",
+    "followups": [
+      "I want something that hints at 'observability for spend'.",
+      "What if we lean into accounting metaphors?",
+      "Could we explore something more playful?",
+      "Pick the top 3 and explain why.",
+      "Suggest tag-lines for the winner."
+    ]
+  },
+  {
+    "id": "brainstorm-feature",
+    "tag": "chatbot.brainstorm",
+    "opener": "What are some ideas for a free tier on a B2B observability tool that converts well to paid?",
+    "followups": [
+      "What should we cap to drive upgrades?",
+      "How would you handle teams vs individuals?",
+      "What if we exposed cost-per-feature only on paid?",
+      "What's the right number of seats to include free?",
+      "Imagine we have $200k/yr in budget — how would we market this?"
+    ]
+  },
+  {
+    "id": "brainstorm-strategy",
+    "tag": "chatbot.brainstorm",
+    "opener": "Should I prioritize a Slack integration or a Linear integration first? Help me think it through.",
+    "followups": [
+      "Both are top requests from design partners.",
+      "Slack is bigger market, Linear is closer to our ICP.",
+      "What questions should I be asking my early customers?",
+      "How would I A/B test this with three of them?",
+      "Draft the email I'd send them this afternoon."
+    ]
+  },
+  {
+    "id": "support-cancel",
+    "tag": "chatbot.support",
+    "opener": "I need to cancel my account — the billing keeps failing and I want to stop the subscription before another charge.",
+    "followups": [
+      "Where do I find the cancel button?",
+      "Will I lose my data immediately?",
+      "Can I export it first?",
+      "Will I get a final invoice?",
+      "Thanks. Confirming — nothing else needed from me?"
+    ]
+  },
+  {
+    "id": "code-perf",
+    "tag": "chatbot.code",
+    "opener": "How can I optimize this Python function — it's slow on inputs over 100k items: def f(xs): return [x for x in xs if x in seen]",
+    "followups": [
+      "What's the time complexity right now?",
+      "Show me with a set instead.",
+      "What if I'm streaming the data?",
+      "Add type hints and a docstring.",
+      "Benchmark it with timeit."
+    ]
+  }
+]

@@ -30,3 +30,4 @@ uv.lock
 # Claude Code worktrees
 .claude/worktrees/
 .aider.*
+keys.txt

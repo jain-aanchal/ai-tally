@@ -9,6 +9,7 @@ const NAV: { label: string; href: string }[] = [
   { label: "Features", href: "/features" },
   { label: "Agents", href: "/agents" },
   { label: "Compare", href: "/compare" },
+  { label: "Attribution", href: "/attribution" },
   { label: "Estimate", href: "/estimate" },
   { label: "Connectors", href: "/connectors" },
   { label: "Settings", href: "/settings" },

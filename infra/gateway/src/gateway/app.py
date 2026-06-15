@@ -187,6 +187,66 @@ async def ingest_otlp_traces(
     return await _run_pipeline(batch, authorization)
 
 
+@app.post("/v1/events")
+async def ingest_events(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """CDP-shape event ingest convenience endpoint (CTO-105).
+
+    Accepts a JSON body shaped like::
+
+        {"events": [{"event_name": "...", "user_id_hash": "...", "occurred_at_ns": ..., ...}, ...]}
+
+    or a single event object. Internally wraps the events into a zero-span
+    :class:`BatchRequest` and runs the same pipeline as ``/v1/batches`` so the
+    same auth / rate-limit / idempotency / write path applies. The chatbot
+    demo's helper module is the first caller; SDKs that already batch spans +
+    events use ``/v1/batches`` directly.
+    """
+    payload = await request.json()
+    raw_events = payload.get("events") if isinstance(payload, dict) else None
+    if raw_events is None and isinstance(payload, dict) and "event_name" in payload:
+        raw_events = [payload]
+    if not isinstance(raw_events, list) or not raw_events:
+        raise HTTPException(status_code=422, detail="body must contain a non-empty 'events' list")
+
+    tenant_id = (
+        payload.get("tenant_id")
+        if isinstance(payload, dict) and payload.get("tenant_id")
+        else x_tenant_id or ""
+    )
+    events: list[BusinessEvent] = []
+    for raw in raw_events:
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=422, detail="each event must be an object")
+        try:
+            events.append(
+                BusinessEvent(
+                    business_event_id=str(raw.get("business_event_id") or uuid7()),
+                    event_name=str(raw["event_name"]),
+                    user_id_hash=str(raw["user_id_hash"]),
+                    occurred_at_ns=int(raw.get("occurred_at_ns") or time.time_ns()),
+                    value_amount_micro=raw.get("value_amount_micro"),
+                    value_currency=str(raw.get("value_currency") or "USD"),
+                    value_type=str(raw.get("value_type") or "count"),
+                    source=str(raw.get("source") or "cdp"),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"malformed event: {exc}") from exc
+
+    batch = BatchRequest(
+        tenant_id=tenant_id,
+        sdk_version="events-v1",
+        resource_spans=[],
+        business_events=events,
+        batch_id=str(payload.get("batch_id") or uuid7()) if isinstance(payload, dict) else uuid7(),
+    )
+    return await _run_pipeline(batch, authorization)
+
+
 @app.post("/v1/batches")
 async def ingest_batch(
     request: Request,
