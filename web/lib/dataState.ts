@@ -112,7 +112,11 @@ export function someZero(values: Record<string, number>): boolean {
  * input (no enabled connectors declared) we return [], i.e. nothing partial — by design.
  */
 export function zeroEnabledLayers<L extends string>(
-  byLayer: Record<L, number>,
+  // Keys are decoupled from L: byLayer carries every layer the system knows
+  // about (LLM/vector/tools/…); `enabled` is just the subset we're checking.
+  // Without the widening the call site would have to narrow byLayer to the
+  // exact enabled set, which is the opposite of how the data flows.
+  byLayer: Readonly<Record<string, number>>,
   enabled: readonly L[],
 ): L[] {
   return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
