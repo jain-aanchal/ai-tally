@@ -14,11 +14,15 @@ from tally.enrichment import enrich_cost
 from tally.pricing import seed_catalog
 from tally.schema import GenAI
 
-
 AT = date(2026, 6, 1)
 
 
-def _span(provider: str, model: str, input_tokens: int = 1000, output_tokens: int = 250) -> dict[str, object]:
+def _span(
+    provider: str,
+    model: str,
+    input_tokens: int = 1000,
+    output_tokens: int = 250,
+) -> dict[str, object]:
     return {
         GenAI.SYSTEM: provider,
         GenAI.REQUEST_MODEL: model,
@@ -36,7 +40,7 @@ def _cost(provider: str, model: str, input_tokens: int = 1000, output_tokens: in
     return res.server_cost_micro_usd
 
 
-# --- OpenAI ----------------------------------------------------------------------------------------
+# --- OpenAI ----
 
 
 def test_gpt_4o_priced() -> None:
@@ -72,7 +76,7 @@ def test_text_embedding_3_large_priced() -> None:
     assert res is not None
 
 
-# --- Anthropic -------------------------------------------------------------------------------------
+# --- Anthropic ----
 
 
 def test_claude_sonnet_4_5_priced() -> None:
@@ -87,7 +91,7 @@ def test_claude_opus_4_8_priced() -> None:
     _cost("anthropic", "claude-opus-4-8")
 
 
-# --- Family-classifier intuition -------------------------------------------------------------------
+# --- Family-classifier intuition ----
 
 
 def test_openai_mini_cheaper_than_full() -> None:
