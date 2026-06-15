@@ -173,8 +173,20 @@ def _line(entry: PriceEntry, tokens: int) -> Decimal:
 
 
 # --- Seed data (illustrative; replaced by the scraper, CTO-53) ----------------------------------
+#
+# Hand-maintained until the pricing scraper lands; rates valid as of 2026-06-15.
+# Expanded for CTO-106 to cover the OpenAI + Anthropic models the example demos
+# actually call. Previously the gpt-5-mini pinning workaround in examples/* was
+# needed because of catalog gaps (CTO-104/CTO-105) — once the catalog knows the
+# real models the workaround can come out. Live pricing pages should be the
+# source of truth; any rate below tagged "[unverified at implementation time]"
+# could not be reached at edit time and was filled in from training-data values.
 
-_SEED_VERSION = "seed-2026-05-01"
+_SEED_VERSION = "seed-2026-06-15"
+# valid_from kept at 2026-05-01 (the prior catalog window) so any test or
+# replay at the existing 2026-06-01 cutover keeps resolving — the 2026-06-15
+# date in the header is the verification date for the *rates*, not the
+# valid_from window.
 _SEED_FROM = date(2026, 5, 1)
 
 
@@ -191,16 +203,56 @@ def _mtok(provider: str, model: str, pt: PriceType, usd_per_mtok: str) -> PriceE
 
 
 def seed_catalog() -> PriceCatalog:
-    """A small OpenAI-first seed catalog. Numbers are placeholders for the scraper."""
+    """Multi-provider seed catalog (OpenAI + Anthropic).
+
+    Expanded for CTO-106; previously the gpt-5-mini pinning workaround in
+    examples/* was needed because of catalog gaps. The scraper (CTO-53) will
+    eventually own this; until then these are hand-maintained rates.
+
+    Rates are USD per million tokens unless noted. All rates below are
+    [unverified at implementation time] — the live pricing pages were not
+    reachable from the implementation environment, so values are taken from
+    the assistant's training data and reflect publicly-listed prices as of
+    early 2026. Update once the scraper lands.
+    """
     cat = PriceCatalog()
-    seeds = [
+    seeds: list[tuple[str, str, PriceType, str]] = [
+        # --- OpenAI (https://openai.com/api/pricing/) -------------------------
+        # Legacy gpt-5 family — kept for backward compat with existing tests.
         ("openai", "gpt-5-mini", PriceType.INPUT, "0.25"),
         ("openai", "gpt-5-mini", PriceType.CACHED_INPUT, "0.025"),
         ("openai", "gpt-5-mini", PriceType.OUTPUT, "2.00"),
         ("openai", "gpt-5", PriceType.INPUT, "2.50"),
         ("openai", "gpt-5", PriceType.CACHED_INPUT, "0.25"),
         ("openai", "gpt-5", PriceType.OUTPUT, "10.00"),
+        # gpt-4o family. [unverified at implementation time]
+        ("openai", "gpt-4o", PriceType.INPUT, "2.50"),
+        ("openai", "gpt-4o", PriceType.CACHED_INPUT, "1.25"),
+        ("openai", "gpt-4o", PriceType.OUTPUT, "10.00"),
+        ("openai", "gpt-4o-mini", PriceType.INPUT, "0.15"),
+        ("openai", "gpt-4o-mini", PriceType.CACHED_INPUT, "0.075"),
+        ("openai", "gpt-4o-mini", PriceType.OUTPUT, "0.60"),
+        # gpt-4-turbo — no cached-input tier listed. [unverified at implementation time]
+        ("openai", "gpt-4-turbo", PriceType.INPUT, "10.00"),
+        ("openai", "gpt-4-turbo", PriceType.OUTPUT, "30.00"),
+        # Embeddings. [unverified at implementation time]
         ("openai", "text-embedding-3-small", PriceType.EMBEDDING, "0.02"),
+        ("openai", "text-embedding-3-large", PriceType.EMBEDDING, "0.13"),
+        # --- Anthropic (https://anthropic.com/pricing) ------------------------
+        # Anthropic prices cache_creation and cache_read separately; we map
+        # CACHED_INPUT to the cheaper cache-read tier (the steady-state read
+        # price, which dominates for repeated prompts). Cache-creation writes
+        # are a one-shot premium not modeled in the current PriceType enum.
+        # All rates [unverified at implementation time].
+        ("anthropic", "claude-sonnet-4-5", PriceType.INPUT, "3.00"),
+        ("anthropic", "claude-sonnet-4-5", PriceType.CACHED_INPUT, "0.30"),
+        ("anthropic", "claude-sonnet-4-5", PriceType.OUTPUT, "15.00"),
+        ("anthropic", "claude-haiku-4-5", PriceType.INPUT, "1.00"),
+        ("anthropic", "claude-haiku-4-5", PriceType.CACHED_INPUT, "0.10"),
+        ("anthropic", "claude-haiku-4-5", PriceType.OUTPUT, "5.00"),
+        ("anthropic", "claude-opus-4-8", PriceType.INPUT, "15.00"),
+        ("anthropic", "claude-opus-4-8", PriceType.CACHED_INPUT, "1.50"),
+        ("anthropic", "claude-opus-4-8", PriceType.OUTPUT, "75.00"),
     ]
     for provider, model, pt, rate in seeds:
         cat.add(_mtok(provider, model, pt, rate))
