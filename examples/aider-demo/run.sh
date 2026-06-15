@@ -56,17 +56,48 @@ start_proxy
 # 4. Point Aider at the proxy and pick a model that matches the provider.
 #    Aider speaks OpenAI protocol by default; for Anthropic we explicitly select
 #    a Claude model so it speaks Anthropic protocol to the proxy upstream.
+#
+# CTO-109: resolve the current cheapest in-family id from the gateway's
+# auto-discovered cache (.tally/models.json) so a retired SKU doesn't break the
+# demo. Falls back to the hardcoded default if the helper errors or the cache
+# is empty. The cache lives at the repo root — same directory as `make up`.
+repo_root="$(cd "$here/../.." && pwd)"
+resolve_from_cache() {
+  # $1=provider $2=family — prints the id, or empty on miss/error.
+  TALLY_SDK_SRC="$repo_root/sdk/python/src" TALLY_CACHE="$repo_root/.tally/models.json" \
+    python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["TALLY_SDK_SRC"])
+try:
+    from tally import models as M
+except Exception:
+    sys.exit(0)
+provider, family = sys.argv[1], sys.argv[2]
+cache_path = Path(os.environ["TALLY_CACHE"])
+cached = M.load_cached(cache_path) or M._load_unchecked(cache_path)
+if not cached:
+    sys.exit(0)
+pick = M.latest(provider, family, cached)
+if pick:
+    print(pick.id)
+PY
+}
+
 if [[ "$PROVIDER" == "anthropic" ]]; then
   # Aider uses LiteLLM under the hood; LiteLLM requires the provider prefix.
-  AIDER_MODEL="${AIDER_MODEL:-anthropic/claude-sonnet-4-5}"
+  resolved=$(resolve_from_cache anthropic sonnet)
+  AIDER_MODEL="${AIDER_MODEL:-anthropic/${resolved:-claude-sonnet-4-5}}"
   export ANTHROPIC_API_BASE="http://localhost:$PROXY_PORT"
   export ANTHROPIC_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
 else
-  AIDER_MODEL="${AIDER_MODEL:-gpt-4o}"
+  resolved=$(resolve_from_cache openai flagship)
+  AIDER_MODEL="${AIDER_MODEL:-${resolved:-gpt-4o}}"
   export OPENAI_API_BASE="http://localhost:$PROXY_PORT/v1"
   export OPENAI_BASE_URL="http://localhost:$PROXY_PORT/v1"
   export OPENAI_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
 fi
+echo "  using model: $AIDER_MODEL"
 
 # Strip the LiteLLM provider prefix (e.g. "anthropic/claude-sonnet-4-5" →
 # "claude-sonnet-4-5") for the gateway-facing model attribute — the price

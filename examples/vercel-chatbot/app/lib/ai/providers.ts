@@ -6,6 +6,7 @@
 import { anthropic } from "@ai-sdk/anthropic";
 import { openai } from "@ai-sdk/openai";
 import { customProvider } from "ai";
+import { resolveLatest } from "../resolveModel";
 import { isTestEnvironment } from "../constants";
 
 export const myProvider = isTestEnvironment
@@ -27,8 +28,11 @@ export const myProvider = isTestEnvironment
 // OpenAI quota is unreliable in demo environments).
 const DEFAULT_PROVIDER = process.env.TALLY_DEMO_PROVIDER ?? "anthropic";
 
-const FALLBACK_ANTHROPIC = "claude-sonnet-4-5";
-const FALLBACK_OPENAI = "gpt-4o-mini";
+// CTO-109: prefer the gateway's auto-discovered cache so a provider retiring
+// a SKU doesn't break this route. The literal ids are last-resort fallbacks.
+const FALLBACK_ANTHROPIC = resolveLatest("anthropic", "sonnet", "claude-sonnet-4-5");
+const FALLBACK_OPENAI = resolveLatest("openai", "mini", "gpt-4o-mini");
+const FALLBACK_ANTHROPIC_TITLE = resolveLatest("anthropic", "haiku", "claude-haiku-4-5");
 
 function resolve(modelId: string) {
   // Honor an explicit anthropic/<model> id — strip the prefix; pass the rest
@@ -61,5 +65,5 @@ export function getTitleModel() {
   }
   return DEFAULT_PROVIDER === "openai"
     ? openai(FALLBACK_OPENAI)
-    : anthropic("claude-haiku-4-5");
+    : anthropic(FALLBACK_ANTHROPIC_TITLE);
 }

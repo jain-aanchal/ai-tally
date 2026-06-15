@@ -7,6 +7,7 @@
 // shape regardless of which path produced it.
 
 import { type NextRequest, NextResponse } from "next/server";
+import { resolveLatest } from "@/lib/resolveModel";
 import {
   classifyFeatureTag,
   type FeatureTag,
@@ -31,11 +32,15 @@ interface DemoChatBody {
   dryRun?: boolean;
 }
 
-const DEFAULT_OPENAI_MODEL = process.env.TALLY_OPENAI_MODEL ?? "gpt-4o-mini";
-// claude-3-5-haiku-latest was retired by Anthropic; the current cheapest model
-// in the 4-series family is claude-haiku-4-5. Override via TALLY_ANTHROPIC_MODEL.
+// CTO-109: resolve the current cheapest model in each family from the gateway's
+// auto-discovered cache (.tally/models.json) instead of hardcoding SKUs. An
+// explicit env override still wins; the literal id is the last-resort fallback
+// the resolver returns only when the cache is missing or has no in-family match.
+const DEFAULT_OPENAI_MODEL =
+  process.env.TALLY_OPENAI_MODEL ?? resolveLatest("openai", "mini", "gpt-4o-mini");
 const DEFAULT_ANTHROPIC_MODEL =
-  process.env.TALLY_ANTHROPIC_MODEL ?? "claude-haiku-4-5";
+  process.env.TALLY_ANTHROPIC_MODEL ??
+  resolveLatest("anthropic", "haiku", "claude-haiku-4-5");
 
 interface ProviderResult {
   text: string;
