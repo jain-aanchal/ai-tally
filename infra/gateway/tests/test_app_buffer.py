@@ -84,7 +84,12 @@ def _post(c: TestClient, spans: list[dict]):
     return c.post("/v1/batches", json={"tenant_id": "t-local", "sdk_version": "test", "resource_spans": spans})
 
 
-def _wait_for(predicate, timeout_s: float = 5.0) -> bool:
+def _wait_for(predicate, timeout_s: float = 15.0) -> bool:
+    # 15s default (was 5s) — GitHub Actions runners under load occasionally
+    # need >5s for the buffer to fully drain in the burst test. Locally this
+    # test finishes in <500ms; CI runners are 10-30x slower under contention
+    # so a generous ceiling avoids flake without masking a real regression
+    # (a broken drain wouldn't finish in 15s either).
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():
