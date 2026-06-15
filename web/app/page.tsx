@@ -11,8 +11,10 @@ import {
   asOfLabel,
   deriveDataState,
   relativeAge,
-  someZero,
+  zeroEnabledLayers,
 } from "@/lib/dataState";
+import { LAYERS, type Layer } from "@/lib/cost";
+import { queryEnabledConnectors } from "@/lib/tenant";
 import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 
@@ -24,14 +26,26 @@ interface HomePayload {
 }
 
 export default async function HomePage() {
-  const { spend: s, outliers, roi, dq } = await apiGet<HomePayload>("/api/home");
+  const [{ spend: s, outliers, roi, dq }, enabledLayers] = await Promise.all([
+    apiGet<HomePayload>("/api/home"),
+    queryEnabledConnectors(),
+  ]);
   const hidden = s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
 
   const layers: Record<string, number> = { ...s.byLayer };
+  // Connector-aware partiality (CTO-107): only enabled layers reporting zero count as a gap.
+  const layerTotals = LAYERS.reduce<Record<Layer, number>>(
+    (acc, l) => {
+      acc[l] = s.byLayer[l];
+      return acc;
+    },
+    { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
+  );
+  const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
   const state = deriveDataState({
     isEmpty: s.totalMicroUsd === 0 && allZero(layers),
-    isPartial: someZero(layers),
+    isPartial: trippedLayers.length > 0,
     reconciledThrough: s.reconciledThrough,
   });
   const asOf = asOfLabel(s.reconciledThrough);
@@ -117,7 +131,7 @@ export default async function HomePage() {
         )}
       </div>
 
-      {state === "partial" && <PartialDataBanner missing="a cost layer connector" />}
+      {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
       {state === "empty" ? (
         <SyntheticPreviewBanner workflow="Home">{grid}</SyntheticPreviewBanner>
