@@ -76,3 +76,35 @@ export async function queryEnabledConnectors(): Promise<Layer[]> {
     return [...DEFAULT_ENABLED_LAYERS];
   }
 }
+
+/**
+ * Enable or disable a single cost-layer connector for the current tenant.
+ *
+ * POSTs to the gateway's /v1/tenant/connectors. Returns ``{ ok: true }`` on success and
+ * ``{ ok: false, error: "..." }`` when the gateway is unreachable or rejects the layer — callers
+ * use this to render an inline confirmation/error without taking down the page.
+ */
+export async function setConnectorEnabled(
+  layer: Layer,
+  enabled: boolean,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/tenant/connectors`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-tenant-id": TENANT,
+      },
+      body: JSON.stringify({ layer, enabled }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: `gateway HTTP ${res.status}${text ? `: ${text}` : ""}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
