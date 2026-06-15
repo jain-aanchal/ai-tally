@@ -19,6 +19,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from tally.enrichment import enrich_cost
+from tally.models import discover_models
 from tally.pricing import seed_catalog
 from tally.schema import GenAI
 from tally.timekeeping import assess
@@ -91,6 +92,21 @@ async def lifespan(app: FastAPI):
         await buffer.start()
         app.state.ingest_buffer = buffer
         logger.info("ingest buffer enabled (capacity=%d)", settings.ingest_buffer_capacity)
+    # Auto-discover provider model lineups (CTO-109). Fail-soft: if both providers
+    # are unreachable AND there's no cached file, we still boot — just with an empty
+    # list and a WARNING. Demos read app.state.models so they don't hardcode SKUs
+    # like claude-3-5-haiku-latest that the provider may retire out from under them.
+    try:
+        app.state.models = discover_models()
+        if app.state.models:
+            openai_ids = sorted(m.id for m in app.state.models if m.provider == "openai")
+            anth_ids = sorted(m.id for m in app.state.models if m.provider == "anthropic")
+            logger.info("models: openai=%s anthropic=%s", openai_ids, anth_ids)
+        else:
+            logger.warning("models: discovery returned no entries — booting without a lineup")
+    except Exception as exc:  # noqa: BLE001 — discovery must never crash boot
+        logger.warning("models: discovery raised, defaulting to empty list: %s", exc)
+        app.state.models = []
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
     if app.state.ingest_buffer is not None:
