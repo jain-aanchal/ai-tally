@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Mock data + helpers for the Cross-provider Compare workflow (CTO-62). Typed for the eventual API.
+// Types + fallback mock for the Cross-provider Compare workflow. Real candidate data comes
+// from /v1/replay (CTO-113); this module's `comparison` value is the rescaled-mock fallback
+// used by the /api/compare route when the gateway has no opted-in samples yet (or is
+// unreachable). The CandidateMetrics / Comparison types are the wire shape for both branches.
 
 import type { MicroUSD } from "./types";
 

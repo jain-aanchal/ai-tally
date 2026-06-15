@@ -52,7 +52,7 @@ describe("api routes", () => {
     // CompareGET is async since the live "current model from traffic" wiring;
     // without a live stack the route returns the mock comparison untouched.
     const body = await json<{ workload: string; current: unknown; candidates: unknown[] }>(
-      await CompareGET(),
+      await CompareGET(new Request("http://test/api/compare") as never),
     );
     expect(body.workload).toBeTypeOf("string");
     expect(body.candidates.length).toBeGreaterThan(0);
