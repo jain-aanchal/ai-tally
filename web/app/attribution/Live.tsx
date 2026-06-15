@@ -67,6 +67,8 @@ export function AttributionLive({
                   <th className="py-1 text-right font-medium">Rate (95% CI)</th>
                   <th className="py-1 text-right font-medium">LLM cost</th>
                   <th className="py-1 text-right font-medium">$/{outcome}</th>
+                  <th className="py-1 text-right font-medium">Value/user</th>
+                  <th className="py-1 text-right font-medium">Margin/user</th>
                 </tr>
               </thead>
               <tbody>
@@ -160,6 +162,31 @@ function ProviderRow({
           ? "—"
           : formatUSD(p.costPerConversionMicroUsd)}
         <span className="sr-only"> per {outcome}</span>
+      </td>
+      <td className="py-2 text-right tabular-nums">
+        {p.valuePerUserMicroUsd === null ? "—" : formatUSD(p.valuePerUserMicroUsd)}
+      </td>
+      <td className="py-2 text-right tabular-nums">
+        {p.marginPerUserMicroUsd === null ? (
+          "—"
+        ) : (
+          <>
+            <div
+              className={
+                p.marginPerUserMicroUsd >= 0
+                  ? "font-semibold text-good"
+                  : "font-semibold text-warn"
+              }
+            >
+              {formatUSD(p.marginPerUserMicroUsd)}
+            </div>
+            {p.marginPct !== null && (
+              <div className="text-xs text-muted">
+                {(p.marginPct * 100).toFixed(1)}%
+              </div>
+            )}
+          </>
+        )}
       </td>
     </tr>
   );

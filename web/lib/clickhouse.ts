@@ -722,11 +722,51 @@ export async function queryAttribution(
     for (const r of conversionRows) {
       convByProvider.set(r.provider, parseInt(r.conversions, 10) || 0);
     }
+
+    // Revenue per provider (CTO-110): sum (conversion + subscription_renewal) − |refund|, and
+    // count distinct paying users. Joined on UserIdHash the same way as conversion counts. The
+    // sum is in USD decimal (ClickHouse Decimal arithmetic on Int64 micro), we then convert to
+    // integer micro-USD at the boundary like everywhere else.
+    const revenueRows = await rowsP<{
+      provider: string;
+      revenue: string;
+      users: string;
+    }>(
+      db,
+      `SELECT
+         ${providerExpr} AS provider,
+         (sumIf(b.ValueAmountMicro, b.EventName IN ('conversion', 'subscription_renewal'))
+            - sumIf(abs(b.ValueAmountMicro), b.EventName = 'refund')) / 1000000 AS revenue,
+         uniqExact(b.UserIdHash) AS users
+       FROM business_events b
+       INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+       WHERE b.TenantId = {tenant:String}
+         AND b.Source = 'stripe'
+         AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         AND b.UserIdHash != ''
+         ${tagSql}
+         ${providerSql}
+       GROUP BY provider`,
+      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+    );
+    const revenueByProvider = new Map<
+      string,
+      { revenueMicroUsd: number; distinctUsers: number }
+    >();
+    for (const r of revenueRows) {
+      const users = parseInt(r.users, 10) || 0;
+      const revenueMicroUsd = micro(r.revenue);
+      if (users > 0) {
+        revenueByProvider.set(r.provider, { revenueMicroUsd, distinctUsers: users });
+      }
+    }
+
     const perProvider = sessionsRows.map((r) => {
       const sessions = parseInt(r.sessions, 10) || 0;
       const conversions = convByProvider.get(r.provider) ?? 0;
       const costMicro = micro(r.cost);
-      return buildProviderRow(r.provider, sessions, conversions, costMicro);
+      const revenue = revenueByProvider.get(r.provider) ?? null;
+      return buildProviderRow(r.provider, sessions, conversions, costMicro, revenue);
     });
     perProvider.sort((a, b) => b.sessions - a.sessions);
 
