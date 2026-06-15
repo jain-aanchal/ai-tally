@@ -1,0 +1,16 @@
+{
+  "id": "evt_1NQ8t12eZvKYlo2C8b2L0004",
+  "object": "event",
+  "created": 1717030000,
+  "type": "customer.subscription.deleted",
+  "data": {
+    "object": {
+      "id": "sub_1NQ8t12eZvKYlo2C0001",
+      "object": "subscription",
+      "customer": "cus_PaYiNgCusT",
+      "status": "canceled",
+      "canceled_at": 1717030000,
+      "currency": "usd"
+    }
+  }
+}
