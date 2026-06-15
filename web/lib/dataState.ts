@@ -102,3 +102,18 @@ export function someZero(values: Record<string, number>): boolean {
   const hasNonZero = xs.some((v) => v !== 0);
   return hasZero && hasNonZero;
 }
+
+/**
+ * Connector-aware partial detection (CTO-107).
+ *
+ * Returns the subset of *enabled* layers that report zero — those are the real gaps. Layers the
+ * tenant never enabled don't count: a tenant who only declared the LLM connector should never see
+ * the banner for vector/tools/etc., because they were never expected to fire. With the empty
+ * input (no enabled connectors declared) we return [], i.e. nothing partial — by design.
+ */
+export function zeroEnabledLayers<L extends string>(
+  byLayer: Record<L, number>,
+  enabled: readonly L[],
+): L[] {
+  return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
+}

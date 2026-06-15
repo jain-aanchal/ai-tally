@@ -57,13 +57,34 @@ export function SyntheticPreviewBanner({
 /**
  * Partial-data state. A banner pointing at the missing connector, rendered above whatever real
  * data does exist.
+ *
+ * Two call styles:
+ *   - ``trippedLayers={["vector","tools"]}`` (CTO-107): a *declared* connector is reporting zero,
+ *     so we name the layer(s) the customer is actually waiting on. This is the actionable variant.
+ *   - ``missing="…"``: free-form fallback for surfaces whose partiality isn't layer-based (e.g.
+ *     the value-event / attribution-rate signals on /features, /data-quality, /agents). These
+ *     surfaces are unrelated to the connector model, so they keep their existing message.
  */
-export function PartialDataBanner({ missing }: { missing: string }) {
+export function PartialDataBanner({
+  trippedLayers,
+  missing,
+}: {
+  trippedLayers?: readonly string[];
+  missing?: string;
+}) {
+  let body: string;
+  if (trippedLayers && trippedLayers.length > 0) {
+    const names = trippedLayers.join(", ");
+    const verb = trippedLayers.length === 1 ? "is" : "are";
+    body = `${names} ${verb} reporting zero — that connector isn’t producing data right now.`;
+  } else {
+    body = `Showing what we have, but ${missing ?? "a data source"} isn’t connected yet — some numbers are incomplete.`;
+  }
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
       <div className="text-warn">
         <span className="font-medium">Partial data. </span>
-        <span>Showing what we have, but {missing} isn&apos;t connected yet — some numbers are incomplete.</span>
+        <span>{body}</span>
       </div>
       <ConnectorCta label="Finish setup" />
     </div>
