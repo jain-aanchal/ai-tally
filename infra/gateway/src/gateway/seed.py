@@ -19,6 +19,9 @@ from gateway.config import get_settings
 _TENANT_NAME = "local-dev"
 _REGION = "local"
 _FEATURE_TAGS = ["assistant", "search", "summarize"]
+# Cost-layer connectors enabled out of the box. Only `llm` is wired today — the rest stay un-enabled
+# so the "Partial data" banner doesn't fire on a fresh stack (CTO-107).
+_ENABLED_LAYERS = ["llm"]
 
 
 def seed() -> None:
@@ -70,6 +73,15 @@ def seed() -> None:
                 ON CONFLICT (tenant_id, tag) DO NOTHING
                 """,
                 (tenant_id, tag, f"{tag} feature (seeded)"),
+            )
+        for layer in _ENABLED_LAYERS:
+            cur.execute(
+                """
+                INSERT INTO tenant_connectors (tenant_id, layer, notes)
+                VALUES (%s, %s, 'seeded')
+                ON CONFLICT (tenant_id, layer) DO UPDATE SET disabled_at = NULL
+                """,
+                (tenant_id, layer),
             )
         conn.commit()
 
