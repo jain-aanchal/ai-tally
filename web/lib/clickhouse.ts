@@ -668,15 +668,22 @@ export async function queryAttribution(
   return tryLive(async (db, tenant) => {
     const outcomeName = filters.outcome ?? "conversion";
     const tagSql = filters.tag ? `AND s.FeatureTag = {tag:String}` : "";
+    // CTO-106: prefer the typed GenAiSystem column (the real shape post-CTO-106),
+    // fall back to the legacy SpanAttributes['chatbot.real_provider'] for
+    // historical rows emitted before the workaround was retired. The
+    // SpanAttributes fallback is for historical rows before CTO-106 retired
+    // the workaround and can be removed once the 30-day window has rolled.
+    const providerExpr =
+      `coalesce(nullIf(s.SpanAttributes['chatbot.real_provider'], ''), nullIf(s.GenAiSystem, ''), 'unknown')`;
     const providerSql = filters.provider
-      ? `AND s.SpanAttributes['chatbot.real_provider'] = {provider:String}`
+      ? `AND ${providerExpr} = {provider:String}`
       : "";
 
-    // sessions per provider (distinct session ids carrying a real_provider attr).
+    // sessions per provider (distinct session ids per real provider).
     const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string }>(
       db,
       `SELECT
-         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
+         ${providerExpr} AS provider,
          uniqExact(s.SessionId) AS sessions,
          sum(s.EstimatedCost) AS cost
        FROM otel_spans s
@@ -693,7 +700,7 @@ export async function queryAttribution(
     const conversionRows = await rowsP<{ provider: string; conversions: string }>(
       db,
       `SELECT
-         if(s.SpanAttributes['chatbot.real_provider'] = '', 'unknown', s.SpanAttributes['chatbot.real_provider']) AS provider,
+         ${providerExpr} AS provider,
          uniqExact(b.BusinessEventId) AS conversions
        FROM business_events b
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
@@ -743,10 +750,11 @@ export async function queryAttribution(
 // quality scores, and latencies still mock today (those need workflow-5 replay infra). At least the
 // "this is what you're running" half stops being a fiction.
 //
-// The chatbot demo's catalog-miss workaround pins span attrs to gpt-5-mini and stashes the real
-// provider/model in SpanAttributes['chatbot.real_provider'] / ['chatbot.real_model']. Prefer those
-// when present so the dashboard shows what the customer actually called, not the pinning hack.
-// CTO-106 will retire the workaround once the price catalog learns real models.
+// CTO-106 retired the chatbot demo's gpt-5-mini pinning workaround: spans now carry the real
+// provider/model on the standard gen_ai.* columns (GenAiSystem / GenAiRequestModel /
+// GenAiResponseModel). The SpanAttributes['chatbot.real_provider'] / ['chatbot.real_model']
+// reads below are a transitional fallback for historical rows emitted before CTO-106 retired
+// the workaround and can be removed once the 30-day window has rolled.
 export async function queryCurrentModel(): Promise<{
   model: string;
   provider: string;

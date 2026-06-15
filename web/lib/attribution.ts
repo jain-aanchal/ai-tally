@@ -8,9 +8,9 @@
 // cheaper per conversion" is statistically meaningful vs. just small-sample
 // noise.
 //
-// Today only the chatbot demo emits chatbot.real_provider on spans and
-// conversion / positive_feedback events; other tenants can opt in by
-// emitting the same shape.
+// Provider is read from the standard gen_ai.system column (post-CTO-106);
+// historical rows that still carry the chatbot.real_provider long-tail
+// attribute keep working via a coalesce fallback in queryAttribution.
 
 import type { MicroUSD } from "./types";
 
