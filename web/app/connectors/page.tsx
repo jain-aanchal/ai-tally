@@ -9,7 +9,9 @@ import {
   connectedCount,
 } from "@/lib/connectors";
 import { queryEnabledConnectors } from "@/lib/tenant";
+import { queryStripeConfig, webhookUrl } from "@/lib/stripeConnector";
 import { ConnectorToggle } from "./ConnectorToggle";
+import { StripeTile } from "./StripeTile";
 
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
@@ -105,9 +107,10 @@ function ConnectorTable({
 }
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live }, enabledLayers] = await Promise.all([
+  const [{ connectors, live }, enabledLayers, stripeConfig] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
+    queryStripeConfig(),
   ]);
   const connected = connectedCount(connectors);
 
@@ -123,6 +126,14 @@ export default async function ConnectorsPage() {
           </Card>
         );
       })}
+
+      <Card title="Third-party integrations">
+        <p className="mb-3 max-w-prose text-xs text-muted">
+          Direct webhook integrations that bypass the generic CDP path — Stripe today, more to come
+          (CTO-117). Each ships with a per-tenant signing secret and a verified ingest endpoint.
+        </p>
+        <StripeTile initialConfig={stripeConfig} webhookUrl={webhookUrl()} />
+      </Card>
     </div>
   );
 
