@@ -736,3 +736,56 @@ export async function queryAttribution(
     return { filters, perProvider, totals, isMock: false };
   });
 }
+
+// --- Compare (Workflow 2) — current model from real traffic --------------------------------------
+//
+// Replaces the "current" half of the hardcoded mock in lib/compare.ts with a live read. Candidates,
+// quality scores, and latencies still mock today (those need workflow-5 replay infra). At least the
+// "this is what you're running" half stops being a fiction.
+//
+// The chatbot demo's catalog-miss workaround pins span attrs to gpt-5-mini and stashes the real
+// provider/model in SpanAttributes['chatbot.real_provider'] / ['chatbot.real_model']. Prefer those
+// when present so the dashboard shows what the customer actually called, not the pinning hack.
+// CTO-106 will retire the workaround once the price catalog learns real models.
+export async function queryCurrentModel(): Promise<{
+  model: string;
+  provider: string;
+  monthlyCostMicroUsd: number;
+} | null> {
+  return tryLive(async (db, tenant) => {
+    const out = await rows<{
+      model: string;
+      provider: string;
+      cost7d: string;
+    }>(
+      db,
+      `SELECT
+         coalesce(
+           nullIf(any(SpanAttributes['chatbot.real_model']), ''),
+           any(GenAiResponseModel),
+           any(GenAiRequestModel)
+         ) AS model,
+         coalesce(
+           nullIf(any(SpanAttributes['chatbot.real_provider']), ''),
+           any(GenAiSystem)
+         ) AS provider,
+         sum(EstimatedCost) AS cost7d
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 7 DAY
+         AND coalesce(GenAiResponseModel, GenAiRequestModel) != ''
+       GROUP BY coalesce(GenAiResponseModel, GenAiRequestModel)
+       ORDER BY count() DESC
+       LIMIT 1`,
+      tenant,
+    );
+    if (out.length === 0 || !out[0].model) return null;
+    // Cost over 7 days → linearly projected to a 30-day month. Honest about what this is.
+    const monthlyCostMicroUsd = Math.round((micro(out[0].cost7d) * 30) / 7);
+    return {
+      model: out[0].model,
+      provider: out[0].provider || "unknown",
+      monthlyCostMicroUsd,
+    };
+  });
+}
