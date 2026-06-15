@@ -125,15 +125,18 @@ interface SessionResult {
   errors: number;
 }
 
-// Mirrors lib/tally.ts pinned rates so the driver can summarize before the
-// gateway ingests. ClickHouse remains the source of truth.
-const PIN_INPUT_PER_MTOK = 0.25;
-const PIN_OUTPUT_PER_MTOK = 2.0;
+// Rough driver-side cost estimate for the run summary printed at the end of
+// `drive-traffic`. The gateway's catalog (CTO-106) computes authoritative cost
+// from real provider+model+tokens; ClickHouse remains the source of truth.
+// Rates here are a coarse blended average and are not used for any dashboard
+// number — only the local summary line.
+const SUMMARY_BLENDED_INPUT_PER_MTOK = 1.5;
+const SUMMARY_BLENDED_OUTPUT_PER_MTOK = 8.0;
 
-function pinnedCostMicroUsd(inputTok: number, outputTok: number): number {
+function estimatedSummaryCostMicroUsd(inputTok: number, outputTok: number): number {
   return Math.round(
-    ((inputTok * PIN_INPUT_PER_MTOK) / 1_000_000 +
-      (outputTok * PIN_OUTPUT_PER_MTOK) / 1_000_000) *
+    ((inputTok * SUMMARY_BLENDED_INPUT_PER_MTOK) / 1_000_000 +
+      (outputTok * SUMMARY_BLENDED_OUTPUT_PER_MTOK) / 1_000_000) *
       1_000_000,
   );
 }
@@ -252,7 +255,7 @@ async function runSession(
     turns: messages.length,
     inputTokens,
     outputTokens,
-    costMicroUsd: pinnedCostMicroUsd(inputTokens, outputTokens),
+    costMicroUsd: estimatedSummaryCostMicroUsd(inputTokens, outputTokens),
     converted,
     errors,
   };
