@@ -596,6 +596,48 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
   });
 }
 
+// --- Tenant integration status (CTO-117) --------------------------------------------------------
+//
+// The /connectors page used to lean on a hardcoded mockActivity to fill in third-party integration
+// state. The real source is the gateway's tenant_integration_runs table, exposed via
+// GET /v1/tenant/integrations/status. We fall back to null on any error so the route can paint the
+// page with the static mockActivity (same pattern as every other gateway-facing helper here).
+
+/** One row per third-party integration that has had at least one run. */
+export interface IntegrationStatusRow {
+  connector_id: string;
+  last_run_at: string;
+  last_run_status: "success" | "partial" | "failed";
+  last_run_event_count: number;
+  last_run_error_message: string | null;
+  total_events_24h: number;
+  total_events_7d: number;
+}
+
+/**
+ * Fetch the caller's per-tenant third-party integration status from the gateway. Returns null on
+ * any error (gateway unreachable, non-2xx, parse failure) so the route can fall back to the static
+ * mockActivity catalog rather than blanking the page.
+ */
+export async function queryIntegrationStatus(): Promise<IntegrationStatusRow[] | null> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/tenant/integrations/status`, {
+      headers: { "x-tenant-id": TENANT },
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      console.warn(`[integrations] /v1/tenant/integrations/status HTTP ${res.status}; falling back`);
+      return null;
+    }
+    const body = (await res.json()) as { integrations?: IntegrationStatusRow[] };
+    return Array.isArray(body.integrations) ? body.integrations : [];
+  } catch (err) {
+    console.warn("[integrations] gateway unreachable:", (err as Error).message);
+    return null;
+  }
+}
+
 // Connector activity (CTO-63/68): which supported cost/revenue sources are actually producing data.
 // Cost sources are read off otel_spans cost layers; revenue sources off business_events.Source. The
 // result is keyed by connector id so applyActivity() can mark each catalog entry connected/available.

@@ -78,6 +78,7 @@ from gateway.eval_executor import (
 )
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
+from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
 from gateway.tenant_stripe import TenantStripeStore
 from gateway.validation import SpanValidator, span_item_id
@@ -95,6 +96,9 @@ async def lifespan(app: FastAPI):
     app.state.auth = ApiKeyAuth(settings)
     app.state.tenant_connectors = TenantConnectorStore(settings)
     app.state.tenant_stripe = TenantStripeStore(settings)
+    # Per-tenant third-party integration run status (CTO-117): Stripe / Segment / HubSpot / Pendo.
+    # Workers call .record_run after each cycle; the dashboard reads via /v1/tenant/integrations/status.
+    app.state.tenant_integrations = TenantIntegrationStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -672,6 +676,26 @@ def get_tenant_stripe(
     )
 
 
+@app.get("/v1/tenant/integrations/status")
+def list_tenant_integration_status(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Per-tenant third-party integration run status (CTO-117).
+
+    Returns one entry per integration the tenant has had at least one run for. The dashboard
+    merges this against its static catalog of supported third-party integrations and renders
+    catalog-entries-without-a-row as "Not connected" (the honest default for fresh tenants).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantIntegrationStore = app.state.tenant_integrations
+    rows = store.get_status(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "integrations": [r.as_dict() for r in rows]},
+        status_code=200,
+    )
+
+
 @app.post("/v1/stripe/webhook")
 async def stripe_webhook(
     request: Request,
@@ -772,6 +796,16 @@ async def stripe_webhook(
         raise HTTPException(status_code=503, detail="storage unavailable") from None
 
     seen.add(key)
+
+    # CTO-117: stamp the integration run so the /connectors page lights up the Stripe card.
+    # Best-effort — a postgres outage here must not turn a 200 into a 500 (Stripe would retry
+    # and we'd double-count the business_event).
+    integrations: TenantIntegrationStore = app.state.tenant_integrations
+    try:
+        integrations.record_run(tenant, "stripe", "success", event_count=1)
+    except Exception:  # noqa: BLE001
+        logger.exception("tenant_integration_runs upsert failed for tenant %s", tenant)
+
     return JSONResponse(
         {
             "ok": True,

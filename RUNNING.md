@@ -221,6 +221,13 @@ Once events start landing, `/attribution` lights up two new columns:
 **Value/user** and **Margin/user** (with margin % below). Cells stay `—`
 until enough events arrive — we never fabricate numbers from absent data.
 
+As a side-effect, the **Stripe card** in the third-party integrations section of
+`/connectors` flips from "Not connected" to a green "Connected" card showing
+real `last_run_at` and rolling 24h / 7d event counts (CTO-117). The Stripe
+webhook handler calls `tenant_integration_runs.record_run` after each successful
+insert, so the card stays current with no extra config. Segment / HubSpot /
+Pendo cards remain "Not connected" until their workers land.
+
 ## Step 8: real cross-provider projections via replay
 
 Workflows 2 (Compare) and 5 (Estimate) used to scale a mock projection off

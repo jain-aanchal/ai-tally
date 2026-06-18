@@ -10,12 +10,19 @@ import {
 } from "@/lib/connectors";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import { queryStripeConfig, webhookUrl } from "@/lib/stripeConnector";
+import type { IntegrationStatusRow } from "@/lib/clickhouse";
+import { INTEGRATIONS, applyIntegrationStatus } from "@/lib/integrations";
 import { ConnectorToggle } from "./ConnectorToggle";
+import { IntegrationCards } from "./IntegrationCards";
 import { StripeTile } from "./StripeTile";
 
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
   live: boolean;
+  // CTO-117: real per-tenant third-party integration status from the gateway. Empty array on a
+  // fresh tenant — the UI renders every card as "Not connected" in that case.
+  integrations: IntegrationStatusRow[];
+  integrationsLive: boolean;
 }
 
 const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] = [
@@ -107,12 +114,15 @@ function ConnectorTable({
 }
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live }, enabledLayers, stripeConfig] = await Promise.all([
+  const [{ connectors, live, integrations }, enabledLayers, stripeConfig] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
     queryStripeConfig(),
   ]);
   const connected = connectedCount(connectors);
+  // CTO-117: derive the three-state per-integration view from the gateway rows. A tenant with no
+  // rows (fresh / nothing wired) gets a deck of "Not connected" cards — no fabricated stats.
+  const integrationCards = applyIntegrationStatus(INTEGRATIONS, integrations ?? []);
 
   const body = (
     <div className="space-y-6">
@@ -129,10 +139,17 @@ export default async function ConnectorsPage() {
 
       <Card title="Third-party integrations">
         <p className="mb-3 max-w-prose text-xs text-muted">
-          Direct webhook integrations that bypass the generic CDP path — Stripe today, more to come
-          (CTO-117). Each ships with a per-tenant signing secret and a verified ingest endpoint.
+          Direct webhook / poller integrations. Each card shows the real per-tenant status from the
+          gateway (CTO-117): healthy, failing, or not-connected. The Stripe webhook lights up its
+          card automatically; Segment / HubSpot / Pendo light up as their workers land.
         </p>
-        <StripeTile initialConfig={stripeConfig} webhookUrl={webhookUrl()} />
+        <IntegrationCards cards={integrationCards} />
+        <div id="stripe-tile" className="mt-4 border-t border-edge pt-4">
+          <p className="mb-2 text-xs text-muted">
+            Stripe webhook setup — paste the signing secret from your Stripe Dashboard.
+          </p>
+          <StripeTile initialConfig={stripeConfig} webhookUrl={webhookUrl()} />
+        </div>
       </Card>
     </div>
   );
