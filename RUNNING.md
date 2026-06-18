@@ -184,6 +184,23 @@ Walkthrough, configuration knobs, and the upstream patch list are in
 
 When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
 
+## Live updates
+
+Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the
+browser on a short interval — leave the tab open while you run demos and new
+spans appear without a manual reload (CTO-108). Pages still server-render the
+first paint; a small client wrapper polls the same `/api/...` endpoint and
+re-renders the body on each tick.
+
+Knobs:
+
+- `NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS` — poll interval, default `5000`.
+  Set to `0` to disable polling entirely (the page becomes static again).
+- Polling pauses automatically when the tab is hidden, and fetches once
+  immediately on focus — no wasted requests sitting in a background tab.
+- On transient API errors the page keeps the last good data and logs the
+  error to `console.warn`; the badge stays green so a 5xx never blanks the UI.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
