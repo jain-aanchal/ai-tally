@@ -2,7 +2,7 @@
 // Route tests for /api/compare — exercises both the replay-backed and mock-fallback branches
 // (CTO-113).
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Mock the clickhouse module before importing the route so the route picks up our stubs.
 vi.mock("@/lib/clickhouse", () => ({
@@ -36,6 +36,9 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 1_310_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
     });
     queryReplayCandidates.mockResolvedValueOnce(null);
 
@@ -43,9 +46,31 @@ describe("/api/compare", () => {
     const body = await res.json();
     expect(body.replay_source).toBe("mock");
     expect(body.current.model).toBe("claude-sonnet-4-5");
+    // CTO-115: live p95/error spliced through.
+    expect(body.current.latencyP95Ms).toBe(2400);
+    expect(body.current.errorRate).toBeCloseTo(0.004, 6);
     // Candidate costs should be rescaled small (off the live $1.31/mo baseline), not the
     // original $1,780/mo mock value.
     expect(body.candidates[0].monthlyCostMicroUsd).toBeLessThan(2_000_000);
+  });
+
+  // CTO-115: n < 50 in the 7-day window → queryCurrentModel returns nulls for latency/error,
+  // and the route surfaces them on the wire as null so the page can render "—".
+  it("surfaces null latency/error when n < 50 (mock-fallback branch)", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 1_310_000,
+      latencyP95Ms: null,
+      errorRate: null,
+      sampleCount: 12,
+    });
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.current.latencyP95Ms).toBeNull();
+    expect(body.current.errorRate).toBeNull();
   });
 
   it("uses replay candidates when /v1/replay returns samples", async () => {
@@ -53,6 +78,9 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
     });
     queryReplayCandidates.mockResolvedValueOnce({
       samples_available: 50,
@@ -107,6 +135,9 @@ describe("/api/compare", () => {
       model: "claude-haiku-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 1_000_000,
+      latencyP95Ms: 1500,
+      errorRate: 0.005,
+      sampleCount: 100,
     });
     queryReplayCandidates.mockResolvedValueOnce({
       samples_available: 30,

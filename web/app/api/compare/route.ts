@@ -67,6 +67,10 @@ export async function GET(req: Request) {
         model: live.model,
         provider: live.provider,
         monthlyCostMicroUsd: live.monthlyCostMicroUsd,
+        // CTO-115: live p95 / error from otel_spans over the same 7-day window. `null` when
+        // fewer than 50 spans landed — page renders "—" so we never fabricate.
+        latencyP95Ms: live.latencyP95Ms,
+        errorRate: live.errorRate,
       },
       candidates,
       recommendation: {
@@ -117,6 +121,9 @@ export async function GET(req: Request) {
       model: live.model,
       provider: live.provider,
       monthlyCostMicroUsd: live.monthlyCostMicroUsd,
+      // CTO-115: live p95 / error from otel_spans. `null` when n < 50 in the 7-day window.
+      latencyP95Ms: live.latencyP95Ms,
+      errorRate: live.errorRate,
     },
     candidates,
     recommendation: {

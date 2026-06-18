@@ -795,18 +795,37 @@ export async function queryAttribution(
 // GenAiResponseModel). The SpanAttributes['chatbot.real_provider'] / ['chatbot.real_model']
 // reads below are a transitional fallback for historical rows emitted before CTO-106 retired
 // the workaround and can be removed once the 30-day window has rolled.
+// CTO-115: suppress live p95 / error rate when the 7-day window has fewer than this many spans.
+// Small samples produce noisy quantiles and error rates we shouldn't display as if real.
+export const MIN_SPANS_FOR_LATENCY_ERROR = 50;
+
 export async function queryCurrentModel(): Promise<{
   model: string;
   provider: string;
   monthlyCostMicroUsd: number;
+  // null when sampleCount < MIN_SPANS_FOR_LATENCY_ERROR — the route surfaces these as "—" on the
+  // page rather than fabricating numbers off a too-small window.
+  latencyP95Ms: number | null;
+  errorRate: number | null;
+  sampleCount: number;
 } | null> {
   return tryLive(async (db, tenant) => {
     const out = await rows<{
       model: string;
       provider: string;
       cost7d: string;
+      // ClickHouse can serialize numeric aggregates as either JSON numbers or strings
+      // (count() over UInt64 frequently lands as a string). Accept both at the boundary.
+      p95Ms: string | number | null;
+      errRate: string | number | null;
+      sampleCount: string | number;
     }>(
       db,
+      // StatusCode is OTel semconv (UInt8): 0=Unset, 1=Ok, 2=Error — so an error span is
+      // `StatusCode = 2`. (The ticket suggested HTTP-style `>= 400`; the codebase already
+      // uses `=== 2` for OTel error semantics, e.g. agents.ts toRunSpan().)
+      // DurationNs is wrapped in `if(... > 0, ..., NULL)` because some insertion paths land
+      // 0-ns durations (mid-stream / early-fail) which would otherwise drag the p95 down.
       `SELECT
          coalesce(
            nullIf(any(SpanAttributes['chatbot.real_model']), ''),
@@ -817,7 +836,10 @@ export async function queryCurrentModel(): Promise<{
            nullIf(any(SpanAttributes['chatbot.real_provider']), ''),
            any(GenAiSystem)
          ) AS provider,
-         sum(EstimatedCost) AS cost7d
+         sum(EstimatedCost) AS cost7d,
+         quantileExact(0.95)(if(DurationNs > 0, DurationNs, NULL)) / 1e6 AS p95Ms,
+         countIf(StatusCode = 2) / count() AS errRate,
+         count() AS sampleCount
        FROM otel_spans
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 7 DAY
@@ -830,10 +852,38 @@ export async function queryCurrentModel(): Promise<{
     if (out.length === 0 || !out[0].model) return null;
     // Cost over 7 days → linearly projected to a 30-day month. Honest about what this is.
     const monthlyCostMicroUsd = Math.round((micro(out[0].cost7d) * 30) / 7);
+    const sampleCount =
+      typeof out[0].sampleCount === "number"
+        ? out[0].sampleCount
+        : parseInt(out[0].sampleCount, 10) || 0;
+    const enoughSamples = sampleCount >= MIN_SPANS_FOR_LATENCY_ERROR;
+    const p95Raw = out[0].p95Ms;
+    const errRaw = out[0].errRate;
+    const p95Num =
+      p95Raw === null
+        ? null
+        : typeof p95Raw === "number"
+          ? p95Raw
+          : parseFloat(p95Raw);
+    const errNum =
+      errRaw === null
+        ? null
+        : typeof errRaw === "number"
+          ? errRaw
+          : parseFloat(errRaw);
+    const latencyP95Ms =
+      enoughSamples && p95Num !== null && Number.isFinite(p95Num)
+        ? Math.round(p95Num)
+        : null;
+    const errorRate =
+      enoughSamples && errNum !== null && Number.isFinite(errNum) ? errNum : null;
     return {
       model: out[0].model,
       provider: out[0].provider || "unknown",
       monthlyCostMicroUsd,
+      latencyP95Ms,
+      errorRate,
+      sampleCount,
     };
   });
 }
