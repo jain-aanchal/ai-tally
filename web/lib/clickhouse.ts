@@ -974,3 +974,85 @@ export async function queryReplayCandidates(
     return null;
   }
 }
+
+// --- Pairwise LLM-judge eval (CTO-114) --------------------------------------------------------
+//
+// The gateway's /v1/eval runs a frontier judge over the replay outputs and returns per-candidate
+// win-rate with a Wilson 95% CI. We cache aggressively (10 minutes) because each pass burns real
+// judge spend — the dashboard must not re-judge on every refresh.
+
+export interface EvalCandidateRow {
+  provider: string;
+  model: string;
+  samples_judged: number;
+  current_wins: number;
+  candidate_wins: number;
+  ties: number;
+  errors: number;
+  win_rate: number;
+  win_rate_ci_lo: number;
+  win_rate_ci_hi: number;
+  judge_cost_micro_usd: number;
+}
+
+export interface EvalProjection {
+  samples_available: number;
+  per_candidate: EvalCandidateRow[];
+  diagnostics: {
+    judge_model: string;
+    rubric_version: string;
+    judge_cost_micro_usd: number;
+  };
+}
+
+const EVAL_CACHE_TTL_MS = 10 * 60 * 1000;
+const _evalCache = new Map<string, { at: number; data: EvalProjection | null }>();
+
+/**
+ * Fetch real pairwise-LLM-judge win-rates from the gateway's `/v1/eval` endpoint.
+ *
+ * Returns null when no eval has run for this tenant yet (no replay corpus, or eval opted-out),
+ * or when the gateway is unreachable. The `/api/compare` route honors that null by surfacing
+ * the per-candidate `qualityScore` as `null` (rendered "—") rather than fabricating a number.
+ * Cached for {@link EVAL_CACHE_TTL_MS} per (tenant, tag).
+ */
+export async function queryEvalCandidates(
+  featureTag?: string,
+  candidates: Array<{ provider: string; model: string }> = DEFAULT_CANDIDATES,
+): Promise<EvalProjection | null> {
+  const tenant = TENANT;
+  const cacheKey = `${tenant}:${featureTag ?? ""}`;
+  const cached = _evalCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < EVAL_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/eval`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      body: JSON.stringify({
+        tenant_id: tenant,
+        feature_tag: featureTag,
+        candidate_models: candidates,
+        sample_size: 50,
+      }),
+      cache: "no-store",
+      // Eval is synchronous — judge calls are slower than replay calls. 10-minute timeout
+      // matches the gateway-side allowance.
+      signal: AbortSignal.timeout(600_000),
+    });
+    if (!res.ok) {
+      console.warn(`[eval] /v1/eval HTTP ${res.status}; falling back to null`);
+      _evalCache.set(cacheKey, { at: Date.now(), data: null });
+      return null;
+    }
+    const body = (await res.json()) as EvalProjection;
+    const data = body.samples_available > 0 ? body : null;
+    _evalCache.set(cacheKey, { at: Date.now(), data });
+    return data;
+  } catch (err) {
+    console.warn("[eval] gateway unreachable, qualityScore will be null:", (err as Error).message);
+    _evalCache.set(cacheKey, { at: Date.now(), data: null });
+    return null;
+  }
+}

@@ -2,12 +2,13 @@
 // Route tests for /api/compare — exercises both the replay-backed and mock-fallback branches
 // (CTO-113).
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the clickhouse module before importing the route so the route picks up our stubs.
 vi.mock("@/lib/clickhouse", () => ({
   queryCurrentModel: vi.fn(),
   queryReplayCandidates: vi.fn(),
+  queryEvalCandidates: vi.fn(),
 }));
 
 import { GET as CompareGET } from "./route";
@@ -15,6 +16,12 @@ import * as ch from "@/lib/clickhouse";
 
 const queryCurrentModel = ch.queryCurrentModel as unknown as ReturnType<typeof vi.fn>;
 const queryReplayCandidates = ch.queryReplayCandidates as unknown as ReturnType<typeof vi.fn>;
+const queryEvalCandidates = ch.queryEvalCandidates as unknown as ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  // Default: no eval pass has run. CTO-114 tests below override per-case.
+  queryEvalCandidates.mockResolvedValue(null);
+});
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -169,5 +176,146 @@ describe("/api/compare", () => {
     const body = await res.json();
     expect(body.candidates).toHaveLength(1);
     expect(body.candidates[0].model).toBe("gpt-4o-mini");
+  });
+
+  // --- CTO-114: eval-backed quality scores -------------------------------------------------
+
+  it("CTO-114: surfaces real win_rate + Wilson CI when eval has judged >= 10 samples", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 50,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 50,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+    queryEvalCandidates.mockResolvedValueOnce({
+      samples_available: 50,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          samples_judged: 25,
+          current_wins: 10,
+          candidate_wins: 11,
+          ties: 4,
+          errors: 0,
+          win_rate: 0.44,
+          win_rate_ci_lo: 0.26,
+          win_rate_ci_hi: 0.63,
+          judge_cost_micro_usd: 50_000,
+        },
+      ],
+      diagnostics: { judge_model: "claude-opus-4-8", rubric_version: "rubric-v1", judge_cost_micro_usd: 50_000 },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
+    expect(haiku.qualityScore).toBeCloseTo(0.44);
+    expect(haiku.qualityCi).toEqual({ lo: 0.26, hi: 0.63 });
+    // Current model is never paired against itself — quality is null.
+    expect(body.current.qualityScore).toBeNull();
+  });
+
+  it("CTO-114: surfaces null when eval has judged FEWER than 10 samples — never fabricates", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 50,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 50,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+    queryEvalCandidates.mockResolvedValueOnce({
+      samples_available: 5,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          samples_judged: 5, // below the 10-sample floor
+          current_wins: 2,
+          candidate_wins: 2,
+          ties: 1,
+          errors: 0,
+          win_rate: 0.4,
+          win_rate_ci_lo: 0.12,
+          win_rate_ci_hi: 0.77,
+          judge_cost_micro_usd: 10_000,
+        },
+      ],
+      diagnostics: { judge_model: "claude-opus-4-8", rubric_version: "rubric-v1", judge_cost_micro_usd: 10_000 },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
+    expect(haiku.qualityScore).toBeNull();
+    expect(haiku.qualityCi).toBeUndefined();
+  });
+
+  it("CTO-114: surfaces null when eval has not run at all", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 50,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 50,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+    // queryEvalCandidates returns null by default (beforeEach).
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.candidates[0].qualityScore).toBeNull();
+    expect(body.current.qualityScore).toBeNull();
   });
 });

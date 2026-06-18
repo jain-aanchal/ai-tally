@@ -112,6 +112,14 @@ export default async function ComparePage({
   );
 }
 
+type RowMetric = {
+  monthlyCostMicroUsd: MicroUSD;
+  qualityScore: number | null; // CTO-114
+  qualityCi?: { lo: number; hi: number }; // CTO-114
+  latencyP95Ms: number | null; // CTO-115
+  errorRate: number | null; // CTO-115
+};
+
 function Row({
   label,
   m,
@@ -119,18 +127,8 @@ function Row({
   highlight,
 }: {
   label: string;
-  m: {
-    monthlyCostMicroUsd: MicroUSD;
-    qualityScore: number;
-    latencyP95Ms: number | null;
-    errorRate: number | null;
-  };
-  current?: {
-    monthlyCostMicroUsd: MicroUSD;
-    qualityScore: number;
-    latencyP95Ms: number | null;
-    errorRate: number | null;
-  };
+  m: RowMetric;
+  current?: RowMetric;
   highlight?: boolean;
 }) {
   // CTO-115: latency/error on the live `current` row are null when fewer than 50 spans landed
@@ -145,8 +143,7 @@ function Row({
         {current && <Delta v={deltaPct(current.monthlyCostMicroUsd, m.monthlyCostMicroUsd)} betterWhenNegative />}
       </td>
       <td className="py-2 text-right tabular-nums">
-        {(m.qualityScore * 100).toFixed(1)}%
-        {current && <DeltaPp v={(m.qualityScore - current.qualityScore) * 100} betterWhenPositive />}
+        <QualityCell m={m} current={current} />
       </td>
       <td className="py-2 text-right tabular-nums">
         {m.latencyP95Ms === null ? (
@@ -173,6 +170,35 @@ function Row({
         )}
       </td>
     </tr>
+  );
+}
+
+// CTO-114: quality cell renders the real pairwise-LLM-judge win-rate when present, with the
+// Wilson 95% CI underneath in muted text (matches Attribution's confidence display). When
+// `qualityScore` is null — n < 10 judged samples, or no eval pass has run — show "—" with a
+// hover hint. Deliberately no fallback to mock; the ticket is explicit.
+function QualityCell({ m, current }: { m: RowMetric; current?: RowMetric }) {
+  if (m.qualityScore === null) {
+    return (
+      <span className="text-muted" title="needs ≥10 judged samples — run eval pass">
+        —
+      </span>
+    );
+  }
+  return (
+    <div className="flex flex-col items-end leading-tight">
+      <span>
+        {(m.qualityScore * 100).toFixed(1)}%
+        {current && current.qualityScore !== null && (
+          <DeltaPp v={(m.qualityScore - current.qualityScore) * 100} betterWhenPositive />
+        )}
+      </span>
+      {m.qualityCi && (
+        <span className="text-xs text-muted">
+          [{Math.round(m.qualityCi.lo * 100)}–{Math.round(m.qualityCi.hi * 100)}%]
+        </span>
+      )}
+    </div>
   );
 }
 

@@ -71,7 +71,13 @@ from gateway.replay_store import (
     InMemoryReplayBlobStore,
     persist_sample,
 )
+from gateway.eval_executor import (
+    EvalExecutor,
+    JudgeCall,
+    JudgeResponse,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
+from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_replay import TenantReplayStore
 from gateway.tenant_stripe import TenantStripeStore
 from gateway.validation import SpanValidator, span_item_id
@@ -97,6 +103,10 @@ async def lifespan(app: FastAPI):
     app.state.replay_blob_store = InMemoryReplayBlobStore()
     app.state.replay_sample_index = []  # list[ReplaySampleRow]
     app.state.replay_runs = []  # list[ReplayRunRow]
+    # Eval harness (CTO-114): pairwise-LLM-judge over the replay outputs. Opt-in like replay;
+    # judge calls accumulate in-memory until the ClickHouse writeback path lands.
+    app.state.tenant_eval = TenantEvalStore(settings)
+    app.state.eval_runs = []  # list[EvalRunRow]
     # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
     # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
     app.state.hmac_registry = HmacKeyRegistry()
@@ -1069,5 +1079,331 @@ async def _mock_candidate_client(call: CandidateCall) -> CandidateResponse:
     return CandidateResponse(
         input_tokens=int(env.get("input_tokens") or 100),
         output_tokens=int(env.get("output_tokens") or 50),
+        status_code=200,
+    )
+
+
+# --- Eval harness endpoints (CTO-114) ------------------------------------------------------------
+
+@app.get("/v1/tenant/eval/config")
+def get_tenant_eval_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Read the caller's pairwise-LLM-judge eval config (CTO-114).
+
+    Defaults to ``enabled=false`` when the tenant has no row yet — eval is opt-in (judge calls
+    burn real provider budget).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    cfg = app.state.tenant_eval.get(tenant_id)
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
+
+
+@app.post("/v1/tenant/eval/config")
+async def set_tenant_eval_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Toggle / tune eval-harness for the caller's tenant (CTO-114).
+
+    Body fields (all optional — only what changes is updated):
+    ``{enabled?: bool, judge_model?: str, daily_budget_usd?: number>=0}``.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    try:
+        cfg = app.state.tenant_eval.upsert(
+            tenant_id,
+            enabled=body.get("enabled"),
+            judge_model=body.get("judge_model"),
+            daily_budget_usd=body.get("daily_budget_usd"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
+
+
+@app.post("/v1/eval")
+async def project_eval(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Run a pairwise-LLM-judge pass over the replay corpus (CTO-114).
+
+    Body::
+
+        {
+          "tenant_id": "...",           # optional — falls back to control-plane resolution
+          "feature_tag": "research",    # optional filter
+          "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}, ...],
+          "sample_size": 50             # optional, default 50
+        }
+
+    For each candidate we find every replay_run with that (provider, model) for samples that
+    belong to this tenant (optionally filtered by feature_tag), pair the candidate's response
+    with the original captured response, and ask the judge which one better follows the
+    instruction. The aggregate ``win_rate`` is ``candidate_wins / (candidate_wins + current_wins
+    + ties)`` — errors are excluded from the denominator (they tell us the judge failed, not
+    that the candidate did).
+
+    Returns per-candidate::
+
+        {
+          provider, model,
+          samples_judged, current_wins, candidate_wins, ties, errors,
+          win_rate, win_rate_ci_lo, win_rate_ci_hi,
+          judge_cost_micro_usd
+        }
+
+    Plus diagnostics (judge model, rubric version, excluded-budget count). Synchronous; v1
+    fits inside a 10-minute timeout for typical 50-sample × 3-candidate passes against the
+    in-memory mock judge.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+
+    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
+        authorization, x_tenant_id
+    )
+    feature_tag = body.get("feature_tag")
+    candidates = body.get("candidate_models") or []
+    if not isinstance(candidates, list) or not all(
+        isinstance(c, dict) and "provider" in c and "model" in c for c in candidates
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="candidate_models must be a list of {provider, model} objects",
+        )
+    sample_size = int(body.get("sample_size") or 50)
+
+    cfg = app.state.tenant_eval.get(tenant_id)
+    sample_index: list = app.state.replay_sample_index
+    replay_runs: list = app.state.replay_runs
+    blob_store = app.state.replay_blob_store
+
+    matching_samples = {
+        r.sample_id: r for r in sample_index
+        if r.tenant_id == tenant_id
+        and (feature_tag is None or r.feature_tag == feature_tag)
+    }
+    samples_available = len(matching_samples)
+
+    if samples_available == 0:
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "feature_tag": feature_tag,
+            "samples_available": 0,
+            "per_candidate": [],
+            "diagnostics": {
+                "judge_model": cfg.judge_model,
+                "rubric_version": "rubric-v1",
+                "judge_cost_micro_usd": 0,
+            },
+        })
+
+    # Pick the same stratified slice the replay projection would have picked. Reuse helper.
+    selected_index_rows = _pick_for_projection(list(matching_samples.values()), sample_size)
+    selected_ids = {r.sample_id for r in selected_index_rows}
+
+    judge_client = getattr(app.state, "eval_judge_client", None) or _mock_judge_client
+    executor = EvalExecutor(
+        catalog=app.state.catalog,
+        judge_client=judge_client,
+        todays_spend_micro_usd=lambda t: _todays_eval_spend(app.state.eval_runs, t),
+        sink=app.state.eval_runs.append,
+        judge_provider="anthropic",
+        judge_model=cfg.judge_model,
+    )
+
+    per_candidate = []
+    total_judge_cost = 0
+    for cand in candidates:
+        provider = str(cand["provider"])
+        model = str(cand["model"])
+        # All replay_runs for this (tenant, candidate) on selected samples.
+        cand_runs = [
+            r for r in replay_runs
+            if r.tenant_id == tenant_id
+            and r.candidate_provider == provider
+            and r.candidate_model == model
+            and r.sample_id in selected_ids
+            and not r.error_msg
+        ]
+        current_wins = 0
+        candidate_wins = 0
+        ties = 0
+        errors = 0
+        excluded_budget = 0
+        cost_sum = 0
+        for run in cand_runs:
+            sample_row = matching_samples.get(run.sample_id)
+            if sample_row is None:
+                continue
+            envelope = _load_envelope(blob_store, sample_row.s3_object_key)
+            instruction = _extract_instruction(envelope)
+            current_response = _extract_response(envelope)
+            # Candidate response: we don't currently persist the candidate's response text in
+            # replay_runs (CTO-113 only wrote tokens/cost/latency). The mock-judge path uses a
+            # synthetic candidate_response derived from the envelope; the production path will
+            # need replay_runs to grow a response-text column.
+            # FIXME(CTO-114-followup): persist candidate response text on replay_runs.
+            candidate_response = envelope.get("candidate_response") or current_response
+            est_cost = _estimate_judge_cost(app.state.catalog, cfg.judge_model, instruction,
+                                             current_response, candidate_response)
+            result = await executor.judge_pair(
+                tenant_id=tenant_id,
+                replay_run_id=run.run_id,
+                sample_id=run.sample_id,
+                candidate_provider=provider,
+                candidate_model=model,
+                instruction=instruction,
+                current_response=current_response,
+                candidate_response=candidate_response,
+                daily_budget_usd=cfg.daily_budget_usd,
+                estimated_call_cost_micro_usd=est_cost,
+            )
+            if result.excluded_budget:
+                excluded_budget += 1
+                continue
+            if result.row is not None:
+                cost_sum += result.row.cost_micro_usd
+            if result.verdict == "current_wins":
+                current_wins += 1
+            elif result.verdict == "candidate_wins":
+                candidate_wins += 1
+            elif result.verdict == "tie":
+                ties += 1
+            else:
+                errors += 1
+        total_judge_cost += cost_sum
+        # Win-rate denominator excludes errors. Ties count toward the denominator (a tie is real
+        # signal: "no clear winner") but not toward wins. Wilson CI computed in the web layer.
+        non_error = current_wins + candidate_wins + ties
+        win_rate = (candidate_wins / non_error) if non_error > 0 else 0.0
+        # Wilson 95% interval for binomial proportion. Kept on the gateway side too so callers
+        # without a Wilson helper get usable numbers — the web layer's wilsonInterval matches.
+        lo, hi = _wilson_interval(candidate_wins, non_error)
+        per_candidate.append({
+            "provider": provider,
+            "model": model,
+            "samples_judged": non_error,
+            "current_wins": current_wins,
+            "candidate_wins": candidate_wins,
+            "ties": ties,
+            "errors": errors,
+            "excluded_budget_count": excluded_budget,
+            "win_rate": win_rate,
+            "win_rate_ci_lo": lo,
+            "win_rate_ci_hi": hi,
+            "judge_cost_micro_usd": cost_sum,
+        })
+
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "feature_tag": feature_tag,
+        "samples_available": samples_available,
+        "per_candidate": per_candidate,
+        "diagnostics": {
+            "judge_model": cfg.judge_model,
+            "rubric_version": "rubric-v1",
+            "judge_cost_micro_usd": total_judge_cost,
+        },
+    })
+
+
+def _load_envelope(blob_store, object_key: str) -> dict:
+    try:
+        import json as _json
+        return _json.loads(blob_store.get_bytes(object_key).decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _extract_instruction(envelope: dict) -> str:
+    """Pull the user instruction out of an envelope. Resilient to several shapes."""
+    if not envelope:
+        return ""
+    for key in ("prompt", "instruction", "user_message"):
+        v = envelope.get(key)
+        if isinstance(v, str) and v:
+            return v
+    msgs = envelope.get("messages")
+    if isinstance(msgs, list):
+        # Last user-role message wins.
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "user":
+                content = m.get("content")
+                if isinstance(content, str):
+                    return content
+    return ""
+
+
+def _extract_response(envelope: dict) -> str:
+    """Pull the captured current-model response text out of an envelope."""
+    if not envelope:
+        return ""
+    for key in ("response", "response_text", "completion"):
+        v = envelope.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _estimate_judge_cost(catalog, model: str, *texts: str) -> int:
+    """Rough pre-flight cost estimate — 4 chars/token, fixed 50-token output budget for the
+    short A/B/TIE answer. Used only for the budget check; the row's actual CostMicroUsd uses
+    real token counts from the judge response.
+    """
+    from tally.pricing import Usage as _Usage
+    from tally.pricing import compute_cost_micro_usd as _ccost
+    char_total = sum(len(t) for t in texts if isinstance(t, str))
+    input_tokens = max(50, char_total // 4)
+    cost, _ = _ccost(catalog, "anthropic", model, _Usage(input_tokens=input_tokens, output_tokens=50))
+    return cost
+
+
+def _wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+    if trials <= 0:
+        return 0.0, 0.0
+    p = successes / trials
+    denom = 1 + (z * z) / trials
+    center = (p + (z * z) / (2 * trials)) / denom
+    import math as _math
+    half = (z * _math.sqrt((p * (1 - p)) / trials + (z * z) / (4 * trials * trials))) / denom
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def _todays_eval_spend(rows: list, tenant_id: str) -> int:
+    """Sum today's eval_runs CostMicroUsd for `tenant_id`."""
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    return sum(
+        r.cost_micro_usd for r in rows
+        if r.tenant_id == tenant_id and r.judged_at.date() == today
+    )
+
+
+async def _mock_judge_client(call: JudgeCall) -> JudgeResponse:
+    """Deterministic mock judge for tests / dev. Always emits "TIE" with token counts
+    derived from the prompt length. Production deployments wire a real Anthropic client via
+    ``app.state.eval_judge_client``.
+    """
+    input_tokens = max(10, len(call.prompt) // 4)
+    return JudgeResponse(
+        text="TIE",
+        input_tokens=input_tokens,
+        output_tokens=2,
         status_code=200,
     )

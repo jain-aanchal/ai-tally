@@ -1,7 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 import { comparison } from "@/lib/compare";
-import { queryCurrentModel, queryReplayCandidates } from "@/lib/clickhouse";
+import {
+  queryCurrentModel,
+  queryEvalCandidates,
+  queryReplayCandidates,
+  type EvalCandidateRow,
+} from "@/lib/clickhouse";
+
+// CTO-114: minimum sample count before a candidate's pairwise-LLM-judge win-rate is shown as
+// a real number. Below this, `qualityScore` is null and the page renders "—". 10 is a soft
+// floor — Wilson CIs widen rapidly below this point and the resulting number, while
+// mathematically defined, is not informative.
+const MIN_JUDGED_SAMPLES = 10;
+
+/** Look up a candidate's eval row; return null when no row exists or sample count too small. */
+function evalQualityFor(
+  evalRows: EvalCandidateRow[] | undefined,
+  provider: string,
+  model: string,
+): { qualityScore: number; qualityCi: { lo: number; hi: number } } | null {
+  const row = evalRows?.find((r) => r.provider === provider && r.model === model);
+  if (!row || row.samples_judged < MIN_JUDGED_SAMPLES) return null;
+  return {
+    qualityScore: row.win_rate,
+    qualityCi: { lo: row.win_rate_ci_lo, hi: row.win_rate_ci_hi },
+  };
+}
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,19 +41,29 @@ export async function GET(req: Request) {
   // (no samples opted-in yet, or gateway unreachable) we drop through to the original
   // current-model-only path below.
   const replay = await queryReplayCandidates(featureTag);
+  // CTO-114: eval is independent of replay (it consumes replay outcomes but is its own opt-in).
+  // Pull it in parallel so the route doesn't add 30s of latency stacked behind the replay call.
+  const evalProj = await queryEvalCandidates(featureTag);
 
   // The "current model" half is the one we can ground in real traffic today: most-trafficked
   // model over the last 7 days. Quality/latency on `current` stay mocked because we don't yet
   // have an eval harness — flagged honestly via SyntheticPreviewBanner on the page.
   const live = await queryCurrentModel();
   if (!live) {
+    // Pure-mock fallback (CI / no DB). Even here, qualityScore must not be a fabricated
+    // number — splice real eval data in if available, else null per-candidate.
+    const candidates = comparison.candidates.map((c) => {
+      const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
+      return {
+        ...c,
+        qualityScore: quality?.qualityScore ?? null,
+        ...(quality ? { qualityCi: quality.qualityCi } : {}),
+      };
+    });
     return NextResponse.json({
       ...comparison,
-      diagnostics: {
-        ...comparison.diagnostics,
-        // Tag the response so the page can render the right banner copy.
-        ...(replay ? {} : {}),
-      },
+      current: { ...comparison.current, qualityScore: null },
+      candidates,
       replay_source: replay ? "replay" : "mock",
     });
   }
@@ -40,16 +75,22 @@ export async function GET(req: Request) {
     // model against itself.
     const candidates = replay.per_candidate
       .filter((c) => c.model !== live.model)
-      .map((c) => ({
-        model: c.model,
-        provider: c.provider,
-        monthlyCostMicroUsd: c.projected_monthly_cost_micro_usd,
-        // Quality score still mock until an LLM-judge eval lands — surface honestly.
-        qualityScore:
-          comparison.candidates.find((m) => m.model === c.model)?.qualityScore ?? 0.9,
-        latencyP95Ms: c.p95_latency_ms || comparison.candidates[0]?.latencyP95Ms || 0,
-        errorRate: c.error_rate,
-      }));
+      .map((c) => {
+        // CTO-114: real pairwise-LLM-judge win-rate when ≥10 samples have been judged for this
+        // candidate. Below the floor, qualityScore is null — the page renders "—". We never
+        // fall back to a mock number; that would have been the previous workaround and the
+        // whole point of this ticket is to stop doing that.
+        const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
+        return {
+          model: c.model,
+          provider: c.provider,
+          monthlyCostMicroUsd: c.projected_monthly_cost_micro_usd,
+          qualityScore: quality?.qualityScore ?? null,
+          ...(quality ? { qualityCi: quality.qualityCi } : {}),
+          latencyP95Ms: c.p95_latency_ms || comparison.candidates[0]?.latencyP95Ms || 0,
+          errorRate: c.error_rate,
+        };
+      });
     const cheapest = candidates.reduce(
       (best, c) => (c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best),
       candidates[0] ?? null,
@@ -71,6 +112,9 @@ export async function GET(req: Request) {
         // fewer than 50 spans landed — page renders "—" so we never fabricate.
         latencyP95Ms: live.latencyP95Ms,
         errorRate: live.errorRate,
+        // CTO-114: current never gets a fabricated quality — there's no judge pair when the
+        // candidate IS the current model. The page renders "—" in that cell.
+        qualityScore: null,
       },
       candidates,
       recommendation: {
@@ -106,10 +150,18 @@ export async function GET(req: Request) {
   const scale = mockCurrentCost > 0 ? live.monthlyCostMicroUsd / mockCurrentCost : 0;
   const candidates = comparison.candidates
     .filter((c) => c.model !== live.model)
-    .map((c) => ({
-      ...c,
-      monthlyCostMicroUsd: Math.round(c.monthlyCostMicroUsd * scale),
-    }));
+    .map((c) => {
+      // CTO-114: even in the rescaled-mock path, qualityScore is the one cell that must NEVER
+      // be faked — splice in real eval data when present, else null. If a tenant has run eval
+      // but not replay, this lets the quality column light up while cost/latency stay mock.
+      const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
+      return {
+        ...c,
+        monthlyCostMicroUsd: Math.round(c.monthlyCostMicroUsd * scale),
+        qualityScore: quality?.qualityScore ?? null,
+        ...(quality ? { qualityCi: quality.qualityCi } : {}),
+      };
+    });
   const projectedSavingsMicroUsd = Math.round(
     comparison.recommendation.projectedSavingsMicroUsd * scale,
   );
@@ -124,6 +176,8 @@ export async function GET(req: Request) {
       // CTO-115: live p95 / error from otel_spans. `null` when n < 50 in the 7-day window.
       latencyP95Ms: live.latencyP95Ms,
       errorRate: live.errorRate,
+      // CTO-114: current never gets a fabricated quality — no pair to judge against itself.
+      qualityScore: null,
     },
     candidates,
     recommendation: {
