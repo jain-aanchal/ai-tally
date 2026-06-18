@@ -51,8 +51,17 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
+from gateway.stripe_ingest import (
+    StripeSignatureError,
+    hash_customer_email,
+    map_stripe_event,
+    verify_stripe_signature,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
+from gateway.tenant_stripe import TenantStripeStore
 from gateway.validation import SpanValidator, span_item_id
+
+from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway")
 
@@ -64,6 +73,14 @@ async def lifespan(app: FastAPI):
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
     app.state.tenant_connectors = TenantConnectorStore(settings)
+    app.state.tenant_stripe = TenantStripeStore(settings)
+    # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
+    # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
+    app.state.hmac_registry = HmacKeyRegistry()
+    # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
+    # will collapse late duplicates at merge time, but this short-circuits the second insert
+    # so the 200 stays well under Stripe's 30s timeout window.
+    app.state.stripe_event_seen = set()
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -568,6 +585,170 @@ async def set_tenant_connector(
     store: TenantConnectorStore = app.state.tenant_connectors
     row = store.set(tenant_id, layer, enabled=enabled, notes=notes)
     return JSONResponse({"tenant_id": tenant_id, "connector": row.as_dict()}, status_code=200)
+
+
+@app.post("/v1/tenant/stripe/connect")
+async def connect_tenant_stripe(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Persist a tenant's Stripe webhook signing secret (CTO-110).
+
+    Body: ``{"webhook_secret": "whsec_...", "stripe_account_id": "acct_..." (optional)}``.
+    Idempotent: pasting the same secret twice is a no-op on the audit log. The response carries
+    a *fingerprint* of the secret (last 4 chars) so the dashboard can show "connected" — the raw
+    secret is never re-exposed.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    secret = body.get("webhook_secret")
+    if not isinstance(secret, str) or not secret.startswith("whsec_"):
+        raise HTTPException(
+            status_code=422,
+            detail="webhook_secret must be a Stripe signing secret starting with 'whsec_'",
+        )
+    account_id = body.get("stripe_account_id")
+    if account_id is not None and not isinstance(account_id, str):
+        raise HTTPException(status_code=422, detail="stripe_account_id must be a string")
+    store: TenantStripeStore = app.state.tenant_stripe
+    try:
+        cfg = store.connect(tenant_id, secret, stripe_account_id=account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "stripe": cfg.as_safe_dict()}, status_code=200)
+
+
+@app.get("/v1/tenant/stripe")
+def get_tenant_stripe(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Read the safe (no-secret) view of a tenant's Stripe config — used by the connectors tile."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantStripeStore = app.state.tenant_stripe
+    cfg = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "stripe": cfg.as_safe_dict() if cfg else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    tenant: str | None = None,
+    stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"),
+) -> JSONResponse:
+    """Stripe webhook ingest (CTO-110).
+
+    Route shape: ``POST /v1/stripe/webhook?tenant=<tenant_id>`` — Stripe can't add custom headers,
+    so the tenant is encoded in the URL (the tenant's Stripe dashboard configures it once at
+    connect time). Verification + idempotency + insert happens here; we ack 200 on every path
+    that isn't a hard rejection so Stripe doesn't redeliver.
+
+    Returns 200 in well under 1s on the happy path: signature check is one HMAC, idempotency is
+    an in-memory set probe, the insert is the same low-volume CH path business_events already
+    uses for the SDK.
+    """
+    if not tenant:
+        raise HTTPException(status_code=422, detail="missing ?tenant= query param")
+    body_bytes = await request.body()
+
+    stripe_store: TenantStripeStore = app.state.tenant_stripe
+    cfg = stripe_store.get(tenant)
+    if cfg is None or not cfg.is_active:
+        # 401: Stripe will retry, but the tenant needs to connect first.
+        raise HTTPException(status_code=401, detail="tenant has not connected Stripe")
+
+    try:
+        verify_stripe_signature(
+            body_bytes,
+            stripe_signature,
+            cfg.webhook_secret,
+            now_s=int(time.time()),
+        )
+    except StripeSignatureError as exc:
+        # Don't echo the body — just the failure reason. The signature header itself is fine to
+        # mention but we drop it from log lines defensively.
+        logger.warning("stripe webhook signature rejected (tenant=%s): %s", tenant, exc)
+        raise HTTPException(status_code=400, detail=f"signature rejected: {exc}") from exc
+
+    import json as _json
+
+    try:
+        event = _json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"body is not JSON: {exc}") from exc
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    mapped = map_stripe_event(event)
+    if mapped is None:
+        # Unsupported type — ack so Stripe doesn't retry. This is the right behavior even if the
+        # tenant points a "send all events" subscription at us; we silently drop what we don't map.
+        return JSONResponse(
+            {"ok": True, "skipped": True, "reason": "unsupported event type"},
+            status_code=200,
+        )
+
+    seen: set[tuple[str, str]] = app.state.stripe_event_seen
+    key = (tenant, mapped.stripe_event_id)
+    if key in seen:
+        return JSONResponse(
+            {"ok": True, "deduplicated": True, "event_id": mapped.stripe_event_id},
+            status_code=200,
+        )
+
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    hashed = hash_customer_email(registry, tenant, mapped.customer_email)
+    user_id_hash = hashed[0] if hashed else ""
+
+    # Build the BusinessEvent. ValueType is "monetary" for everything except churn (which is a
+    # count event with value 0). Currency comes off the Stripe payload, defaulting to USD.
+    value_type = "monetary"
+    if mapped.event_name == "refund":
+        value_type = "refund"
+    elif mapped.event_name == "subscription_renewal":
+        value_type = "mrr"
+    elif mapped.event_name == "churn":
+        value_type = "count"
+
+    ev = BusinessEvent(
+        business_event_id=mapped.stripe_event_id,
+        event_name=mapped.event_name,
+        user_id_hash=user_id_hash,
+        occurred_at_ns=mapped.occurred_at_ns,
+        value_amount_micro=mapped.value_amount_micro,
+        value_currency=mapped.currency,
+        value_type=value_type,
+        source="stripe",
+    )
+
+    store: ClickHouseStore = app.state.store
+    try:
+        store.insert_business_events(tenant, [ev])
+    except Exception:  # noqa: BLE001 — never crash the gateway on a CH blip
+        logger.exception("clickhouse insert (stripe webhook) failed for tenant %s", tenant)
+        # 503 → Stripe will retry, which is exactly what we want on a transient outage.
+        raise HTTPException(status_code=503, detail="storage unavailable") from None
+
+    seen.add(key)
+    return JSONResponse(
+        {
+            "ok": True,
+            "event_id": mapped.stripe_event_id,
+            "event_name": mapped.event_name,
+            "value_amount_micro": mapped.value_amount_micro,
+            "currency": mapped.currency,
+        },
+        status_code=200,
+    )
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:

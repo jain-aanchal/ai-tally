@@ -31,6 +31,13 @@ export interface ProviderAttribution {
   conversionRate: number;
   conversionRateLo: number;
   conversionRateHi: number;
+  // Revenue per distinct user, from Stripe business_events (CTO-110). Null when no
+  // revenue events exist yet for the tenant — we surface "—" rather than fabricate.
+  valuePerUserMicroUsd: MicroUSD | null;
+  // Margin per distinct user = value/user − cost/user. Null when value/user is null.
+  marginPerUserMicroUsd: MicroUSD | null;
+  // Margin as a fraction of value: (value − cost) / value. Null when value/user is null or 0.
+  marginPct: number | null;
 }
 
 export interface AttributionReport {
@@ -80,10 +87,23 @@ export function buildProviderRow(
   sessions: number,
   conversions: number,
   costMicroUsd: MicroUSD,
+  // Optional revenue side — provider rows are unchanged when no Stripe data exists.
+  revenue?: { revenueMicroUsd: MicroUSD; distinctUsers: number } | null,
 ): ProviderAttribution {
   const { p, lo, hi } = wilsonInterval(conversions, sessions);
   const costPerConversion =
     conversions > 0 ? Math.round(costMicroUsd / conversions) : null;
+  // Revenue lights up only when Stripe events exist for *this* provider. Without users we have
+  // no denominator, so the row stays honest with nulls.
+  let valuePerUser: MicroUSD | null = null;
+  let marginPerUser: MicroUSD | null = null;
+  let marginPct: number | null = null;
+  if (revenue && revenue.distinctUsers > 0 && revenue.revenueMicroUsd !== 0) {
+    valuePerUser = Math.round(revenue.revenueMicroUsd / revenue.distinctUsers);
+    const costPerUser = Math.round(costMicroUsd / revenue.distinctUsers);
+    marginPerUser = valuePerUser - costPerUser;
+    marginPct = valuePerUser > 0 ? (valuePerUser - costPerUser) / valuePerUser : null;
+  }
   return {
     provider,
     sessions,
@@ -93,6 +113,9 @@ export function buildProviderRow(
     conversionRate: p,
     conversionRateLo: lo,
     conversionRateHi: hi,
+    valuePerUserMicroUsd: valuePerUser,
+    marginPerUserMicroUsd: marginPerUser,
+    marginPct,
   };
 }
 
@@ -112,9 +135,17 @@ export function emptyReport(filters: AttributionFilters): AttributionReport {
  * sensible to the eye, with isMock=true so the UI can flag it.
  */
 export function mockReport(filters: AttributionFilters): AttributionReport {
+  // The mock now seeds plausible revenue so the new Value/user + Margin/user columns
+  // render in the synthetic-preview state. Real reports get this from Stripe events.
   const perProvider = [
-    buildProviderRow("openai", 25, 5, 850_000),
-    buildProviderRow("anthropic", 25, 7, 720_000),
+    buildProviderRow("openai", 25, 5, 850_000, {
+      revenueMicroUsd: 49_000_000,
+      distinctUsers: 18,
+    }),
+    buildProviderRow("anthropic", 25, 7, 720_000, {
+      revenueMicroUsd: 78_000_000,
+      distinctUsers: 22,
+    }),
   ];
   const sessions = perProvider.reduce((s, p) => s + p.sessions, 0);
   const conversions = perProvider.reduce((s, p) => s + p.conversions, 0);

@@ -1,0 +1,14 @@
+{
+  "id": "evt_1NQ8t12eZvKYlo2C8b2L0099",
+  "object": "event",
+  "created": 1717040000,
+  "type": "payment_intent.created",
+  "data": {
+    "object": {
+      "id": "pi_1NQ8t12eZvKYlo2C0001",
+      "object": "payment_intent",
+      "amount": 4900,
+      "currency": "usd"
+    }
+  }
+}

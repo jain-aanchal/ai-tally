@@ -1,0 +1,19 @@
+{
+  "id": "evt_1NQ8t12eZvKYlo2C8b2L0002",
+  "object": "event",
+  "created": 1717010000,
+  "type": "invoice.paid",
+  "data": {
+    "object": {
+      "id": "in_1NQ8t12eZvKYlo2C0001",
+      "object": "invoice",
+      "amount_paid": 2900,
+      "amount_due": 2900,
+      "currency": "usd",
+      "customer": "cus_PaYiNgCusT",
+      "customer_email": "bob@example.com",
+      "billing_reason": "subscription_cycle",
+      "subscription": "sub_1NQ8t12eZvKYlo2C0001"
+    }
+  }
+}
