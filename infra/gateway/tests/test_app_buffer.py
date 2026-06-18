@@ -84,12 +84,10 @@ def _post(c: TestClient, spans: list[dict]):
     return c.post("/v1/batches", json={"tenant_id": "t-local", "sdk_version": "test", "resource_spans": spans})
 
 
-def _wait_for(predicate, timeout_s: float = 15.0) -> bool:
-    # 15s default (was 5s) — GitHub Actions runners under load occasionally
-    # need >5s for the buffer to fully drain in the burst test. Locally this
-    # test finishes in <500ms; CI runners are 10-30x slower under contention
-    # so a generous ceiling avoids flake without masking a real regression
-    # (a broken drain wouldn't finish in 15s either).
+def _wait_for(predicate, timeout_s: float = 30.0) -> bool:
+    # 30s ceiling — loaded GitHub Actions runners have been seen taking >15s
+    # for the burst drain to fully settle. Locally this test finishes in
+    # <500ms; a real regression would never complete in 30s either.
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():
@@ -112,10 +110,17 @@ def test_buffered_burst_is_accepted_and_persisted() -> None:
             total += 40
         # The buffered spans land in ClickHouse off the hot path. We drive drain_once() from the
         # test thread (idempotent + lock-guarded against the background loop) so the assertion is
-        # deterministic rather than racing the loop's poll cadence on a slow CI runner.
+        # deterministic. Predicate is "buffer empty AND store has all spans" — checking
+        # drain_once() == 0 alone has a race: it can return 0 transiently while the background
+        # loop is mid-flight and spans haven't reached the store yet.
         buf = app.state.ingest_buffer
-        assert _wait_for(lambda: buf.drain_once() == 0 and len(store.spans) == total), (
-            f"only {len(store.spans)}/{total} drained"
+
+        def _drained() -> bool:
+            buf.drain_once()  # keep pumping; ignore the count (background loop drains too)
+            return buf.depth == 0 and len(store.spans) == total
+
+        assert _wait_for(_drained), (
+            f"only {len(store.spans)}/{total} drained, buffer depth={buf.depth}"
         )
 
 
