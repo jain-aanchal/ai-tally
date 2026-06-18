@@ -13,6 +13,8 @@ export interface ContextDropsByService {
   service: string;
   sdkVersion: string;
   drops24h: number;
+  /** CTO-118: total span count over the same 24h window. 0 → service inactive → render "—". */
+  spans24h?: number;
 }
 
 export interface CalibrationDay {
