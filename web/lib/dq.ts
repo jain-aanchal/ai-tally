@@ -25,8 +25,15 @@ export interface CalibrationDay {
 
 export interface SampleByStratum {
   stratum: "body" | "mid" | "tail";
-  rate: number; // 0..1
-  ciHalfWidthPct: number; // 0..1 fractional half-width of CI on extrapolated cost
+  rate: number; // 0..1, average configured keep rate seen in this stratum over the window
+  /**
+   * 0..1 fractional half-width of the 95% CI on extrapolated cost. `null` when fewer than 30
+   * kept spans landed in this stratum over the window — Wilson-flavoured estimators get
+   * uselessly wide below that. Render `—`, never a fabricated tight band (CTO-119).
+   */
+  ciHalfWidthPct: number | null;
+  /** kept-span count in this stratum over the window (used to gate the CI). */
+  spans: number;
 }
 
 export interface DataQualityReport {
@@ -75,8 +82,8 @@ export const dq: DataQualityReport = {
     { date: "2026-05-19", estimatedMicroUsd: 1_120_000_000, reconciledMicroUsd: 1_101_000_000 },
   ],
   sampling: [
-    { stratum: "tail", rate: 1.0, ciHalfWidthPct: 0.0 },
-    { stratum: "mid", rate: 0.5, ciHalfWidthPct: 0.04 },
-    { stratum: "body", rate: 0.1, ciHalfWidthPct: 0.18 },
+    { stratum: "tail", rate: 1.0, ciHalfWidthPct: 0.0, spans: 420 },
+    { stratum: "mid", rate: 0.5, ciHalfWidthPct: 0.04, spans: 1840 },
+    { stratum: "body", rate: 0.1, ciHalfWidthPct: 0.18, spans: 12_600 },
   ],
 };

@@ -165,6 +165,10 @@ class TallyClient:
                 price_catalog_version=catalog_version,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
+                # CTO-119: stratum + configured keep-rate ride on the kept span so the DQ surface
+                # can compute per-stratum CIs without re-classifying after the fact.
+                sampling_stratum=decision.stratum.value,
+                sampling_rate=decision.sample_rate,
             )
             attrs = build_span_attributes(fields)
             # NB: sample_rate travels at the batch level (wire Sampling, §12.2), not as a span

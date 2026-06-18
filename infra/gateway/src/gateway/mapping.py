@@ -39,6 +39,8 @@ _PROMOTED_GENAI = frozenset(
         GenAI.CONTEXT_DROPPED_MESSAGES,
         GenAI.CONTEXT_DROPPED_TOKENS,
         GenAI.CONTEXT_WINDOW_USED_PCT,
+        GenAI.SAMPLING_STRATUM,
+        GenAI.SAMPLING_RATE,
     }
 )
 
@@ -110,6 +112,8 @@ COLUMNS: tuple[str, ...] = (
     "ContextDroppedMessages",
     "ContextDroppedTokens",
     "ContextWindowUsedPct",
+    "SamplingStratum",
+    "SamplingRate",
     "SpanAttributes",
     "SampleRate",
 )
@@ -210,6 +214,10 @@ def span_to_row(
         _i(span.get(GenAI.CONTEXT_DROPPED_MESSAGES)),
         _i(span.get(GenAI.CONTEXT_DROPPED_TOKENS)),
         _f(span.get(GenAI.CONTEXT_WINDOW_USED_PCT)),
+        # CTO-119: stratum default 'unsampled' matches the DDL — pre-CTO-119 spans land in their
+        # own honestly-labelled bucket on the DQ surface rather than masquerading as 'body'.
+        _s(span.get(GenAI.SAMPLING_STRATUM) or "unsampled"),
+        _f(span.get(GenAI.SAMPLING_RATE) if span.get(GenAI.SAMPLING_RATE) is not None else 1.0),
         extra,
         float(sample_rate),
     )

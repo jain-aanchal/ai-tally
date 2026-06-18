@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS otel_spans
     ContextDroppedTokens   UInt32 DEFAULT 0         CODEC(T64, ZSTD(1)),
     ContextWindowUsedPct   Float32 DEFAULT 0        CODEC(ZSTD(1)),
 
+    -- Stratified-sampling provenance (CTO-119). SamplingStratum is the head-time classification
+    -- ('body'|'mid'|'tail'); SamplingRate is THAT stratum's configured keep rate. Distinct from
+    -- the per-span `SampleRate` weight below (which is the billing-extrapolation factor — they're
+    -- usually equal today, but conceptually independent: rate can change after a span is kept).
+    -- Default 'unsampled' / 1.0 so pre-CTO-119 rows group as a separate, honestly-labelled bucket.
+    SamplingStratum        LowCardinality(String) DEFAULT 'unsampled',
+    SamplingRate           Float32 DEFAULT 1.0     CODEC(ZSTD(1)),
+
     -- Replay (Workflow 1)
     ResolvedPromptHash     FixedString(64),
     ResolvedContextRef     String,
@@ -97,3 +105,10 @@ ALTER TABLE otel_spans
     ADD COLUMN IF NOT EXISTS ContextDroppedMessages UInt32  DEFAULT 0 CODEC(T64, ZSTD(1)),
     ADD COLUMN IF NOT EXISTS ContextDroppedTokens   UInt32  DEFAULT 0 CODEC(T64, ZSTD(1)),
     ADD COLUMN IF NOT EXISTS ContextWindowUsedPct   Float32 DEFAULT 0 CODEC(ZSTD(1));
+
+-- CTO-119 additive migration. Same idempotent pattern; default 'unsampled' / 1.0 means
+-- pre-migration rows group as their own bucket on the DQ surface rather than polluting
+-- body/mid/tail breakdowns.
+ALTER TABLE otel_spans
+    ADD COLUMN IF NOT EXISTS SamplingStratum LowCardinality(String) DEFAULT 'unsampled',
+    ADD COLUMN IF NOT EXISTS SamplingRate    Float32                DEFAULT 1.0 CODEC(ZSTD(1));

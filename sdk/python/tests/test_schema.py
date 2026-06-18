@@ -74,6 +74,23 @@ def test_bad_currency_rejected():
     )
 
 
+def test_sampling_stratum_and_rate_round_trip():
+    fields = SpanFields(sampling_stratum="tail", sampling_rate=1.0)
+    attrs = build_span_attributes(fields)
+    assert attrs[GenAI.SAMPLING_STRATUM] == "tail"
+    assert attrs[GenAI.SAMPLING_RATE] == 1.0
+    assert validate_span_attributes(attrs) == []
+
+
+def test_sampling_stratum_rejects_unknown_value():
+    violations = validate_span_attributes({GenAI.SAMPLING_STRATUM: "outlier"})
+    assert any("stratum" in v for v in violations)
+
+
+def test_sampling_rate_must_be_in_unit_interval():
+    assert validate_span_attributes({GenAI.SAMPLING_RATE: 1.5})
+
+
 @pytest.mark.parametrize(
     "usd,micro",
     [("0.0012", 1200), ("1", 1_000_000), ("0.0000005", 1), ("0.00000049", 0)],

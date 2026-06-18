@@ -30,6 +30,6 @@ describe("data-quality", () => {
   it("body has wider CI than mid", () => {
     const body = dq.sampling.find((s) => s.stratum === "body")!;
     const mid = dq.sampling.find((s) => s.stratum === "mid")!;
-    expect(body.ciHalfWidthPct).toBeGreaterThan(mid.ciHalfWidthPct);
+    expect(body.ciHalfWidthPct!).toBeGreaterThan(mid.ciHalfWidthPct!);
   });
 });
