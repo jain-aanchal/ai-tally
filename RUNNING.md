@@ -45,6 +45,12 @@ curl -s localhost:8080/healthz     # {"status":"ok"}
 > The gateway waits for ClickHouse + Postgres to pass health checks before it boots, so a brief
 > "starting" is normal.
 
+> On first boot the gateway also hits `GET /v1/models` on every provider whose API key it has and
+> writes the result to `.tally/models.json` (CTO-109). Subsequent boots reuse that file for 24 h —
+> set `TALLY_MODELS_REFRESH=1` to force a refetch, or `TALLY_PINNED_MODELS=<path>` to skip discovery
+> entirely. If both providers are unreachable, boot still succeeds — you'll just see a warning in
+> the gateway log and the demos fall back to their hardcoded model defaults.
+
 The composed gateway already sets `TALLY_CLICKHOUSE_DB=default` (the official ClickHouse image loads
 unqualified DDL into the `default` database — see the note in `infra/docker-compose.yml`). Running
 the gateway *by hand* with the library default `TALLY_CLICKHOUSE_DB=tally` will fail with
@@ -177,6 +183,113 @@ Walkthrough, configuration knobs, and the upstream patch list are in
 [examples/vercel-chatbot/PATCHES.md](examples/vercel-chatbot/PATCHES.md).
 
 When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
+
+## Step 7: real revenue via Stripe
+
+The chatbot demo emits synthetic conversion events so `/attribution` has
+something to show. For **real** revenue numbers — Value/user, Margin/user, and
+margin % per provider — connect Stripe (CTO-110). The gateway exposes a
+verified webhook ingest at:
+
+```
+POST http://localhost:8080/v1/stripe/webhook?tenant=<your-tenant-id>
+```
+
+To wire it up:
+
+1. Open `/connectors` in the dashboard and use the **Stripe revenue** tile to
+   paste your signing secret (`whsec_…`). The raw secret is persisted on the
+   gateway and never round-tripped back to the browser.
+2. In the Stripe Dashboard → Developers → Webhooks, point a new endpoint at
+   the URL above and subscribe to four events:
+   `checkout.session.completed`, `invoice.paid`, `charge.refunded`,
+   `customer.subscription.deleted`.
+3. For local testing, run `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=local-dev`
+   and paste the printed `whsec_…` into the tile.
+4. (Optional) Backfill history with the helper:
+
+   ```bash
+   cd infra/gateway
+   uv run python scripts/backfill_stripe.py \
+       --tenant local-dev --days 30 \
+       --stripe-key sk_live_xxx        # or sk_test_xxx
+   ```
+
+   The script is safe to re-run — idempotency is keyed on Stripe's event id.
+
+Once events start landing, `/attribution` lights up two new columns:
+**Value/user** and **Margin/user** (with margin % below). Cells stay `—`
+until enough events arrive — we never fabricate numbers from absent data.
+
+## Step 8: real cross-provider projections via replay
+
+Workflows 2 (Compare) and 5 (Estimate) used to scale a mock projection off
+the user's live current-model spend. **Opt in to replay** to back those
+projections with real cross-provider calls instead (CTO-113).
+
+1. **Enable replay sampling** for the local tenant:
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/tenant/replay/config \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{"enabled": true, "sample_rate": 0.05, "daily_budget_usd": 5.0}'
+   ```
+
+   - `enabled` defaults to `false` for every tenant — no surprises.
+   - `sample_rate` is the fraction of ingested spans we capture (default 5%).
+   - `daily_budget_usd` is a **hard cap** on the replay executor's spend per
+     tenant per day. A bug in replay must never burn $10k overnight — the
+     executor checks today's spend before every candidate call and skips
+     with `excluded_budget=True` when projected next-call cost would push the
+     day over.
+
+2. **Drive traffic** (`make chatbot-demo` or `make aider-demo`). The gateway
+   stratifies the batch by `(feature_tag, token-quintile)` so small-but-
+   expensive runs aren't drowned out, scrubs PII (emails, API keys, postal
+   addresses), and writes the resolved request envelope to object storage.
+
+3. **Request a projection** — the dashboard does this automatically from
+   `/compare` and `/estimate`, but you can hit the gateway directly to see
+   the raw output:
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/replay \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{
+       "candidate_models": [
+         {"provider": "anthropic", "model": "claude-haiku-4-5"},
+         {"provider": "openai",    "model": "gpt-5-mini"}
+       ],
+       "sample_size": 50
+     }'
+   ```
+
+   Returns per-candidate `projected_monthly_cost_micro_usd`, `p50_latency_ms`,
+   `p95_latency_ms`, `error_rate`, `samples_replayed`, and
+   `excluded_budget_count`. Diagnostics carry the v1 honesty string
+   `"resolved-context replay (no live retrieval)"` so the dashboard never
+   claims a fidelity tier it doesn't have.
+
+`/compare` and `/estimate` report `replay_source: "replay"` when the
+projection is replay-backed and `"mock"` when it falls back to the rescaled
+mock (tenant hasn't opted in yet, or the gateway is unreachable).
+
+## Live updates
+
+Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the
+browser on a short interval — leave the tab open while you run demos and new
+spans appear without a manual reload (CTO-108). Pages still server-render the
+first paint; a small client wrapper polls the same `/api/...` endpoint and
+re-renders the body on each tick.
+
+Knobs:
+
+- `NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS` — poll interval, default `5000`.
+  Set to `0` to disable polling entirely (the page becomes static again).
+- Polling pauses automatically when the tab is hidden, and fetches once
+  immediately on focus — no wasted requests sitting in a background tab.
+- On transient API errors the page keeps the last good data and logs the
+  error to `console.warn`; the badge stays green so a 5xx never blanks the UI.
 
 ## Troubleshooting
 

@@ -31,3 +31,6 @@ uv.lock
 .claude/worktrees/
 .aider.*
 keys.txt
+
+# Model auto-discovery cache (CTO-109)
+.tally/

@@ -19,6 +19,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from tally.enrichment import enrich_cost
+from tally.models import discover_models
 from tally.pricing import seed_catalog
 from tally.schema import GenAI
 from tally.timekeeping import assess
@@ -50,8 +51,32 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.store import ClickHouseStore
+from gateway.stripe_ingest import (
+    StripeSignatureError,
+    hash_customer_email,
+    map_stripe_event,
+    verify_stripe_signature,
+)
+from gateway.replay_executor import (
+    CandidateCall,
+    CandidateResponse,
+    ReplayExecutor,
+)
+from gateway.replay_sampler import (
+    SampleCandidate,
+    build_payloads,
+    stratified_sample,
+)
+from gateway.replay_store import (
+    InMemoryReplayBlobStore,
+    persist_sample,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
+from gateway.tenant_replay import TenantReplayStore
+from gateway.tenant_stripe import TenantStripeStore
 from gateway.validation import SpanValidator, span_item_id
+
+from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway")
 
@@ -63,6 +88,22 @@ async def lifespan(app: FastAPI):
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
     app.state.tenant_connectors = TenantConnectorStore(settings)
+    app.state.tenant_stripe = TenantStripeStore(settings)
+    # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
+    # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
+    # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
+    # (sink wired to a list for v1 — the projection API reads from it directly).
+    app.state.tenant_replay = TenantReplayStore(settings)
+    app.state.replay_blob_store = InMemoryReplayBlobStore()
+    app.state.replay_sample_index = []  # list[ReplaySampleRow]
+    app.state.replay_runs = []  # list[ReplayRunRow]
+    # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
+    # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
+    app.state.hmac_registry = HmacKeyRegistry()
+    # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
+    # will collapse late duplicates at merge time, but this short-circuits the second insert
+    # so the 200 stays well under Stripe's 30s timeout window.
+    app.state.stripe_event_seen = set()
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -91,6 +132,21 @@ async def lifespan(app: FastAPI):
         await buffer.start()
         app.state.ingest_buffer = buffer
         logger.info("ingest buffer enabled (capacity=%d)", settings.ingest_buffer_capacity)
+    # Auto-discover provider model lineups (CTO-109). Fail-soft: if both providers
+    # are unreachable AND there's no cached file, we still boot — just with an empty
+    # list and a WARNING. Demos read app.state.models so they don't hardcode SKUs
+    # like claude-3-5-haiku-latest that the provider may retire out from under them.
+    try:
+        app.state.models = discover_models()
+        if app.state.models:
+            openai_ids = sorted(m.id for m in app.state.models if m.provider == "openai")
+            anth_ids = sorted(m.id for m in app.state.models if m.provider == "anthropic")
+            logger.info("models: openai=%s anthropic=%s", openai_ids, anth_ids)
+        else:
+            logger.warning("models: discovery returned no entries — booting without a lineup")
+    except Exception as exc:  # noqa: BLE001 — discovery must never crash boot
+        logger.warning("models: discovery raised, defaulting to empty list: %s", exc)
+        app.state.models = []
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
     if app.state.ingest_buffer is not None:
@@ -554,6 +610,170 @@ async def set_tenant_connector(
     return JSONResponse({"tenant_id": tenant_id, "connector": row.as_dict()}, status_code=200)
 
 
+@app.post("/v1/tenant/stripe/connect")
+async def connect_tenant_stripe(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Persist a tenant's Stripe webhook signing secret (CTO-110).
+
+    Body: ``{"webhook_secret": "whsec_...", "stripe_account_id": "acct_..." (optional)}``.
+    Idempotent: pasting the same secret twice is a no-op on the audit log. The response carries
+    a *fingerprint* of the secret (last 4 chars) so the dashboard can show "connected" — the raw
+    secret is never re-exposed.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    secret = body.get("webhook_secret")
+    if not isinstance(secret, str) or not secret.startswith("whsec_"):
+        raise HTTPException(
+            status_code=422,
+            detail="webhook_secret must be a Stripe signing secret starting with 'whsec_'",
+        )
+    account_id = body.get("stripe_account_id")
+    if account_id is not None and not isinstance(account_id, str):
+        raise HTTPException(status_code=422, detail="stripe_account_id must be a string")
+    store: TenantStripeStore = app.state.tenant_stripe
+    try:
+        cfg = store.connect(tenant_id, secret, stripe_account_id=account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "stripe": cfg.as_safe_dict()}, status_code=200)
+
+
+@app.get("/v1/tenant/stripe")
+def get_tenant_stripe(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Read the safe (no-secret) view of a tenant's Stripe config — used by the connectors tile."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantStripeStore = app.state.tenant_stripe
+    cfg = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "stripe": cfg.as_safe_dict() if cfg else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    tenant: str | None = None,
+    stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"),
+) -> JSONResponse:
+    """Stripe webhook ingest (CTO-110).
+
+    Route shape: ``POST /v1/stripe/webhook?tenant=<tenant_id>`` — Stripe can't add custom headers,
+    so the tenant is encoded in the URL (the tenant's Stripe dashboard configures it once at
+    connect time). Verification + idempotency + insert happens here; we ack 200 on every path
+    that isn't a hard rejection so Stripe doesn't redeliver.
+
+    Returns 200 in well under 1s on the happy path: signature check is one HMAC, idempotency is
+    an in-memory set probe, the insert is the same low-volume CH path business_events already
+    uses for the SDK.
+    """
+    if not tenant:
+        raise HTTPException(status_code=422, detail="missing ?tenant= query param")
+    body_bytes = await request.body()
+
+    stripe_store: TenantStripeStore = app.state.tenant_stripe
+    cfg = stripe_store.get(tenant)
+    if cfg is None or not cfg.is_active:
+        # 401: Stripe will retry, but the tenant needs to connect first.
+        raise HTTPException(status_code=401, detail="tenant has not connected Stripe")
+
+    try:
+        verify_stripe_signature(
+            body_bytes,
+            stripe_signature,
+            cfg.webhook_secret,
+            now_s=int(time.time()),
+        )
+    except StripeSignatureError as exc:
+        # Don't echo the body — just the failure reason. The signature header itself is fine to
+        # mention but we drop it from log lines defensively.
+        logger.warning("stripe webhook signature rejected (tenant=%s): %s", tenant, exc)
+        raise HTTPException(status_code=400, detail=f"signature rejected: {exc}") from exc
+
+    import json as _json
+
+    try:
+        event = _json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"body is not JSON: {exc}") from exc
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    mapped = map_stripe_event(event)
+    if mapped is None:
+        # Unsupported type — ack so Stripe doesn't retry. This is the right behavior even if the
+        # tenant points a "send all events" subscription at us; we silently drop what we don't map.
+        return JSONResponse(
+            {"ok": True, "skipped": True, "reason": "unsupported event type"},
+            status_code=200,
+        )
+
+    seen: set[tuple[str, str]] = app.state.stripe_event_seen
+    key = (tenant, mapped.stripe_event_id)
+    if key in seen:
+        return JSONResponse(
+            {"ok": True, "deduplicated": True, "event_id": mapped.stripe_event_id},
+            status_code=200,
+        )
+
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    hashed = hash_customer_email(registry, tenant, mapped.customer_email)
+    user_id_hash = hashed[0] if hashed else ""
+
+    # Build the BusinessEvent. ValueType is "monetary" for everything except churn (which is a
+    # count event with value 0). Currency comes off the Stripe payload, defaulting to USD.
+    value_type = "monetary"
+    if mapped.event_name == "refund":
+        value_type = "refund"
+    elif mapped.event_name == "subscription_renewal":
+        value_type = "mrr"
+    elif mapped.event_name == "churn":
+        value_type = "count"
+
+    ev = BusinessEvent(
+        business_event_id=mapped.stripe_event_id,
+        event_name=mapped.event_name,
+        user_id_hash=user_id_hash,
+        occurred_at_ns=mapped.occurred_at_ns,
+        value_amount_micro=mapped.value_amount_micro,
+        value_currency=mapped.currency,
+        value_type=value_type,
+        source="stripe",
+    )
+
+    store: ClickHouseStore = app.state.store
+    try:
+        store.insert_business_events(tenant, [ev])
+    except Exception:  # noqa: BLE001 — never crash the gateway on a CH blip
+        logger.exception("clickhouse insert (stripe webhook) failed for tenant %s", tenant)
+        # 503 → Stripe will retry, which is exactly what we want on a transient outage.
+        raise HTTPException(status_code=503, detail="storage unavailable") from None
+
+    seen.add(key)
+    return JSONResponse(
+        {
+            "ok": True,
+            "event_id": mapped.stripe_event_id,
+            "event_name": mapped.event_name,
+            "value_amount_micro": mapped.value_amount_micro,
+            "currency": mapped.currency,
+        },
+        status_code=200,
+    )
+
+
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:
     hints = resp.server_hints or ServerHints()
     return {
@@ -571,3 +791,283 @@ def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, 
         },
         "replayed": replayed,
     }
+
+
+# --------------------------------------------------------------------------------------------
+# Replay infrastructure (CTO-113) — sampling config, capture, projection.
+# --------------------------------------------------------------------------------------------
+
+
+@app.get("/v1/tenant/replay/config")
+def get_tenant_replay_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Read the caller's replay-sampling config (CTO-113).
+
+    Defaults to ``enabled=false`` when the tenant has no row yet — sampling is opt-in.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    cfg = app.state.tenant_replay.get(tenant_id)
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
+
+
+@app.post("/v1/tenant/replay/config")
+async def set_tenant_replay_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Toggle / tune replay sampling for the caller's tenant (CTO-113).
+
+    Body fields (all optional — only what changes is updated):
+    ``{enabled?: bool, sample_rate?: 0..1, retention_days?: int>0, daily_budget_usd?: number>=0}``.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    try:
+        cfg = app.state.tenant_replay.upsert(
+            tenant_id,
+            enabled=body.get("enabled"),
+            sample_rate=body.get("sample_rate"),
+            retention_days=body.get("retention_days"),
+            daily_budget_usd=body.get("daily_budget_usd"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
+
+
+def capture_replay_samples_for_batch(
+    tenant_id: str,
+    candidates: list[SampleCandidate],
+    *,
+    config_store: TenantReplayStore | None = None,
+    blob_store=None,
+    sample_index: list | None = None,
+    captured_at=None,
+) -> int:
+    """Hook the gateway calls per accepted batch. Returns the number of samples persisted.
+
+    Pulled out as a free function so tests can drive it without standing up a FastAPI app. The
+    real ``POST /v1/batches`` path wires this in after the ingest pipeline writes to ClickHouse.
+
+    No-op (returns 0) when the tenant has not opted in.
+    """
+    import datetime as _dt
+    config_store = config_store or app.state.tenant_replay
+    blob_store = blob_store or app.state.replay_blob_store
+    sample_index = sample_index if sample_index is not None else app.state.replay_sample_index
+    captured_at = captured_at or _dt.datetime.now(_dt.timezone.utc)
+
+    cfg = config_store.get(tenant_id)
+    if not cfg.enabled or cfg.sample_rate <= 0 or not candidates:
+        return 0
+
+    sampled = stratified_sample(candidates, sample_rate=cfg.sample_rate)
+    payloads = build_payloads(sampled, scrub=True)
+    for p in payloads:
+        row = persist_sample(
+            blob_store=blob_store,
+            tenant_id=tenant_id,
+            payload=p,
+            captured_at=captured_at,
+        )
+        sample_index.append(row)
+    return len(payloads)
+
+
+@app.post("/v1/replay")
+async def project_replay(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Project per-candidate cost/latency/error from replayed samples (CTO-113).
+
+    Body::
+
+        {
+          "tenant_id": "...",           # optional — falls back to control-plane resolution
+          "feature_tag": "research",    # optional filter
+          "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4.5"}, ...],
+          "sample_size": 50             # optional, default 50
+        }
+
+    Returns per candidate: ``projected_monthly_cost_micro_usd``, ``p50_latency_ms``,
+    ``p95_latency_ms``, ``error_rate``, ``samples_replayed``, ``excluded_budget_count``.
+    Plus ``samples_available`` (filter-matched corpus size before sampling) and a diagnostics
+    block with the v1 honesty string ``"resolved-context replay (no live retrieval)"``.
+
+    Synchronous: 60s timeout is fine for 50 samples × 3 candidates with the in-memory mock
+    client; with a real provider client the executor's concurrency limit (5 per tenant) keeps
+    things bounded.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+
+    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
+        authorization, x_tenant_id
+    )
+    feature_tag = body.get("feature_tag")
+    candidates = body.get("candidate_models") or []
+    if not isinstance(candidates, list) or not all(
+        isinstance(c, dict) and "provider" in c and "model" in c for c in candidates
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="candidate_models must be a list of {provider, model} objects",
+        )
+    sample_size = int(body.get("sample_size") or 50)
+
+    cfg = app.state.tenant_replay.get(tenant_id)
+    index: list = app.state.replay_sample_index
+    matching = [
+        r for r in index
+        if r.tenant_id == tenant_id
+        and (feature_tag is None or r.feature_tag == feature_tag)
+    ]
+    samples_available = len(matching)
+
+    if samples_available == 0:
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "feature_tag": feature_tag,
+            "samples_available": 0,
+            "per_candidate": [],
+            "diagnostics": {
+                "context_fidelity": "resolved-context replay (no live retrieval)",
+                "replay_cost_micro_usd": 0,
+            },
+        })
+
+    # Pick samples stratified by token quintile (re-use the sampler's logic on the index).
+    selected = _pick_for_projection(matching, sample_size)
+
+    # Executor — uses a deterministic mock client by default so tests don't need a network.
+    # Production deployments wire a real provider client here via app.state override.
+    client = getattr(app.state, "replay_candidate_client", None) or _mock_candidate_client
+    executor = ReplayExecutor(
+        catalog=app.state.catalog,
+        blob_store=app.state.replay_blob_store,
+        client=client,
+        todays_spend_micro_usd=lambda t: _todays_spend(app.state.replay_runs, t),
+        sink=app.state.replay_runs.append,
+    )
+
+    per_candidate = []
+    total_replay_cost = 0
+    for cand in candidates:
+        provider = str(cand["provider"])
+        model = str(cand["model"])
+        results = []
+        excluded_budget = 0
+        latencies: list[int] = []
+        errors = 0
+        cost_sum = 0
+        for sample in selected:
+            # Pre-flight cost estimate for the budget check: assume output = input tokens (50/50).
+            from tally.pricing import Usage as _Usage
+            from tally.pricing import compute_cost_micro_usd as _ccost
+            est_cost, _ = _ccost(
+                app.state.catalog, provider, model,
+                _Usage(input_tokens=sample.input_tokens, output_tokens=sample.input_tokens),
+            )
+            result = await executor.replay_sample(
+                tenant_id=tenant_id,
+                sample_id=sample.sample_id,
+                object_key=sample.s3_object_key,
+                candidate_provider=provider,
+                candidate_model=model,
+                daily_budget_usd=cfg.daily_budget_usd,
+                estimated_call_cost_micro_usd=est_cost,
+            )
+            results.append(result)
+            if result.excluded_budget:
+                excluded_budget += 1
+                continue
+            if result.row is not None:
+                latencies.append(result.row.latency_ms)
+                cost_sum += result.row.cost_micro_usd
+                if result.row.error_msg:
+                    errors += 1
+        total_replay_cost += cost_sum
+        # Project per-sample cost into a monthly figure by scaling to the *corpus* size.
+        # `samples_available` is the matched corpus (after filter); we treat it as a
+        # representative slice of the tenant's monthly volume on that feature_tag.
+        replayed = len(results) - excluded_budget
+        avg_cost = (cost_sum / replayed) if replayed > 0 else 0
+        # Honest extrapolation: avg cost per call × corpus size, scaled by a 30/sample-window-days
+        # factor of 30 — we don't track window days yet, so v1 just reports avg × corpus.
+        projected_monthly_cost = int(round(avg_cost * samples_available))
+        sorted_lat = sorted(latencies)
+        p50 = sorted_lat[len(sorted_lat) // 2] if sorted_lat else 0
+        p95 = sorted_lat[max(0, int(len(sorted_lat) * 0.95) - 1)] if sorted_lat else 0
+        error_rate = (errors / replayed) if replayed > 0 else 0.0
+        per_candidate.append({
+            "provider": provider,
+            "model": model,
+            "projected_monthly_cost_micro_usd": projected_monthly_cost,
+            "p50_latency_ms": p50,
+            "p95_latency_ms": p95,
+            "error_rate": error_rate,
+            "samples_replayed": replayed,
+            "excluded_budget_count": excluded_budget,
+        })
+
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "feature_tag": feature_tag,
+        "samples_available": samples_available,
+        "per_candidate": per_candidate,
+        "diagnostics": {
+            "context_fidelity": "resolved-context replay (no live retrieval)",
+            "replay_cost_micro_usd": total_replay_cost,
+        },
+    })
+
+
+def _pick_for_projection(rows: list, sample_size: int) -> list:
+    """Token-quintile stratified pick from an index of ReplaySampleRow."""
+    if sample_size >= len(rows):
+        return rows
+    # Approximate stratification: sort by token total, take every Nth.
+    by_tokens = sorted(rows, key=lambda r: r.input_tokens + r.output_tokens)
+    step = max(1, len(by_tokens) // sample_size)
+    picked = by_tokens[::step][:sample_size]
+    return picked
+
+
+def _todays_spend(rows: list, tenant_id: str) -> int:
+    """Sum today's replay_runs CostMicroUsd for `tenant_id`."""
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    return sum(
+        r.cost_micro_usd for r in rows
+        if r.tenant_id == tenant_id and r.ran_at.date() == today
+    )
+
+
+async def _mock_candidate_client(call: CandidateCall) -> CandidateResponse:
+    """Deterministic mock — echoes back token counts from the envelope so executor tests are
+    self-contained. Production deployments inject a real provider-routing client via
+    ``app.state.replay_candidate_client``.
+
+    The envelope is expected to carry ``{"input_tokens": int, "output_tokens": int}`` from the
+    captured sample. Falls back to small defaults if missing.
+    """
+    env = call.envelope or {}
+    return CandidateResponse(
+        input_tokens=int(env.get("input_tokens") or 100),
+        output_tokens=int(env.get("output_tokens") or 50),
+        status_code=200,
+    )

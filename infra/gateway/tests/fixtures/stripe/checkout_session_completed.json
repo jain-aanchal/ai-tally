@@ -1,0 +1,24 @@
+{
+  "id": "evt_1NQ8t12eZvKYlo2C8b2L0001",
+  "object": "event",
+  "api_version": "2024-11-20.acacia",
+  "created": 1717000000,
+  "type": "checkout.session.completed",
+  "data": {
+    "object": {
+      "id": "cs_test_a1abcd",
+      "object": "checkout.session",
+      "amount_total": 4900,
+      "amount_subtotal": 4900,
+      "currency": "usd",
+      "customer": "cus_PaYiNgCusT",
+      "customer_email": "alice@example.com",
+      "customer_details": {
+        "email": "Alice@Example.com",
+        "name": "Alice"
+      },
+      "payment_status": "paid",
+      "mode": "payment"
+    }
+  }
+}

@@ -722,11 +722,51 @@ export async function queryAttribution(
     for (const r of conversionRows) {
       convByProvider.set(r.provider, parseInt(r.conversions, 10) || 0);
     }
+
+    // Revenue per provider (CTO-110): sum (conversion + subscription_renewal) − |refund|, and
+    // count distinct paying users. Joined on UserIdHash the same way as conversion counts. The
+    // sum is in USD decimal (ClickHouse Decimal arithmetic on Int64 micro), we then convert to
+    // integer micro-USD at the boundary like everywhere else.
+    const revenueRows = await rowsP<{
+      provider: string;
+      revenue: string;
+      users: string;
+    }>(
+      db,
+      `SELECT
+         ${providerExpr} AS provider,
+         (sumIf(b.ValueAmountMicro, b.EventName IN ('conversion', 'subscription_renewal'))
+            - sumIf(abs(b.ValueAmountMicro), b.EventName = 'refund')) / 1000000 AS revenue,
+         uniqExact(b.UserIdHash) AS users
+       FROM business_events b
+       INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+       WHERE b.TenantId = {tenant:String}
+         AND b.Source = 'stripe'
+         AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         AND b.UserIdHash != ''
+         ${tagSql}
+         ${providerSql}
+       GROUP BY provider`,
+      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+    );
+    const revenueByProvider = new Map<
+      string,
+      { revenueMicroUsd: number; distinctUsers: number }
+    >();
+    for (const r of revenueRows) {
+      const users = parseInt(r.users, 10) || 0;
+      const revenueMicroUsd = micro(r.revenue);
+      if (users > 0) {
+        revenueByProvider.set(r.provider, { revenueMicroUsd, distinctUsers: users });
+      }
+    }
+
     const perProvider = sessionsRows.map((r) => {
       const sessions = parseInt(r.sessions, 10) || 0;
       const conversions = convByProvider.get(r.provider) ?? 0;
       const costMicro = micro(r.cost);
-      return buildProviderRow(r.provider, sessions, conversions, costMicro);
+      const revenue = revenueByProvider.get(r.provider) ?? null;
+      return buildProviderRow(r.provider, sessions, conversions, costMicro, revenue);
     });
     perProvider.sort((a, b) => b.sessions - a.sessions);
 
@@ -796,4 +836,91 @@ export async function queryCurrentModel(): Promise<{
       monthlyCostMicroUsd,
     };
   });
+}
+
+// --- Replay-backed candidate projection (CTO-113) -----------------------------------------------
+//
+// The gateway runs cross-provider replay against captured samples and returns per-candidate
+// cost / latency / error rate from real call outcomes. Cached for 5 minutes per (tenant, tag)
+// because each projection burns real provider spend — we don't want the dashboard re-replaying
+// on every page refresh.
+
+const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
+
+export interface ReplayCandidateRow {
+  provider: string;
+  model: string;
+  projected_monthly_cost_micro_usd: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  error_rate: number;
+  samples_replayed: number;
+  excluded_budget_count: number;
+}
+
+export interface ReplayProjection {
+  samples_available: number;
+  per_candidate: ReplayCandidateRow[];
+  diagnostics: {
+    context_fidelity: string;
+    replay_cost_micro_usd: number;
+  };
+}
+
+const REPLAY_CACHE_TTL_MS = 5 * 60 * 1000;
+const _replayCache = new Map<string, { at: number; data: ReplayProjection | null }>();
+
+// Default candidate list when the caller doesn't override. Models come from the SDK's expanded
+// catalog (CTO-106) — picked to mirror the existing mock so the dashboard's switcher looks the
+// same when replay is active.
+const DEFAULT_CANDIDATES = [
+  { provider: "anthropic", model: "claude-haiku-4-5" },
+  { provider: "openai", model: "gpt-5-mini" },
+  { provider: "openai", model: "gpt-4o-mini" },
+];
+
+/**
+ * Fetch real candidate metrics from the gateway's `/v1/replay` endpoint.
+ *
+ * Returns null when no samples exist (the route can fall back to its rescaled-mock path) or
+ * when the gateway is unreachable. Cached for {@link REPLAY_CACHE_TTL_MS} per (tenant, tag).
+ */
+export async function queryReplayCandidates(
+  featureTag?: string,
+  candidates: Array<{ provider: string; model: string }> = DEFAULT_CANDIDATES,
+): Promise<ReplayProjection | null> {
+  const tenant = TENANT;
+  const cacheKey = `${tenant}:${featureTag ?? ""}`;
+  const cached = _replayCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < REPLAY_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/replay`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      body: JSON.stringify({
+        tenant_id: tenant,
+        feature_tag: featureTag,
+        candidate_models: candidates,
+        sample_size: 50,
+      }),
+      cache: "no-store",
+      // Replay is synchronous — 30s is plenty for 50 samples × 3 candidates on the mock client.
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      console.warn(`[replay] /v1/replay HTTP ${res.status}; falling back to mock`);
+      _replayCache.set(cacheKey, { at: Date.now(), data: null });
+      return null;
+    }
+    const body = (await res.json()) as ReplayProjection;
+    const data = body.samples_available > 0 ? body : null;
+    _replayCache.set(cacheKey, { at: Date.now(), data });
+    return data;
+  } catch (err) {
+    console.warn("[replay] gateway unreachable, falling back to mock:", (err as Error).message);
+    _replayCache.set(cacheKey, { at: Date.now(), data: null });
+    return null;
+  }
 }

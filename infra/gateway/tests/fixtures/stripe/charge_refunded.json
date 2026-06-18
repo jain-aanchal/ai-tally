@@ -1,0 +1,21 @@
+{
+  "id": "evt_1NQ8t12eZvKYlo2C8b2L0003",
+  "object": "event",
+  "created": 1717020000,
+  "type": "charge.refunded",
+  "data": {
+    "object": {
+      "id": "ch_3NQ8t12eZvKYlo2C0001",
+      "object": "charge",
+      "amount": 4900,
+      "amount_refunded": 4900,
+      "currency": "usd",
+      "customer": "cus_PaYiNgCusT",
+      "receipt_email": "alice@example.com",
+      "billing_details": {
+        "email": "alice@example.com"
+      },
+      "refunded": true
+    }
+  }
+}

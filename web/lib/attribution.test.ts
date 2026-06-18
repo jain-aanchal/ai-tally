@@ -50,6 +50,44 @@ describe("buildProviderRow", () => {
     const r = buildProviderRow("openai", 25, 0, 500_000);
     expect(r.costPerConversionMicroUsd).toBeNull();
   });
+
+  it("leaves value/margin null when no Stripe data is provided (CTO-110)", () => {
+    const r = buildProviderRow("openai", 25, 5, 850_000);
+    expect(r.valuePerUserMicroUsd).toBeNull();
+    expect(r.marginPerUserMicroUsd).toBeNull();
+    expect(r.marginPct).toBeNull();
+  });
+
+  it("computes value/user and positive margin/user from revenue (CTO-110)", () => {
+    const r = buildProviderRow("openai", 25, 5, 1_000_000, {
+      revenueMicroUsd: 10_000_000,
+      distinctUsers: 10,
+    });
+    // 10_000_000 micro / 10 users = 1_000_000 micro per user
+    expect(r.valuePerUserMicroUsd).toBe(1_000_000);
+    // cost/user = 1_000_000 / 10 = 100_000 → margin = 1_000_000 − 100_000 = 900_000
+    expect(r.marginPerUserMicroUsd).toBe(900_000);
+    expect(r.marginPct).toBeCloseTo(0.9);
+  });
+
+  it("surfaces negative margin/user when cost outweighs value (CTO-110)", () => {
+    const r = buildProviderRow("openai", 25, 5, 2_000_000, {
+      revenueMicroUsd: 1_000_000,
+      distinctUsers: 10,
+    });
+    // value/user = 100_000, cost/user = 200_000 → margin = −100_000
+    expect(r.marginPerUserMicroUsd).toBe(-100_000);
+    expect(r.marginPct).toBeCloseTo(-1);
+  });
+
+  it("treats zero distinct users as no Stripe data (no fabrication)", () => {
+    const r = buildProviderRow("openai", 25, 5, 1_000_000, {
+      revenueMicroUsd: 50_000,
+      distinctUsers: 0,
+    });
+    expect(r.valuePerUserMicroUsd).toBeNull();
+    expect(r.marginPerUserMicroUsd).toBeNull();
+  });
 });
 
 describe("parseFilters", () => {
