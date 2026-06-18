@@ -3,6 +3,14 @@
 // from /v1/replay (CTO-113); this module's `comparison` value is the rescaled-mock fallback
 // used by the /api/compare route when the gateway has no opted-in samples yet (or is
 // unreachable). The CandidateMetrics / Comparison types are the wire shape for both branches.
+//
+// CTO-115: the `current` row's `latencyP95Ms` and `errorRate` are now derived from live
+// otel_spans over the same 7-day window the cost query uses (see queryCurrentModel in
+// clickhouse.ts). They carry `null` when the live window has fewer than 50 spans, and the
+// page renders "—" in that case. Everything else on this row (qualityScore) and every
+// candidate row stays mock until CTO-114 (eval harness) and the per-candidate
+// CTO-113-extension land. The numeric mocks in `comparison.current` below are the unreachable-
+// ClickHouse fallback (CI / fresh clones); that path keeps showing numbers, not nulls.
 
 import type { MicroUSD } from "./types";
 
@@ -14,9 +22,14 @@ export interface CandidateMetrics {
   monthlyCostMicroUsd: MicroUSD;
   /** pass rate from default LLM-judge eval (0..1) */
   qualityScore: number;
-  /** p95 latency in milliseconds */
-  latencyP95Ms: number;
-  errorRate: number; // 0..1
+  /**
+   * p95 latency in milliseconds. `null` on the `current` row when the live 7-day window has
+   * fewer than 50 spans (rendered as "—" — CTO-115). Candidate rows keep numeric mocks until
+   * per-candidate replay latency lands.
+   */
+  latencyP95Ms: number | null;
+  /** 0..1. `null` on the `current` row under the same low-sample suppression rule. */
+  errorRate: number | null;
 }
 
 export interface Comparison {

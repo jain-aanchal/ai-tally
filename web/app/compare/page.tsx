@@ -119,10 +119,24 @@ function Row({
   highlight,
 }: {
   label: string;
-  m: { monthlyCostMicroUsd: MicroUSD; qualityScore: number; latencyP95Ms: number; errorRate: number };
-  current?: { monthlyCostMicroUsd: MicroUSD; qualityScore: number; latencyP95Ms: number; errorRate: number };
+  m: {
+    monthlyCostMicroUsd: MicroUSD;
+    qualityScore: number;
+    latencyP95Ms: number | null;
+    errorRate: number | null;
+  };
+  current?: {
+    monthlyCostMicroUsd: MicroUSD;
+    qualityScore: number;
+    latencyP95Ms: number | null;
+    errorRate: number | null;
+  };
   highlight?: boolean;
 }) {
+  // CTO-115: latency/error on the live `current` row are null when fewer than 50 spans landed
+  // in the 7-day window. Render "—" rather than fabricating a placeholder, and skip deltas
+  // against a null baseline.
+  const lowSampleTitle = "needs ≥50 spans in 7d";
   return (
     <tr className={`border-t border-edge ${highlight ? "font-medium" : ""}`}>
       <td className="py-2">{label}</td>
@@ -135,12 +149,28 @@ function Row({
         {current && <DeltaPp v={(m.qualityScore - current.qualityScore) * 100} betterWhenPositive />}
       </td>
       <td className="py-2 text-right tabular-nums">
-        {m.latencyP95Ms} ms
-        {current && <Delta v={deltaPct(current.latencyP95Ms, m.latencyP95Ms)} betterWhenNegative />}
+        {m.latencyP95Ms === null ? (
+          <span className="text-muted" title={lowSampleTitle}>
+            —
+          </span>
+        ) : (
+          <>{m.latencyP95Ms} ms</>
+        )}
+        {current && current.latencyP95Ms !== null && m.latencyP95Ms !== null && (
+          <Delta v={deltaPct(current.latencyP95Ms, m.latencyP95Ms)} betterWhenNegative />
+        )}
       </td>
       <td className="py-2 text-right tabular-nums">
-        {(m.errorRate * 100).toFixed(2)}%
-        {current && <DeltaPp v={(m.errorRate - current.errorRate) * 100} betterWhenPositive={false} />}
+        {m.errorRate === null ? (
+          <span className="text-muted" title={lowSampleTitle}>
+            —
+          </span>
+        ) : (
+          <>{(m.errorRate * 100).toFixed(2)}%</>
+        )}
+        {current && current.errorRate !== null && m.errorRate !== null && (
+          <DeltaPp v={(m.errorRate - current.errorRate) * 100} betterWhenPositive={false} />
+        )}
       </td>
     </tr>
   );
