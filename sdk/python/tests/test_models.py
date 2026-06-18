@@ -39,7 +39,13 @@ def test_classify_family_truth_table() -> None:
         assert M.classify_family(model_id) == expected, model_id
 
 
-def _make(provider: str, model_id: str, *, created: datetime | None, deprecated=None) -> M.ModelInfo:
+def _make(
+    provider: str,
+    model_id: str,
+    *,
+    created: datetime | None,
+    deprecated=None,
+) -> M.ModelInfo:
     return M.ModelInfo(
         provider=provider,
         id=model_id,
@@ -84,7 +90,11 @@ def test_cache_round_trip(tmp_path: Path) -> None:
     cache = tmp_path / "models.json"
     original = [
         _make("openai", "gpt-4o", created=datetime(2024, 5, 1, tzinfo=timezone.utc)),
-        _make("anthropic", "claude-sonnet-4-5", created=datetime(2025, 10, 15, tzinfo=timezone.utc)),
+        _make(
+            "anthropic",
+            "claude-sonnet-4-5",
+            created=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        ),
     ]
     M.save_cache(original, cache)
     loaded = M.load_cached(cache)
