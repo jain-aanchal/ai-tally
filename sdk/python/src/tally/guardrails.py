@@ -114,11 +114,90 @@ def _near_breach(state: GuardrailState, config: GuardrailConfig) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------------------------
+# Control-plane refresh (CTO-116) — pull the active rule set from the gateway periodically.
+#
+# The gateway is the canonical source of truth. We poll on CONFIG_REFRESH_SECONDS (mirroring
+# web/lib/guardrails.ts) and fail soft: if the gateway is unreachable, we keep enforcing the
+# last-known config. A rule that hasn't loaded yet is a no-op — never a hard fail.
+#
+# Each rule emits two span attributes when it fires:
+#   gen_ai.guardrail.{rule_id}.verdict in {"enforced","shadow_observed","passed"}
+#   gen_ai.guardrail.{rule_id}.kind    in pii_gate | cost_cap | loop_limit | model_deprecation
+# Shadow-state rules emit "shadow_observed" — they record what would have fired without altering
+# the call. The dashboard counts shadow_observed/wk as the graduation signal.
+# --------------------------------------------------------------------------------------------
+
+import json
+import logging
+import threading
+import urllib.error
+import urllib.request
+
+CONFIG_REFRESH_SECONDS = 60
+
+_logger = logging.getLogger("tally.guardrails")
+
+
+class RuleKind(str, Enum):
+    PII_GATE = "pii_gate"
+    COST_CAP = "cost_cap"
+    LOOP_LIMIT = "loop_limit"
+    MODEL_DEPRECATION = "model_deprecation"
+
+
+class RuleState(str, Enum):
+    ENABLED = "enabled"
+    SHADOW = "shadow"
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPlaneRule:
+    rule_id: str
+    kind: RuleKind
+    state: RuleState
+    params: dict
+
+
+@dataclass(frozen=True, slots=True)
+class RuleVerdict:
+    """Per-rule outcome for span-attr emission.
+
+    verdict is one of:
+      - "enforced"        rule fired AND state=enabled, behavior altered
+      - "shadow_observed" rule fired AND state=shadow, behavior NOT altered
+      - "passed"          rule evaluated but did not fire
+    """
+
+    rule_id: str
+    kind: RuleKind
+    verdict: str
+
+    def attrs(self) -> dict[str, str]:
+        return {
+            f"gen_ai.guardrail.{self.rule_id}.verdict": self.verdict,
+            f"gen_ai.guardrail.{self.rule_id}.kind": self.kind.value,
+        }
+
+
 @dataclass(slots=True)
 class GuardrailEngine:
-    """Evaluates guardrails against per-trace state. Holds the OBSERVE-mode would-fire tally."""
+    """Evaluates guardrails against per-trace state. Holds the OBSERVE-mode would-fire tally.
+
+    For CTO-116, also pulls a tenant-scoped rule set from the gateway on a refresh interval and
+    exposes :meth:`apply_rules` which evaluates the cached rules against a per-call context.
+    """
 
     would_fire_counts: dict[Limit, int] = field(default_factory=dict)
+    rules: list[ControlPlaneRule] = field(default_factory=list)
+    shadow_fire_counts: dict[str, int] = field(default_factory=dict)
+    _last_refresh_at: float = 0.0
+    _refresh_seconds: int = CONFIG_REFRESH_SECONDS
+    _gateway_url: str | None = None
+    _tenant_id: str | None = None
+    _stop: threading.Event | None = None
+    _thread: threading.Thread | None = None
 
     def evaluate(self, state: GuardrailState, config: GuardrailConfig) -> Verdict:
         """Consult the guardrail. Call BEFORE the next LLM/tool call.
@@ -141,8 +220,142 @@ class GuardrailEngine:
             return Verdict(
                 proceed=True,
                 breached=limit,
-                warning=f"guardrail '{limit.value}' exceeded ({value}/{cap})",
+                warning=f"guardrail \'{limit.value}\' exceeded ({value}/{cap})",
             )
 
         # GRACEFUL or HARD_STOP — localized exception, never a process kill.
         raise CostLimitExceededException(limit, value, cap, state.trace_id)
+
+    # ---- Control-plane refresh (CTO-116) -----------------------------------------------------
+
+    @classmethod
+    def from_gateway(
+        cls,
+        gateway_url: str,
+        tenant_id: str,
+        *,
+        refresh_seconds: int = CONFIG_REFRESH_SECONDS,
+        start: bool = True,
+    ) -> "GuardrailEngine":
+        """Build an engine bound to a gateway tenant, sync rules once, optionally start the loop.
+
+        Fail-soft: an unreachable gateway is logged but does not raise — the engine is returned
+        with an empty rule list and the next refresh will retry.
+        """
+        engine = cls()
+        engine._gateway_url = gateway_url.rstrip("/")
+        engine._tenant_id = tenant_id
+        engine._refresh_seconds = refresh_seconds
+        engine._refresh_once()
+        if start:
+            engine.start_refresh()
+        return engine
+
+    def _refresh_once(self) -> None:
+        """One sync attempt. Replaces ``self.rules`` on success; on any error, keeps current rules."""
+        import time as _time
+
+        if not self._gateway_url or not self._tenant_id:
+            return
+        url = f"{self._gateway_url}/v1/tenant/guardrails"
+        req = urllib.request.Request(url, headers={"x-tenant-id": self._tenant_id})
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            raw_rules = payload.get("rules") or []
+            parsed: list[ControlPlaneRule] = []
+            for r in raw_rules:
+                try:
+                    parsed.append(
+                        ControlPlaneRule(
+                            rule_id=str(r["rule_id"]),
+                            kind=RuleKind(r["kind"]),
+                            state=RuleState(r["state"]),
+                            params=dict(r.get("params") or {}),
+                        )
+                    )
+                except (KeyError, ValueError) as exc:
+                    _logger.warning("guardrails: skipping malformed rule: %s", exc)
+            self.rules = parsed
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+            _logger.warning(
+                "guardrails: refresh failed, keeping last-known rules (%d): %s",
+                len(self.rules),
+                exc,
+            )
+        finally:
+            self._last_refresh_at = _time.time()
+
+    def _run_refresh_loop(self) -> None:
+        assert self._stop is not None
+        while not self._stop.is_set():
+            if self._stop.wait(self._refresh_seconds):
+                return
+            self._refresh_once()
+
+    def start_refresh(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run_refresh_loop, name="guardrail-refresh", daemon=True
+        )
+        self._thread.start()
+
+    def stop_refresh(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self._thread = None
+        self._stop = None
+
+    def apply_rules(self, call_context: dict) -> list[RuleVerdict]:
+        """Evaluate each loaded rule against ``call_context``.
+
+        Returns one :class:`RuleVerdict` per non-disabled rule. The verdict string is:
+          - "enforced"        rule fired and state=enabled (caller should alter behavior)
+          - "shadow_observed" rule fired and state=shadow  (record only)
+          - "passed"          rule did not fire
+
+        Shadow firings increment ``shadow_fire_counts[rule_id]`` so the dashboard can count
+        would-have-fired/wk before flipping to enabled.
+        """
+        out: list[RuleVerdict] = []
+        for rule in self.rules:
+            if rule.state == RuleState.DISABLED:
+                continue
+            fired = _rule_fires(rule, call_context)
+            if fired:
+                if rule.state == RuleState.ENABLED:
+                    verdict = "enforced"
+                else:
+                    verdict = "shadow_observed"
+                    self.shadow_fire_counts[rule.rule_id] = (
+                        self.shadow_fire_counts.get(rule.rule_id, 0) + 1
+                    )
+            else:
+                verdict = "passed"
+            out.append(RuleVerdict(rule_id=rule.rule_id, kind=rule.kind, verdict=verdict))
+        return out
+
+
+def _rule_fires(rule: ControlPlaneRule, ctx: dict) -> bool:
+    """Heuristic per-kind firing predicate. Keep these dumb on purpose — the gateway is the
+    source of truth for what each kind means, the SDK just evaluates the cached predicate."""
+    if rule.kind == RuleKind.PII_GATE:
+        return bool(ctx.get("contains_pii"))
+    if rule.kind == RuleKind.COST_CAP:
+        cap = rule.params.get("max_cost_micro_usd")
+        if cap is None:
+            return False
+        return float(ctx.get("cost_micro_usd", 0)) > float(cap)
+    if rule.kind == RuleKind.LOOP_LIMIT:
+        cap = rule.params.get("max_steps")
+        if cap is None:
+            return False
+        return int(ctx.get("step_count", 0)) > int(cap)
+    if rule.kind == RuleKind.MODEL_DEPRECATION:
+        deprecated = rule.params.get("deprecated_models") or []
+        return ctx.get("model") in deprecated
+    return False
