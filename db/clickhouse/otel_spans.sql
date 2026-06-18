@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS otel_spans
     AgentRunId             String                   CODEC(ZSTD(1)),
     AgentStepIndex         UInt16,
 
+    -- Context-window drops (CTO-118). Counts only — never the dropped message text.
+    -- All three default to 0 so existing rows survive an additive ALTER without backfill.
+    ContextDroppedMessages UInt32 DEFAULT 0         CODEC(T64, ZSTD(1)),
+    ContextDroppedTokens   UInt32 DEFAULT 0         CODEC(T64, ZSTD(1)),
+    ContextWindowUsedPct   Float32 DEFAULT 0        CODEC(ZSTD(1)),
+
     -- Replay (Workflow 1)
     ResolvedPromptHash     FixedString(64),
     ResolvedContextRef     String,
@@ -83,3 +89,11 @@ TTL
     toDateTime(Timestamp) + INTERVAL 7 DAY  TO VOLUME 'warm',
     toDateTime(Timestamp) + INTERVAL 30 DAY TO VOLUME 'cold',
     toDateTime(Timestamp) + INTERVAL 90 DAY DELETE;
+
+-- CTO-118 additive migration. Idempotent: `ADD COLUMN IF NOT EXISTS` plus a `DEFAULT 0`
+-- so the operation is metadata-only and non-blocking; existing rows show 0 until they're
+-- naturally aged out. Counts only — there is no body field here, and never will be.
+ALTER TABLE otel_spans
+    ADD COLUMN IF NOT EXISTS ContextDroppedMessages UInt32  DEFAULT 0 CODEC(T64, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS ContextDroppedTokens   UInt32  DEFAULT 0 CODEC(T64, ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS ContextWindowUsedPct   Float32 DEFAULT 0 CODEC(ZSTD(1));

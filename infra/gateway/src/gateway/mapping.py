@@ -36,8 +36,37 @@ _PROMOTED_GENAI = frozenset(
         GenAI.AGENT_RUN_ID,
         GenAI.AGENT_STEP_INDEX,
         GenAI.RESOLVED_CONTEXT_REF,
+        GenAI.CONTEXT_DROPPED_MESSAGES,
+        GenAI.CONTEXT_DROPPED_TOKENS,
+        GenAI.CONTEXT_WINDOW_USED_PCT,
     }
 )
+
+# Hard PII guard (CTO-118): any incoming attribute whose key tail-segment matches one of
+# these is dropped on the floor. The contract is "counts only, never bodies"; if a caller
+# tries to sneak a message body through under a familiar name, we refuse to persist it.
+# Match by suffix so nested namespaces (e.g. "gen_ai.prompt.text") are caught too.
+_BODY_KEY_SUFFIXES = frozenset(
+    {
+        "message_text",
+        "messages",
+        "prompt",
+        "prompt_text",
+        "completion",
+        "completion_text",
+        "input_text",
+        "output_text",
+        "content",
+        "text",
+        "body",
+    }
+)
+
+
+def _is_body_key(key: str) -> bool:
+    """Return True if the key's last dot-segment looks like it could carry a message body."""
+    tail = key.rsplit(".", 1)[-1].lower()
+    return tail in _BODY_KEY_SUFFIXES
 
 # Structural keys recognised on the raw span dict (snake_case or ClickHouse-case both accepted).
 _STRUCTURAL = frozenset(
@@ -78,6 +107,9 @@ COLUMNS: tuple[str, ...] = (
     "PriceCatalogVersion",
     "AgentRunId",
     "AgentStepIndex",
+    "ContextDroppedMessages",
+    "ContextDroppedTokens",
+    "ContextWindowUsedPct",
     "SpanAttributes",
     "SampleRate",
 )
@@ -104,6 +136,18 @@ def _fixed64(v: object | None) -> str:
     return s[:64]
 
 
+def _f(v: object | None) -> float:
+    """Coerce to float, defaulting to 0.0, clamped to [0, 1] (we only promote a fraction)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0.0
+    f = float(v)
+    if f < 0.0:
+        return 0.0
+    if f > 1.0:
+        return 1.0
+    return f
+
+
 def span_to_row(
     span: dict[str, object],
     *,
@@ -125,9 +169,12 @@ def span_to_row(
     )
 
     # Long-tail attributes: anything not promoted and not structural, stringified for Map(String,String).
+    # PII guard (CTO-118): refuse to persist any key that looks like it could carry a message body.
     extra: dict[str, str] = {}
     for k, v in span.items():
         if k in _PROMOTED_GENAI or k in _STRUCTURAL or v is None:
+            continue
+        if _is_body_key(str(k)):
             continue
         extra[str(k)] = str(v)
 
@@ -160,6 +207,9 @@ def span_to_row(
         _s(span.get(GenAI.COST_PRICE_CATALOG_VERSION)),
         _s(span.get(GenAI.AGENT_RUN_ID)),
         _i(span.get(GenAI.AGENT_STEP_INDEX)),
+        _i(span.get(GenAI.CONTEXT_DROPPED_MESSAGES)),
+        _i(span.get(GenAI.CONTEXT_DROPPED_TOKENS)),
+        _f(span.get(GenAI.CONTEXT_WINDOW_USED_PCT)),
         extra,
         float(sample_rate),
     )
