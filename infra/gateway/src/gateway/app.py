@@ -85,6 +85,11 @@ from gateway.tenant_cac import (
 )
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
+from gateway.tenant_guardrails import (
+    ALLOWED_KINDS as GUARDRAIL_KINDS,
+    ALLOWED_STATES as GUARDRAIL_STATES,
+    TenantGuardrailStore,
+)
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
 from gateway.tenant_stripe import TenantStripeStore
@@ -102,6 +107,10 @@ async def lifespan(app: FastAPI):
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
     app.state.tenant_connectors = TenantConnectorStore(settings)
+    # Per-tenant guardrail registry (CTO-116) — the SDK polls /v1/tenant/guardrails on its
+    # config-refresh window and enforces matching rules in-process. Shadow rules emit span
+    # attrs but never alter the call; enabled rules do.
+    app.state.tenant_guardrails = TenantGuardrailStore(settings)
     app.state.tenant_stripe = TenantStripeStore(settings)
     # Per-tenant third-party integration run status (CTO-117): Stripe / Segment / HubSpot / Pendo.
     # Workers call .record_run after each cycle; the dashboard reads via /v1/tenant/integrations/status.
@@ -631,6 +640,97 @@ async def set_tenant_connector(
     store: TenantConnectorStore = app.state.tenant_connectors
     row = store.set(tenant_id, layer, enabled=enabled, notes=notes)
     return JSONResponse({"tenant_id": tenant_id, "connector": row.as_dict()}, status_code=200)
+
+
+@app.get("/v1/tenant/guardrails")
+def list_tenant_guardrails(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """List guardrail rules for the caller's tenant (CTO-116).
+
+    The SDK polls this on its config-refresh interval; the dashboard renders the same payload.
+    Rules in 'shadow' state are evaluated and observed but never alter agent behavior — that's the
+    safe staging step before flipping to 'enabled'.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantGuardrailStore = app.state.tenant_guardrails
+    rules = store.list(tenant_id)
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "rules": [r.as_dict() for r in rules],
+    })
+
+
+@app.post("/v1/tenant/guardrails")
+async def upsert_tenant_guardrail(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert a guardrail rule. Idempotent on client-supplied change_id (CTO-116).
+
+    Body: ``{rule_id, kind, params, state, change_id, actor?, notes?}``. Replaying the same
+    change_id is a no-op (returns the existing rule unchanged).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    rule_id = body.get("rule_id")
+    kind = body.get("kind")
+    state = body.get("state")
+    params = body.get("params") or {}
+    change_id = body.get("change_id")
+    if not isinstance(rule_id, str) or not rule_id:
+        raise HTTPException(status_code=422, detail="rule_id required")
+    if kind not in GUARDRAIL_KINDS:
+        raise HTTPException(
+            status_code=422, detail=f"kind must be one of {sorted(GUARDRAIL_KINDS)}"
+        )
+    if state not in GUARDRAIL_STATES:
+        raise HTTPException(
+            status_code=422, detail=f"state must be one of {sorted(GUARDRAIL_STATES)}"
+        )
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=422, detail="params must be an object")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    store: TenantGuardrailStore = app.state.tenant_guardrails
+    try:
+        rule = store.upsert(
+            tenant_id,
+            rule_id,
+            kind=kind,
+            params=params,
+            state=state,
+            change_id=change_id,
+            actor=body.get("actor"),
+            notes=body.get("notes"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "rule": rule.as_dict()})
+
+
+@app.get("/v1/tenant/guardrails/audit")
+def list_tenant_guardrail_audit(
+    rule_id: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Recent guardrail rule changes for the caller's tenant (CTO-116)."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantGuardrailStore = app.state.tenant_guardrails
+    changes = store.audit(tenant_id, rule_id=rule_id)
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "rule_id": rule_id,
+        "changes": [c.as_dict() for c in changes],
+    })
 
 
 @app.post("/v1/tenant/stripe/connect")
