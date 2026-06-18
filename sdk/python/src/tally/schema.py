@@ -60,6 +60,13 @@ class GenAI:
     CONTEXT_DROPPED_TOKENS = "gen_ai.context.dropped_tokens"  # int, total tokens trimmed
     CONTEXT_WINDOW_USED_PCT = "gen_ai.context.window_used_pct"  # float, 0..1
 
+    # Stratified-sampling provenance (CTO-119). The stratum the head-time sampler placed this trace
+    # in ("body" | "mid" | "tail") plus the stratum's configured keep rate. Distinct from the
+    # existing per-span `SampleRate` weight used for billing extrapolation — this pair lets the DQ
+    # surface compute per-stratum confidence bands without inferring them from cost histograms.
+    SAMPLING_STRATUM = "gen_ai.sampling.stratum"  # str, "body" | "mid" | "tail"
+    SAMPLING_RATE = "gen_ai.sampling.rate"  # float, 0..1
+
 
 # Known operation names (open set — unknown values are allowed but should be lowercase tokens).
 OPERATIONS = frozenset({"chat", "completion", "embeddings", "tool", "agent", "rerank"})
@@ -81,8 +88,8 @@ _INT_KEYS = frozenset(
         GenAI.CONTEXT_DROPPED_TOKENS,
     }
 )
-# Float keys — currently just the context-window utilization signal (CTO-118).
-_FLOAT_KEYS = frozenset({GenAI.CONTEXT_WINDOW_USED_PCT})
+# Float keys — context-window utilization (CTO-118) and stratum keep-rate (CTO-119).
+_FLOAT_KEYS = frozenset({GenAI.CONTEXT_WINDOW_USED_PCT, GenAI.SAMPLING_RATE})
 _STR_KEYS = frozenset(
     {
         GenAI.SYSTEM,
@@ -100,8 +107,12 @@ _STR_KEYS = frozenset(
         GenAI.TOOL_NAME,
         GenAI.TOOL_CALL_ID,
         GenAI.RESOLVED_CONTEXT_REF,
+        GenAI.SAMPLING_STRATUM,
     }
 )
+# Allowed values for the stratum string. The validator rejects anything else so we don't end up
+# with a long-tail of free-text strata polluting the DQ table.
+_SAMPLING_STRATA = frozenset({"body", "mid", "tail"})
 _ALL_KEYS = _INT_KEYS | _STR_KEYS | _FLOAT_KEYS
 
 _MICRO = Decimal(1_000_000)
@@ -145,6 +156,8 @@ class SpanFields:
     tool_call_id: str | None = None
     tool_cost_micro_usd: int | None = None
     resolved_context_ref: str | None = None
+    sampling_stratum: str | None = None
+    sampling_rate: float | None = None
 
 
 _FIELD_TO_KEY = {
@@ -170,6 +183,8 @@ _FIELD_TO_KEY = {
     "tool_call_id": GenAI.TOOL_CALL_ID,
     "tool_cost_micro_usd": GenAI.TOOL_COST_MICRO_USD,
     "resolved_context_ref": GenAI.RESOLVED_CONTEXT_REF,
+    "sampling_stratum": GenAI.SAMPLING_STRATUM,
+    "sampling_rate": GenAI.SAMPLING_RATE,
 }
 
 
@@ -229,5 +244,11 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
 
     if GenAI.COST_ESTIMATED_MICRO_USD in attrs and GenAI.COST_CURRENCY not in attrs:
         violations.append("cost present without gen_ai.cost.currency")
+
+    stratum = attrs.get(GenAI.SAMPLING_STRATUM)
+    if isinstance(stratum, str) and stratum not in _SAMPLING_STRATA:
+        violations.append(
+            f"{GenAI.SAMPLING_STRATUM} must be one of {sorted(_SAMPLING_STRATA)}, got {stratum!r}"
+        )
 
     return violations
