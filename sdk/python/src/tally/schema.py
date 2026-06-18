@@ -54,6 +54,12 @@ class GenAI:
 
     RESOLVED_CONTEXT_REF = "gen_ai.resolved_context_ref"
 
+    # Context-window drop signals (CTO-118). Counts/token counts ONLY — never the dropped
+    # message text. Matches the bar set by the edge-proxy: no field here could hold a prompt.
+    CONTEXT_DROPPED_MESSAGES = "gen_ai.context.dropped_messages"  # int, count of trimmed messages
+    CONTEXT_DROPPED_TOKENS = "gen_ai.context.dropped_tokens"  # int, total tokens trimmed
+    CONTEXT_WINDOW_USED_PCT = "gen_ai.context.window_used_pct"  # float, 0..1
+
 
 # Known operation names (open set — unknown values are allowed but should be lowercase tokens).
 OPERATIONS = frozenset({"chat", "completion", "embeddings", "tool", "agent", "rerank"})
@@ -71,8 +77,12 @@ _INT_KEYS = frozenset(
         GenAI.TOOL_COST_MICRO_USD,
         GenAI.AGENT_STEP_INDEX,
         GenAI.AGENT_STEP_MAX,
+        GenAI.CONTEXT_DROPPED_MESSAGES,
+        GenAI.CONTEXT_DROPPED_TOKENS,
     }
 )
+# Float keys — currently just the context-window utilization signal (CTO-118).
+_FLOAT_KEYS = frozenset({GenAI.CONTEXT_WINDOW_USED_PCT})
 _STR_KEYS = frozenset(
     {
         GenAI.SYSTEM,
@@ -92,7 +102,7 @@ _STR_KEYS = frozenset(
         GenAI.RESOLVED_CONTEXT_REF,
     }
 )
-_ALL_KEYS = _INT_KEYS | _STR_KEYS
+_ALL_KEYS = _INT_KEYS | _STR_KEYS | _FLOAT_KEYS
 
 _MICRO = Decimal(1_000_000)
 
@@ -201,6 +211,11 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
                 violations.append(f"{key} must be str, got {type(value).__name__}")
             elif value == "":
                 violations.append(f"{key} must be non-empty")
+        elif key in _FLOAT_KEYS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                violations.append(f"{key} must be float, got {type(value).__name__}")
+            elif not (0.0 <= float(value) <= 1.0):
+                violations.append(f"{key} must be in [0, 1], got {value}")
 
     op = attrs.get(GenAI.OPERATION_NAME)
     if isinstance(op, str) and op and op != op.lower():

@@ -67,11 +67,13 @@ def _buffered_client(store: FakeStore) -> Iterator[TestClient]:
         settings.ingest_buffer_poll_interval_s = prev_poll
 
 
-def _spans(n: int) -> list[dict]:
+def _spans(n: int, batch: int = 0) -> list[dict]:
+    # Unique (trace_id, span_id) per call — the buffer's BufferConsumer dedups on that pair, so
+    # repeating IDs across batches makes the drained-store count race with chunk boundaries.
     return [
         {
-            "trace_id": f"t{i}",
-            "span_id": f"s{i}",
+            "trace_id": f"t-{batch}-{i}",
+            "span_id": f"s-{batch}-{i}",
             GenAI.SYSTEM: "openai",
             GenAI.OPERATION_NAME: "chat",
             GenAI.USAGE_INPUT_TOKENS: 10,
@@ -101,8 +103,8 @@ def test_buffered_burst_is_accepted_and_persisted() -> None:
     with _buffered_client(store) as c:
         # Several batches in quick succession — a burst the synchronous path would push through CH.
         total = 0
-        for _ in range(5):
-            r = _post(c, _spans(40))
+        for batch in range(5):
+            r = _post(c, _spans(40, batch=batch))
             assert r.status_code == 200
             body = r.json()
             assert body["status"] == "accepted"
@@ -129,8 +131,8 @@ def test_burst_returns_no_5xx_even_when_clickhouse_down() -> None:
     # buffered and retried in the background; the client sees 200 the whole time.
     store = FakeStore(span_fail=True)
     with _buffered_client(store) as c:
-        for _ in range(5):
-            r = _post(c, _spans(20))
+        for batch in range(5):
+            r = _post(c, _spans(20, batch=batch))
             assert r.status_code == 200  # never 503, even though CH insert raises
             assert r.json()["status"] == "accepted"
         # Rows are retained in the buffer (not lost, not written) while CH is down.

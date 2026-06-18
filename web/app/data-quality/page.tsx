@@ -96,17 +96,26 @@ export default async function DataQualityPage() {
             </tr>
           </thead>
           <tbody>
-            {contextDrops.map((d) => (
-              <tr key={`${d.service}-${d.sdkVersion}`} className="border-t border-edge">
-                <td className="py-2">{d.service}</td>
-                <td className="py-2 font-mono text-xs text-gray-300">{d.sdkVersion}</td>
-                <td className="py-2 text-right tabular-nums">
-                  <HealthText h={classify("drops", d.drops24h)}>
-                    {d.drops24h.toLocaleString()}
-                  </HealthText>
-                </td>
-              </tr>
-            ))}
+            {contextDrops.map((d) => {
+              // CTO-118: distinguish "service inactive" (no spans in 24h) from "real zero drops".
+              // Inactive → "—" with tooltip; active+zero → green "0"; active+>0 → red count.
+              const inactive = (d.spans24h ?? 1) === 0;
+              return (
+                <tr key={`${d.service}-${d.sdkVersion}`} className="border-t border-edge">
+                  <td className="py-2">{d.service}</td>
+                  <td className="py-2 font-mono text-xs text-gray-300">{d.sdkVersion}</td>
+                  <td className="py-2 text-right tabular-nums">
+                    {inactive ? (
+                      <span className="text-muted" title="no spans in the last 24h">—</span>
+                    ) : (
+                      <HealthText h={classify("drops", d.drops24h)}>
+                        {d.drops24h.toLocaleString()}
+                      </HealthText>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </Card>

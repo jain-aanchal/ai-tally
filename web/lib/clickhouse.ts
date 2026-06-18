@@ -365,20 +365,27 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       events7d: parseInt(r.events, 10) || 0,
     }));
 
-    const svc = await rows<{ service: string; sdk: string }>(
+    // CTO-118: ContextDroppedMessages now a typed column (default 0 on legacy rows). Drops count
+    // is per-service over 24h. We also pull `total_spans` so the page can distinguish a clean
+    // "0 drops in green" (service active, no drops) from "no data this week" (service inactive).
+    const svc = await rows<{ service: string; sdk: string; drops: string; spans: string }>(
       db,
-      `SELECT ServiceName AS service, any(SpanAttributes['telemetry.sdk.version']) AS sdk
+      `SELECT ServiceName AS service,
+              any(SpanAttributes['telemetry.sdk.version']) AS sdk,
+              countIf(ContextDroppedMessages > 0) AS drops,
+              count() AS spans
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 24 HOUR
        GROUP BY service`,
       tenant,
     );
-    // Context-drop detection isn't instrumented yet → 0 drops, but the service inventory is real.
     const contextDrops: ContextDropsByService[] = svc.map((r) => ({
       service: r.service || "unknown",
       sdkVersion: r.sdk || "unknown",
-      drops24h: 0,
+      drops24h: parseInt(r.drops, 10) || 0,
+      spans24h: parseInt(r.spans, 10) || 0,
     }));
+    const contextDropCount24h = contextDrops.reduce((s, c) => s + c.drops24h, 0);
 
     const cal = await rows<{ date: string; est: string; recon: string }>(
       db,
@@ -402,7 +409,8 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
     return {
       overall: {
         attributionRate: totalEvents > 0 ? attributed / totalEvents : 1,
-        contextDropCount24h: 0,
+        // CTO-118: real count from typed columns above (sum across services).
+        contextDropCount24h,
         estimateCalibration: 0,
         effectiveSampleRate,
       },
