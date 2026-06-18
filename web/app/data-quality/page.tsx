@@ -153,32 +153,55 @@ export default async function DataQualityPage() {
         </table>
       </Card>
 
-      <Card title="Sampling by stratum">
-        <table className="w-full text-sm">
-          <thead className="text-xs uppercase text-muted">
-            <tr>
-              <th className="py-1 text-left font-medium">Stratum</th>
-              <th className="py-1 text-right font-medium">Keep rate</th>
-              <th className="py-1 text-right font-medium">CI on extrapolated cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sampling.map((s) => (
-              <tr key={s.stratum} className="border-t border-edge">
-                <td className="py-2 capitalize">{s.stratum}</td>
-                <td className="py-2 text-right tabular-nums">{Math.round(s.rate * 100)}%</td>
-                <td className="py-2 text-right tabular-nums">
-                  {s.ciHalfWidthPct === 0 ? (
-                    <span className="text-good">exact</span>
-                  ) : (
-                    `±${Math.round(s.ciHalfWidthPct * 100)}%`
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
+      {/* CTO-119: hide the table entirely when no sampling is configured (effective rate == 100%
+          AND no spans in any stratum) — every span is captured, the CI is degenerate, the table
+          would just be confusing. Inactive tenants (no data) get the same treatment. */}
+      {(() => {
+        const totalSpans = sampling.reduce((s, r) => s + r.spans, 0);
+        if (overall.effectiveSampleRate >= 1.0 && totalSpans === 0) {
+          return (
+            <Card title="Sampling by stratum">
+              <p className="text-sm text-muted" title="no sampling configured — every span captured">
+                Not applicable — every span captured.
+              </p>
+            </Card>
+          );
+        }
+        return (
+          <Card title="Sampling by stratum">
+            <table className="w-full text-sm">
+              <thead className="text-xs uppercase text-muted">
+                <tr>
+                  <th className="py-1 text-left font-medium">Stratum</th>
+                  <th className="py-1 text-right font-medium">Keep rate</th>
+                  <th className="py-1 text-right font-medium">CI on extrapolated cost</th>
+                  <th className="py-1 text-right font-medium">Spans (30d)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sampling.map((s) => (
+                  <tr key={s.stratum} className="border-t border-edge">
+                    <td className="py-2 capitalize">{s.stratum}</td>
+                    <td className="py-2 text-right tabular-nums">{Math.round(s.rate * 100)}%</td>
+                    <td className="py-2 text-right tabular-nums">
+                      {s.ciHalfWidthPct === null ? (
+                        <span className="text-muted" title="needs ≥30 kept spans in 30d">
+                          —
+                        </span>
+                      ) : s.ciHalfWidthPct === 0 ? (
+                        <span className="text-good">exact</span>
+                      ) : (
+                        `±${Math.round(s.ciHalfWidthPct * 100)}%`
+                      )}
+                    </td>
+                    <td className="py-2 text-right tabular-nums">{s.spans.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+        );
+      })()}
     </div>
   );
 

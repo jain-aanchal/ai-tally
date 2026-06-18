@@ -403,8 +403,43 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       reconciledMicroUsd: micro(r.recon),
     }));
 
-    // No stratified-sampling metadata in otel_spans yet → leave empty (the page renders no rows).
-    const sampling: SampleByStratum[] = [];
+    // CTO-119: per-stratum stats from typed columns. The "ci_half" formula is the standard
+    // coefficient-of-variation half-width: zCrit × stddev(cost) / mean(cost) / sqrt(n), which
+    // assumes cost is approximately log-normal within the stratum. Fine for body (high-volume,
+    // similar costs); heroic for tail (rare, expensive) — flagged in CTO-119 as a follow-up
+    // where a bootstrap estimator may be warranted. n<30 → null (page renders "—") rather than
+    // a meaninglessly wide band.
+    const strata = await rows<{ stratum: string; rate: string; n: string; mean: string; std: string }>(
+      db,
+      `SELECT SamplingStratum AS stratum,
+              avg(SamplingRate) AS rate,
+              count() AS n,
+              avg(EstimatedCost) AS mean,
+              stddevPop(EstimatedCost) AS std
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND SamplingStratum IN ('body', 'mid', 'tail')
+       GROUP BY stratum`,
+      tenant,
+    );
+    const Z95 = 1.96;
+    const byStratum = new Map(strata.map((r) => {
+      const n = parseInt(r.n, 10) || 0;
+      const mean = parseFloat(r.mean) || 0;
+      const std = parseFloat(r.std) || 0;
+      const ci = n >= 30 && mean > 0 ? (Z95 * std) / mean / Math.sqrt(n) : null;
+      return [r.stratum, { rate: parseFloat(r.rate) || 0, ci, spans: n }];
+    }));
+    const sampling: SampleByStratum[] = (["tail", "mid", "body"] as const).map((s) => {
+      const row = byStratum.get(s);
+      return {
+        stratum: s,
+        rate: row?.rate ?? 0,
+        ciHalfWidthPct: row?.ci ?? null,
+        spans: row?.spans ?? 0,
+      };
+    });
 
     return {
       overall: {
