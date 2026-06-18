@@ -84,10 +84,10 @@ def _post(c: TestClient, spans: list[dict]):
     return c.post("/v1/batches", json={"tenant_id": "t-local", "sdk_version": "test", "resource_spans": spans})
 
 
-def _wait_for(predicate, timeout_s: float = 30.0) -> bool:
-    # 30s ceiling — loaded GitHub Actions runners have been seen taking >15s
+def _wait_for(predicate, timeout_s: float = 60.0) -> bool:
+    # 60s ceiling — loaded GitHub Actions runners have been seen taking >30s
     # for the burst drain to fully settle. Locally this test finishes in
-    # <500ms; a real regression would never complete in 30s either.
+    # <500ms; a real regression would never complete in 60s either.
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():

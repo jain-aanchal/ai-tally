@@ -76,6 +76,13 @@ from gateway.eval_executor import (
     JudgeCall,
     JudgeResponse,
 )
+from gateway.tenant_cac import (
+    CacFormInput,
+    CacPeriodError,
+    TenantCacStore,
+    csv_template,
+    parse_csv,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_integrations import TenantIntegrationStore
@@ -99,6 +106,8 @@ async def lifespan(app: FastAPI):
     # Per-tenant third-party integration run status (CTO-117): Stripe / Segment / HubSpot / Pendo.
     # Workers call .record_run after each cycle; the dashboard reads via /v1/tenant/integrations/status.
     app.state.tenant_integrations = TenantIntegrationStore(settings)
+    # Per-tenant monthly CAC inputs (CTO-111): finance fills serially, locked when next month opens.
+    app.state.tenant_cac = TenantCacStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -815,6 +824,94 @@ async def stripe_webhook(
             "currency": mapped.currency,
         },
         status_code=200,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Unit economics — CAC inputs (CTO-111).
+# --------------------------------------------------------------------------------------------
+
+
+@app.get("/v1/tenant/cac")
+def list_tenant_cac(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """List monthly CAC periods for the caller's tenant, newest first."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantCacStore = app.state.tenant_cac
+    rows = store.list(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "periods": [r.as_dict() for r in rows]},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/cac")
+async def upsert_tenant_cac(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert one CAC period. Idempotent on (tenant_id, period_start).
+
+    Rejects rows whose ``period_start`` is already closed (the successor month exists). Rejects
+    rows whose ``new_customers_total < new_customers_paid`` (sanity guard).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    try:
+        form = CacFormInput.from_json(body)
+        period = app.state.tenant_cac.upsert(tenant_id, form)
+    except CacPeriodError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "period": period.as_dict()}, status_code=200
+    )
+
+
+@app.post("/v1/tenant/cac/csv")
+async def upload_tenant_cac_csv(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Bulk-upsert CAC periods from a CSV body (fixed column order)."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    body = (await request.body()).decode("utf-8", errors="replace")
+    try:
+        forms = parse_csv(body)
+        # Sort ascending so prior-period locking on each upsert holds.
+        forms_sorted = sorted(forms, key=lambda f: f.period_start)
+        periods = app.state.tenant_cac.upsert_many(tenant_id, forms_sorted)
+    except CacPeriodError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "imported": len(periods),
+            "periods": [p.as_dict() for p in periods],
+        },
+        status_code=200,
+    )
+
+
+@app.get("/v1/tenant/cac/csv/template")
+def download_tenant_cac_template(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+):
+    """Return the CSV template (header + example row). Used by the upload UI."""
+    from fastapi.responses import PlainTextResponse
+
+    _ = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    return PlainTextResponse(
+        csv_template(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="cac_template.csv"'},
     )
 
 
