@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
 )
@@ -36,6 +37,24 @@ func (s *recordingSink) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.records)
+}
+
+// waitFor polls the sink for the expected record count with a generous ceiling. The proxy
+// emits a TraceRecord *after* its rp.ServeHTTP returns; the HTTP client's Do() can return as
+// soon as the response body is streamed through, which is sometimes before the server-side
+// goroutine reaches sink.Record. Under -race the scheduler makes this gap observable. Polling
+// closes the window without weakening any assertion — a real regression still wouldn't reach
+// the count in 2s.
+func (s *recordingSink) waitFor(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.count() >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("expected %d traces, got %d after 2s", want, s.count())
 }
 
 // newTestProxy builds a Proxy in front of the given upstream handler and returns a client-facing
@@ -141,9 +160,7 @@ func TestTransparentForwarding(t *testing.T) {
 	}
 
 	// Telemetry copy captured the tenant + counts, no content.
-	if sink.count() != 1 {
-		t.Fatalf("expected 1 trace, got %d", sink.count())
-	}
+	sink.waitFor(t, 1)
 	rec := sink.last()
 	if rec.TenantKey != "tk_live_acme" {
 		t.Errorf("TenantKey = %q", rec.TenantKey)
@@ -218,7 +235,8 @@ func TestUpstreamUnavailableReturns502(t *testing.T) {
 	if strings.Contains(string(body), origin.URL) {
 		t.Errorf("error body leaked upstream address: %q", body)
 	}
-	if sink.count() != 1 || !sink.last().Failed {
+	sink.waitFor(t, 1)
+	if !sink.last().Failed {
 		t.Errorf("expected a failed trace record, got %+v", sink.records)
 	}
 }
@@ -245,6 +263,7 @@ func TestLargeBodyForwardedByteForByte(t *testing.T) {
 	if gotLen != len(payload) || !match {
 		t.Errorf("body corrupted: gotLen=%d want=%d match=%v", gotLen, len(payload), match)
 	}
+	sink.waitFor(t, 1)
 	if rec := sink.last(); rec.ReqBytes != int64(len(payload)) {
 		t.Errorf("ReqBytes = %d, want %d", rec.ReqBytes, len(payload))
 	}
@@ -300,6 +319,7 @@ func TestStreamingPassThrough(t *testing.T) {
 	}
 	_ = want
 
+	sink.waitFor(t, 1)
 	if rec := sink.last(); rec.StatusCode != http.StatusOK {
 		t.Errorf("trace status = %d", rec.StatusCode)
 	}
@@ -328,6 +348,7 @@ func TestFeatureTagHeaderRecordedAndStripped(t *testing.T) {
 	if sawFeatureHeader {
 		t.Error("X-Tally-Feature-Tag leaked to upstream")
 	}
+	sink.waitFor(t, 1)
 	if got := sink.last().FeatureTag; got != "aider-demo" {
 		t.Errorf("FeatureTag = %q, want %q", got, "aider-demo")
 	}
@@ -349,6 +370,7 @@ func TestFeatureTagHeaderAbsent(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	sink.waitFor(t, 1)
 	if got := sink.last().FeatureTag; got != "" {
 		t.Errorf("FeatureTag = %q, want empty", got)
 	}

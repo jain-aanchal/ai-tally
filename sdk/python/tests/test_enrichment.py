@@ -26,7 +26,7 @@ def test_server_value_overwrites_and_sets_version():
     res = enrich_cost(_span(client_cost=999), seed_catalog(), at=AT)
     assert res.server_cost_micro_usd == 2_250_000  # 0.25 + 2.00 USD
     assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 2_250_000
-    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-05-01"
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
     assert res.catalog_miss is False
 
 

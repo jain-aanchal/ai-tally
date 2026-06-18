@@ -55,6 +55,13 @@ function resolveRealProvider(modelId: string): "openai" | "anthropic" {
   return modelId.startsWith("openai/") ? "openai" : "anthropic";
 }
 
+// The picker id is "<provider>/<model>"; the gateway's price catalog stores
+// model names without the prefix. CTO-106.
+function stripProviderPrefix(modelId: string): string {
+  const i = modelId.indexOf("/");
+  return i >= 0 ? modelId.slice(i + 1) : modelId;
+}
+
 export const maxDuration = 60;
 
 function getStreamContext() {
@@ -269,7 +276,7 @@ export async function POST(request: Request) {
               sessionId: id,
               userHash: sessionUserHash(session.user.id ?? id),
               realProvider: resolveRealProvider(chatModel),
-              realModel: chatModel,
+              realModel: stripProviderPrefix(chatModel),
               promptText,
               inputTokens: usage?.inputTokens ?? 0,
               outputTokens: usage?.outputTokens ?? 0,

@@ -34,11 +34,12 @@ where the file isn't TS/JS). To audit: `grep -rn "ai-tally:" examples/vercel-cha
 ### `app/lib/tally.ts` (new file)
 
 A small helper module — POSTs spans and CDP events to the ai-tally gateway,
-classifies prompts into feature tags (`chatbot.support` / `chatbot.brainstorm`
-/ `chatbot.code`), and pins the model to `gpt-5-mini` on the outbound batch
-so the gateway's seed price catalog can compute cost authoritatively. The real
-provider/model travel on long-tail attributes (`chatbot.real_provider`,
-`chatbot.real_model`). See **gateway-side workaround** below.
+and classifies prompts into feature tags (`chatbot.support` /
+`chatbot.brainstorm` / `chatbot.code`). Emits the real provider / model on
+the standard `gen_ai.*` attributes; the gateway's price catalog
+([sdk/python/src/tally/pricing.py](../../sdk/python/src/tally/pricing.py))
+prices them directly. CTO-106 retired the prior `gpt-5-mini` pinning
+workaround.
 
 ### `app/app/api/demo-chat/route.ts` (new file)
 
@@ -79,21 +80,16 @@ never enters the auth flow because it hits `/api/demo-chat` directly. A
 human visiting `:3001` will be redirected to `/login` as upstream intends —
 the demo is the cost-and-attribution pipeline, not the chat UI.
 
-## Gateway-side workaround (CTO-104 carryover)
+## Pricing
 
-The gateway's seed price catalog (`sdk/python/src/tally/pricing.py`) currently
-knows only `gpt-5-mini`, `gpt-5`, and `text-embedding-3-small`. Anything else
-→ catalog miss → `EstimatedCost` drops to $0 in ClickHouse. CTO-104 worked
-around this by pinning emitted spans to `gpt-5-mini` and back-computing the
-tokens from the real provider's cost. We do the same here:
-
-- `gen_ai.system` → `"openai"`
-- `gen_ai.request.model` / `gen_ai.response.model` → `"gpt-5-mini"`
-- real provider+model → `chatbot.real_provider` / `chatbot.real_model`
-  (long-tail string attributes, persisted into `SpanAttributes` map)
-
-This drops out cleanly when [CTO-106](https://linear.app/cto-assist/issue/CTO-106)
-lands a real per-provider catalog.
+The gateway's seed catalog ([sdk/python/src/tally/pricing.py](../../sdk/python/src/tally/pricing.py))
+covers the OpenAI gpt-4o family and the Anthropic Claude 4 family directly
+(CTO-106). Spans emit the real `gen_ai.system` + `gen_ai.request.model` and
+the gateway's `enrich_cost` computes authoritative cost from real input /
+output tokens — no pinning, no back-computation. Historical rows from before
+CTO-106 still carry `chatbot.real_provider` / `chatbot.real_model` on
+SpanAttributes; the dashboard queries coalesce both shapes so the rollout
+window stays clean.
 
 ## Buildability
 

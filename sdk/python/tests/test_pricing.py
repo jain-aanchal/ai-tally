@@ -73,7 +73,7 @@ def test_compute_cost_chat():
         at=date(2026, 6, 1),
     )
     assert micro == 2_250_000
-    assert version == "seed-2026-05-01"
+    assert version == "seed-2026-06-15"
 
 
 def test_compute_cost_cached_input_cheaper():
