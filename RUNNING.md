@@ -274,6 +274,68 @@ projections with real cross-provider calls instead (CTO-113).
 projection is replay-backed and `"mock"` when it falls back to the rescaled
 mock (tenant hasn't opted in yet, or the gateway is unreachable).
 
+## Step 9: cross-provider eval (real quality scores)
+
+Replay gives you per-candidate cost / latency / error from real calls, but
+`/compare`'s **Quality** column still needs a judgment — "is the haiku-4.5
+response actually as good as sonnet-4.5's was?". CTO-114 adds a pairwise
+LLM-judge eval pass that replaces the previously fabricated `qualityScore`
+with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
+— judge calls run a frontier model and are pricier than candidate replays.
+
+1. **Enable eval** for the local tenant:
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/tenant/eval/config \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{"enabled": true, "judge_model": "claude-opus-4-8", "daily_budget_usd": 10.0}'
+   ```
+
+   - Default off, default budget `$10/day`, default judge `claude-opus-4-8`.
+   - The judge is overridable per tenant (e.g. to mitigate judge-self-bias if
+     all candidates are claude-family — v2 will rotate judges automatically).
+   - The daily budget is a hard ceiling enforced before every judge call.
+
+2. **Run the eval pass** (or let the dashboard call it automatically):
+
+   ```bash
+   curl -X POST http://localhost:8080/v1/eval \
+     -H 'x-tenant-id: local-dev' -H 'content-type: application/json' \
+     -d '{
+       "candidate_models": [
+         {"provider": "anthropic", "model": "claude-haiku-4-5"},
+         {"provider": "openai",    "model": "gpt-5-mini"}
+       ],
+       "sample_size": 50
+     }'
+   ```
+
+   For each candidate, the executor pairs the candidate's replay response
+   with the originally captured response, randomizes A/B order to mitigate
+   position bias, and asks the judge for exactly `A`, `B`, or `TIE`. Anything
+   else parses to an `error` row (the win-rate denominator excludes errors).
+
+3. **Read the result on `/compare`.** The Quality column now shows
+   `47.2%` with `[31–63%]` underneath — the real win-rate and Wilson 95% CI.
+   Below the 10-judged-samples floor (small `n` means a CI wider than the
+   number is useful), the cell shows `—` with the hint "needs ≥10 judged
+   samples — run eval pass". **The page will never fabricate a quality
+   number** — there is no fallback to mock here, by design.
+
+   The `current` row's Quality is always `—`: a model is never paired against
+   itself, so there's no judge verdict to surface.
+
+   **Bias caveats** baked into the rubric (see `eval_executor.py`):
+
+   - **Position bias**: A/B order is randomized per sample. The recorded
+     verdict is decoded against the orientation we showed the judge.
+   - **Judge-self-bias**: when one of the candidates is from the same model
+     family as the judge (e.g. claude judging claude), the judge tends to
+     slightly favor its own family. v1 accepts the trade-off; rotate the
+     `judge_model` per tenant if the bias matters for a given comparison.
+   - **Rubric versioning**: the prompt is tagged `rubric-v1`. A future
+     tightening will bump the version so a mixed corpus stays interpretable.
+
 ## Live updates
 
 Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the
