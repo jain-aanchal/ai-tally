@@ -50,18 +50,27 @@ describe("api routes", () => {
 
   it("GET /api/compare returns a comparison", async () => {
     // CompareGET is async since the live "current model from traffic" wiring;
-    // without a live stack the route returns the mock comparison untouched. The mock keeps
-    // numeric latency/error on current — CTO-115's null path is exercised in route.test.ts.
+    // without a live stack the route returns the mock comparison untouched.
     const body = await json<{
       workload: string;
-      current: { latencyP95Ms: number | null; errorRate: number | null };
-      candidates: unknown[];
+      current: {
+        qualityScore: number | null;
+        latencyP95Ms: number | null;
+        errorRate: number | null;
+      };
+      candidates: Array<{ qualityScore: number | null; qualityCi?: unknown }>;
     }>(await CompareGET(new Request("http://test/api/compare") as never));
     expect(body.workload).toBeTypeOf("string");
     expect(body.candidates.length).toBeGreaterThan(0);
-    // CTO-115: shape check only. The live path returns either numbers (n ≥ 50) or null (n < 50);
-    // the mock-fallback path returns numbers. The route.test.ts unit tests cover both branches
-    // explicitly with mocked queryCurrentModel — this smoke test just asserts the field exists.
+    // CTO-114: with no eval pass having run (gateway unreachable in tests), every
+    // qualityScore must be null — the route MUST NOT fabricate a number.
+    expect(body.current.qualityScore).toBeNull();
+    for (const c of body.candidates) {
+      expect(c.qualityScore).toBeNull();
+      expect(c.qualityCi).toBeUndefined();
+    }
+    // CTO-115: shape check — fields exist; live path returns numbers (n>=50) or null (n<50);
+    // mock-fallback returns numbers. Route.test.ts covers both branches explicitly.
     expect("latencyP95Ms" in body.current).toBe(true);
     expect("errorRate" in body.current).toBe(true);
   });

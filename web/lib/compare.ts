@@ -1,16 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Types + fallback mock for the Cross-provider Compare workflow. Real candidate data comes
-// from /v1/replay (CTO-113); this module's `comparison` value is the rescaled-mock fallback
-// used by the /api/compare route when the gateway has no opted-in samples yet (or is
-// unreachable). The CandidateMetrics / Comparison types are the wire shape for both branches.
+// from /v1/replay (CTO-113) for cost/latency/error and from /v1/eval (CTO-114) for
+// qualityScore. This module's `comparison` value is the rescaled-mock fallback used by the
+// /api/compare route when the gateway has no opted-in samples yet (or is unreachable). The
+// CandidateMetrics / Comparison types are the wire shape for both branches.
 //
 // CTO-115: the `current` row's `latencyP95Ms` and `errorRate` are now derived from live
 // otel_spans over the same 7-day window the cost query uses (see queryCurrentModel in
 // clickhouse.ts). They carry `null` when the live window has fewer than 50 spans, and the
-// page renders "—" in that case. Everything else on this row (qualityScore) and every
-// candidate row stays mock until CTO-114 (eval harness) and the per-candidate
-// CTO-113-extension land. The numeric mocks in `comparison.current` below are the unreachable-
-// ClickHouse fallback (CI / fresh clones); that path keeps showing numbers, not nulls.
+// page renders "—" in that case. The candidate rows keep numeric mocks until per-candidate
+// CTO-113-extension lands.
+//
+// CTO-114: `qualityScore` is now `number | null`. Non-null only when a pairwise-LLM-judge
+// eval pass has run and judged >= 10 samples for that candidate; the value is the
+// candidate's win-rate (candidate_wins / non-error judgments) with a Wilson 95% CI in
+// `qualityCi`. When no eval has run, or n < 10, the route returns `null` and the page
+// renders "—" rather than ever fabricating a quality number.
+//
+// The numeric mocks in `comparison.current` below are the unreachable-gateway fallback (CI /
+// fresh clones); that path keeps showing numbers, not nulls, for backwards compatibility.
 
 import type { MicroUSD } from "./types";
 
@@ -20,15 +28,22 @@ export interface CandidateMetrics {
   provider: string;
   /** projected monthly cost at current traffic */
   monthlyCostMicroUsd: MicroUSD;
-  /** pass rate from default LLM-judge eval (0..1) */
-  qualityScore: number;
+  /**
+   * Pairwise-LLM-judge win rate (0..1) from CTO-114. `null` when no eval pass has judged
+   * >= 10 samples for this candidate — the page renders "—" in that case. NEVER substitute a
+   * mock when this is null; the ticket is explicit about that. Always `null` on the `current`
+   * row (no judge pair when comparing a model to itself).
+   */
+  qualityScore: number | null;
+  /** Wilson 95% CI on the win-rate (CTO-114). Present only when `qualityScore` is a number. */
+  qualityCi?: { lo: number; hi: number };
   /**
    * p95 latency in milliseconds. `null` on the `current` row when the live 7-day window has
    * fewer than 50 spans (rendered as "—" — CTO-115). Candidate rows keep numeric mocks until
    * per-candidate replay latency lands.
    */
   latencyP95Ms: number | null;
-  /** 0..1. `null` on the `current` row under the same low-sample suppression rule. */
+  /** 0..1. `null` on the `current` row under the same low-sample suppression rule (CTO-115). */
   errorRate: number | null;
 }
 
