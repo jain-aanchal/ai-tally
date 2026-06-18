@@ -21,6 +21,11 @@ is ``agent_run.cross_process_ratio`` — see CTO-83.
 
 from __future__ import annotations
 
+import json
+import logging
+import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -128,12 +133,6 @@ def _near_breach(state: GuardrailState, config: GuardrailConfig) -> str | None:
 # the call. The dashboard counts shadow_observed/wk as the graduation signal.
 # --------------------------------------------------------------------------------------------
 
-import json
-import logging
-import threading
-import urllib.error
-import urllib.request
-
 CONFIG_REFRESH_SECONDS = 60
 
 _logger = logging.getLogger("tally.guardrails")
@@ -236,7 +235,7 @@ class GuardrailEngine:
         *,
         refresh_seconds: int = CONFIG_REFRESH_SECONDS,
         start: bool = True,
-    ) -> "GuardrailEngine":
+    ) -> GuardrailEngine:
         """Build an engine bound to a gateway tenant, sync rules once, optionally start the loop.
 
         Fail-soft: an unreachable gateway is logged but does not raise — the engine is returned
@@ -252,7 +251,7 @@ class GuardrailEngine:
         return engine
 
     def _refresh_once(self) -> None:
-        """One sync attempt. Replaces ``self.rules`` on success; on any error, keeps current rules."""
+        """One sync attempt. Replaces ``self.rules`` on success; on error, keeps current rules."""
         import time as _time
 
         if not self._gateway_url or not self._tenant_id:

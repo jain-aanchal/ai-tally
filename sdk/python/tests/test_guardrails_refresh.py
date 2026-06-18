@@ -14,7 +14,6 @@ import pytest
 
 from tally.guardrails import (
     CONFIG_REFRESH_SECONDS,
-    ControlPlaneRule,
     GuardrailEngine,
     RuleKind,
     RuleState,
@@ -28,7 +27,7 @@ class _FakeResp:
     def read(self) -> bytes:
         return self._buf
 
-    def __enter__(self) -> "_FakeResp":
+    def __enter__(self) -> _FakeResp:
         return self
 
     def __exit__(self, *a: object) -> None:
