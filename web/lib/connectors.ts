@@ -147,7 +147,13 @@ export function connectedCount(rows: ConnectorStatus[]): number {
   return rows.filter((r) => r.state === "connected").length;
 }
 
-/** Mock activity for when ClickHouse is unreachable — shows a populated, plausible example. */
+/**
+ * Typed fallback activity for the cost / revenue source rows. Used when the gateway and
+ * ClickHouse are both unreachable so a fresh clone / CI keeps rendering. Real per-tenant
+ * third-party integration status now comes from the gateway's
+ * `GET /v1/tenant/integrations/status` (CTO-117) — this map is the demo-friendly fallback
+ * rather than the primary data path.
+ */
 export const mockActivity: ConnectorActivity = {
   records: { llm_proxy: 4120, stripe: 86 },
   lastAt: {
