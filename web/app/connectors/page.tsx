@@ -9,20 +9,11 @@ import {
   connectedCount,
 } from "@/lib/connectors";
 import { queryEnabledConnectors } from "@/lib/tenant";
-import { queryStripeConfig, webhookUrl } from "@/lib/stripeConnector";
-import type { IntegrationStatusRow } from "@/lib/clickhouse";
-import { INTEGRATIONS, applyIntegrationStatus } from "@/lib/integrations";
 import { ConnectorToggle } from "./ConnectorToggle";
-import { IntegrationCards } from "./IntegrationCards";
-import { StripeTile } from "./StripeTile";
 
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
   live: boolean;
-  // CTO-117: real per-tenant third-party integration status from the gateway. Empty array on a
-  // fresh tenant — the UI renders every card as "Not connected" in that case.
-  integrations: IntegrationStatusRow[];
-  integrationsLive: boolean;
 }
 
 const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] = [
@@ -30,11 +21,6 @@ const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] 
     category: "cost",
     title: "Cost sources",
     blurb: "All-in spend — beyond LLM tokens — attributed to features (CTO-63).",
-  },
-  {
-    category: "revenue",
-    title: "Revenue & CDP",
-    blurb: "Value events that turn cost into ROI via attribution (CTO-68).",
   },
 ];
 
@@ -114,20 +100,19 @@ function ConnectorTable({
 }
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live, integrations }, enabledLayers, stripeConfig] = await Promise.all([
+  const [{ connectors, live }, enabledLayers] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
-    queryStripeConfig(),
   ]);
-  const connected = connectedCount(connectors);
-  // CTO-117: derive the three-state per-integration view from the gateway rows. A tenant with no
-  // rows (fresh / nothing wired) gets a deck of "Not connected" cards — no fabricated stats.
-  const integrationCards = applyIntegrationStatus(INTEGRATIONS, integrations ?? []);
+  // Only cost-layer sources surface in the UI today; revenue/CDP and the third-party integration
+  // cards were purely decorative (no real status), removed in the cleanup wave following #100.
+  const visibleConnectors = connectors.filter((c) => c.category === "cost");
+  const connected = connectedCount(visibleConnectors);
 
   const body = (
     <div className="space-y-6">
       {SECTIONS.map((s) => {
-        const rows = connectors.filter((c) => c.category === s.category);
+        const rows = visibleConnectors.filter((c) => c.category === s.category);
         const n = connectedCount(rows);
         return (
           <Card key={s.category} title={`${s.title} — ${n}/${rows.length} connected`}>
@@ -136,21 +121,6 @@ export default async function ConnectorsPage() {
           </Card>
         );
       })}
-
-      <Card title="Third-party integrations">
-        <p className="mb-3 max-w-prose text-xs text-muted">
-          Direct webhook / poller integrations. Each card shows the real per-tenant status from the
-          gateway (CTO-117): healthy, failing, or not-connected. The Stripe webhook lights up its
-          card automatically; Segment / HubSpot / Pendo light up as their workers land.
-        </p>
-        <IntegrationCards cards={integrationCards} />
-        <div id="stripe-tile" className="mt-4 border-t border-edge pt-4">
-          <p className="mb-2 text-xs text-muted">
-            Stripe webhook setup — paste the signing secret from your Stripe Dashboard.
-          </p>
-          <StripeTile initialConfig={stripeConfig} webhookUrl={webhookUrl()} />
-        </div>
-      </Card>
     </div>
   );
 
@@ -159,15 +129,14 @@ export default async function ConnectorsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">Connectors</h1>
         <span className="text-sm text-muted">
-          {connected} of {connectors.length} sources connected
+          {connected} of {visibleConnectors.length} sources connected
         </span>
       </div>
 
       <p className="max-w-prose text-sm text-muted">
-        Pluggable cost and revenue sources. Each normalizes one provider into the shared cost /
-        business-event model; credentials and sync schedules are configured in the backend connector
-        runner. A source shows <span className="text-good">Connected</span> once it has produced
-        data.
+        Pluggable cost sources. Each normalizes one provider into the shared cost model;
+        credentials and sync schedules are configured in the backend connector runner. A source
+        shows <span className="text-good">Connected</span> once it has produced data.
       </p>
 
       {live ? body : <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>}
