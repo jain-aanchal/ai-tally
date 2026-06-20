@@ -84,14 +84,6 @@ export function AttributionLive({
           wide bands, by design. Two providers &ldquo;tie&rdquo; when their bands overlap.
         </p>
       </Card>
-
-      <Card title="Filters">
-        <dl className="grid grid-cols-2 gap-y-1 text-sm sm:grid-cols-3">
-          <Filter k="tag" v={tag ?? "(all)"} />
-          <Filter k="provider" v={provider ?? "(all)"} />
-          <Filter k="outcome" v={outcome} />
-        </dl>
-      </Card>
     </div>
   );
 
@@ -192,11 +184,3 @@ function ProviderRow({
   );
 }
 
-function Filter({ k, v }: { k: string; v: string }) {
-  return (
-    <>
-      <dt className="text-muted">{k}</dt>
-      <dd className="font-mono">{v}</dd>
-    </>
-  );
-}
