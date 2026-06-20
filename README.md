@@ -8,7 +8,7 @@ Four workflows on one shared data spine:
 
 1. **Agent loop cost visibility** — why did this run cost 50× median?
 2. **Cross-provider comparison** — are we on the right model? Real replay, real eval, no marketing benchmarks.
-3. **End-to-end cost** — what does this feature really cost, all-in (LLM + vector + tools + compute + egress)?
+3. **End-to-end cost** — what does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
 4. **Business-outcome attribution** — is this AI feature profitable? `$/conversion` and margin per provider, joined from real Stripe revenue.
 
 A fifth surface — pre-deploy "what will this change cost?" — is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
@@ -34,7 +34,7 @@ db/clickhouse/     ClickHouse DDL — otel_spans, attribution, business_events, 
 db/postgres/       Postgres control-plane schema — tenants, connectors, stripe, replay,
                    eval, guardrails, CAC, integration runs
 web/               Next.js dashboard (the four shipped workflows)
-examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot, Stripe
+examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot
 ```
 
 ## Running it
@@ -112,7 +112,7 @@ Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs 
 
 ## Stripe → real revenue
 
-Connect Stripe via the `/connectors` UI (paste a signing secret) or `stripe listen` for local dev, and the gateway's verified webhook handler maps Stripe events to `business_events` rows — `checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative revenue. Stripe customer emails are HMAC-hashed into the same `UserIdHash` space the SDK uses, so the attribution join lights up the moment events land.
+Wire Stripe by POSTing your signing secret to `POST /v1/tenant/stripe/config` on the gateway (or `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=...` for local dev). The verified webhook handler maps Stripe events to `business_events` rows — `checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative revenue. Stripe customer emails are HMAC-hashed into the same `UserIdHash` space the SDK uses, so the attribution join lights up the moment events land. (A web-side "paste your signing secret" affordance was previously available on `/connectors`; it was removed pending a real per-tenant connector UI.)
 
 Two new columns appear on `/attribution` once a tenant wires Stripe: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
 
@@ -124,7 +124,7 @@ Stored in Postgres (`db/postgres/000{1..7}_*.sql`), accessed only through the ga
 - **Cost-layer connector declarations** (which of LLM / vector / tools / compute / egress this tenant streams in)
 - **Stripe config**, **replay config**, **eval config**, **guardrail rules** + audit log
 - **CAC periods** for the unit-economics workflow (one row per finance-entered month)
-- **Integration run status** for third-party connectors (light up the connector card with real `last_run_at` and 24h/7d event counts)
+- **Integration run status** for third-party connectors (workers call `record_run` after each cycle with `last_run_at` + 24h/7d event counts; the surfacing UI card was removed pending the real per-connector UI)
 
 Every control-plane write is audited with an idempotent `change_id` (UUID), and `INSERT … ON CONFLICT DO NOTHING` makes a UI double-click safe.
 
