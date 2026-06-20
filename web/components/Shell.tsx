@@ -10,10 +10,10 @@ const NAV: { label: string; href: string }[] = [
   { label: "Compare", href: "/compare" },
   { label: "Attribution", href: "/attribution" },
   { label: "Connectors", href: "/connectors" },
-  { label: "Settings", href: "/settings" },
-  // Estimate (/estimate) and Data Quality (/data-quality) hidden from the nav — the pages
-  // still render at their URLs but most of their tiles are mock fixtures today. Re-add to NAV
-  // when CTO-128 (estimate body-driven what-if) and the DQ follow-ups land.
+  // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
+  //   - /settings        — empty shell, no real settings wired
+  //   - /estimate        — mock fixtures (re-add when CTO-128 lands)
+  //   - /data-quality    — placeholder rows (re-add when DQ follow-ups land)
 ];
 
 export function Shell({ children }: { children: ReactNode }) {
