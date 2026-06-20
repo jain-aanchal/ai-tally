@@ -60,6 +60,12 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ../db/postgres/0001_control_plane.sql:/docker-entrypoint-initdb.d/0001_control_plane.sql:ro
       - ../db/postgres/0002_tenant_connectors.sql:/docker-entrypoint-initdb.d/0002_tenant_connectors.sql:ro
+      - ../db/postgres/0003_tenant_stripe_config.sql:/docker-entrypoint-initdb.d/0003_tenant_stripe_config.sql:ro
+      - ../db/postgres/0004_tenant_replay_config.sql:/docker-entrypoint-initdb.d/0004_tenant_replay_config.sql:ro
+      - ../db/postgres/0005_cac_periods.sql:/docker-entrypoint-initdb.d/0005_cac_periods.sql:ro
+      - ../db/postgres/0005_tenant_eval_config.sql:/docker-entrypoint-initdb.d/0005a_tenant_eval_config.sql:ro
+      - ../db/postgres/0006_tenant_guardrails.sql:/docker-entrypoint-initdb.d/0006_tenant_guardrails.sql:ro
+      - ../db/postgres/0007_tenant_integration_runs.sql:/docker-entrypoint-initdb.d/0007_tenant_integration_runs.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s

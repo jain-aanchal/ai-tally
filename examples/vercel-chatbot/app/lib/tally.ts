@@ -109,6 +109,8 @@ export interface SpanInput {
   promptText: string;
   inputTokens: number;
   outputTokens: number;
+  /** End-to-end completion duration in ms (drives the p95 latency column on /compare). */
+  durationMs?: number;
   featureTagOverride?: FeatureTag;
   runId?: string;
 }
@@ -125,7 +127,7 @@ export async function postSpan(input: SpanInput): Promise<void> {
     trace_id: hexId(16),
     span_id: hexId(8),
     timestamp_ns: Date.now() * 1_000_000,
-    duration_ns: 0,
+    duration_ns: Math.max(0, Math.round((input.durationMs ?? 0) * 1_000_000)),
     status_code: 1,
     // gen_ai.* — real provider/model since CTO-106 expanded the seed catalog
     // to cover them. The gateway's enrich_cost computes authoritative cost

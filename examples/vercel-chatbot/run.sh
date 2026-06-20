@@ -56,6 +56,14 @@ else
     (cd "${APP_DIR}" && pnpm --silent exec drizzle-kit push >>"${LOG_FILE}" 2>&1) || \
       err "drizzle-kit push failed — see ${LOG_FILE}"
   fi
+  # Seed the deterministic demo user that the auth flow pins every guest session to
+  # (see app/(auth)/auth.ts). Without this row, saveChat 400s on a foreign-key violation
+  # because the JWT-issued userId would have nothing to reference. Idempotent.
+  PGPASSWORD=tally psql -h localhost -U tally -d chatbot_demo >/dev/null <<'SQL'
+INSERT INTO "User" (id, email, "isAnonymous", "emailVerified")
+VALUES ('00000000-0000-0000-0000-000000000001', 'demo@local', true, false)
+ON CONFLICT (id) DO NOTHING;
+SQL
   TALLY_GATEWAY_URL="${TALLY_GATEWAY_URL:-${GATEWAY_URL}/v1/batches}" \
   TALLY_TENANT="${TALLY_TENANT:-local-dev}" \
     nohup pnpm --dir "${APP_DIR}" exec next dev --turbo --port 3001 \

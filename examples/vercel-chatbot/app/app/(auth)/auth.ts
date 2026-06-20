@@ -73,8 +73,14 @@ export const {
       id: "guest",
       credentials: {},
       async authorize() {
-        const [guestUser] = await createGuestUser();
-        return { ...guestUser, type: "guest" };
+        // Pin every guest session to the deterministic demo user seeded by run.sh so the
+        // JWT-issued userId always references an existing row (saveChat / message FKs).
+        // Avoids stale-cookie + empty-User-table failure modes during local dev.
+        return {
+          id: "00000000-0000-0000-0000-000000000001",
+          email: "demo@local",
+          type: "guest",
+        };
       },
     }),
   ],
