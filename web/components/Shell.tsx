@@ -10,10 +10,11 @@ const NAV: { label: string; href: string }[] = [
   { label: "Agents", href: "/agents" },
   { label: "Compare", href: "/compare" },
   { label: "Attribution", href: "/attribution" },
-  { label: "Estimate", href: "/estimate" },
   { label: "Connectors", href: "/connectors" },
   { label: "Settings", href: "/settings" },
-  { label: "Data Quality", href: "/data-quality" },
+  // Estimate (/estimate) and Data Quality (/data-quality) hidden from the nav — the pages
+  // still render at their URLs but most of their tiles are mock fixtures today. Re-add to NAV
+  // when CTO-128 (estimate body-driven what-if) and the DQ follow-ups land.
 ];
 
 export function Shell({ children }: { children: ReactNode }) {
