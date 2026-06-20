@@ -2,36 +2,36 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Cost-and-value observability for AI products. See what your AI actually costs — all-in — and what it returns.
+Cost-and-value observability for AI products. See what your AI actually costs (all-in) and what it returns.
 
 Four workflows on one shared data spine:
 
-1. **Agent loop cost visibility** — why did this run cost 50× median?
-2. **Cross-provider comparison** — are we on the right model? Real replay, real eval, no marketing benchmarks.
-3. **End-to-end cost** — what does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
-4. **Business-outcome attribution** — is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
+1. **Agent loop cost visibility.** Why did this run cost 50× median?
+2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks.
+3. **End-to-end cost.** What does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
+4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
 
-A fifth surface — pre-deploy "what will this change cost?" — is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
+A fifth surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
 
 ## Product principles
 
-- **Honest under uncertainty** — render `—` rather than fabricate a number. A quality cell with no eval pass behind it is `—`, not "85%". A p95 latency built from fewer than 50 spans is `—`, not noise. Misleadingly-rosy zeros are worse than empty space.
-- **No bodies in telemetry** — token counts and drop counts, never message text. The PII guard at the gateway suffix-matches keys like `prompt`, `messages`, `completion`, `body` and drops them on the floor. This is the contract, not a flag.
-- **Billing decoupled from sampling** — head-time meter counts every trace before the sampling decision, so invoices are exact regardless of analytics sample rate.
-- **Tail-aware, not median-aware** — agent cost is a power law; stratified sampling keeps the tail at ~100% and samples the cheap body down.
-- **Never corrupt customer state** — guardrails default to OBSERVE (record what would have fired), never hard-kill.
-- **OTel-native** — built on OpenTelemetry `gen_ai.*` conventions; extensions namespaced under the same.
+- **Honest under uncertainty.** Render `—` rather than fabricate a number. A quality cell with no eval pass behind it is `—`, not "85%". A p95 latency built from fewer than 50 spans is `—`, not noise. Misleadingly-rosy zeros are worse than empty space.
+- **No bodies in telemetry.** Token counts and drop counts, never message text. The PII guard at the gateway suffix-matches keys like `prompt`, `messages`, `completion`, `body` and drops them on the floor. This is the contract, not a flag.
+- **Billing decoupled from sampling.** A head-time meter counts every trace before the sampling decision, so invoices are exact regardless of analytics sample rate.
+- **Tail-aware, not median-aware.** Agent cost is a power law; stratified sampling keeps the tail at ~100% and samples the cheap body down.
+- **Never corrupt customer state.** Guardrails default to OBSERVE (record what would have fired), never hard-kill.
+- **OTel-native.** Built on OpenTelemetry `gen_ai.*` conventions; extensions namespaced under the same.
 
 ## Repository layout
 
 ```
 sdk/python/        Python SDK (OTel gen_ai.* + cost/feature/identity/sampling/guardrails)
-infra/gateway/     Ingest gateway (FastAPI: auth → enrich cost → ClickHouse)
+infra/gateway/     Ingest gateway (FastAPI: auth → enrich cost → ClickHouse),
                    plus per-tenant control plane (connectors, replay, eval, guardrails, CAC)
 infra/edge-proxy/  Zero-code edge proxy (Go) + BYO-deployment Helm chart
 infra/             docker-compose stack (ClickHouse, Postgres, Redpanda, MinIO) + Makefile
-db/clickhouse/     ClickHouse DDL — otel_spans, attribution, business_events, replay_samples, eval_runs
-db/postgres/       Postgres control-plane schema — tenants, connectors, stripe, replay,
+db/clickhouse/     ClickHouse DDL: otel_spans, attribution, business_events, replay_samples, eval_runs
+db/postgres/       Postgres control-plane schema: tenants, connectors, stripe, replay,
                    eval, guardrails, CAC, integration runs
 web/               Next.js dashboard (the four shipped workflows)
 examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot
@@ -39,8 +39,7 @@ examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot
 
 ## Running it
 
-To bring up the whole stack on a laptop and see ingested telemetry in the dashboard, follow
-**[RUNNING.md](./RUNNING.md)** — a verified end-to-end runbook. Short version:
+To bring up the whole stack on a laptop and see ingested telemetry in the dashboard, follow **[RUNNING.md](./RUNNING.md)**, a verified end-to-end runbook. Short version:
 
 ```bash
 cd infra && make up && make seed && make demo   # stack + tenant + sample telemetry
@@ -86,13 +85,13 @@ cd web && npx vitest run
 
 ## Model auto-discovery
 
-On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU — `claude-3-5-haiku-latest` was the case that prompted this — the next boot picks up the replacement automatically.
+On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU (`claude-3-5-haiku-latest` was the case that prompted this) the next boot picks up the replacement automatically.
 
 Knobs:
 
-- `TALLY_MODELS_REFRESH=1` — bypass the 24h TTL and refetch on the next boot.
-- `TALLY_PINNED_MODELS=<path>` — skip discovery entirely, load the lineup from that file (useful for CI runs that must be hermetic).
-- `TALLY_MODELS_CACHE=<path>` — Node-side override for where `resolveLatest()` reads the cache from.
+- `TALLY_MODELS_REFRESH=1`: bypass the 24h TTL and refetch on the next boot.
+- `TALLY_PINNED_MODELS=<path>`: skip discovery entirely, load the lineup from that file (useful for CI runs that must be hermetic).
+- `TALLY_MODELS_CACHE=<path>`: Node-side override for where `resolveLatest()` reads the cache from.
 
 Discovery is fail-soft: if both providers are unreachable and the cache file doesn't exist, the gateway boots with an empty list and a warning. The demos fall back to their hardcoded defaults.
 
@@ -100,19 +99,19 @@ Discovery is fail-soft: if both providers are unreachable and the cache file doe
 
 Workflow 2 (Compare) used to be a mock projection rescaled off the user's real current-model spend. It's now backed by **real cross-provider replay**: the gateway captures an opt-in 5% sample of spans, scrubs PII (emails, API keys, postal addresses), stores the resolved request envelope in object storage, and replays it against candidate models on demand.
 
-Per-tenant opt-in — default off; nothing is sampled until a tenant flips `enabled=true` via `POST /v1/tenant/replay/config`. A daily budget cap (default `$5/day`) hard-stops the replay executor from running away. The diagnostics block on `/api/compare` carries the honest fidelity string `"resolved-context replay (no live retrieval)"` so the dashboard never claims a tier it doesn't have.
+Per-tenant opt-in: default off; nothing is sampled until a tenant flips `enabled=true` via `POST /v1/tenant/replay/config`. A daily budget cap (default `$5/day`) hard-stops the replay executor from running away. The diagnostics block on `/api/compare` carries the honest fidelity string `"resolved-context replay (no live retrieval)"` so the dashboard never claims a tier it doesn't have.
 
-When a tenant has no opted-in samples (or the gateway is unreachable), `/api/compare` falls back to the rescaled-mock path it had before — `replay_source` in the response distinguishes the two branches.
+When a tenant has no opted-in samples (or the gateway is unreachable), `/api/compare` falls back to the rescaled-mock path it had before. `replay_source` in the response distinguishes the two branches.
 
 ## Pairwise LLM-judge eval
 
-The Quality column on `/compare` is grounded in a real eval pass — pairwise LLM-judge over replay outputs, with A/B order randomized per sample to mitigate position bias, win-rate scored as a Wilson 95% CI. Opt-in separately from replay (judge calls run a frontier model and are pricier than candidate replays); default daily budget `$10/day`, default judge `claude-opus-4-8`, rubric tagged `rubric-v1` so a future tightening stays interpretable.
+The Quality column on `/compare` is grounded in a real eval pass: pairwise LLM-judge over replay outputs, with A/B order randomized per sample to mitigate position bias, win-rate scored as a Wilson 95% CI. Opt-in separately from replay (judge calls run a frontier model and are pricier than candidate replays); default daily budget `$10/day`, default judge `claude-opus-4-8`, rubric tagged `rubric-v1` so a future tightening stays interpretable.
 
-Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs ≥10 judged samples — run eval pass"*. There is **no fallback to mock here, by design** — a fake quality number is worse than no quality number.
+Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs ≥10 judged samples, run eval pass"*. There is **no fallback to mock here, by design**: a fake quality number is worse than no quality number.
 
 ## Stripe → real revenue (production)
 
-> **Status — what works, what doesn't (as of today):**
+> **Status (what works, what doesn't, as of today):**
 >
 > | Layer | State |
 > |---|---|
@@ -121,12 +120,12 @@ Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs 
 > | Stripe → `business_events` event mapping (`checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative) | ✅ ships |
 > | HMAC join: Stripe `customer.email` → SDK's `UserIdHash` space | ✅ ships |
 > | `/attribution` Value/user + Margin/user columns | ✅ ships (cells stay `—` until enough events arrive) |
-> | Dashboard tile to paste a signing secret (the "Connect Stripe" affordance) | ⚠️ **removed in [#102](https://github.com/jain-aanchal/ai-tally/pull/102), not yet replaced** — wire-up is currently API-only |
+> | Dashboard tile to paste a signing secret (the "Connect Stripe" affordance) | ⚠️ **removed in [#102](https://github.com/jain-aanchal/ai-tally/pull/102), not yet replaced**; wire-up is currently API-only |
 > | Backfill helper `scripts/backfill_stripe.py --days N` | ✅ ships |
 >
 > Net: the **ingest backend is fully wired**; the **dashboard wire-up affordance is hidden** until the per-tenant connector UI ships.
 
-The chatbot demo (`make chatbot-demo`) exercises the attribution join with synthetic `positive_feedback` events — no Stripe wire-up needed to see `$/conversion` light up locally. For production tenants, Stripe is the v1 revenue source — but the setup path today is the gateway API, not the dashboard.
+The chatbot demo (`make chatbot-demo`) exercises the attribution join with synthetic `positive_feedback` events. No Stripe wire-up is needed to see `$/conversion` light up locally. For production tenants, Stripe is the v1 revenue source, but the setup path today is the gateway API, not the dashboard.
 
 To wire it from outside the dashboard:
 
@@ -140,7 +139,7 @@ curl -X POST http://<gateway>/v1/tenant/stripe/config \
 stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=local-dev
 ```
 
-Once events start landing, `/attribution` adds two columns: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
+Once events start landing, `/attribution` adds two columns: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive. We never fabricate numbers from absent data.
 
 ## Per-tenant control plane
 
@@ -156,7 +155,7 @@ Every control-plane write is audited with an idempotent `change_id` (UUID), and 
 
 ## Status
 
-The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest — a placeholder for a metric we haven't grounded yet. The remaining backlog turns those `—`s into real numbers (per-feature attribution, candidate-response replay for honest eval grading, body-driven pre-deploy estimation, real workers for the "Coming soon" connectors).
+The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. The remaining backlog turns those `—`s into real numbers (per-feature attribution, candidate-response replay for honest eval grading, body-driven pre-deploy estimation, real workers for the "Coming soon" connectors).
 
 Decisions and the full system spec live in the project tracker. Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
 
