@@ -42,9 +42,6 @@ export function Shell({ children }: { children: ReactNode }) {
           <TopBarSelect label="Range" value="Last 30 days" />
           <TopBarSelect label="Feature" value="All features" />
           <TopBarSelect label="Env" value="production" />
-          <span className="ml-auto rounded-full bg-edge px-2 py-0.5 text-xs text-muted">
-            mock data
-          </span>
         </header>
         <main className="min-w-0 flex-1 p-6">{children}</main>
       </div>

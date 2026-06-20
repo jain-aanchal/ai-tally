@@ -205,6 +205,7 @@ export async function POST(request: Request) {
 
     const modelMessages = await convertToModelMessages(uiMessages);
 
+    const turnStartMs = Date.now();
     const stream = createUIMessageStream({
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
@@ -280,6 +281,7 @@ export async function POST(request: Request) {
               promptText,
               inputTokens: usage?.inputTokens ?? 0,
               outputTokens: usage?.outputTokens ?? 0,
+              durationMs: Date.now() - turnStartMs,
               runId: id,
             });
           },
