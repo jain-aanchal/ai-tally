@@ -12,6 +12,7 @@ import {
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { LAYERS, type Layer } from "@/lib/cost";
 import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
+import type { ProviderAttribution } from "@/lib/attribution";
 import type { CostOutlier, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 import { useLivePoll } from "@/lib/useLivePoll";
@@ -20,6 +21,7 @@ export interface HomePayload {
   spend: SpendSummary;
   outliers: CostOutlier[];
   roi: FeatureRoi[];
+  perProviderConversion: ProviderAttribution[];
 }
 
 export function HomeLive({
@@ -32,7 +34,7 @@ export function HomeLive({
   enabledLayers: readonly Layer[];
 }) {
   const { data, updatedAt } = useLivePoll<HomePayload>(endpoint, initialData);
-  const { spend: s, outliers, roi } = data;
+  const { spend: s, outliers, roi, perProviderConversion } = data;
 
   const hidden = s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
@@ -113,6 +115,51 @@ export function HomeLive({
             ))}
           </tbody>
         </table>
+      </Card>
+
+      <Card title="Per-provider · conversion">
+        {perProviderConversion.length === 0 ? (
+          <p className="text-sm text-muted">
+            No sessions yet — drive traffic to populate (link out from{" "}
+            <a className="text-good underline" href="/attribution">
+              Attribution
+            </a>
+            ).
+          </p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-xs uppercase text-muted">
+              <tr>
+                <th className="py-1 text-left font-medium">Provider</th>
+                <th className="py-1 text-right font-medium">Sessions</th>
+                <th className="py-1 text-right font-medium">Conversions</th>
+                <th className="py-1 text-right font-medium">Rate</th>
+                <th className="py-1 text-right font-medium">$/conversion</th>
+              </tr>
+            </thead>
+            <tbody>
+              {perProviderConversion.map((p) => (
+                <tr key={p.provider} className="border-t border-edge">
+                  <td className="py-1.5 font-mono">{p.provider}</td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {p.sessions.toLocaleString()}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {p.conversions.toLocaleString()}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {(p.conversionRate * 100).toFixed(1)}%
+                  </td>
+                  <td className="py-1.5 text-right font-semibold tabular-nums">
+                    {p.costPerConversionMicroUsd === null
+                      ? "—"
+                      : formatUSD(p.costPerConversionMicroUsd)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Card>
 
     </div>
