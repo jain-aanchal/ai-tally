@@ -135,16 +135,18 @@ export function emptyReport(filters: AttributionFilters): AttributionReport {
  * sensible to the eye, with isMock=true so the UI can flag it.
  */
 export function mockReport(filters: AttributionFilters): AttributionReport {
-  // The mock now seeds plausible revenue so the new Value/user + Margin/user columns
-  // render in the synthetic-preview state. Real reports get this from Stripe events.
+  // Demo seed numbers: a YC-stage SaaS with two providers in production, Stripe wired.
+  // openai: 3200 sessions, 412 conversions, $24K LLM cost, 240 paying users → $200 ARPA, 50% margin
+  // anthropic: 2100 sessions, 318 conversions, $14.2K LLM cost, 195 paying users → $267 ARPA, 73% margin
+  // Anthropic is cheaper per conversion AND has higher value/user: the kind of finding /attribution exists to surface.
   const perProvider = [
-    buildProviderRow("openai", 25, 5, 850_000, {
-      revenueMicroUsd: 49_000_000,
-      distinctUsers: 18,
+    buildProviderRow("openai", 3200, 412, 24_000_000_000, {
+      revenueMicroUsd: 48_000_000_000,
+      distinctUsers: 240,
     }),
-    buildProviderRow("anthropic", 25, 7, 720_000, {
-      revenueMicroUsd: 78_000_000,
-      distinctUsers: 22,
+    buildProviderRow("anthropic", 2100, 318, 14_200_000_000, {
+      revenueMicroUsd: 52_000_000_000,
+      distinctUsers: 195,
     }),
   ];
   const sessions = perProvider.reduce((s, p) => s + p.sessions, 0);

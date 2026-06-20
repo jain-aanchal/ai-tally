@@ -51,52 +51,64 @@ export function totalForDay(p: CostDayPoint): MicroUSD {
 }
 
 // 14 days, oldest → newest. Reconciled through day 8 (index), estimated after.
+// Proportions match the per-feature mix in featureRows below: LLM dominates (real ingest today),
+// vector / tools / compute / embeddings / egress are smaller shares to surface the all-in story.
 function point(date: string, base: number, vectorBoost = 1): CostDayPoint {
   return {
     date,
     byLayer: {
-      llm: base * 0.55,
-      vector: base * 0.14 * vectorBoost,
-      tools: base * 0.13,
-      compute: base * 0.12,
-      embeddings: base * 0.04,
-      egress: base * 0.02,
+      llm: base * 0.73,
+      vector: base * 0.13 * vectorBoost,
+      tools: base * 0.08,
+      compute: base * 0.045,
+      embeddings: base * 0.013,
+      egress: base * 0.004,
     },
   };
 }
 
 export const costSeries: CostSeries = {
-  reconciledThrough: "2026-05-19",
+  reconciledThrough: "2026-06-12",
   days: [
-    point("2026-05-13", 950_000_000),
-    point("2026-05-14", 980_000_000),
-    point("2026-05-15", 1_020_000_000),
-    point("2026-05-16", 1_010_000_000),
-    point("2026-05-17", 1_050_000_000),
-    point("2026-05-18", 1_080_000_000),
-    point("2026-05-19", 1_120_000_000),
-    point("2026-05-20", 1_160_000_000, 2.4), // hidden vector spike
-    point("2026-05-21", 1_220_000_000, 3.0),
-    point("2026-05-22", 1_260_000_000, 3.4),
-    point("2026-05-23", 1_300_000_000, 3.6),
-    point("2026-05-24", 1_340_000_000, 3.8),
-    point("2026-05-25", 1_380_000_000, 4.0),
-    point("2026-05-26", 1_400_000_000, 4.0),
+    point("2026-06-06", 1_420_000_000),
+    point("2026-06-07", 1_510_000_000),
+    point("2026-06-08", 1_580_000_000),
+    point("2026-06-09", 1_610_000_000),
+    point("2026-06-10", 1_660_000_000),
+    point("2026-06-11", 1_720_000_000),
+    point("2026-06-12", 1_750_000_000),
+    point("2026-06-13", 1_790_000_000, 1.8), // vector index expanded, shows up immediately
+    point("2026-06-14", 1_830_000_000, 2.0),
+    point("2026-06-15", 1_890_000_000, 2.1),
+    point("2026-06-16", 1_940_000_000, 2.2),
+    point("2026-06-17", 1_980_000_000, 2.3),
+    point("2026-06-18", 2_050_000_000, 2.3),
+    point("2026-06-19", 2_170_000_000, 2.4),
   ],
 };
 
+// Per-feature 30-day spend, summing to ~$52,400 (matches mock.ts mockSpend.totalMicroUsd).
+// research_agent is the dominant cost driver (~54%), classic story for an agentic startup.
 export const featureRows: FeatureCostRow[] = [
   {
     feature: "research_agent",
-    byLayer: { llm: 4_210_000_000, vector: 1_820_000_000, tools: 1_640_000_000, compute: 1_210_000_000, embeddings: 380_000_000, egress: 60_000_000 },
+    byLayer: { llm: 19_100_000_000, vector: 4_760_000_000, tools: 2_460_000_000, compute: 1_440_000_000, embeddings: 350_000_000, egress: 100_000_000 },
+  },
+  {
+    feature: "support_triage",
+    byLayer: { llm: 7_640_000_000, vector: 0, tools: 820_000_000, compute: 480_000_000, embeddings: 0, egress: 40_000_000 },
   },
   {
     feature: "inline_writer",
-    byLayer: { llm: 2_100_000_000, vector: 80_000_000, tools: 120_000_000, compute: 310_000_000, embeddings: 30_000_000, egress: 10_000_000 },
+    byLayer: { llm: 5_730_000_000, vector: 0, tools: 410_000_000, compute: 240_000_000, embeddings: 0, egress: 0 },
   },
   {
     feature: "smart_search",
-    byLayer: { llm: 1_900_000_000, vector: 240_000_000, tools: 310_000_000, compute: 290_000_000, embeddings: 100_000_000, egress: 10_000_000 },
+    byLayer: { llm: 3_820_000_000, vector: 1_360_000_000, tools: 0, compute: 0, embeddings: 210_000_000, egress: 0 },
+  },
+  {
+    feature: "chatbot",
+    byLayer: { llm: 1_910_000_000, vector: 680_000_000, tools: 410_000_000, compute: 240_000_000, embeddings: 140_000_000, egress: 60_000_000 },
   },
 ];
 
@@ -104,7 +116,12 @@ export const hiddenCostAlerts: HiddenCostAlert[] = [
   {
     severity: "warn",
     message:
-      "Your vector DB cost grew 4× this month while LLM cost was flat — index size doubled May 20.",
+      "research_agent vector cost grew 2.4× over the last 7 days while LLM cost grew 1.2×. Pinecone index expanded on June 13.",
+  },
+  {
+    severity: "info",
+    message:
+      "support_triage averaged 3.2 LLM calls per session this week (up from 2.4). Worth checking the retry loop on tool.search_kb.",
   },
 ];
 
