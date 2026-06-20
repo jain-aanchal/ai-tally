@@ -112,13 +112,35 @@ Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs 
 
 ## Stripe → real revenue (production)
 
-The chatbot demo (`make chatbot-demo`) exercises the attribution join with synthetic `positive_feedback` events — no Stripe wire-up needed to see `$/conversion` light up locally. For production tenants, **Stripe is the v1 revenue source.**
+> **Status — what works, what doesn't (as of today):**
+>
+> | Layer | State |
+> |---|---|
+> | Webhook ingest `POST /v1/stripe/webhook` (signature-verified) | ✅ ships |
+> | Control-plane config `POST /v1/tenant/stripe/config` (per-tenant signing secret) | ✅ ships |
+> | Stripe → `business_events` event mapping (`checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative) | ✅ ships |
+> | HMAC join: Stripe `customer.email` → SDK's `UserIdHash` space | ✅ ships |
+> | `/attribution` Value/user + Margin/user columns | ✅ ships (cells stay `—` until enough events arrive) |
+> | Dashboard tile to paste a signing secret (the "Connect Stripe" affordance) | ⚠️ **removed in [#102](https://github.com/jain-aanchal/ai-tally/pull/102), not yet replaced** — wire-up is currently API-only |
+> | Backfill helper `scripts/backfill_stripe.py --days N` | ✅ ships |
+>
+> Net: the **ingest backend is fully wired**; the **dashboard wire-up affordance is hidden** until the per-tenant connector UI ships.
 
-Wire it by POSTing your signing secret to `POST /v1/tenant/stripe/config` on the gateway, or `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=...` for local dev. The verified webhook handler maps Stripe events to `business_events` rows — `checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative revenue. Stripe customer emails are HMAC-hashed into the same `UserIdHash` space the SDK uses, so the attribution join lights up the moment events land.
+The chatbot demo (`make chatbot-demo`) exercises the attribution join with synthetic `positive_feedback` events — no Stripe wire-up needed to see `$/conversion` light up locally. For production tenants, Stripe is the v1 revenue source — but the setup path today is the gateway API, not the dashboard.
 
-A dashboard-side "paste your signing secret" tile was previously available on `/connectors`; it was removed in [#102](https://github.com/jain-aanchal/ai-tally/pull/102) pending a real per-tenant connector UI. The webhook + control-plane API are unchanged.
+To wire it from outside the dashboard:
 
-Two new columns appear on `/attribution` once a tenant wires Stripe (or runs the chatbot demo): **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
+```bash
+# production: POST your Stripe signing secret to the gateway
+curl -X POST http://<gateway>/v1/tenant/stripe/config \
+  -H "x-tenant-id: <tenant-uuid>" -H "content-type: application/json" \
+  -d '{"webhook_secret": "whsec_..."}'
+
+# local dev: stripe-cli forwards directly to the gateway
+stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=local-dev
+```
+
+Once events start landing, `/attribution` adds two columns: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
 
 ## Per-tenant control plane
 
