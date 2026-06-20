@@ -6,7 +6,9 @@ import { relativeAge } from "@/lib/dataState";
 import {
   type ConnectorCategory,
   type ConnectorStatus,
+  comingSoonCount,
   connectedCount,
+  liveAvailableCount,
 } from "@/lib/connectors";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import { ConnectorToggle } from "./ConnectorToggle";
@@ -30,6 +32,14 @@ function StateBadge({ row }: { row: ConnectorStatus }) {
       <span className="inline-flex items-center gap-1.5 rounded-full border border-good/40 bg-good/10 px-2 py-0.5 text-xs font-medium text-good">
         <span className="h-1.5 w-1.5 rounded-full bg-good" />
         Connected
+      </span>
+    );
+  }
+  if (row.state === "coming_soon") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-edge bg-ink/40 px-2 py-0.5 text-xs font-medium text-muted">
+        <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+        Coming soon
       </span>
     );
   }
@@ -84,7 +94,7 @@ function ConnectorTable({
                   {r.lastAt ? relativeAge(r.lastAt) : "—"}
                 </td>
                 <td className="py-2 text-right">
-                  {layer ? (
+                  {layer && r.state !== "coming_soon" ? (
                     <ConnectorToggle layer={layer} initialEnabled={isEnabled} />
                   ) : (
                     <span className="text-xs text-muted">—</span>
@@ -114,8 +124,11 @@ export default async function ConnectorsPage() {
       {SECTIONS.map((s) => {
         const rows = visibleConnectors.filter((c) => c.category === s.category);
         const n = connectedCount(rows);
+        const live = liveAvailableCount(rows);
+        const soon = comingSoonCount(rows);
+        const suffix = soon > 0 ? ` · ${soon} coming soon` : "";
         return (
-          <Card key={s.category} title={`${s.title} — ${n}/${rows.length} connected`}>
+          <Card key={s.category} title={`${s.title} — ${n}/${live} connected${suffix}`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
             <ConnectorTable rows={rows} enabledLayers={enabledLayers} />
           </Card>
@@ -124,12 +137,16 @@ export default async function ConnectorsPage() {
     </div>
   );
 
+  const totalSoon = comingSoonCount(visibleConnectors);
+  const totalLive = liveAvailableCount(visibleConnectors);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">Connectors</h1>
         <span className="text-sm text-muted">
-          {connected} of {visibleConnectors.length} sources connected
+          {connected} of {totalLive} sources connected
+          {totalSoon > 0 ? ` · ${totalSoon} coming soon` : ""}
         </span>
       </div>
 

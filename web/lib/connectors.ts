@@ -19,6 +19,15 @@ export type LiveKey =
   | { kind: "cost-layer"; layer: Layer }
   | { kind: "revenue-source"; source: string };
 
+/**
+ * Whether the backend ingest path for this connector actually exists today.
+ * - `live`        — a real worker / SDK / webhook ingests data when configured (LLM proxy, Stripe)
+ * - `coming_soon` — catalog entry only; no worker yet, the UI advertises a placeholder so users
+ *                   know it's planned. Re-classify to `live` when the corresponding integration
+ *                   ships (Pinecone, Tavily, AWS Cost Explorer, Vercel via CTO-127 follow-ups).
+ */
+export type Availability = "live" | "coming_soon";
+
 export interface ConnectorDef {
   /** Stable id — matches the backend connector's `name`. */
   id: string;
@@ -28,9 +37,10 @@ export interface ConnectorDef {
   feeds: string;
   description: string;
   liveKey: LiveKey;
+  availability: Availability;
 }
 
-export type ConnectorState = "connected" | "available";
+export type ConnectorState = "connected" | "available" | "coming_soon";
 
 export interface ConnectorStatus extends ConnectorDef {
   state: ConnectorState;
@@ -49,6 +59,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "LLM cost",
     description: "Token usage from the edge proxy or SDK — the primary spend signal.",
     liveKey: { kind: "cost-layer", layer: "llm" },
+    availability: "live",
   },
   {
     id: "pinecone",
@@ -57,6 +68,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Vector DB cost",
     description: "Vector database read/write/storage usage attributed to features.",
     liveKey: { kind: "cost-layer", layer: "vector" },
+    availability: "coming_soon",
   },
   {
     id: "tavily",
@@ -65,6 +77,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Tool-call cost",
     description: "Search / tool API usage billed per call.",
     liveKey: { kind: "cost-layer", layer: "tools" },
+    availability: "coming_soon",
   },
   {
     id: "aws_cost_explorer",
@@ -73,6 +86,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Compute cost",
     description: "Cloud billing line items for compute backing the AI workload.",
     liveKey: { kind: "cost-layer", layer: "compute" },
+    availability: "coming_soon",
   },
   {
     id: "vercel",
@@ -81,6 +95,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Egress cost",
     description: "Edge/serverless and bandwidth usage for the serving tier.",
     liveKey: { kind: "cost-layer", layer: "egress" },
+    availability: "coming_soon",
   },
   {
     id: "segment",
@@ -89,6 +104,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Revenue events",
     description: "CDP track events — the value side of ROI attribution.",
     liveKey: { kind: "revenue-source", source: "segment" },
+    availability: "coming_soon",
   },
   {
     id: "rudderstack",
@@ -97,6 +113,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Revenue events",
     description: "Open-source CDP track events (Segment-compatible payloads).",
     liveKey: { kind: "revenue-source", source: "rudderstack" },
+    availability: "coming_soon",
   },
   {
     id: "stripe",
@@ -105,6 +122,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Monetary events",
     description: "Payments, subscriptions and refunds as monetary business events.",
     liveKey: { kind: "revenue-source", source: "stripe" },
+    availability: "live",
   },
   {
     id: "hubspot",
@@ -113,6 +131,7 @@ export const CONNECTORS: ConnectorDef[] = [
     feeds: "Lifecycle events",
     description: "Deal-stage / lifecycle changes (e.g. closed-won) for attribution.",
     liveKey: { kind: "revenue-source", source: "hubspot" },
+    availability: "coming_soon",
   },
 ];
 
@@ -134,17 +153,29 @@ export function applyActivity(
   return catalog.map((def) => {
     const records = activity.records[def.id] ?? 0;
     const lastAt = activity.lastAt[def.id] ?? null;
-    return {
-      ...def,
-      records,
-      lastAt,
-      state: records > 0 ? "connected" : "available",
-    };
+    let state: ConnectorState;
+    if (records > 0) {
+      state = "connected";
+    } else if (def.availability === "coming_soon") {
+      state = "coming_soon";
+    } else {
+      state = "available";
+    }
+    return { ...def, records, lastAt, state };
   });
 }
 
 export function connectedCount(rows: ConnectorStatus[]): number {
   return rows.filter((r) => r.state === "connected").length;
+}
+
+/** Number of rows that aren't connected today but are claimed to be possible to connect now. */
+export function liveAvailableCount(rows: ConnectorStatus[]): number {
+  return rows.filter((r) => r.availability === "live").length;
+}
+
+export function comingSoonCount(rows: ConnectorStatus[]): number {
+  return rows.filter((r) => r.state === "coming_soon").length;
 }
 
 /**
