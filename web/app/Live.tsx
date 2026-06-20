@@ -12,7 +12,7 @@ import {
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { LAYERS, type Layer } from "@/lib/cost";
 import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
-import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "@/lib/types";
+import type { CostOutlier, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -20,7 +20,6 @@ export interface HomePayload {
   spend: SpendSummary;
   outliers: CostOutlier[];
   roi: FeatureRoi[];
-  dq: DataQuality;
 }
 
 export function HomeLive({
@@ -33,7 +32,7 @@ export function HomeLive({
   enabledLayers: readonly Layer[];
 }) {
   const { data, updatedAt } = useLivePoll<HomePayload>(endpoint, initialData);
-  const { spend: s, outliers, roi, dq } = data;
+  const { spend: s, outliers, roi } = data;
 
   const hidden = s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
@@ -116,13 +115,6 @@ export function HomeLive({
         </table>
       </Card>
 
-      <Card title="Data quality">
-        <dl className="space-y-2 text-sm">
-          <Metric label="attribution rate" value={`${Math.round(dq.attributionRate * 100)}%`} good />
-          <Metric label="context drops" value={String(dq.contextDropCount)} good={dq.contextDropCount === 0} />
-          <Metric label="estimate calibration" value={`${(dq.estimateCalibration * 100).toFixed(1)}% off`} good={dq.estimateCalibration < 0.03} />
-        </dl>
-      </Card>
     </div>
   );
 
@@ -149,11 +141,3 @@ export function HomeLive({
   );
 }
 
-function Metric({ label, value, good }: { label: string; value: string; good: boolean }) {
-  return (
-    <div className="flex items-center justify-between">
-      <dt className="text-muted">{label}</dt>
-      <dd className={good ? "text-good" : "text-warn"}>{value}</dd>
-    </div>
-  );
-}
