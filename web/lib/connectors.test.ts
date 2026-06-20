@@ -29,7 +29,7 @@ describe("connector catalog", () => {
 });
 
 describe("applyActivity", () => {
-  it("marks sources with records connected and the rest available", () => {
+  it("marks sources with records connected; live-but-empty -> available; coming-soon stays so", () => {
     const rows = applyActivity(CONNECTORS, {
       records: { llm_proxy: 10, stripe: 2 },
       lastAt: { llm_proxy: "2026-05-31T18:00:00Z" },
@@ -38,15 +38,20 @@ describe("applyActivity", () => {
     expect(byId.llm_proxy.state).toBe("connected");
     expect(byId.llm_proxy.records).toBe(10);
     expect(byId.stripe.state).toBe("connected");
-    expect(byId.pinecone.state).toBe("available");
+    // pinecone is in the catalog with availability='coming_soon' (no ingest worker yet) so it
+    // surfaces as 'coming_soon' rather than the previous catch-all 'available'.
+    expect(byId.pinecone.state).toBe("coming_soon");
     expect(byId.pinecone.records).toBe(0);
     expect(byId.pinecone.lastAt).toBeNull();
   });
 
-  it("an empty activity map leaves every source available", () => {
+  it("an empty activity map: nothing connected; live entries -> available, coming-soon -> coming_soon", () => {
     const rows = applyActivity(CONNECTORS, { records: {}, lastAt: {} });
     expect(connectedCount(rows)).toBe(0);
-    expect(rows.every((r) => r.state === "available")).toBe(true);
+    for (const r of rows) {
+      const expected = r.availability === "live" ? "available" : "coming_soon";
+      expect(r.state).toBe(expected);
+    }
   });
 
   it("preserves the full catalog (no source dropped or duplicated)", () => {
