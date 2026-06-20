@@ -90,13 +90,15 @@ export const comparison: Comparison = {
     latencyP95Ms: 2400,
     errorRate: 0.004,
   },
+  // No qualityCi on candidates: a CI implies real eval data, which the mock-fallback path
+  // doesn't have. The /api/compare route nulls qualityScore on these in the fallback path too
+  // (CTO-114: never fabricate a quality number); the values here document the ideal shape only.
   candidates: [
     {
       model: "claude-haiku-4.5",
       provider: "anthropic",
       monthlyCostMicroUsd: 5_300_000_000, // ~72% cheaper than current
       qualityScore: 0.908,
-      qualityCi: { lo: 0.872, hi: 0.937 },
       latencyP95Ms: 1800,
       errorRate: 0.006,
     },
@@ -105,7 +107,6 @@ export const comparison: Comparison = {
       provider: "openai",
       monthlyCostMicroUsd: 6_250_000_000, // ~67% cheaper
       qualityScore: 0.894,
-      qualityCi: { lo: 0.856, hi: 0.925 },
       latencyP95Ms: 1600,
       errorRate: 0.009,
     },
@@ -114,7 +115,6 @@ export const comparison: Comparison = {
       provider: "google",
       monthlyCostMicroUsd: 4_490_000_000, // ~76% cheaper
       qualityScore: 0.871,
-      qualityCi: { lo: 0.831, hi: 0.905 },
       latencyP95Ms: 1400,
       errorRate: 0.012,
     },
