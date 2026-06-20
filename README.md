@@ -9,7 +9,7 @@ Four workflows on one shared data spine:
 1. **Agent loop cost visibility** — why did this run cost 50× median?
 2. **Cross-provider comparison** — are we on the right model? Real replay, real eval, no marketing benchmarks.
 3. **End-to-end cost** — what does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
-4. **Business-outcome attribution** — is this AI feature profitable? `$/conversion` and margin per provider, joined from real Stripe revenue.
+4. **Business-outcome attribution** — is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
 
 A fifth surface — pre-deploy "what will this change cost?" — is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
 
@@ -110,11 +110,15 @@ The Quality column on `/compare` is grounded in a real eval pass — pairwise LL
 
 Below the 10-judged-samples floor, the cell renders `—` with the hint *"needs ≥10 judged samples — run eval pass"*. There is **no fallback to mock here, by design** — a fake quality number is worse than no quality number.
 
-## Stripe → real revenue
+## Stripe → real revenue (production)
 
-Wire Stripe by POSTing your signing secret to `POST /v1/tenant/stripe/config` on the gateway (or `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=...` for local dev). The verified webhook handler maps Stripe events to `business_events` rows — `checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative revenue. Stripe customer emails are HMAC-hashed into the same `UserIdHash` space the SDK uses, so the attribution join lights up the moment events land. (A web-side "paste your signing secret" affordance was previously available on `/connectors`; it was removed pending a real per-tenant connector UI.)
+The chatbot demo (`make chatbot-demo`) exercises the attribution join with synthetic `positive_feedback` events — no Stripe wire-up needed to see `$/conversion` light up locally. For production tenants, **Stripe is the v1 revenue source.**
 
-Two new columns appear on `/attribution` once a tenant wires Stripe: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
+Wire it by POSTing your signing secret to `POST /v1/tenant/stripe/config` on the gateway, or `stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=...` for local dev. The verified webhook handler maps Stripe events to `business_events` rows — `checkout.session.completed` → conversion, `invoice.paid` → renewal, `charge.refunded` → negative revenue. Stripe customer emails are HMAC-hashed into the same `UserIdHash` space the SDK uses, so the attribution join lights up the moment events land.
+
+A dashboard-side "paste your signing secret" tile was previously available on `/connectors`; it was removed in [#102](https://github.com/jain-aanchal/ai-tally/pull/102) pending a real per-tenant connector UI. The webhook + control-plane API are unchanged.
+
+Two new columns appear on `/attribution` once a tenant wires Stripe (or runs the chatbot demo): **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive — we never fabricate numbers from absent data.
 
 ## Per-tenant control plane
 
