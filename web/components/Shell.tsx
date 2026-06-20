@@ -38,23 +38,8 @@ export function Shell({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-edge bg-panel/60 px-6 py-3 text-sm">
-          <TopBarSelect label="Tenant" value="acme-prod" />
-          <TopBarSelect label="Range" value="Last 30 days" />
-          <TopBarSelect label="Feature" value="All features" />
-          <TopBarSelect label="Env" value="production" />
-        </header>
         <main className="min-w-0 flex-1 p-6">{children}</main>
       </div>
-    </div>
-  );
-}
-
-function TopBarSelect({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-xs uppercase tracking-wide text-muted">{label}</span>
-      <span className="rounded-md border border-edge bg-ink px-2 py-1 text-gray-200">{value}</span>
     </div>
   );
 }
