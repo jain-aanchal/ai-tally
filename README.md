@@ -4,13 +4,14 @@
 
 Cost-and-value observability for AI products. See what your AI actually costs — all-in — and what it returns.
 
-Five workflows on one shared data spine:
+Four workflows on one shared data spine:
 
 1. **Agent loop cost visibility** — why did this run cost 50× median?
 2. **Cross-provider comparison** — are we on the right model? Real replay, real eval, no marketing benchmarks.
 3. **End-to-end cost** — what does this feature really cost, all-in (LLM + vector + tools + compute + egress)?
 4. **Business-outcome attribution** — is this AI feature profitable? `$/conversion` and margin per provider, joined from real Stripe revenue.
-5. **Pre-deploy estimation** — what will this change cost before we ship?
+
+A fifth surface — pre-deploy "what will this change cost?" — is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
 
 ## Product principles
 
@@ -32,7 +33,7 @@ infra/             docker-compose stack (ClickHouse, Postgres, Redpanda, MinIO) 
 db/clickhouse/     ClickHouse DDL — otel_spans, attribution, business_events, replay_samples, eval_runs
 db/postgres/       Postgres control-plane schema — tenants, connectors, stripe, replay,
                    eval, guardrails, CAC, integration runs
-web/               Next.js dashboard (the five workflows)
+web/               Next.js dashboard (the four shipped workflows)
 examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot, Stripe
 ```
 
@@ -55,7 +56,7 @@ The runbook covers nine end-to-end steps, including the demos that exercise each
 | Agent loop + edge proxy | `make aider-demo` | Drives Aider against a fixture repo through the edge proxy |
 | Business-outcome attribution | `make chatbot-demo` | 50 scripted chat sessions across OpenAI + Anthropic with thumbs-up conversion events |
 | Real revenue via Stripe | RUNNING.md §7 | Verified webhook ingest → `business_events` → `$/conversion` |
-| Replay-backed Compare/Estimate | RUNNING.md §8 | Opt-in 5% sampling, cross-provider replay with daily budget cap |
+| Replay-backed Compare | RUNNING.md §8 | Opt-in 5% sampling, cross-provider replay with daily budget cap |
 | Pairwise LLM-judge quality | RUNNING.md §9 | Pairwise judge with Wilson 95% CIs on win-rate |
 
 Demos need provider keys exported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
@@ -95,13 +96,13 @@ Knobs:
 
 Discovery is fail-soft: if both providers are unreachable and the cache file doesn't exist, the gateway boots with an empty list and a warning. The demos fall back to their hardcoded defaults.
 
-## Replay-backed Compare and Estimate
+## Replay-backed Compare
 
-Workflows 2 (Compare) and 5 (Estimate) used to be mock projections rescaled off the user's real current-model spend. They're now backed by **real cross-provider replay**: the gateway captures an opt-in 5% sample of spans, scrubs PII (emails, API keys, postal addresses), stores the resolved request envelope in object storage, and replays it against candidate models on demand.
+Workflow 2 (Compare) used to be a mock projection rescaled off the user's real current-model spend. It's now backed by **real cross-provider replay**: the gateway captures an opt-in 5% sample of spans, scrubs PII (emails, API keys, postal addresses), stores the resolved request envelope in object storage, and replays it against candidate models on demand.
 
 Per-tenant opt-in — default off; nothing is sampled until a tenant flips `enabled=true` via `POST /v1/tenant/replay/config`. A daily budget cap (default `$5/day`) hard-stops the replay executor from running away. The diagnostics block on `/api/compare` carries the honest fidelity string `"resolved-context replay (no live retrieval)"` so the dashboard never claims a tier it doesn't have.
 
-When a tenant has no opted-in samples (or the gateway is unreachable), the `/api/compare` and `/api/estimate` routes fall back to the rescaled-mock path they had before — `replay_source` in each response distinguishes the two branches.
+When a tenant has no opted-in samples (or the gateway is unreachable), `/api/compare` falls back to the rescaled-mock path it had before — `replay_source` in the response distinguishes the two branches.
 
 ## Pairwise LLM-judge eval
 
@@ -129,7 +130,7 @@ Every control-plane write is audited with an idempotent `change_id` (UUID), and 
 
 ## Status
 
-The five workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest — a placeholder for a metric we haven't grounded yet. The remaining backlog turns those `—`s into real numbers (per-feature attribution, candidate-response replay for honest eval grading, real workers for the "Coming soon" connectors).
+The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest — a placeholder for a metric we haven't grounded yet. The remaining backlog turns those `—`s into real numbers (per-feature attribution, candidate-response replay for honest eval grading, body-driven pre-deploy estimation, real workers for the "Coming soon" connectors).
 
 Decisions and the full system spec live in the project tracker. Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
 
