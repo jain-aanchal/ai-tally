@@ -2,6 +2,7 @@ import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
 import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
+import { postCdpEvent, sessionUserHash } from "@/lib/tally";
 
 const voteSchema = z.object({
   chatId: z.string(),
@@ -79,6 +80,17 @@ export async function PATCH(request: Request) {
     messageId,
     type,
   });
+
+  // ai-tally: surface upvotes as positive_feedback CDP events so /attribution
+  // lights up conversions for the live chat (matches the synthetic driver path
+  // in /api/demo-chat). Same userHash scheme as postSpan so the join works.
+  if (type === "up") {
+    void postCdpEvent({
+      sessionId: chatId,
+      userHash: sessionUserHash(session.user.id ?? chatId),
+      type: "positive_feedback",
+    });
+  }
 
   return new Response("Message voted", { status: 200 });
 }
