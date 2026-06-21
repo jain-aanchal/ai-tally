@@ -41,20 +41,20 @@ export const projection: Projection = {
   workload: "research_agent / production / last 30 days",
   pr: { repo: "jain-aanchal/ai-tally", number: 1284, title: "agent: add web_fetch retries + reranker step" },
   current: {
-    monthlyCostMicroUsd: 6_420_000_000,
-    p99CostMicroUsd: 3_400_000,
+    monthlyCostMicroUsd: 19_100_000_000, // matches the research_agent line in cost.ts featureRows
+    p99CostMicroUsd: 4_870_000,
     meanLatencyMs: 1400,
   },
   proposed: {
-    monthlyCostMicroUsd: 11_200_000_000,
-    p99CostMicroUsd: 8_100_000,
+    monthlyCostMicroUsd: 33_240_000_000, // +74% projected
+    p99CostMicroUsd: 11_580_000,
     meanLatencyMs: 2100,
   },
   blowUpRisk: 0.42,
   drivers: [
-    { delta: 3_800_000_000, reason: "longer system prompt (4.2k → 6.8k tokens)" },
-    { delta: 1_400_000_000, reason: "new tool call in 60% of paths" },
-    { delta: -400_000_000, reason: "cached input recapture" },
+    { delta: 11_320_000_000, reason: "longer system prompt (4.2k → 6.8k tokens)" },
+    { delta: 4_160_000_000, reason: "new tool call in 60% of paths" },
+    { delta: -1_340_000_000, reason: "cached input recapture (Sonnet prompt caching)" },
   ],
   sample: {
     used: 180,
@@ -62,5 +62,5 @@ export const projection: Projection = {
     pathologicalIncluded: 18,
     ciHalfWidthPct: 0.18,
   },
-  reconcilerLastRunMinutesAgo: 51,
+  reconcilerLastRunMinutesAgo: 18,
 };

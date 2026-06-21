@@ -77,21 +77,27 @@ export function deltaPct(current: number, candidate: number): number {
   return (candidate - current) / current;
 }
 
+// Compare fixture for the research_agent workload — the dominant cost driver from cost.ts
+// ($19.1K LLM spend on this workload alone over 30 days, ≈ $4.5K/week).
 export const comparison: Comparison = {
   workload: "research_agent / production / last 7 days",
   current: {
     model: "claude-sonnet-4.5",
     provider: "anthropic",
-    monthlyCostMicroUsd: 6_420_000_000,
+    monthlyCostMicroUsd: 19_100_000_000, // $19,100/mo on this workload
     qualityScore: 0.941,
+    qualityCi: { lo: 0.911, hi: 0.962 },
     latencyP95Ms: 2400,
     errorRate: 0.004,
   },
+  // No qualityCi on candidates: a CI implies real eval data, which the mock-fallback path
+  // doesn't have. The /api/compare route nulls qualityScore on these in the fallback path too
+  // (CTO-114: never fabricate a quality number); the values here document the ideal shape only.
   candidates: [
     {
       model: "claude-haiku-4.5",
       provider: "anthropic",
-      monthlyCostMicroUsd: 1_780_000_000,
+      monthlyCostMicroUsd: 5_300_000_000, // ~72% cheaper than current
       qualityScore: 0.908,
       latencyP95Ms: 1800,
       errorRate: 0.006,
@@ -99,7 +105,7 @@ export const comparison: Comparison = {
     {
       model: "gpt-5-mini",
       provider: "openai",
-      monthlyCostMicroUsd: 2_100_000_000,
+      monthlyCostMicroUsd: 6_250_000_000, // ~67% cheaper
       qualityScore: 0.894,
       latencyP95Ms: 1600,
       errorRate: 0.009,
@@ -107,7 +113,7 @@ export const comparison: Comparison = {
     {
       model: "gemini-3-flash",
       provider: "google",
-      monthlyCostMicroUsd: 1_510_000_000,
+      monthlyCostMicroUsd: 4_490_000_000, // ~76% cheaper
       qualityScore: 0.871,
       latencyP95Ms: 1400,
       errorRate: 0.012,
@@ -116,16 +122,16 @@ export const comparison: Comparison = {
   recommendation: {
     verdict: "mixed",
     summary:
-      "Route short prompts (<1k tokens) to haiku-4.5; keep current for long-context. Quality delta -1.1pp at projected mix.",
-    projectedSavingsMicroUsd: 4_100_000_000,
+      "Route short prompts (<1k tokens) to haiku-4.5; keep current for long-context (>4k tokens). Projected quality delta -1.1pp at the projected mix, saves ~$12.2K/mo on this workload.",
+    projectedSavingsMicroUsd: 12_200_000_000,
     projectedSavingsPct: 0.64,
   },
   diagnostics: {
     samplesReplayed: 4200,
     samplesAvailable: 87_400,
     excludedRateLimited: 312,
-    replayCostMicroUsd: 14_200_000,
+    replayCostMicroUsd: 42_300_000, // $42.30 spent replaying = ~0.2% of monthly workload spend
     contextFidelity: "resolved-context replay (no live retrieval)",
-    reconcilerLastRunMinutesAgo: 36,
+    reconcilerLastRunMinutesAgo: 18,
   },
 };

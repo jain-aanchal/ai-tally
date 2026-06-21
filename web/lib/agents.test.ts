@@ -5,7 +5,7 @@ import { agents, getRun, p99Ratio, runsForAgent } from "./agents";
 describe("agents data + helpers", () => {
   it("computes p99/p50 ratio", () => {
     const research = agents.find((a) => a.name === "research_agent")!;
-    expect(Math.round(p99Ratio(research))).toBe(28); // 3.4M / 120k
+    expect(Math.round(p99Ratio(research))).toBe(41); // 4.87M / 120k
   });
 
   it("flags research_agent as a tail outlier (ratio > 20)", () => {
@@ -19,7 +19,7 @@ describe("agents data + helpers", () => {
   });
 
   it("runsForAgent filters by agent", () => {
-    expect(runsForAgent("research_agent").length).toBe(2);
+    expect(runsForAgent("research_agent").length).toBe(3);
     expect(runsForAgent("nope").length).toBe(0);
   });
 
