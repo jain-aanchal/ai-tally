@@ -40,6 +40,7 @@ import {
   buildProviderRow,
   emptyReport,
 } from "./attribution";
+import type { GuardrailMode, GuardrailRule, GuardrailScopeKind } from "./guardrails";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -677,6 +678,87 @@ export async function queryIntegrationStatus(): Promise<IntegrationStatusRow[] |
     return Array.isArray(body.integrations) ? body.integrations : [];
   } catch (err) {
     console.warn("[integrations] gateway unreachable:", (err as Error).message);
+    return null;
+  }
+}
+
+// --- Tenant guardrails (CTO-120 / control-plane CTO-116) ----------------------------------------
+//
+// The /guardrails page used to serve the typed mock from lib/guardrails.ts. The real source is the
+// gateway's tenant_guardrails table, exposed via GET /v1/tenant/guardrails. We map the control-plane
+// rule shape (rule_id / kind / params / state) onto the web's GuardrailRule and fall back to null on
+// any error so the route can paint the page with the static mock (same pattern as every other
+// gateway-facing helper here).
+//
+// Shape mapping (gateway -> web):
+//   rule_id                       -> id
+//   params.scope_kind ("feature") -> scopeKind (default "agent")
+//   params.scope / rule_id        -> scope
+//   params.mode OR state          -> mode  (params.mode wins; else shadow/disabled->observe,
+//                                            enabled->warn as a safe enforcing default)
+//   params.max_cost_micro_usd     -> maxCostMicroUsd
+//   params.max_steps              -> maxSteps
+// The control plane does not carry fire counts, so wouldHaveFiredThisWeek / runsThisWeek default to
+// 0 (those are observability tallies the SDK emits, not config) — honest rather than fabricated.
+
+interface GatewayGuardrailRule {
+  rule_id: string;
+  kind: string;
+  params?: Record<string, unknown> | null;
+  state: string;
+}
+
+function guardrailIntOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function mapGuardrailRule(r: GatewayGuardrailRule): GuardrailRule {
+  const params = r.params ?? {};
+  const rawMode = params["mode"];
+  const mode: GuardrailMode =
+    rawMode === "observe" || rawMode === "warn" || rawMode === "graceful" || rawMode === "hard_stop"
+      ? rawMode
+      : r.state === "enabled"
+        ? "warn"
+        : "observe"; // shadow / disabled / unknown -> observe (never alters the agent)
+  const scopeKind: GuardrailScopeKind = params["scope_kind"] === "feature" ? "feature" : "agent";
+  const scope =
+    typeof params["scope"] === "string" && params["scope"] ? (params["scope"] as string) : r.rule_id;
+  return {
+    id: r.rule_id,
+    scopeKind,
+    scope,
+    mode,
+    maxCostMicroUsd: guardrailIntOrNull(params["max_cost_micro_usd"]),
+    maxSteps: guardrailIntOrNull(params["max_steps"]),
+    // Control plane carries config, not telemetry — fire counts come from the SDK, default 0.
+    wouldHaveFiredThisWeek: guardrailIntOrNull(params["would_have_fired_this_week"]) ?? 0,
+    runsThisWeek: guardrailIntOrNull(params["runs_this_week"]) ?? 0,
+  };
+}
+
+/**
+ * Fetch the caller's per-tenant guardrail rules from the gateway and map them onto the web's
+ * GuardrailRule shape. Returns null on any error (gateway unreachable, non-2xx, parse failure) so
+ * the route can fall back to the static mock (`?? guardrailRules`) rather than blanking the page.
+ */
+export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
+      headers: { "x-tenant-id": TENANT },
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      console.warn(`[guardrails] /v1/tenant/guardrails HTTP ${res.status}; falling back to mock`);
+      return null;
+    }
+    const body = (await res.json()) as { rules?: GatewayGuardrailRule[] };
+    return Array.isArray(body.rules) ? body.rules.map(mapGuardrailRule) : [];
+  } catch (err) {
+    console.warn("[guardrails] gateway unreachable, falling back to mock:", (err as Error).message);
     return null;
   }
 }
