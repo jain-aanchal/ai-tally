@@ -18,6 +18,7 @@ import {
 } from "./onboarding/first-trace/route";
 import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
 import { GET as AttributionGET } from "./attribution/route";
+import { GET as CacGET } from "./cac/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -154,6 +155,24 @@ describe("api routes", () => {
     ]);
     expect(body.filters.tag).toBe("chatbot-demo");
     expect(body.filters.outcome).toBe("positive_feedback");
+  });
+
+  it("GET /api/cac falls back to the labelled mock when the gateway is unreachable", async () => {
+    // CI / fresh-clone: the gateway isn't running, so queryCacPeriods returns [] and the route
+    // serves MOCK_CAC_PERIODS. Real CAC data goes through the live path (isMock=false).
+    const body = await json<{
+      periods: { periodStart: string; locked: boolean }[];
+      economics: Record<string, { arpaMicroUsd: number }>;
+      isMock: boolean;
+    }>(await CacGET());
+    expect(body.isMock).toBe(true);
+    expect(body.periods.length).toBeGreaterThan(0);
+    // Newest-first ordering.
+    expect(body.periods[0].periodStart).toBe("2026-05-01");
+    // A period intentionally omits economics (honest-null payback/LTV demo).
+    expect(body.economics["2026-03-01"]).toBeUndefined();
+    // And at least one period carries economics so the cards render real numbers.
+    expect(body.economics["2026-05-01"].arpaMicroUsd).toBeGreaterThan(0);
   });
 
   it("PUT /api/guardrails echoes a valid rule, rejects an unconstrained one", async () => {
