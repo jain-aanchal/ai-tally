@@ -14,6 +14,11 @@ import {
 // mathematically defined, is not informative.
 const MIN_JUDGED_SAMPLES = 10;
 
+// CTO-123: minimum replayed-response count before a candidate's per-candidate p95 latency /
+// error rate are shown as real numbers. Below this, both are null and the page renders "—" —
+// the same honest-null rule the `current` row uses for its live otel window (CTO-115).
+const MIN_REPLAYED_SAMPLES = 50;
+
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
   evalRows: EvalCandidateRow[] | undefined,
@@ -81,14 +86,19 @@ export async function GET(req: Request) {
         // fall back to a mock number; that would have been the previous workaround and the
         // whole point of this ticket is to stop doing that.
         const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
+        // CTO-123: real per-candidate p95 latency + error rate from the replay projection.
+        // Honest-null below the floor — same rule the `current` row uses (CTO-115): a p95 / error
+        // rate computed from fewer than 50 replayed responses is too noisy to present, so we emit
+        // null and the page renders "—" rather than a number or a borrowed mock.
+        const enoughReplayed = c.samples_replayed >= MIN_REPLAYED_SAMPLES;
         return {
           model: c.model,
           provider: c.provider,
           monthlyCostMicroUsd: c.projected_monthly_cost_micro_usd,
           qualityScore: quality?.qualityScore ?? null,
           ...(quality ? { qualityCi: quality.qualityCi } : {}),
-          latencyP95Ms: c.p95_latency_ms || comparison.candidates[0]?.latencyP95Ms || 0,
-          errorRate: c.error_rate,
+          latencyP95Ms: enoughReplayed ? c.p95_latency_ms : null,
+          errorRate: enoughReplayed ? c.error_rate : null,
         };
       });
     const cheapest = candidates.reduce(
