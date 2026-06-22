@@ -11,6 +11,7 @@ const NAV: { label: string; href: string }[] = [
   { label: "Attribution", href: "/attribution" },
   { label: "Unit Economics", href: "/unit-economics" },
   { label: "Connectors", href: "/connectors" },
+  { label: "Guardrails", href: "/guardrails" },
   // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
   //   - /settings        — empty shell, no real settings wired
   //   - /estimate        — mock fixtures (re-add when CTO-128 lands)
