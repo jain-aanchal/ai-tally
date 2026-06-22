@@ -10,6 +10,21 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+// ai-tally (CTO-137): import the embedding-span helper directly. The real chat
+// route has no embedding/RAG path today, so rather than fabricate one we have a
+// fraction of synthetic sessions emit a RAG-retrieval embedding span straight
+// to the gateway. This is DEMO SEED TRAFFIC — clearly not a real code path.
+import { postEmbeddingSpan } from "../app/lib/tally";
+
+// Embedding pricing for the simulated RAG retrieval. text-embedding-3-small is
+// $0.02 per 1M input tokens. Demo-seed only — the gateway catalog remains the
+// source of truth for any real numbers.
+const EMBED_MODEL = "text-embedding-3-small";
+const EMBED_USD_PER_MTOK = 0.02;
+
+function embedCostMicroUsd(inputTokens: number): number {
+  return Math.round(((inputTokens * EMBED_USD_PER_MTOK) / 1_000_000) * 1_000_000);
+}
 
 interface Prompt {
   id: string;
@@ -224,6 +239,28 @@ async function runSession(
       errors++;
       console.warn(`[session ${index}] turn ${t} failed: ${(err as Error).message}`);
       break;
+    }
+  }
+
+  // ai-tally (CTO-137): ~30% of sessions ALSO emit a simulated RAG-retrieval
+  // embedding span so the Cost tab's Embeddings bar is non-zero on a live demo.
+  // DEMO SEED TRAFFIC — the real chat route has no embedding path; this stands
+  // in for a retrieval step. Best-effort; never fails the session.
+  if (rng() < 0.3 && errors === 0 && !args.dryRun) {
+    const embedTokens = 200 + Math.floor(rng() * 600); // 200..799
+    try {
+      await postEmbeddingSpan({
+        sessionId,
+        provider: "openai",
+        model: EMBED_MODEL,
+        inputTokens: embedTokens,
+        costMicroUsd: embedCostMicroUsd(embedTokens),
+        runId: sessionId,
+      });
+    } catch (err) {
+      console.warn(
+        `[session ${index}] embedding span failed: ${(err as Error).message}`,
+      );
     }
   }
 

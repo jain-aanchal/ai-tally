@@ -49,10 +49,65 @@ import { type PostRequestBody, postRequestBodySchema } from "./schema";
 // this they'd never produce telemetry. resolveProvider() infers the real
 // provider from the picker's "<provider>/<model>" id; falls back to anthropic
 // because that's the local-demo default in lib/ai/providers.ts.
-import { postSpan, sessionUserHash } from "@/lib/tally";
+import { postSpan, postToolSpan, sessionUserHash } from "@/lib/tally";
 
 function resolveRealProvider(modelId: string): "openai" | "anthropic" {
   return modelId.startsWith("openai/") ? "openai" : "anthropic";
+}
+
+// ai-tally (CTO-137): fixed per-tool price table in micro-USD. Tool calls have
+// no provider token cost, so we attach a small flat price per invocation; the
+// gateway buckets these (gen_ai.operation.name='tool') into the Cost tab's
+// Tools layer. Demo-seed pricing — not a real billing model.
+const TOOL_COST_MICRO_USD: Record<string, number> = {
+  getWeather: 1_000,
+  createDocument: 5_000,
+  updateDocument: 5_000,
+  editDocument: 5_000,
+  requestSuggestions: 2_000,
+};
+
+// ai-tally (CTO-137): scan finished assistant message parts for tool
+// invocations and emit one tool span each. The AI SDK encodes tool calls as
+// parts with a `type` like "tool-getWeather" (or a legacy "tool-invocation"
+// / "dynamic-tool" part carrying `toolName`). Best-effort — never throws into
+// the stream.
+function emitToolSpans(
+  messages: { role: string; parts?: unknown[] }[],
+  ctx: { sessionId: string; userHash: string; provider: string; runId: string }
+): void {
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.parts)) {
+      continue;
+    }
+    for (const part of msg.parts) {
+      const p = part as { type?: string; toolName?: string };
+      let toolName: string | undefined;
+      if (typeof p.type === "string" && p.type.startsWith("tool-")) {
+        toolName = p.type.slice("tool-".length);
+      } else if (
+        (p.type === "tool-invocation" || p.type === "dynamic-tool") &&
+        typeof p.toolName === "string"
+      ) {
+        toolName = p.toolName;
+      }
+      if (!toolName || toolName === "invocation") {
+        continue;
+      }
+      const costMicroUsd = TOOL_COST_MICRO_USD[toolName];
+      if (costMicroUsd === undefined) {
+        continue;
+      }
+      void postToolSpan({
+        sessionId: ctx.sessionId,
+        userHash: ctx.userHash,
+        provider: ctx.provider,
+        tool: toolName,
+        costMicroUsd,
+        runId: ctx.runId,
+      });
+    }
+  }
 }
 
 // The picker id is "<provider>/<model>"; the gateway's price catalog stores
@@ -303,6 +358,15 @@ export async function POST(request: Request) {
       },
       generateId: generateUUID,
       onFinish: async ({ messages: finishedMessages }) => {
+        // ai-tally (CTO-137): emit a tool span per tool invocation in the
+        // finished assistant messages so the Cost tab's Tools bar fills on
+        // manual (non-driver) sessions too. Fire-and-forget inside.
+        emitToolSpans(finishedMessages, {
+          sessionId: id,
+          userHash: sessionUserHash(session.user.id ?? id),
+          provider: resolveRealProvider(chatModel),
+          runId: id,
+        });
         if (isToolApprovalFlow) {
           for (const finishedMsg of finishedMessages) {
             const existingMsg = uiMessages.find((m) => m.id === finishedMsg.id);
