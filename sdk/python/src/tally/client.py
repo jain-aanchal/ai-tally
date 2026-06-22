@@ -42,10 +42,23 @@ _TOOL_PRICING: dict[tuple[str, str], int] = {
     ("firecrawl", "scrape"): 20_000,
 }
 
+# Default per-(provider, operation) vector-DB prices in micro-USD (CTO-142). Inline and
+# hand-maintained until a real vector-pricing catalog lands (follow-up, à la CTO-141). When a
+# caller omits an explicit ``cost_micro_usd`` we look the pair up here; an unknown pair defaults to
+# 0 with a one-time WARN.
+_VECTOR_PRICING: dict[tuple[str, str], int] = {
+    ("pinecone", "query"): 400,
+    ("pinecone", "upsert"): 200,
+    ("weaviate", "query"): 300,
+    ("qdrant", "query"): 250,
+}
+
 # Pairs we've already warned about, so the missing-price WARN fires once per (provider, tool).
 _warned_tool_pairs: set[tuple[str, str]] = set()
 # Embedding (provider, model) pairs we've already warned about (CTO-136).
 _warned_embedding_pairs: set[tuple[str, str]] = set()
+# Vector (provider, operation) pairs we've already warned about (CTO-142).
+_warned_vector_pairs: set[tuple[str, str]] = set()
 
 
 class Exporter(Protocol):
@@ -353,6 +366,63 @@ class TallyClient:
         if result is None:  # boundary swallowed an error; return a benign result
             return EmbeddingCallResult(None, None, {})
         return result
+
+    # --- high-level: record a vector-DB call (Vector cost layer, CTO-142) ---
+    def record_vector_call(
+        self,
+        *,
+        provider: str,
+        index: str,
+        operation: str,
+        cost_micro_usd: int | None = None,
+        record_count: int | None = None,
+        latency_ms: int | None = None,
+    ) -> None:
+        """Record a vector-DB call so the span lands in the gateway's ``vector`` cost-layer bucket.
+
+        Bucketing is keyed off ``gen_ai.operation.name == 'vector'``. The call's cost rides on
+        ``gen_ai.tool.cost_micro_usd`` (same carrier as ``record_tool_call`` — the gateway promotes
+        it into the layer's spend). The tool-name slot encodes ``{provider}.{index}.{operation}``.
+        When ``cost_micro_usd`` is omitted we resolve a default from the inline
+        :data:`_VECTOR_PRICING` table keyed by ``(provider, operation)`` (follow-up: promote to a
+        real catalog, à la CTO-141); an unknown pair defaults to 0 with a one-time WARN. Never
+        raises.
+
+        ``record_count`` and ``latency_ms`` are accepted for API symmetry with future span fields
+        but are not yet emitted as schema attributes (no conformant key exists for them).
+        """
+
+        @safe(self.obs, where="TallyClient.record_vector_call")
+        def _do() -> None:
+            ctx = current_context()
+            if ctx.trace_id is None:
+                note_context_drop(self.obs, where="record_vector_call")
+
+            resolved_cost = cost_micro_usd
+            if resolved_cost is None:
+                key = (provider, operation)
+                resolved_cost = _VECTOR_PRICING.get(key)
+                if resolved_cost is None:
+                    if key not in _warned_vector_pairs:
+                        _warned_vector_pairs.add(key)
+                        _log.warning(
+                            "no default vector price for (%s, %s); defaulting cost to 0",
+                            provider,
+                            operation,
+                        )
+                    resolved_cost = 0
+
+            fields = SpanFields(
+                system=provider,
+                operation="vector",
+                tool_name=f"{provider}.{index}.{operation}",
+                tool_cost_micro_usd=resolved_cost,
+                feature_tag=ctx.feature_tag,
+                session_id=ctx.session_id,
+            )
+            self._emit(build_span_attributes(fields))
+
+        _do()
 
     # --- guardrails (may raise, by design — pre-call check) ---
     def guard(self, state: GuardrailState, config: GuardrailConfig) -> Verdict:
