@@ -80,7 +80,7 @@ function zeroLayers(): SpendByLayer {
 
 // Map a gen_ai operation to a cost layer. Only LLM-family spans exist today.
 const LAYER_CASE =
-  "multiIf(GenAiOperation = 'tool', 'tools', GenAiOperation = 'embeddings', 'embeddings', 'llm')";
+  "multiIf(GenAiOperation = 'tool', 'tools', GenAiOperation = 'embeddings', 'embeddings', GenAiOperation = 'vector', 'vector', 'llm')";
 
 async function rows<T>(db: ClickHouseClient, query: string, tenant: string): Promise<T[]> {
   const rs = await db.query({
