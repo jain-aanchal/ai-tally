@@ -1060,6 +1060,56 @@ export async function queryReplayCandidates(
   }
 }
 
+// --- Body-driven what-if estimate (CTO-128) ---------------------------------------------------
+//
+// /estimate's POST surface lets an operator swap a candidate model AND tighten the system prompt,
+// then re-project cost off the captured corpus. Unlike queryReplayCandidates (which is cached and
+// multi-candidate), this is a single-candidate, override-bearing, uncached call — each what-if is
+// a distinct intent and burns a fresh (cheap, mock-by-default) replay.
+
+export interface ReplayEstimateRequest {
+  candidateModel: { provider: string; model: string };
+  systemPromptOverride?: string;
+  featureTag?: string;
+  sampleSize?: number;
+}
+
+/**
+ * Fetch a single-candidate what-if projection from the gateway's `/v1/replay/estimate` endpoint.
+ *
+ * Returns null when no samples ground the estimate or when the gateway is unreachable, so the
+ * route can apply its honest-null floor rather than fabricate a number.
+ */
+export async function queryReplayEstimate(
+  req: ReplayEstimateRequest,
+): Promise<ReplayProjection | null> {
+  const tenant = TENANT;
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/replay/estimate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      body: JSON.stringify({
+        tenant_id: tenant,
+        feature_tag: req.featureTag,
+        candidate_model: req.candidateModel,
+        system_prompt_override: req.systemPromptOverride,
+        sample_size: req.sampleSize ?? 50,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      console.warn(`[estimate] /v1/replay/estimate HTTP ${res.status}; returning null`);
+      return null;
+    }
+    const body = (await res.json()) as ReplayProjection;
+    return body.samples_available > 0 ? body : null;
+  } catch (err) {
+    console.warn("[estimate] gateway unreachable, returning null:", (err as Error).message);
+    return null;
+  }
+}
+
 // --- Pairwise LLM-judge eval (CTO-114) --------------------------------------------------------
 //
 // The gateway's /v1/eval runs a frontier judge over the replay outputs and returns per-candidate

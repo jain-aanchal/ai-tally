@@ -57,6 +57,7 @@ from gateway.stripe_ingest import (
     map_stripe_event,
     verify_stripe_signature,
 )
+from gateway.replay_estimate import apply_system_prompt_override
 from gateway.replay_executor import (
     CandidateCall,
     CandidateResponse,
@@ -1274,6 +1275,159 @@ async def project_replay(
             "context_fidelity": "resolved-context replay (no live retrieval)",
             "replay_cost_micro_usd": total_replay_cost,
         },
+    })
+
+
+@app.post("/v1/replay/estimate")
+async def project_replay_estimate(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Body-driven what-if: project one candidate with an optional prompt override (CTO-128).
+
+    Body::
+
+        {
+          "tenant_id": "...",            # optional — falls back to control-plane resolution
+          "feature_tag": "research",     # optional filter
+          "candidate_model": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+          "system_prompt_override": "...",  # optional — applied to the envelope before pricing
+          "sample_size": 50              # optional, default 50; sized to min(sample_size, available)
+        }
+
+    Reuses the ``/v1/replay`` executor + per-corpus extrapolation. The only new behavior is
+    applying ``system_prompt_override`` to each captured envelope before the candidate call
+    (see :func:`gateway.replay_estimate.apply_system_prompt_override`). Returns the same
+    projection shape as ``/v1/replay`` (a single-element ``per_candidate`` list) plus the v1
+    honesty/diagnostics block. Like ``/v1/replay``, the candidate client is injectable via
+    ``app.state.replay_candidate_client`` (a deterministic mock by default).
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+
+    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
+        authorization, x_tenant_id
+    )
+    feature_tag = body.get("feature_tag")
+    candidate = body.get("candidate_model")
+    if not isinstance(candidate, dict) or "provider" not in candidate or "model" not in candidate:
+        raise HTTPException(
+            status_code=422,
+            detail="candidate_model must be a {provider, model} object",
+        )
+    system_prompt_override = body.get("system_prompt_override")
+    if system_prompt_override is not None and not isinstance(system_prompt_override, str):
+        raise HTTPException(status_code=422, detail="system_prompt_override must be a string")
+    sample_size = int(body.get("sample_size") or 50)
+
+    cfg = app.state.tenant_replay.get(tenant_id)
+    index: list = app.state.replay_sample_index
+    matching = [
+        r for r in index
+        if r.tenant_id == tenant_id
+        and (feature_tag is None or r.feature_tag == feature_tag)
+    ]
+    samples_available = len(matching)
+
+    diagnostics = {
+        "context_fidelity": "resolved-context replay (no live retrieval)",
+        "prompt_override_applied": bool(system_prompt_override),
+        # The override length is estimated at 4 chars/token — no real tokenizer in v1.
+        "token_estimate": "4-chars-per-token (no live tokenizer)",
+        "replay_cost_micro_usd": 0,
+    }
+
+    if samples_available == 0:
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "feature_tag": feature_tag,
+            "samples_available": 0,
+            "per_candidate": [],
+            "diagnostics": diagnostics,
+        })
+
+    # Size to min(sample_size, available); _pick_for_projection already clamps when size>=len.
+    selected = _pick_for_projection(matching, min(sample_size, samples_available))
+
+    client = getattr(app.state, "replay_candidate_client", None) or _mock_candidate_client
+    executor = ReplayExecutor(
+        catalog=app.state.catalog,
+        blob_store=app.state.replay_blob_store,
+        client=client,
+        todays_spend_micro_usd=lambda t: _todays_spend(app.state.replay_runs, t),
+        sink=app.state.replay_runs.append,
+    )
+
+    transform = (
+        (lambda env: apply_system_prompt_override(env, system_prompt_override))
+        if system_prompt_override
+        else None
+    )
+
+    provider = str(candidate["provider"])
+    model = str(candidate["model"])
+    results = []
+    excluded_budget = 0
+    latencies: list[int] = []
+    errors = 0
+    cost_sum = 0
+    for sample in selected:
+        from tally.pricing import Usage as _Usage
+        from tally.pricing import compute_cost_micro_usd as _ccost
+        est_cost, _ = _ccost(
+            app.state.catalog, provider, model,
+            _Usage(input_tokens=sample.input_tokens, output_tokens=sample.input_tokens),
+        )
+        result = await executor.replay_sample(
+            tenant_id=tenant_id,
+            sample_id=sample.sample_id,
+            object_key=sample.s3_object_key,
+            candidate_provider=provider,
+            candidate_model=model,
+            daily_budget_usd=cfg.daily_budget_usd,
+            estimated_call_cost_micro_usd=est_cost,
+            envelope_transform=transform,
+        )
+        results.append(result)
+        if result.excluded_budget:
+            excluded_budget += 1
+            continue
+        if result.row is not None:
+            latencies.append(result.row.latency_ms)
+            cost_sum += result.row.cost_micro_usd
+            if result.row.error_msg:
+                errors += 1
+
+    replayed = len(results) - excluded_budget
+    avg_cost = (cost_sum / replayed) if replayed > 0 else 0
+    projected_monthly_cost = int(round(avg_cost * samples_available))
+    sorted_lat = sorted(latencies)
+    p50 = sorted_lat[len(sorted_lat) // 2] if sorted_lat else 0
+    p95 = sorted_lat[max(0, int(len(sorted_lat) * 0.95) - 1)] if sorted_lat else 0
+    error_rate = (errors / replayed) if replayed > 0 else 0.0
+
+    diagnostics["replay_cost_micro_usd"] = cost_sum
+
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "feature_tag": feature_tag,
+        "samples_available": samples_available,
+        "per_candidate": [{
+            "provider": provider,
+            "model": model,
+            "projected_monthly_cost_micro_usd": projected_monthly_cost,
+            "p50_latency_ms": p50,
+            "p95_latency_ms": p95,
+            "error_rate": error_rate,
+            "samples_replayed": replayed,
+            "excluded_budget_count": excluded_budget,
+        }],
+        "diagnostics": diagnostics,
     })
 
 

@@ -135,6 +135,10 @@ class ReplayExecutor:
         # budget check. Callers compute this from the sample's known input tokens + an output
         # token estimate (default 1x input tokens, i.e. a 50/50 chat shape).
         estimated_call_cost_micro_usd: int = 0,
+        # Optional transform applied to the loaded envelope before the candidate call — used by
+        # the body-driven what-if estimate (CTO-128) to apply a system_prompt_override. Pure;
+        # must return a (possibly new) envelope dict and never mutate the input.
+        envelope_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
     ) -> ReplayResult:
         """Replay one sample against one candidate. Honors the daily budget cap and concurrency limit."""
 
@@ -155,6 +159,8 @@ class ReplayExecutor:
         async with self._semaphore(tenant_id):
             envelope_bytes = self.blob_store.get_bytes(object_key)
             envelope = json.loads(envelope_bytes.decode("utf-8"))
+            if envelope_transform is not None:
+                envelope = envelope_transform(envelope)
             call = CandidateCall(
                 provider=candidate_provider, model=candidate_model, envelope=envelope
             )
