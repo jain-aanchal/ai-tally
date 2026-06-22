@@ -12,6 +12,7 @@ framework to catch); ``record_llm_call`` itself never raises.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -23,6 +24,23 @@ from tally.pricing import PriceCatalog, Usage, compute_cost_micro_usd
 from tally.safety import SelfObservability, safe
 from tally.sampling import BillingMeter, Sampler, TraceSignals
 from tally.schema import SpanFields, build_span_attributes
+
+_log = logging.getLogger("tally")
+
+# Default per-(provider, tool) tool-call prices in micro-USD (CTO-135). Inline and hand-maintained
+# until a real tool-pricing catalog lands (tracked by CTO-141). When a caller omits an explicit
+# ``cost_micro_usd`` we look the pair up here; an unknown pair defaults to 0 with a one-time WARN.
+_TOOL_PRICING: dict[tuple[str, str], int] = {
+    ("tavily", "search"): 10_000,
+    ("serpapi", "search"): 15_000,
+    ("brave", "search"): 5_000,
+    ("firecrawl", "scrape"): 20_000,
+}
+
+# Pairs we've already warned about, so the missing-price WARN fires once per (provider, tool).
+_warned_tool_pairs: set[tuple[str, str]] = set()
+# Embedding (provider, model) pairs we've already warned about (CTO-136).
+_warned_embedding_pairs: set[tuple[str, str]] = set()
 
 
 class Exporter(Protocol):
@@ -45,6 +63,18 @@ class LlmCallResult:
     cost_micro_usd: int | None
     kept: bool
     sample_rate: float
+    attributes: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingCallResult:
+    """Result of :meth:`TallyClient.record_embedding_call` (CTO-136).
+
+    Mirrors :class:`LlmCallResult` but without sampling fields — embeddings always emit.
+    """
+
+    trace_id: str | None
+    cost_micro_usd: int | None
     attributes: dict[str, object]
 
 
@@ -187,6 +217,134 @@ class TallyClient:
         result = _do()
         if result is None:  # boundary swallowed an error; return a benign result
             return LlmCallResult(None, None, False, 1.0, {})
+        return result
+
+    # --- high-level: record a tool call (Tools cost layer, CTO-135) ---
+    def record_tool_call(
+        self,
+        *,
+        provider: str,
+        tool: str,
+        cost_micro_usd: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        latency_ms: int | None = None,
+        call_id: str | None = None,
+    ) -> None:
+        """Record a tool call so the span lands in the gateway's ``tools`` cost-layer bucket.
+
+        Bucketing is keyed off ``gen_ai.operation.name == 'tool'``. The tool's cost rides on
+        ``gen_ai.tool.cost_micro_usd``. When ``cost_micro_usd`` is omitted we resolve a default
+        from the inline :data:`_TOOL_PRICING` table (CTO-141); an unknown ``(provider, tool)``
+        pair defaults to 0 with a one-time WARN. Never raises.
+
+        ``latency_ms`` is accepted for API symmetry with future span timing but is not yet emitted
+        as a schema attribute (no latency key exists in the conformant set).
+        """
+
+        @safe(self.obs, where="TallyClient.record_tool_call")
+        def _do() -> None:
+            ctx = current_context()
+            if ctx.trace_id is None:
+                note_context_drop(self.obs, where="record_tool_call")
+
+            resolved_cost = cost_micro_usd
+            if resolved_cost is None:
+                key = (provider, tool)
+                resolved_cost = _TOOL_PRICING.get(key)
+                if resolved_cost is None:
+                    if key not in _warned_tool_pairs:
+                        _warned_tool_pairs.add(key)
+                        _log.warning(
+                            "no default tool price for (%s, %s); defaulting cost to 0",
+                            provider,
+                            tool,
+                        )
+                    resolved_cost = 0
+
+            fields = SpanFields(
+                system=provider,
+                operation="tool",
+                tool_name=tool,
+                tool_call_id=call_id,
+                tool_cost_micro_usd=resolved_cost,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                feature_tag=ctx.feature_tag,
+                session_id=ctx.session_id,
+            )
+            self._emit(build_span_attributes(fields))
+
+        _do()
+
+    # --- high-level: record an embedding call (Embeddings cost layer, CTO-136) ---
+    def record_embedding_call(
+        self,
+        *,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        at: date | None = None,
+    ) -> EmbeddingCallResult:
+        """Record an embedding call so the span lands in the gateway's ``embeddings`` bucket.
+
+        Bucketing is keyed off ``gen_ai.operation.name == 'embeddings'``. Cost is estimated from
+        the catalog (input-side only). Unknown provider/model → cost stays None/0 with a one-time
+        WARN. Never raises.
+        """
+
+        @safe(self.obs, where="TallyClient.record_embedding_call", fallback=None)
+        def _do() -> EmbeddingCallResult:
+            ctx = current_context()
+            trace_id = ctx.trace_id
+            if trace_id is None:
+                note_context_drop(self.obs, where="record_embedding_call")
+
+            cost_micro: int | None = None
+            catalog_version: str | None = None
+            if self.catalog is not None:
+                cost_micro, version = compute_cost_micro_usd(
+                    self.catalog,
+                    provider,
+                    model,
+                    Usage(input_tokens=input_tokens, output_tokens=0),
+                    at=at,
+                    tenant_id=self.tenant_id,
+                )
+                catalog_version = version or None
+                if not catalog_version:
+                    # No applicable rate → partial/zero price. Warn once per (provider, model).
+                    key = (provider, model)
+                    if key not in _warned_embedding_pairs:
+                        _warned_embedding_pairs.add(key)
+                        _log.warning(
+                            "no embedding price for (%s, %s); cost estimated as 0",
+                            provider,
+                            model,
+                        )
+
+            fields = SpanFields(
+                system=provider,
+                request_model=model,
+                operation="embeddings",
+                input_tokens=input_tokens,
+                cost_estimated_micro_usd=cost_micro,
+                price_catalog_version=catalog_version,
+                feature_tag=ctx.feature_tag,
+                session_id=ctx.session_id,
+            )
+            attrs = build_span_attributes(fields)
+            self._emit(attrs)
+
+            return EmbeddingCallResult(
+                trace_id=trace_id,
+                cost_micro_usd=cost_micro,
+                attributes=attrs,
+            )
+
+        result = _do()
+        if result is None:  # boundary swallowed an error; return a benign result
+            return EmbeddingCallResult(None, None, {})
         return result
 
     # --- guardrails (may raise, by design — pre-call check) ---
