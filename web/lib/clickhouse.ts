@@ -320,13 +320,46 @@ export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null
   });
 }
 
+/**
+ * Late-arrival diagnostics for the /features attribution card (CTO-139), read from the gateway's
+ * reconciler run log via GET /v1/tenant/reconciliation/status. The gateway returns the latest
+ * reconciliation run (event-late count + lag distribution in seconds + finished_at); we convert to
+ * the page's units (hours / minutes-ago).
+ *
+ * Honest-null: when no reconciler run exists yet (`run` is null) — or the gateway is unreachable /
+ * non-2xx — we return null so the /api/features route falls back to its mock via `?? diagnostics`.
+ */
 export async function queryAttributionDiagnostics(): Promise<AttributionDiagnostics | null> {
-  // No reconciler / late-arrival pipeline runs yet, so every counter is honestly zero. We still
-  // gate on ClickHouse being reachable (tryLive) so a live deployment shows live zeros, not mock.
-  return tryLive(async (db, tenant) => {
-    await rows(db, `SELECT 1 FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1`, tenant);
-    return { lateArrivalEvents7d: 0, lateArrivalMedianHours: 0, reconcilerLastRunMinutesAgo: 0 };
-  });
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/tenant/reconciliation/status`, {
+      headers: { "x-tenant-id": TENANT },
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      console.warn(`[reconciliation] /v1/tenant/reconciliation/status HTTP ${res.status}; falling back`);
+      return null;
+    }
+    const body = (await res.json()) as {
+      run?: {
+        events_late: number;
+        lag_seconds_median: number;
+        finished_at: string;
+      } | null;
+    };
+    const run = body.run;
+    // No reconciler run yet → null so the route falls back to the mock (honest "no data" state).
+    if (!run) return null;
+    const minutesAgo = Math.max(0, Math.round((Date.now() - Date.parse(run.finished_at)) / 60000));
+    return {
+      lateArrivalEvents7d: run.events_late,
+      lateArrivalMedianHours: Math.round((run.lag_seconds_median / 3600) * 10) / 10,
+      reconcilerLastRunMinutesAgo: minutesAgo,
+    };
+  } catch (err) {
+    console.warn("[reconciliation] gateway unreachable:", (err as Error).message);
+    return null;
+  }
 }
 
 // --- Data Quality (dedicated report) ------------------------------------------------------------
