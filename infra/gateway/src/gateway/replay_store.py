@@ -106,7 +106,7 @@ REPLAY_SAMPLE_COLS = (
 REPLAY_RUN_COLS = (
     "TenantId", "RunId", "SampleId", "CandidateProvider", "CandidateModel",
     "InputTokens", "OutputTokens", "CostMicroUsd", "LatencyMs", "ErrorMsg",
-    "RanAt", "ContextFidelity",
+    "RanAt", "ContextFidelity", "ResponseText", "FinishReason",
 )
 
 
@@ -124,6 +124,17 @@ class ReplayRunRow:
     error_msg: str
     ran_at: datetime
     context_fidelity: str = "resolved-context"
+    # --- Candidate response body (CTO-125) ---------------------------------------------------
+    # PII CARVE-OUT: ``response_text`` is the verbatim text the candidate model produced. This is
+    # a message body — exactly the kind of payload the span-side PII guard (mapping.py
+    # ``_is_body_key``) refuses to persist into telemetry. Replay is a *separate, opt-in* path:
+    # a tenant must explicitly enable ``tenant_replay_config`` (default OFF), the body lives in
+    # the replay store under its own retention TTL (``retention_days``) and access tier, and it is
+    # never written to spans/business_events. We persist it here so the pairwise LLM judge grades
+    # the candidate's ACTUAL output rather than an envelope re-render. The span-side "counts only,
+    # never bodies" invariant is untouched by this field.
+    response_text: str = ""
+    finish_reason: str = ""
 
     def as_clickhouse_row(self) -> tuple[object, ...]:
         return (
@@ -139,6 +150,9 @@ class ReplayRunRow:
             self.error_msg,
             self.ran_at,
             self.context_fidelity,
+            # Candidate response body — see PII carve-out note on the dataclass above.
+            self.response_text,
+            self.finish_reason,
         )
 
 

@@ -88,6 +88,35 @@ def test_replay_writes_run_row() -> None:
     assert row.cost_micro_usd > 0
 
 
+def test_replay_persists_candidate_response_text() -> None:
+    """CTO-125: the replay run row carries the candidate model's actual response body."""
+
+    async def text_client(call: CandidateCall) -> CandidateResponse:
+        return CandidateResponse(
+            input_tokens=100, output_tokens=50,
+            response_text="The candidate's actual answer is 42.",
+            finish_reason="stop",
+            status_code=200,
+        )
+
+    exec_, rows = _make_executor(client=text_client)
+    sid = uuid4()
+    key = _seed_blob(exec_.blob_store, "t1", sid)
+    result = asyncio.run(exec_.replay_sample(
+        tenant_id="t1", sample_id=sid, object_key=key,
+        candidate_provider="anthropic", candidate_model="claude-haiku-4-5",
+        daily_budget_usd=Decimal("5.00"),
+    ))
+    assert result.succeeded
+    row: ReplayRunRow = rows[0]
+    assert row.response_text == "The candidate's actual answer is 42."
+    assert row.finish_reason == "stop"
+    # And it survives the ClickHouse-row serialization (last two columns).
+    ch = row.as_clickhouse_row()
+    assert ch[-2] == "The candidate's actual answer is 42."
+    assert ch[-1] == "stop"
+
+
 # --- Budget cap ---------------------------------------------------------------
 
 def test_replay_skips_when_budget_exceeded() -> None:

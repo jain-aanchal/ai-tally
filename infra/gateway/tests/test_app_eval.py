@@ -229,3 +229,92 @@ def test_eval_candidate_wins_aggregate(client: TestClient) -> None:
     assert cand["current_wins"] > 5
     assert cand["candidate_wins"] + cand["current_wins"] == 40
     assert cand["ties"] == 0
+
+
+# --- CTO-125: judge reads persisted candidate response text ----------------------
+
+def _seed_with_persisted_response(
+    *, persisted_text: str, envelope_candidate: str, feature_tag: str = "chat",
+) -> None:
+    """One sample whose envelope carries a *different* candidate_response than the persisted
+    replay_run.response_text, so a test can tell which one the judge actually graded."""
+    blob_store = app.state.replay_blob_store
+    sample_index = app.state.replay_sample_index
+    replay_runs = app.state.replay_runs
+    now = datetime.now(timezone.utc)
+    sid = uuid4()
+    key = build_replay_object_key(T, sid, now)
+    body = json.dumps({
+        "prompt": "What is 2 + 2?",
+        "response": "4",
+        "candidate_response": envelope_candidate,
+        "input_tokens": 50,
+        "output_tokens": 20,
+    }).encode()
+    blob_store.put_bytes(key, body)
+    sample_index.append(ReplaySampleRow(
+        tenant_id=T, sample_id=sid, trace_id="trace-x", feature_tag=feature_tag,
+        real_provider="anthropic", real_model="claude-sonnet-4-5",
+        input_tokens=50, output_tokens=20,
+        captured_at=now, s3_object_key=key, pii_scrubbed=True,
+    ))
+    replay_runs.append(ReplayRunRow(
+        tenant_id=T, run_id=uuid4(), sample_id=sid,
+        candidate_provider="anthropic", candidate_model="claude-haiku-4-5",
+        input_tokens=50, output_tokens=20,
+        cost_micro_usd=1234, latency_ms=42, error_msg="", ran_at=now,
+        response_text=persisted_text, finish_reason="stop",
+    ))
+
+
+def test_eval_judges_persisted_response_not_envelope(client: TestClient) -> None:
+    """The judge must grade the persisted replay_run.response_text, NOT the envelope re-render."""
+    _seed_with_persisted_response(
+        persisted_text="PERSISTED candidate answer",
+        envelope_candidate="ENVELOPE reconstructed answer",
+    )
+    seen_prompts: list[str] = []
+
+    async def capturing_judge(call: JudgeCall) -> JudgeResponse:
+        seen_prompts.append(call.prompt)
+        return JudgeResponse(text="TIE", input_tokens=100, output_tokens=2)
+    app.state.eval_judge_client = capturing_judge
+
+    r = client.post(
+        "/v1/eval",
+        headers={"X-Tenant-Id": T},
+        json={"tenant_id": T,
+              "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}],
+              "sample_size": 1},
+    )
+    assert r.status_code == 200
+    assert len(seen_prompts) == 1
+    prompt = seen_prompts[0]
+    assert "PERSISTED candidate answer" in prompt
+    assert "ENVELOPE reconstructed answer" not in prompt
+
+
+def test_eval_legacy_row_falls_back_to_envelope(client: TestClient) -> None:
+    """Legacy replay_runs predating CTO-125 have empty response_text → judge falls back to the
+    envelope reconstruct path so historical eval results keep working."""
+    _seed_with_persisted_response(
+        persisted_text="",  # legacy row: column absent / empty
+        envelope_candidate="ENVELOPE reconstructed answer",
+    )
+    seen_prompts: list[str] = []
+
+    async def capturing_judge(call: JudgeCall) -> JudgeResponse:
+        seen_prompts.append(call.prompt)
+        return JudgeResponse(text="TIE", input_tokens=100, output_tokens=2)
+    app.state.eval_judge_client = capturing_judge
+
+    r = client.post(
+        "/v1/eval",
+        headers={"X-Tenant-Id": T},
+        json={"tenant_id": T,
+              "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}],
+              "sample_size": 1},
+    )
+    assert r.status_code == 200
+    assert len(seen_prompts) == 1
+    assert "ENVELOPE reconstructed answer" in seen_prompts[0]

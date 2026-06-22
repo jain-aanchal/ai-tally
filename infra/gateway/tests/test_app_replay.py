@@ -78,6 +78,9 @@ def test_config_defaults_off(client: TestClient) -> None:
     assert r.status_code == 200
     assert r.json()["config"]["enabled"] is False
     assert r.json()["config"]["sample_rate"] == 0.05
+    # CTO-125: the opt-in config surfaces a candidate-response retention consent disclosure.
+    consent = r.json()["config"]["candidate_response_retention_consent"]
+    assert "response text is retained" in consent
 
 
 def test_config_round_trip(client: TestClient) -> None:

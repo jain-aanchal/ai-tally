@@ -67,6 +67,7 @@ class CandidateResponse:
     input_tokens: int
     output_tokens: int
     response_text: str = ""
+    finish_reason: str = ""
     status_code: int = 200
     error_msg: str = ""
 
@@ -181,6 +182,12 @@ class ReplayExecutor:
             latency_ms=latency_ms,
             error_msg=response.error_msg,
             ran_at=datetime.now(UTC),
+            # CTO-125: persist the candidate's actual response body so the LLM judge grades what
+            # the candidate model really produced, not an envelope re-render. See the PII
+            # carve-out note on ReplayRunRow — this is an opt-in replay-only path, distinct from
+            # the span-side "no bodies in telemetry" guard.
+            response_text=response.response_text,
+            finish_reason=response.finish_reason,
         )
         self.sink(row)
         return ReplayResult(

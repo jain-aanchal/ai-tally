@@ -56,3 +56,18 @@ CREATE TABLE IF NOT EXISTS replay_runs
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(RanAt)
 ORDER BY (TenantId, RunId);
+
+
+-- CTO-125 additive migration. Idempotent: `ADD COLUMN IF NOT EXISTS` plus defaults so existing
+-- rows (which predate candidate-response persistence) read back as empty strings and the eval
+-- judge falls back to the envelope re-render path for them. Same style as the otel_spans ALTERs.
+--
+-- PII CARVE-OUT: ResponseText is the verbatim candidate-model response body. The span-side guard
+-- (mapping.py `_is_body_key`) deliberately refuses message bodies in `otel_spans`/business events.
+-- Replay is a *separate, opt-in* path (Postgres `tenant_replay_config`, default OFF) with its own
+-- retention TTL (`retention_days`) and access tier. Persisting the body here lets the pairwise LLM
+-- judge grade the candidate's ACTUAL output instead of a reconstruction. This does NOT relax the
+-- span-side no-bodies invariant; it applies only to this opt-in replay table.
+ALTER TABLE replay_runs
+    ADD COLUMN IF NOT EXISTS ResponseText  String  DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS FinishReason  LowCardinality(String) DEFAULT '';
