@@ -20,7 +20,12 @@ from typing import Protocol
 from tally.context import current_context, note_context_drop
 from tally.egress import BatchProcessor
 from tally.guardrails import GuardrailConfig, GuardrailEngine, GuardrailState, Verdict
-from tally.pricing import PriceCatalog, Usage, compute_cost_micro_usd
+from tally.pricing import (
+    PriceCatalog,
+    Usage,
+    compute_cost_micro_usd,
+    compute_embedding_cost_micro_usd,
+)
 from tally.safety import SelfObservability, safe
 from tally.sampling import BillingMeter, Sampler, TraceSignals
 from tally.schema import SpanFields, build_span_attributes
@@ -303,11 +308,13 @@ class TallyClient:
             cost_micro: int | None = None
             catalog_version: str | None = None
             if self.catalog is not None:
-                cost_micro, version = compute_cost_micro_usd(
+                # Embeddings are priced under PriceType.EMBEDDING, not INPUT — use the
+                # embedding-specific resolver so seeded embedding rates actually apply.
+                cost_micro, version = compute_embedding_cost_micro_usd(
                     self.catalog,
                     provider,
                     model,
-                    Usage(input_tokens=input_tokens, output_tokens=0),
+                    input_tokens,
                     at=at,
                     tenant_id=self.tenant_id,
                 )

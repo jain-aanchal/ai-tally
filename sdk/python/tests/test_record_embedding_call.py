@@ -8,15 +8,15 @@ from decimal import Decimal
 
 from tally.client import MemoryExporter, TallyClient
 from tally.context import with_trace_context
-from tally.pricing import PriceCatalog, PriceEntry, PriceType, Unit
+from tally.pricing import PriceCatalog, PriceEntry, PriceType, Unit, seed_catalog
 from tally.schema import GenAI, validate_span_attributes
 
 _FROM = date(2026, 5, 1)
 
 
 def _embedding_catalog() -> PriceCatalog:
-    # compute_cost_micro_usd resolves the input-side rate, so seed the embedding
-    # model under PriceType.INPUT (priced per million tokens).
+    # Seed under PriceType.EMBEDDING — the tier the real seed_catalog uses for
+    # text-embedding-3-*. record_embedding_call resolves this tier (not INPUT).
     cat = PriceCatalog()
     cat.add(
         PriceEntry(
@@ -24,7 +24,7 @@ def _embedding_catalog() -> PriceCatalog:
             valid_from=_FROM,
             provider="openai",
             model="text-embedding-3-small",
-            price_type=PriceType.INPUT,
+            price_type=PriceType.EMBEDDING,
             unit=Unit.PER_MILLION_TOKENS,
             price_per_unit=Decimal("0.02"),
         )
@@ -54,6 +54,23 @@ def test_embedding_cost_matches_seeded_catalog():
     assert span[GenAI.USAGE_INPUT_TOKENS] == 1_000_000
     assert span[GenAI.COST_ESTIMATED_MICRO_USD] == 20_000
     assert span[GenAI.FEATURE_TAG] == "rag"
+
+
+def test_real_seed_catalog_prices_embeddings_nonzero():
+    # Regression: the production seed_catalog() prices embeddings under PriceType.EMBEDDING.
+    # record_embedding_call must resolve that tier — a generic INPUT-only path would cost $0.
+    exporter = MemoryExporter()
+    client = TallyClient(exporter=exporter, catalog=seed_catalog())
+    result = client.record_embedding_call(
+        provider="openai",
+        model="text-embedding-3-small",
+        input_tokens=1_000_000,
+        at=date(2026, 6, 1),
+    )
+    assert result.cost_micro_usd is not None and result.cost_micro_usd > 0
+    span = exporter.spans[0]
+    assert span[GenAI.OPERATION_NAME] == "embeddings"
+    assert span[GenAI.COST_ESTIMATED_MICRO_USD] > 0
 
 
 def test_unknown_model_cost_zero_no_raise():

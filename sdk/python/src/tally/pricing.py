@@ -164,6 +164,29 @@ def compute_cost_micro_usd(
     return usd_to_micro(total_usd), version
 
 
+def compute_embedding_cost_micro_usd(
+    catalog: PriceCatalog,
+    provider: str,
+    model: str,
+    input_tokens: int,
+    *,
+    at: date | None = None,
+    tenant_id: str | None = None,
+) -> tuple[int, str]:
+    """Compute embedding cost in micro-USD.
+
+    Resolves the ``PriceType.EMBEDDING`` tier — NOT ``INPUT``. The seed catalog prices embedding
+    models under ``EMBEDDING`` (see ``text-embedding-3-*``), so ``compute_cost_micro_usd`` (which
+    only looks at INPUT/OUTPUT) would return 0 for them. Returns ``(micro_usd, catalog_version)``;
+    ``(0, "")`` when no embedding rate is seeded for ``(provider, model)`` at ``at``.
+    """
+    at = at or date.today()
+    entry = catalog.lookup(provider, model, PriceType.EMBEDDING, at=at, tenant_id=tenant_id)
+    if entry is None:
+        return 0, ""
+    return usd_to_micro(_line(entry, input_tokens)), entry.version
+
+
 def _line(entry: PriceEntry, tokens: int) -> Decimal:
     if entry.unit is Unit.PER_MILLION_TOKENS:
         return entry.price_per_unit * Decimal(tokens) / Decimal(1_000_000)
