@@ -22,7 +22,9 @@ from tally.egress import BatchProcessor
 from tally.guardrails import GuardrailConfig, GuardrailEngine, GuardrailState, Verdict
 from tally.pricing import (
     PriceCatalog,
+    PriceType,
     Usage,
+    compute_call_cost_micro_usd,
     compute_cost_micro_usd,
     compute_embedding_cost_micro_usd,
 )
@@ -32,26 +34,10 @@ from tally.schema import SpanFields, build_span_attributes
 
 _log = logging.getLogger("tally")
 
-# Default per-(provider, tool) tool-call prices in micro-USD (CTO-135). Inline and hand-maintained
-# until a real tool-pricing catalog lands (tracked by CTO-141). When a caller omits an explicit
-# ``cost_micro_usd`` we look the pair up here; an unknown pair defaults to 0 with a one-time WARN.
-_TOOL_PRICING: dict[tuple[str, str], int] = {
-    ("tavily", "search"): 10_000,
-    ("serpapi", "search"): 15_000,
-    ("brave", "search"): 5_000,
-    ("firecrawl", "scrape"): 20_000,
-}
-
-# Default per-(provider, operation) vector-DB prices in micro-USD (CTO-142). Inline and
-# hand-maintained until a real vector-pricing catalog lands (follow-up, à la CTO-141). When a
-# caller omits an explicit ``cost_micro_usd`` we look the pair up here; an unknown pair defaults to
-# 0 with a one-time WARN.
-_VECTOR_PRICING: dict[tuple[str, str], int] = {
-    ("pinecone", "query"): 400,
-    ("pinecone", "upsert"): 200,
-    ("weaviate", "query"): 300,
-    ("qdrant", "query"): 250,
-}
+# Tool + vector per-call prices now live in the versioned price catalog (CTO-141) under
+# PriceType.TOOL_CALL / PriceType.VECTOR_CALL — the inline ``_TOOL_PRICING`` / ``_VECTOR_PRICING``
+# stopgap dicts (PR #111 / #116) were removed. ``record_tool_call`` / ``record_vector_call`` resolve
+# the rate via ``compute_call_cost_micro_usd`` when the caller omits ``cost_micro_usd``.
 
 # Pairs we've already warned about, so the missing-price WARN fires once per (provider, tool).
 _warned_tool_pairs: set[tuple[str, str]] = set()
@@ -252,9 +238,11 @@ class TallyClient:
         """Record a tool call so the span lands in the gateway's ``tools`` cost-layer bucket.
 
         Bucketing is keyed off ``gen_ai.operation.name == 'tool'``. The tool's cost rides on
-        ``gen_ai.tool.cost_micro_usd``. When ``cost_micro_usd`` is omitted we resolve a default
-        from the inline :data:`_TOOL_PRICING` table (CTO-141); an unknown ``(provider, tool)``
-        pair defaults to 0 with a one-time WARN. Never raises.
+        ``gen_ai.tool.cost_micro_usd``. When ``cost_micro_usd`` is omitted we resolve the rate from
+        the versioned price catalog (CTO-141) under ``PriceType.TOOL_CALL`` and stamp
+        ``price_catalog_version`` on the span; an unknown ``(provider, tool)`` pair (or no catalog)
+        defaults to 0 with a one-time WARN. A caller-supplied ``cost_micro_usd`` always overrides.
+        Never raises.
 
         ``latency_ms`` is accepted for API symmetry with future span timing but is not yet emitted
         as a schema attribute (no latency key exists in the conformant set).
@@ -267,18 +255,29 @@ class TallyClient:
                 note_context_drop(self.obs, where="record_tool_call")
 
             resolved_cost = cost_micro_usd
+            catalog_version: str | None = None
             if resolved_cost is None:
                 key = (provider, tool)
-                resolved_cost = _TOOL_PRICING.get(key)
-                if resolved_cost is None:
+                if self.catalog is not None:
+                    resolved_cost, version = compute_call_cost_micro_usd(
+                        self.catalog,
+                        provider,
+                        tool,
+                        PriceType.TOOL_CALL,
+                        tenant_id=self.tenant_id,
+                    )
+                    catalog_version = version or None
+                else:
+                    resolved_cost = 0
+                if not catalog_version:
+                    resolved_cost = 0
                     if key not in _warned_tool_pairs:
                         _warned_tool_pairs.add(key)
                         _log.warning(
-                            "no default tool price for (%s, %s); defaulting cost to 0",
+                            "no catalog tool price for (%s, %s); defaulting cost to 0",
                             provider,
                             tool,
                         )
-                    resolved_cost = 0
 
             fields = SpanFields(
                 system=provider,
@@ -286,6 +285,7 @@ class TallyClient:
                 tool_name=tool,
                 tool_call_id=call_id,
                 tool_cost_micro_usd=resolved_cost,
+                price_catalog_version=catalog_version,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 feature_tag=ctx.feature_tag,
@@ -383,10 +383,10 @@ class TallyClient:
         Bucketing is keyed off ``gen_ai.operation.name == 'vector'``. The call's cost rides on
         ``gen_ai.tool.cost_micro_usd`` (same carrier as ``record_tool_call`` — the gateway promotes
         it into the layer's spend). The tool-name slot encodes ``{provider}.{index}.{operation}``.
-        When ``cost_micro_usd`` is omitted we resolve a default from the inline
-        :data:`_VECTOR_PRICING` table keyed by ``(provider, operation)`` (follow-up: promote to a
-        real catalog, à la CTO-141); an unknown pair defaults to 0 with a one-time WARN. Never
-        raises.
+        When ``cost_micro_usd`` is omitted we resolve the rate from the versioned price catalog
+        (CTO-141) under ``PriceType.VECTOR_CALL`` keyed by ``(provider, operation)`` and stamp
+        ``price_catalog_version`` on the span; an unknown pair (or no catalog) defaults to 0 with a
+        one-time WARN. A caller-supplied ``cost_micro_usd`` always overrides. Never raises.
 
         ``record_count`` and ``latency_ms`` are accepted for API symmetry with future span fields
         but are not yet emitted as schema attributes (no conformant key exists for them).
@@ -399,24 +399,36 @@ class TallyClient:
                 note_context_drop(self.obs, where="record_vector_call")
 
             resolved_cost = cost_micro_usd
+            catalog_version: str | None = None
             if resolved_cost is None:
                 key = (provider, operation)
-                resolved_cost = _VECTOR_PRICING.get(key)
-                if resolved_cost is None:
+                if self.catalog is not None:
+                    resolved_cost, version = compute_call_cost_micro_usd(
+                        self.catalog,
+                        provider,
+                        operation,
+                        PriceType.VECTOR_CALL,
+                        tenant_id=self.tenant_id,
+                    )
+                    catalog_version = version or None
+                else:
+                    resolved_cost = 0
+                if not catalog_version:
+                    resolved_cost = 0
                     if key not in _warned_vector_pairs:
                         _warned_vector_pairs.add(key)
                         _log.warning(
-                            "no default vector price for (%s, %s); defaulting cost to 0",
+                            "no catalog vector price for (%s, %s); defaulting cost to 0",
                             provider,
                             operation,
                         )
-                    resolved_cost = 0
 
             fields = SpanFields(
                 system=provider,
                 operation="vector",
                 tool_name=f"{provider}.{index}.{operation}",
                 tool_cost_micro_usd=resolved_cost,
+                price_catalog_version=catalog_version,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
             )
