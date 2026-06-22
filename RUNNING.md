@@ -191,6 +191,52 @@ Walkthrough, configuration knobs, and the upstream patch list are in
 [examples/vercel-chatbot/README.md](examples/vercel-chatbot/README.md) and
 [examples/vercel-chatbot/PATCHES.md](examples/vercel-chatbot/PATCHES.md).
 
+### Realistic-volume demo
+
+The default `make chatbot-demo` drives **50** sessions (~$0.40), so a freshly
+seeded stack shows a fraction-of-a-cent dashboard — not the **~$52,400/mo**
+story the seed fixtures and the LinkedIn screenshots advertise. To reproduce
+that startup-scale picture you have two paths:
+
+**A. `$0` backfill (recommended for screenshots).** Posts **30 days** of
+backdated synthetic spans + conversion events straight to the gateway's
+`/v1/batches` endpoint. It makes **no LLM calls and needs no API keys**, so a
+screenshot run costs **$0**. The spans sum to ~$52,400 with the seed feature mix
+(research_agent 54% · support_triage 17% · inline_writer 12% · smart_search 10%
+· chatbot 7%), a 60/40 OpenAI/Anthropic provider split, and a small layer of
+tool (~8%) and embedding (~1.5%) spans so the **Cost** tab's Tools/Embeddings
+bars are non-zero too. Conversions fire at **13% (OpenAI) / 15% (Anthropic)**
+and `positive_feedback` on ~75% of sessions, matching the attribution
+screenshot.
+
+```bash
+cd infra && make chatbot-demo-backfill
+# tune it: make chatbot-demo-backfill BACKFILL_ARGS="--days 30 --target-usd 52400 --seed 138"
+```
+
+The backfill is **idempotent** — batch ids are derived from `--seed`, so the
+gateway's `(tenant_id, batch_id)` dedup makes a re-run a no-op. Use a fresh
+`--seed` to layer in another independent month. All of it is synthetic-seed
+data: backdated timestamps, RNG-drawn token counts, fabricated conversion
+revenue. The gateway still computes **authoritative** cost from
+(provider, model, tokens) against the seed catalog — the script only sizes token
+volumes to land on the dollar story.
+
+**B. Live realistic mode (higher fidelity, real spend).** Drives ~**5,000**
+sessions across the seed feature tags over a bounded window (~10 min), making
+**real** OpenAI/Anthropic calls. Spend is bounded by a `--max-usd` cap
+(default **$10**) so a laptop run stays ~$5–10.
+
+```bash
+cd infra && make chatbot-demo-realistic        # == make chatbot-demo MODE=realistic
+# knobs (passed after --): window, cap, session count
+bash examples/vercel-chatbot/run.sh -- --mode=realistic --max-usd 8 --window-min 10 --sessions 5000
+```
+
+The default `make chatbot-demo` (50 sessions, quick) is **unchanged**. Pick the
+backfill for instant $0 screenshot data, or live realistic mode when you want
+the cost numbers to come from real provider responses.
+
 When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
 
 ## Step 7: real revenue via Stripe
@@ -386,7 +432,9 @@ Knobs:
 | `make demo` | Send a sample batch through the gateway into ClickHouse |
 | `make aider-demo` | Run Aider against a fixture repo through the edge proxy (needs `OPENAI_API_KEY`) |
 | `make aider-demo-stop` | Kill the background edge proxy started by `aider-demo` |
-| `make chatbot-demo` | Run the Vercel AI chatbot demo (needs `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) |
+| `make chatbot-demo` | Run the Vercel AI chatbot demo (needs `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`; `MODE=realistic` for startup volume) |
+| `make chatbot-demo-realistic` | Live ~5000-session run over ~10 min, real LLM spend capped ~$10 |
+| `make chatbot-demo-backfill` | `$0` 30-day backfill of synthetic backdated spans (no LLM calls, no API keys) |
 | `make chatbot-demo-stop` | Kill the background chatbot dev server started by `chatbot-demo` |
 | `make ps` / `make logs` | Status / tail gateway logs |
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
