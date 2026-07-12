@@ -70,7 +70,9 @@ from gateway.replay_sampler import (
     stratified_sample,
 )
 from gateway.replay_store import (
+    GCSReplayBlobStore,
     InMemoryReplayBlobStore,
+    ReplayBlobStore,
     persist_sample,
 )
 from gateway.eval_executor import (
@@ -102,6 +104,26 @@ from tally.hmac_keys import HmacKeyRegistry
 logger = logging.getLogger("tally.gateway")
 
 
+def _build_replay_blob_store(settings) -> ReplayBlobStore:
+    """Select the replay blob-store backend from settings (CTO-152).
+
+    ``memory`` (default) -> in-process dict store; ``gcs`` -> Google Cloud Storage via ADC /
+    Workload Identity. The GCS client + its optional ``google-cloud-storage`` dependency are only
+    touched when the backend is actually ``gcs`` (lazy import lives inside the store), so the
+    default install/boot never needs the package.
+    """
+    backend = (settings.replay_blob_backend or "memory").lower()
+    if backend == "memory":
+        return InMemoryReplayBlobStore()
+    if backend == "gcs":
+        if not settings.replay_gcs_bucket:
+            raise ValueError(
+                "TALLY_REPLAY_GCS_BUCKET must be set when TALLY_REPLAY_BLOB_BACKEND=gcs"
+            )
+        return GCSReplayBlobStore(bucket=settings.replay_gcs_bucket)
+    raise ValueError(f"unknown TALLY_REPLAY_BLOB_BACKEND: {backend!r} (expected 'memory' or 'gcs')")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -128,7 +150,7 @@ async def lifespan(app: FastAPI):
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
     # (sink wired to a list for v1 — the projection API reads from it directly).
     app.state.tenant_replay = TenantReplayStore(settings)
-    app.state.replay_blob_store = InMemoryReplayBlobStore()
+    app.state.replay_blob_store = _build_replay_blob_store(settings)
     app.state.replay_sample_index = []  # list[ReplaySampleRow]
     app.state.replay_runs = []  # list[ReplayRunRow]
     # Eval harness (CTO-114): pairwise-LLM-judge over the replay outputs. Opt-in like replay;

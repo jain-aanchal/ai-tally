@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     ingest_buffer_drain_batch: int = 2_000
     ingest_buffer_poll_interval_s: float = 0.05
 
+    # Replay blob-store backend (CTO-152). ``memory`` (default) uses the in-process dict store;
+    # ``gcs`` persists scrubbed replay samples to a Google Cloud Storage bucket via ADC / Workload
+    # Identity (no raw key material). ``replay_gcs_bucket`` is required when the backend is ``gcs``.
+    replay_blob_backend: str = "memory"
+    replay_gcs_bucket: str = ""
+
 
 _settings: Settings | None = None
 
