@@ -290,7 +290,7 @@ _VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
 
 
 def seed_catalog() -> PriceCatalog:
-    """Multi-provider seed catalog (OpenAI + Anthropic).
+    """Multi-provider seed catalog (OpenAI + Anthropic + Google Gemini/Vertex).
 
     Expanded for CTO-106; previously the gpt-5-mini pinning workaround in
     examples/* was needed because of catalog gaps. The scraper (CTO-53) will
@@ -340,6 +340,30 @@ def seed_catalog() -> PriceCatalog:
         ("anthropic", "claude-opus-4-8", PriceType.INPUT, "15.00"),
         ("anthropic", "claude-opus-4-8", PriceType.CACHED_INPUT, "1.50"),
         ("anthropic", "claude-opus-4-8", PriceType.OUTPUT, "75.00"),
+        # --- Google Gemini / Vertex AI (https://ai.google.dev/pricing) --------
+        # CTO-149. Provider string "google" matches gen_ai.system and the Compare
+        # mock's provider: "google". Gemini exposes both the Gemini API and Vertex
+        # AI; per-token rates are the same across both surfaces (Vertex bills the
+        # identical published rate), so one catalog entry covers both. Gemini's
+        # "context cache" read tier maps to CACHED_INPUT (the steady-state read
+        # price for repeated prompts); the one-shot cache-storage fee is not
+        # modeled by the current PriceType enum. Text tokens only for v1
+        # (multimodal token accounting is out of scope). Usage field mapping:
+        # promptTokenCount -> input, candidatesTokenCount -> output,
+        # cachedContentTokenCount -> cached_input. All rates
+        # [unverified at implementation time] — taken from training-data values
+        # for the published per-MTok prices; update once the scraper (CTO-53) lands.
+        ("google", "gemini-2.5-flash", PriceType.INPUT, "0.30"),
+        ("google", "gemini-2.5-flash", PriceType.CACHED_INPUT, "0.075"),
+        ("google", "gemini-2.5-flash", PriceType.OUTPUT, "2.50"),
+        ("google", "gemini-2.5-pro", PriceType.INPUT, "1.25"),
+        ("google", "gemini-2.5-pro", PriceType.CACHED_INPUT, "0.31"),
+        ("google", "gemini-2.5-pro", PriceType.OUTPUT, "10.00"),
+        # gemini-3-flash — the id the /compare mock lists. Priced in line with the
+        # 2.5-flash tier pending a verified published rate. [unverified at implementation time]
+        ("google", "gemini-3-flash", PriceType.INPUT, "0.30"),
+        ("google", "gemini-3-flash", PriceType.CACHED_INPUT, "0.075"),
+        ("google", "gemini-3-flash", PriceType.OUTPUT, "2.50"),
     ]
     for provider, model, pt, rate in seeds:
         cat.add(_mtok(provider, model, pt, rate))

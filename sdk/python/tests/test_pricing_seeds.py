@@ -91,6 +91,26 @@ def test_claude_opus_4_8_priced() -> None:
     _cost("anthropic", "claude-opus-4-8")
 
 
+# --- Google Gemini / Vertex AI (CTO-149) ----
+
+
+def test_gemini_2_5_flash_priced() -> None:
+    _cost("google", "gemini-2.5-flash")
+
+
+def test_gemini_2_5_pro_priced() -> None:
+    _cost("google", "gemini-2.5-pro")
+
+
+def test_gemini_3_flash_priced() -> None:
+    # The id the /compare mock lists — must not be a catalog miss.
+    _cost("google", "gemini-3-flash")
+
+
+def test_gemini_flash_cheaper_than_pro() -> None:
+    assert _cost("google", "gemini-2.5-flash") < _cost("google", "gemini-2.5-pro")
+
+
 # --- Family-classifier intuition ----
 
 

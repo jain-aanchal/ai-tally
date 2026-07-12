@@ -34,6 +34,9 @@ def test_classify_family_truth_table() -> None:
         "text-embedding-3-large": "embedding",
         "gpt-5": "flagship",
         "ft:gpt-3.5-turbo:acme": "other",
+        "gemini-2.5-flash": "flash",
+        "gemini-3-flash": "flash",
+        "gemini-2.5-pro": "pro",
     }
     for model_id, expected in cases.items():
         assert M.classify_family(model_id) == expected, model_id
