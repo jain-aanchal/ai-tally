@@ -53,6 +53,20 @@ class ClickHouseStore:
         self.client.insert("otel_spans", rows, column_names=list(COLUMNS))
         return len(rows)
 
+    def span_exists(self, tenant_id: str, span_id: str) -> bool:
+        """Return True if a span with this deterministic SpanId already exists for the tenant.
+
+        The idempotency guard for connector-emitted synthetic spans (CTO-143): ``otel_spans`` is a
+        plain MergeTree with no dedup, so the compute/egress connectors check here before inserting
+        a day's span. Tenant-scoped so the (bloom-filtered) SpanId lookup stays cheap and can't cross
+        tenants.
+        """
+        result = self.client.query(
+            "SELECT count() FROM otel_spans WHERE TenantId = %(t)s AND SpanId = %(s)s",
+            parameters={"t": tenant_id, "s": span_id},
+        )
+        return result.result_rows[0][0] > 0
+
     def insert_business_events(self, tenant_id: str, events: list[BusinessEvent]) -> int:
         if not events:
             return 0

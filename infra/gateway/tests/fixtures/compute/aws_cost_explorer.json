@@ -1,0 +1,19 @@
+{
+  "ResultsByTime": [
+    {
+      "TimePeriod": {"Start": "2026-07-01", "End": "2026-07-02"},
+      "Total": {"UnblendedCost": {"Amount": "12.50", "Unit": "USD"}},
+      "Estimated": true
+    },
+    {
+      "TimePeriod": {"Start": "2026-07-02", "End": "2026-07-03"},
+      "Total": {"UnblendedCost": {"Amount": "8.25", "Unit": "USD"}},
+      "Estimated": true
+    },
+    {
+      "TimePeriod": {"Start": "2026-07-03", "End": "2026-07-04"},
+      "Total": {"UnblendedCost": {"Amount": "0", "Unit": "USD"}},
+      "Estimated": true
+    }
+  ]
+}
