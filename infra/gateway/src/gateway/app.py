@@ -50,6 +50,7 @@ from gateway.protocol import (
     otlp_traces_to_spans,
 )
 from gateway.ratelimit import RateLimiter
+from gateway.reconciliation import ReconciliationStore
 from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
@@ -115,6 +116,10 @@ async def lifespan(app: FastAPI):
     # Per-tenant third-party integration run status (CTO-117): Stripe / Segment / HubSpot / Pendo.
     # Workers call .record_run after each cycle; the dashboard reads via /v1/tenant/integrations/status.
     app.state.tenant_integrations = TenantIntegrationStore(settings)
+    # Reconciler run log (CTO-139): late-arrival tracking for the /features attribution diagnostics
+    # card. run_reconciliation() scans recent events vs. matched spans and calls .record_run; the
+    # dashboard reads the latest via GET /v1/tenant/reconciliation/status.
+    app.state.reconciliation = ReconciliationStore(settings)
     # Per-tenant monthly CAC inputs (CTO-111): finance fills serially, locked when next month opens.
     app.state.tenant_cac = TenantCacStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
@@ -801,6 +806,27 @@ def list_tenant_integration_status(
     rows = store.get_status(tenant_id)
     return JSONResponse(
         {"tenant_id": tenant_id, "integrations": [r.as_dict() for r in rows]},
+        status_code=200,
+    )
+
+
+@app.get("/v1/tenant/reconciliation/status")
+def get_tenant_reconciliation_status(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Latest reconciler run for the caller's tenant (CTO-139).
+
+    Drives the /features "Attribution diagnostics" card: late-arrival event count, median lateness,
+    and how long ago the reconciler last ran. ``run`` is ``None`` when no pass has ever run for the
+    tenant — the honest first-render state, which the web fn turns into a null so the route falls
+    back to its mock.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: ReconciliationStore = app.state.reconciliation
+    run = store.get_latest(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "run": run.as_dict() if run is not None else None},
         status_code=200,
     )
 
