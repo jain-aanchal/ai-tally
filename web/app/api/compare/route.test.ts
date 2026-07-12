@@ -377,4 +377,130 @@ describe("/api/compare", () => {
     expect(body.candidates[0].qualityScore).toBeNull();
     expect(body.current.qualityScore).toBeNull();
   });
+
+  // --- CTO-166: the Gemini (provider: "google") candidate flows through the SAME live path ----
+
+  it("CTO-166: grounds the google/gemini candidate in real replay + eval (no provider gating)", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 60,
+      per_candidate: [
+        {
+          provider: "google",
+          model: "gemini-3-flash",
+          projected_monthly_cost_micro_usd: 2_400_000,
+          p50_latency_ms: 700,
+          p95_latency_ms: 1400,
+          error_rate: 0.012,
+          samples_replayed: 60, // >= 50-replay floor → real latency/error
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 9_000,
+      },
+    });
+    queryEvalCandidates.mockResolvedValueOnce({
+      samples_available: 40,
+      per_candidate: [
+        {
+          provider: "google",
+          model: "gemini-3-flash",
+          samples_judged: 22, // >= 10-judge floor → real win-rate + CI
+          current_wins: 9,
+          candidate_wins: 10,
+          ties: 3,
+          errors: 0,
+          win_rate: 0.45,
+          win_rate_ci_lo: 0.27,
+          win_rate_ci_hi: 0.64,
+          judge_cost_micro_usd: 40_000,
+        },
+      ],
+      diagnostics: { judge_model: "claude-opus-4-8", rubric_version: "rubric-v1", judge_cost_micro_usd: 40_000 },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.replay_source).toBe("replay");
+    const gemini = body.candidates.find((c: { model: string }) => c.model === "gemini-3-flash");
+    expect(gemini).toBeDefined();
+    expect(gemini.provider).toBe("google");
+    // Cost/latency/error come straight from the projection — not a borrowed mock.
+    expect(gemini.monthlyCostMicroUsd).toBe(2_400_000);
+    expect(gemini.latencyP95Ms).toBe(1400);
+    expect(gemini.errorRate).toBeCloseTo(0.012, 6);
+    // Quality is the real pairwise-LLM-judge win-rate + Wilson CI.
+    expect(gemini.qualityScore).toBeCloseTo(0.45);
+    expect(gemini.qualityCi).toEqual({ lo: 0.27, hi: 0.64 });
+  });
+
+  it("CTO-166: honest-nulls the gemini row below the floors (<50 replay, <10 judged)", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 30,
+      per_candidate: [
+        {
+          provider: "google",
+          model: "gemini-3-flash",
+          projected_monthly_cost_micro_usd: 2_400_000,
+          p50_latency_ms: 700,
+          p95_latency_ms: 1400,
+          error_rate: 0.012,
+          samples_replayed: 30, // below the 50-replay floor → null latency/error
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 4_500,
+      },
+    });
+    queryEvalCandidates.mockResolvedValueOnce({
+      samples_available: 8,
+      per_candidate: [
+        {
+          provider: "google",
+          model: "gemini-3-flash",
+          samples_judged: 8, // below the 10-judge floor → null qualityScore, never fabricated
+          current_wins: 3,
+          candidate_wins: 3,
+          ties: 2,
+          errors: 0,
+          win_rate: 0.5,
+          win_rate_ci_lo: 0.2,
+          win_rate_ci_hi: 0.8,
+          judge_cost_micro_usd: 12_000,
+        },
+      ],
+      diagnostics: { judge_model: "claude-opus-4-8", rubric_version: "rubric-v1", judge_cost_micro_usd: 12_000 },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    const gemini = body.candidates.find((c: { model: string }) => c.model === "gemini-3-flash");
+    expect(gemini).toBeDefined();
+    // Below the replay floor → honest null latency/error (page renders "—"); cost still real.
+    expect(gemini.latencyP95Ms).toBeNull();
+    expect(gemini.errorRate).toBeNull();
+    expect(gemini.monthlyCostMicroUsd).toBe(2_400_000);
+    // Below the judge floor → honest null quality; NEVER a fabricated Gemini number.
+    expect(gemini.qualityScore).toBeNull();
+    expect(gemini.qualityCi).toBeUndefined();
+  });
 });

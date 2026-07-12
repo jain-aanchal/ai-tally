@@ -15,6 +15,14 @@
 // honest-null floor (null below 50 replayed responses → "—"). The numeric values on the mock
 // candidates below are used only by the unreachable-gateway rescaled-mock fallback path.
 //
+// CTO-166: the `gemini-3-flash` / `provider: "google"` candidate below is now ALSO grounded in
+// the live path — CTO-149 made Google a first-class priced provider, and gemini was added to the
+// gateway candidate list (DEFAULT_CANDIDATES in clickhouse.ts) so it flows through /v1/replay +
+// /v1/eval exactly like the anthropic/openai rows. The same honest-null floors apply to it:
+// null latency/error below 50 replayed responses, null qualityScore below 10 judged samples —
+// never a fabricated Gemini number. The numeric mock below is now purely the
+// unreachable-gateway fallback, same status as the other mock candidates.
+//
 // CTO-114: `qualityScore` is now `number | null`. Non-null only when a pairwise-LLM-judge
 // eval pass has run and judged >= 10 samples for that candidate; the value is the
 // candidate's win-rate (candidate_wins / non-error judgments) with a Wilson 95% CI in
