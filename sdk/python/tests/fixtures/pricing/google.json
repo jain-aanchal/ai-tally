@@ -1,0 +1,10 @@
+{
+  "_note": "Recorded fixture for CTO-165 tests. Trimmed to the rows we price. Rates are realistic-but-clearly-fixture (odd cents) and NOT authoritative. Gemini is not in the seed catalog, so these publish as ADDED rows superseding the [unverified] seed gap.",
+  "source": "https://ai.google.dev/gemini-api/docs/pricing",
+  "currency": "USD",
+  "unit": "per_million_tokens",
+  "models": [
+    {"name": "gemini-2.5-pro", "input": "1.30", "cached_input": "0.33", "output": "11.00"},
+    {"name": "gemini-2.5-flash", "input": "0.11", "cached_input": "0.03", "output": "0.44"}
+  ]
+}

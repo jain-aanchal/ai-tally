@@ -1,0 +1,11 @@
+{
+  "_note": "Recorded fixture for CTO-165 tests. Trimmed to the rows we price. Rates are realistic-but-clearly-fixture (odd cents) and NOT authoritative.",
+  "source": "https://openai.com/api/pricing/",
+  "currency": "USD",
+  "unit": "per_million_tokens",
+  "models": [
+    {"model": "gpt-4o", "input": "2.55", "cached_input": "1.28", "output": "10.10"},
+    {"model": "gpt-4o-mini", "input": "0.16", "cached_input": "0.08", "output": "0.64"},
+    {"model": "gpt-4-turbo", "input": "10.20", "cached_input": null, "output": "30.30"}
+  ]
+}
