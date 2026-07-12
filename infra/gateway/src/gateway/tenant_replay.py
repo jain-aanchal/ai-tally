@@ -19,6 +19,18 @@ import psycopg
 from gateway.config import Settings
 
 
+# Consent disclosure (CTO-125). When a tenant opts into replay, captured samples AND the candidate
+# models' response bodies are retained (under `retention_days`) so the eval harness can grade the
+# real candidate output. Surfaced in the config response so the opt-in is informed; wiring it into
+# the dashboard UI is out of scope here.
+CANDIDATE_RESPONSE_RETENTION_CONSENT = (
+    "When replay is enabled, candidate models are re-run against your scrubbed samples and their "
+    "response text is retained alongside the sample for the configured retention period, so quality "
+    "evaluation can judge the candidate's actual output. Retention follows retention_days; replay "
+    "is opt-in and off by default."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayConfig:
     enabled: bool
@@ -32,6 +44,7 @@ class ReplayConfig:
             "sample_rate": self.sample_rate,
             "retention_days": self.retention_days,
             "daily_budget_usd": float(self.daily_budget_usd),
+            "candidate_response_retention_consent": CANDIDATE_RESPONSE_RETENTION_CONSENT,
         }
 
 

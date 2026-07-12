@@ -1305,11 +1305,23 @@ async def _mock_candidate_client(call: CandidateCall) -> CandidateResponse:
 
     The envelope is expected to carry ``{"input_tokens": int, "output_tokens": int}`` from the
     captured sample. Falls back to small defaults if missing.
+
+    CTO-125: the mock also surfaces a ``response_text`` so the replay run persists candidate body
+    text (real provider clients return the model's actual completion). We prefer an explicit
+    ``candidate_response`` on the envelope, else the captured current ``response``.
     """
     env = call.envelope or {}
+    response_text = ""
+    for key in ("candidate_response", "response", "response_text", "completion"):
+        v = env.get(key)
+        if isinstance(v, str) and v:
+            response_text = v
+            break
     return CandidateResponse(
         input_tokens=int(env.get("input_tokens") or 100),
         output_tokens=int(env.get("output_tokens") or 50),
+        response_text=response_text,
+        finish_reason="stop",
         status_code=200,
     )
 
@@ -1485,12 +1497,14 @@ async def project_eval(
             envelope = _load_envelope(blob_store, sample_row.s3_object_key)
             instruction = _extract_instruction(envelope)
             current_response = _extract_response(envelope)
-            # Candidate response: we don't currently persist the candidate's response text in
-            # replay_runs (CTO-113 only wrote tokens/cost/latency). The mock-judge path uses a
-            # synthetic candidate_response derived from the envelope; the production path will
-            # need replay_runs to grow a response-text column.
-            # FIXME(CTO-114-followup): persist candidate response text on replay_runs.
-            candidate_response = envelope.get("candidate_response") or current_response
+            # Candidate response (CTO-125): the replay executor now persists the candidate model's
+            # actual response body on the run row, so the judge grades what the candidate truly
+            # produced rather than an envelope re-render. KEEP a fallback for legacy rows written
+            # before this column existed (response_text absent → reconstruct from the envelope) so
+            # historical eval results keep working.
+            candidate_response = getattr(run, "response_text", "") or (
+                envelope.get("candidate_response") or current_response
+            )
             est_cost = _estimate_judge_cost(app.state.catalog, cfg.judge_model, instruction,
                                              current_response, candidate_response)
             result = await executor.judge_pair(
