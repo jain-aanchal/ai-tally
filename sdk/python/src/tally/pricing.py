@@ -29,6 +29,7 @@ class PriceType(str, Enum):
     OUTPUT = "output"
     CACHED_INPUT = "cached_input"
     TOOL_CALL = "tool_call"
+    VECTOR_CALL = "vector_call"
     EMBEDDING = "embedding"
 
 
@@ -187,6 +188,32 @@ def compute_embedding_cost_micro_usd(
     return usd_to_micro(_line(entry, input_tokens)), entry.version
 
 
+def compute_call_cost_micro_usd(
+    catalog: PriceCatalog,
+    provider: str,
+    name: str,
+    price_type: PriceType,
+    *,
+    at: date | None = None,
+    tenant_id: str | None = None,
+) -> tuple[int, str]:
+    """Compute the flat per-call cost in micro-USD for a non-LLM call.
+
+    Used for tool calls (``PriceType.TOOL_CALL``) and vector-DB calls
+    (``PriceType.VECTOR_CALL``), both of which price per *call* rather than per token. ``name`` is
+    the catalog ``model`` slot — e.g. the tool name (``"search"``) or the vector operation
+    (``"query"``). The matching seed entry must use ``Unit.PER_CALL``.
+
+    Returns ``(micro_usd, catalog_version)``; ``(0, "")`` when no entry is seeded for
+    ``(provider, name, price_type)`` at ``at``.
+    """
+    at = at or date.today()
+    entry = catalog.lookup(provider, name, price_type, at=at, tenant_id=tenant_id)
+    if entry is None:
+        return 0, ""
+    return usd_to_micro(_line(entry, 1)), entry.version
+
+
 def _line(entry: PriceEntry, tokens: int) -> Decimal:
     if entry.unit is Unit.PER_MILLION_TOKENS:
         return entry.price_per_unit * Decimal(tokens) / Decimal(1_000_000)
@@ -223,6 +250,43 @@ def _mtok(provider: str, model: str, pt: PriceType, usd_per_mtok: str) -> PriceE
         unit=Unit.PER_MILLION_TOKENS,
         price_per_unit=Decimal(usd_per_mtok),
     )
+
+
+def _per_call(provider: str, name: str, pt: PriceType, usd_per_call: str) -> PriceEntry:
+    return PriceEntry(
+        version=_SEED_VERSION,
+        valid_from=_SEED_FROM,
+        provider=provider,
+        model=name,
+        price_type=pt,
+        unit=Unit.PER_CALL,
+        price_per_unit=Decimal(usd_per_call),
+    )
+
+
+# Per-call tool + vector-DB rates (CTO-141). Promoted from the inline ``_TOOL_PRICING`` /
+# ``_VECTOR_PRICING`` dicts that PR #111 / #116 carried in client.py as stopgaps. Prices in USD;
+# kept consistent with the micro-USD values they replace (e.g. tavily search $0.01 == 10_000
+# micro). The ``model`` slot holds the tool name (tools) or operation (vector). All rates
+# [unverified at implementation time].
+_TOOL_SEEDS: list[tuple[str, str, PriceType, str]] = [
+    # Tools — $0.01 tavily == 10_000 micro, etc.
+    ("tavily", "search", PriceType.TOOL_CALL, "0.01"),
+    ("serpapi", "search", PriceType.TOOL_CALL, "0.015"),
+    ("brave", "search", PriceType.TOOL_CALL, "0.005"),
+    ("firecrawl", "scrape", PriceType.TOOL_CALL, "0.02"),
+    ("exa", "search", PriceType.TOOL_CALL, "0.01"),
+    ("you.com", "search", PriceType.TOOL_CALL, "0.01"),
+    ("bing", "search", PriceType.TOOL_CALL, "0.007"),
+    ("openai", "code_interpreter", PriceType.TOOL_CALL, "0.03"),
+]
+_VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
+    # Vector DB — keep micro-USD parity with the old inline dict (pinecone query 400 micro).
+    ("pinecone", "query", PriceType.VECTOR_CALL, "0.0004"),
+    ("pinecone", "upsert", PriceType.VECTOR_CALL, "0.0002"),
+    ("weaviate", "query", PriceType.VECTOR_CALL, "0.0003"),
+    ("qdrant", "query", PriceType.VECTOR_CALL, "0.00025"),
+]
 
 
 def seed_catalog() -> PriceCatalog:
@@ -279,4 +343,7 @@ def seed_catalog() -> PriceCatalog:
     ]
     for provider, model, pt, rate in seeds:
         cat.add(_mtok(provider, model, pt, rate))
+    # Per-call tool + vector entries (CTO-141), promoted from the inline client.py dicts.
+    for provider, name, pt, rate in (*_TOOL_SEEDS, *_VECTOR_SEEDS):
+        cat.add(_per_call(provider, name, pt, rate))
     return cat
