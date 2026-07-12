@@ -16,7 +16,7 @@ import {
   GET as FirstTraceGET,
   POST as FirstTracePOST,
 } from "./onboarding/first-trace/route";
-import { GET as GuardrailsGET, PUT as GuardrailsPUT } from "./guardrails/route";
+import { GET as GuardrailsGET, POST as GuardrailsPOST } from "./guardrails/route";
 import { GET as AttributionGET } from "./attribution/route";
 import { GET as CacGET } from "./cac/route";
 
@@ -130,7 +130,7 @@ describe("api routes", () => {
 
   it("GET /api/guardrails returns rules + refresh window", async () => {
     const body = await json<{ rules: unknown[]; configRefreshSeconds: number }>(
-      await GuardrailsGET(),
+      await GuardrailsGET(new Request("http://test/api/guardrails")),
     );
     expect(body.rules.length).toBeGreaterThan(0);
     expect(body.configRefreshSeconds).toBeGreaterThan(0);
@@ -175,18 +175,22 @@ describe("api routes", () => {
     expect(body.economics["2026-05-01"].arpaMicroUsd).toBeGreaterThan(0);
   });
 
-  it("PUT /api/guardrails echoes a valid rule, rejects an unconstrained one", async () => {
-    const ok = await GuardrailsPUT(
+  it("POST /api/guardrails echoes a valid rule (gateway unreachable), rejects an unconstrained one", async () => {
+    // Gateway isn't running in CI / fresh clone, so POST validates and echoes the rule back with a
+    // client-supplied change_id rather than blocking on the control plane.
+    const ok = await GuardrailsPOST(
       new Request("http://test/x", {
-        method: "PUT",
+        method: "POST",
         body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn", maxSteps: 10 }),
       }),
     );
     expect(ok.status).toBe(200);
+    const okBody = await json<{ changeId: string }>(ok);
+    expect(okBody.changeId).toBeTypeOf("string");
 
-    const bad = await GuardrailsPUT(
+    const bad = await GuardrailsPOST(
       new Request("http://test/x", {
-        method: "PUT",
+        method: "POST",
         body: JSON.stringify({ id: "gr_x", scope: "a", mode: "warn" }),
       }),
     );
