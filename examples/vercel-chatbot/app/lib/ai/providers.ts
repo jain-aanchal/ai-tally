@@ -31,7 +31,10 @@ const DEFAULT_PROVIDER = process.env.TALLY_DEMO_PROVIDER ?? "anthropic";
 // CTO-109: prefer the gateway's auto-discovered cache so a provider retiring
 // a SKU doesn't break this route. The literal ids are last-resort fallbacks.
 const FALLBACK_ANTHROPIC = resolveLatest("anthropic", "sonnet", "claude-sonnet-4-5");
-const FALLBACK_OPENAI = resolveLatest("openai", "mini", "gpt-4o-mini");
+// CTO-147: last-resort literal bumped gpt-4o-mini → gpt-5-mini (the 4o SKUs were
+// retired). resolveLatest() still prefers the live cache when .tally/models.json
+// is present; this literal only bites when discovery has never run.
+const FALLBACK_OPENAI = resolveLatest("openai", "mini", "gpt-5-mini");
 const FALLBACK_ANTHROPIC_TITLE = resolveLatest("anthropic", "haiku", "claude-haiku-4-5");
 
 function resolve(modelId: string) {

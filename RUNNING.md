@@ -172,6 +172,18 @@ export ANTHROPIC_API_KEY=sk-ant-...
 cd infra && make chatbot-demo
 ```
 
+On launch the demo **refreshes the model lineup** (CTO-147): before booting the
+chatbot, `run.sh` force-refreshes the gateway's discovery cache
+(`.tally/models.json`, CTO-109) with `TALLY_MODELS_REFRESH=1` and logs the live
+OpenAI/Anthropic lineup. This keeps the picker's IDs (`app/lib/ai/models.ts`,
+which now pin `gpt-5` / `gpt-5-mini` — the retired `gpt-4o` / `gpt-4o-mini` SKUs
+are gone) and `providers.ts`'s `resolveLatest()` fallbacks from rotting. The
+refresh is **fail-soft**: offline / no API key just warns and proceeds on the
+pinned IDs. For an offline or hermetic run, either set `TALLY_SKIP_MODEL_REFRESH=1`
+to skip it, or point `TALLY_PINNED_MODELS=<path>` at a saved lineup (discovery
+loads it verbatim and skips the network). The picker list itself is still
+hardcoded; reading the cache dynamically in the model picker is a CTO-147 follow-up.
+
 The chatbot boots on `:3001` (avoiding the dashboard on `:3000`). The driver
 posts spans straight to the gateway from the chatbot's `/api/chat` route, so
 this exercises the **gateway-POST ingestion path** — distinct from Aider's

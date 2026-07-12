@@ -30,6 +30,45 @@ if ! curl -fsS --max-time 3 "${GATEWAY_HEALTH}" >/dev/null; then
   err "ai-tally gateway not reachable at ${GATEWAY_HEALTH}. Run 'make up' from infra/ first."
 fi
 
+# CTO-147: refresh the model lineup before launch so the picker's pinned IDs
+# (lib/ai/models.ts) and providers.ts's resolveLatest() fallbacks track what the
+# providers currently advertise — this is what stops the gpt-4o/gpt-4o-mini class
+# of "provider retired the SKU, every send 404s" breakage from silently returning.
+# We force-refresh the gateway's discovery cache (.tally/models.json, CTO-109) by
+# calling tally.models.discover_models with TALLY_MODELS_REFRESH=1 (bypasses the
+# 24h TTL) and log the resulting lineup so operators see the live list.
+#
+# Fail-soft (mirrors CTO-109): offline / no API key / SDK import error just warns
+# and proceeds with the corrected pinned IDs. Set TALLY_PINNED_MODELS=<path> for
+# hermetic/offline runs — discover_models loads it verbatim and skips the network.
+# Skip entirely with TALLY_SKIP_MODEL_REFRESH=1.
+REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
+MODELS_CACHE="${TALLY_MODELS_CACHE:-${REPO_ROOT}/.tally/models.json}"
+if [ "${TALLY_SKIP_MODEL_REFRESH:-0}" = "1" ]; then
+  echo "→ Skipping model-lineup refresh (TALLY_SKIP_MODEL_REFRESH=1); using pinned IDs."
+else
+  echo "→ Refreshing model lineup (.tally/models.json)…"
+  TALLY_SDK_SRC="${REPO_ROOT}/sdk/python/src" TALLY_MODELS_CACHE="${MODELS_CACHE}" \
+    TALLY_MODELS_REFRESH=1 python3 - <<'PY' || echo "  ⚠ model refresh failed — continuing with pinned IDs (see lib/ai/models.ts)" >&2
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["TALLY_SDK_SRC"])
+try:
+    from tally import models as M
+except Exception as exc:  # SDK not importable — fail soft.
+    print(f"  ⚠ could not import tally.models ({exc}) — using pinned IDs", file=sys.stderr)
+    sys.exit(0)
+cache = Path(os.environ["TALLY_MODELS_CACHE"])
+found = M.discover_models(cache_path=cache)  # honors TALLY_MODELS_REFRESH / TALLY_PINNED_MODELS
+if not found:
+    print("  ⚠ discovery returned no models (offline / no key?) — using pinned IDs", file=sys.stderr)
+    sys.exit(0)
+oi = sorted(m.id for m in found if m.provider == "openai")
+an = sorted(m.id for m in found if m.provider == "anthropic")
+print(f"  ✓ lineup refreshed: openai={oi} anthropic={an}")
+PY
+fi
+
 if curl -fsS --max-time 2 "${CHATBOT_URL}/api/demo-chat" -X POST \
     -H 'content-type: application/json' -d '{"sessionId":"probe","prompt":"hi","provider":"openai","dryRun":true}' \
     >/dev/null 2>&1; then
