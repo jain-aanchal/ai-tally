@@ -13,8 +13,47 @@ import {
   type FeatureTag,
   postCdpEvent,
   postSpan,
+  postToolSpan,
   sessionUserHash,
 } from "@/lib/tally";
+
+// ai-tally (CTO-137): the synthetic driver hits THIS route (not the upstream
+// (chat) UI route), so to fill the Cost tab's Tools bar on a live
+// `make chatbot-demo` we detect tool-shaped prompts here and emit a matching
+// tool span. Same fixed price table as the UI route. Demo-seed pricing — not a
+// real billing model.
+const TOOL_COST_MICRO_USD: Record<string, number> = {
+  getWeather: 1_000,
+  createDocument: 5_000,
+  updateDocument: 5_000,
+  editDocument: 5_000,
+  requestSuggestions: 2_000,
+};
+
+// Map a prompt to the demo tool it would have triggered, mirroring the upstream
+// route's tool set. Keyword-based and intentionally coarse — this is scripted
+// demo traffic, not a real tool router.
+function inferDemoTool(prompt: string): string | undefined {
+  const t = prompt.toLowerCase();
+  if (
+    t.includes("weather") ||
+    t.includes("forecast") ||
+    t.includes("temperature")
+  ) {
+    return "getWeather";
+  }
+  if (
+    t.includes("draft a doc") ||
+    t.includes("write a document") ||
+    t.includes("create a doc")
+  ) {
+    return "createDocument";
+  }
+  if (t.includes("suggestion") && t.includes("document")) {
+    return "requestSuggestions";
+  }
+  return undefined;
+}
 
 // ai-tally: Next.js 16 cacheComponents rejects route segment config
 // (`runtime`, `dynamic`). POST routes are dynamic by default; Node runtime
@@ -167,6 +206,21 @@ export async function POST(req: NextRequest) {
     featureTagOverride: featureTag,
     runId: body.sessionId,
   });
+
+  // ai-tally (CTO-137): if the prompt is tool-shaped, emit a tool span so the
+  // Cost tab's Tools bar is non-zero on a live demo run. Fire-and-forget.
+  const demoTool = inferDemoTool(body.prompt);
+  if (demoTool) {
+    void postToolSpan({
+      sessionId: body.sessionId,
+      userHash,
+      provider: body.provider,
+      tool: demoTool,
+      costMicroUsd: TOOL_COST_MICRO_USD[demoTool] ?? 1_000,
+      runId: body.sessionId,
+      featureTagOverride: featureTag,
+    });
+  }
 
   // ai-tally: after the 5th message in a session, signal engagement so the
   // attribution dashboard can show $/engaged-session alongside $/conversion.

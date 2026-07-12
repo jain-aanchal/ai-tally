@@ -108,6 +108,30 @@
     ]
   },
   {
+    "id": "brainstorm-weather-trip",
+    "tag": "chatbot.brainstorm",
+    "opener": "What's the weather like in San Francisco this weekend? I'm trying to plan a trip.",
+    "followups": [
+      "How about the forecast for Lake Tahoe instead?",
+      "Will the temperature drop much overnight?",
+      "What should I pack given that weather?",
+      "Any chance of rain on Sunday?",
+      "Thanks — what's the weather looking like the following week?"
+    ]
+  },
+  {
+    "id": "support-weather-widget",
+    "tag": "chatbot.support",
+    "opener": "The weather widget on my dashboard shows the wrong temperature — can you check the forecast for my city?",
+    "followups": [
+      "My city is Denver.",
+      "It's showing 90 degrees but it feels much colder.",
+      "Is the forecast data cached?",
+      "How often does the weather refresh?",
+      "Got it, the temperature looks right now."
+    ]
+  },
+  {
     "id": "code-perf",
     "tag": "chatbot.code",
     "opener": "How can I optimize this Python function — it's slow on inputs over 100k items: def f(xs): return [x for x in xs if x in seen]",

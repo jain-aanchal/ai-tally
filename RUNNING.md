@@ -178,6 +178,15 @@ this exercises the **gateway-POST ingestion path** — distinct from Aider's
 edge-proxy path. After ~2 minutes, the dashboard auto-opens to
 `/attribution?tag=chatbot-demo&outcome=positive_feedback`.
 
+The run also emits **tool** spans (weather-style prompts trigger a `getWeather`
+tool span) and, for ~30% of sessions, a simulated RAG-retrieval **embedding**
+span. So on the **Cost** tab you'll now see LLM dominant with the **Tools** and
+**Embeddings** bars non-zero (instead of $0), matching the seed mock. The tool
+prices are a small fixed table (`getWeather`=$0.001, document tools=$0.005,
+`requestSuggestions`=$0.002) and the embedding cost is computed at
+text-embedding-3-small's $0.02/Mtok — both are demo-seed values, not real
+billing. (Vector/Compute/Egress layers stay $0 — out of scope here.)
+
 Walkthrough, configuration knobs, and the upstream patch list are in
 [examples/vercel-chatbot/README.md](examples/vercel-chatbot/README.md) and
 [examples/vercel-chatbot/PATCHES.md](examples/vercel-chatbot/PATCHES.md).
