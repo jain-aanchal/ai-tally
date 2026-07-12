@@ -10,6 +10,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 source "$here/_dashboard-links.sh"
 
 PROVIDER="${PROVIDER:-openai}"
+# CTO-164: accept `gemini` as an alias for `google` so either spelling works.
+[[ "$PROVIDER" == "gemini" ]] && PROVIDER="google"
 FEATURE_TAG="${FEATURE_TAG:-aider-demo}"
 TENANT="${TENANT:-local-dev}"
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
@@ -17,9 +19,19 @@ PROXY_PORT="${PROXY_PORT:-7070}"
 PROXY_PID_FILE="${PROXY_PID_FILE:-/tmp/ai-tally-aider-edge-proxy.pid}"
 
 # 1. Validate the API key for the chosen provider.
+#    google (Gemini) takes a different path than openai/anthropic — see below.
 if [[ "$PROVIDER" == "anthropic" ]]; then
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ERROR: ANTHROPIC_API_KEY not set"; exit 1; }
   upstream="https://api.anthropic.com"
+elif [[ "$PROVIDER" == "google" ]]; then
+  # Accept GEMINI_API_KEY or GOOGLE_API_KEY; LiteLLM (Aider's backend) reads
+  # GEMINI_API_KEY, so normalize to that.
+  if [[ -z "${GEMINI_API_KEY:-}" && -n "${GOOGLE_API_KEY:-}" ]]; then
+    export GEMINI_API_KEY="$GOOGLE_API_KEY"
+  fi
+  [[ -n "${GEMINI_API_KEY:-}" ]] || { echo "ERROR: GEMINI_API_KEY (or GOOGLE_API_KEY) not set"; exit 1; }
+  # Informational only — see step 3/4 for why Gemini runs direct, not via proxy.
+  upstream="https://generativelanguage.googleapis.com"
 else
   [[ -n "${OPENAI_API_KEY:-}" ]] || { echo "ERROR: OPENAI_API_KEY not set (or pass PROVIDER=anthropic)"; exit 1; }
   upstream="https://api.openai.com"
@@ -51,7 +63,19 @@ start_proxy() {
   done
   echo "ERROR: edge-proxy didn't bind on :$PROXY_PORT (see /tmp/ai-tally-aider-edge-proxy.log)"; exit 1
 }
-start_proxy
+# CTO-164: Gemini runs DIRECT (not through the edge-proxy). The Go proxy is a
+# transparent pass-through that assumes the OpenAI/Anthropic request shape and
+# Authorization: Bearer auth; Gemini's REST surface differs (LiteLLM's
+# `gemini/*` path posts to generativelanguage.googleapis.com with the key as a
+# `?key=`/`x-goog-api-key` credential and a different body schema). Bridging
+# that in the proxy is out of scope here, so for google we skip the proxy and
+# still POST the feature-tagged batch to the gateway (step 5) — the same
+# side-channel every provider already uses to populate the dashboard rows.
+if [[ "$PROVIDER" != "google" ]]; then
+  start_proxy
+else
+  echo "▶ google/Gemini: running Aider direct to $upstream (edge-proxy skipped — see CTO-164 note)"
+fi
 
 # 4. Point Aider at the proxy and pick a model that matches the provider.
 #    Aider speaks OpenAI protocol by default; for Anthropic we explicitly select
@@ -90,6 +114,14 @@ if [[ "$PROVIDER" == "anthropic" ]]; then
   AIDER_MODEL="${AIDER_MODEL:-anthropic/${resolved:-claude-sonnet-4-5}}"
   export ANTHROPIC_API_BASE="http://localhost:$PROXY_PORT"
   export ANTHROPIC_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
+elif [[ "$PROVIDER" == "google" ]]; then
+  # LiteLLM's `gemini/<model>` path reads GEMINI_API_KEY from the env and talks
+  # to generativelanguage.googleapis.com directly (no base-URL override, no
+  # proxy). The fallback id must be one CTO-149 prices — gemini-2.5-flash is in
+  # seed_catalog(), so the batch POST below enriches with a real cost.
+  resolved=$(resolve_from_cache google flash)
+  AIDER_MODEL="${AIDER_MODEL:-gemini/${resolved:-gemini-2.5-flash}}"
+  # No *_API_BASE / *_DEFAULT_HEADERS: Aider hits Gemini directly (see step 3).
 else
   resolved=$(resolve_from_cache openai flagship)
   AIDER_MODEL="${AIDER_MODEL:-${resolved:-gpt-4o}}"

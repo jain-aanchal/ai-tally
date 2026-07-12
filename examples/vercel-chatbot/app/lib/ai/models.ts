@@ -76,6 +76,20 @@ export const chatModels: ChatModel[] = [
     provider: "openai",
     description: "OpenAI flagship — needs OPENAI_API_KEY with credit",
   },
+  {
+    id: "google/gemini-3-flash",
+    name: "Gemini 3 Flash",
+    provider: "google",
+    description:
+      "Google fast-and-cheap — needs GOOGLE_API_KEY or GEMINI_API_KEY",
+  },
+  {
+    id: "google/gemini-2.5-pro",
+    name: "Gemini 2.5 Pro",
+    provider: "google",
+    description:
+      "Google flagship — higher quality, pricier; needs GOOGLE_API_KEY or GEMINI_API_KEY",
+  },
 ];
 
 export async function getCapabilities(): Promise<
