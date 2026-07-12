@@ -57,6 +57,24 @@ class Settings(BaseSettings):
     replay_blob_backend: str = "memory"
     replay_gcs_bucket: str = ""
 
+    # BigQuery export sink (CTO-154). OPTIONAL, additive analytics mirror that copies
+    # spans / business_events / attribution / daily rollups into a tenant's OWN BigQuery
+    # dataset. ClickHouse stays the primary store and the dashboard keeps reading it — this
+    # is a mirror, never a replacement. DISABLED by default at both the process level (this
+    # flag) and per-tenant (``tenant_bq_export_config.enabled``, also default false), so no
+    # existing deployment starts exporting on upgrade. Auth is via ADC / Workload Identity /
+    # a Secret Manager reference stored per-tenant — never a raw service-account key.
+    # Requires the optional ``[bigquery]`` extra (``google-cloud-bigquery``), lazy-imported
+    # in :mod:`gateway.bq_export` so the gateway boots without it.
+    bq_export_enabled: bool = False
+    # GCP project that owns the export datasets. Empty means "resolve from ADC / per-tenant".
+    bq_export_gcp_project: str = ""
+    # Defaults for a tenant that enables export without overriding dataset/prefix.
+    bq_export_default_dataset: str = "tally_export"
+    bq_export_default_table_prefix: str = "tally_"
+    # Max rows pulled from ClickHouse per (tenant, table) export pass.
+    bq_export_batch_limit: int = 10_000
+
 
 _settings: Settings | None = None
 

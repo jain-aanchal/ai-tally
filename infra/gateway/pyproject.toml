@@ -23,6 +23,12 @@ dev = [
     "ruff>=0.6",
     "httpx>=0.27",
 ]
+# Optional analytics-mirror sink (CTO-154). Only needed by deployments that turn on the
+# per-tenant BigQuery export; `gateway.bq_export` lazy-imports it, so the gateway imports
+# and boots fine without this extra installed.
+bigquery = [
+    "google-cloud-bigquery>=3.20",
+]
 
 [tool.uv.sources]
 # The gateway reuses the SDK's wire/enrichment/timekeeping/pricing logic directly.
