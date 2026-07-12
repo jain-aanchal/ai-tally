@@ -69,7 +69,9 @@ class GenAI:
 
 
 # Known operation names (open set — unknown values are allowed but should be lowercase tokens).
-OPERATIONS = frozenset({"chat", "completion", "embeddings", "tool", "agent", "rerank"})
+OPERATIONS = frozenset(
+    {"chat", "completion", "embeddings", "tool", "agent", "rerank", "vector"}
+)
 
 #: Default currency when none supplied.
 DEFAULT_CURRENCY = "USD"
