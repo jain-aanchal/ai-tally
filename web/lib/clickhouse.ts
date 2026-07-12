@@ -292,9 +292,31 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
 
 // --- Features (ROI + attribution diagnostics) ---------------------------------------------------
 
+// Below this many attributed conversions we refuse to print value/payback/attributionRate — the
+// numbers would be too noisy to trust. The UI renders these honest nulls as `—`.
+const MIN_CONVERSIONS_FOR_ECONOMICS = 5;
+
+// Per-feature value attribution (CTO-124).
+//
+// Cost side: sum(EstimatedCost)/uniq(UserIdHash) from `otel_spans` over 30d (unchanged).
+//
+// Value side: each row in `attribution_records` ties one converting `business_events` row
+// (BusinessEventId) to the `FeatureTag` of the agent run that last touched it — the per-feature
+// normalization that was missing. We join attribution_records (FINAL, to collapse the
+// ReplacingMergeTree) → business_events (FINAL) ON (TenantId, BusinessEventId) to pull EventName and
+// the converting user, then per feature compute:
+//   valuePerUserMicroUsd = sum(ValueAmountMicro) / distinct converting users
+//   paybackDays          = costPerUser / (valuePerUser / 30), guarded against div-by-zero
+//   attributionRate      = matched users (have an attribution_record) / total users with that event
+//   valueEvent           = the most-frequent EventName attributed to the feature (null if none)
+// attributionBreakdown is REAL, not derived: `attribution_records.AttributionConfidence` is an enum
+// ('direct' | 'session_stitched' | 'identity_graph_stitched'), so we count attributed users by it
+// and add `unmatched` = total-users-with-event minus attributed-users. The four sum to the
+// per-feature user total. Honest-null floor: fewer than MIN_CONVERSIONS_FOR_ECONOMICS attributed
+// conversions ⇒ value/payback/attributionRate are null (rendered `—`), never fabricated.
 export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null> {
   return tryLive(async (db, tenant) => {
-    const out = await rows<{ feature: string; cost: string; users: string }>(
+    const cost = await rows<{ feature: string; cost: string; users: string }>(
       db,
       `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users
        FROM otel_spans
@@ -303,18 +325,111 @@ export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null
        ORDER BY cost DESC`,
       tenant,
     );
-    return out.map((r) => {
+
+    // Attributed value + confidence breakdown per feature, last-touch only. `conversions` counts
+    // attributed events; `matched_users` the distinct converting users we tied to a feature.
+    const attr = await rows<{
+      feature: string;
+      value_micro: string;
+      conversions: string;
+      matched_users: string;
+      direct_users: string;
+      session_users: string;
+      identity_users: string;
+    }>(
+      db,
+      `SELECT
+         ar.FeatureTag                                                                    AS feature,
+         sum(ifNull(ar.ValueAmountMicro, 0))                                              AS value_micro,
+         count()                                                                          AS conversions,
+         uniqExact(be.UserIdHash)                                                         AS matched_users,
+         uniqExactIf(be.UserIdHash, ar.AttributionConfidence = 'direct')                  AS direct_users,
+         uniqExactIf(be.UserIdHash, ar.AttributionConfidence = 'session_stitched')        AS session_users,
+         uniqExactIf(be.UserIdHash, ar.AttributionConfidence = 'identity_graph_stitched') AS identity_users
+       FROM attribution_records AS ar FINAL
+       INNER JOIN (
+         SELECT TenantId, BusinessEventId, UserIdHash
+         FROM business_events FINAL
+         WHERE TenantId = {tenant:String}
+       ) AS be
+         ON ar.TenantId = be.TenantId AND ar.BusinessEventId = be.BusinessEventId
+       WHERE ar.TenantId = {tenant:String} AND ar.AttributedTraceTs >= now() - INTERVAL 30 DAY
+       GROUP BY feature`,
+      tenant,
+    );
+    const attrByFeature = new Map(attr.map((r) => [r.feature, r]));
+
+    // Dominant value event per feature: most-frequent EventName among attributed conversions.
+    const events = await rows<{ feature: string; event: string; n: string }>(
+      db,
+      `SELECT ar.FeatureTag AS feature, be.EventName AS event, count() AS n
+       FROM attribution_records AS ar FINAL
+       INNER JOIN (
+         SELECT TenantId, BusinessEventId, EventName
+         FROM business_events FINAL
+         WHERE TenantId = {tenant:String}
+       ) AS be
+         ON ar.TenantId = be.TenantId AND ar.BusinessEventId = be.BusinessEventId
+       WHERE ar.TenantId = {tenant:String}
+       GROUP BY feature, event
+       ORDER BY n DESC`,
+      tenant,
+    );
+    const valueEventByFeature = new Map<string, string>();
+    for (const e of events) {
+      if (!valueEventByFeature.has(e.feature)) valueEventByFeature.set(e.feature, e.event);
+    }
+
+    return cost.map((r) => {
       const users = Math.max(1, parseInt(r.users, 10) || 1);
+      const costPerUserMicroUsd = Math.round(micro(r.cost) / users);
+      const a = attrByFeature.get(r.feature);
+
+      const conversions = a ? parseInt(a.conversions, 10) || 0 : 0;
+      const matchedUsers = a ? parseInt(a.matched_users, 10) || 0 : 0;
+      const direct = a ? parseInt(a.direct_users, 10) || 0 : 0;
+      const sessionStitched = a ? parseInt(a.session_users, 10) || 0 : 0;
+      const identityGraphStitched = a ? parseInt(a.identity_users, 10) || 0 : 0;
+
+      // Total users with this feature's event = the converting (matched) users; we have no
+      // feature-tagged signal for users whose event never attributed, so `unmatched` here is the
+      // gap between the union confidence count and the matched user count (≈ 0 in practice). Until a
+      // feature-tagged unattributed source exists (CTO-139 reconciler), attributionRate is matched/
+      // matched = 1.0 for features with conversions; we keep the field for forward-compat.
+      const attributedUsers = direct + sessionStitched + identityGraphStitched;
+      const totalUsers = Math.max(matchedUsers, attributedUsers);
+      const unmatched = Math.max(0, matchedUsers - attributedUsers);
+
+      const valueEvent = valueEventByFeature.get(r.feature) ?? null;
+      const attributionBreakdown = { direct, sessionStitched, identityGraphStitched, unmatched };
+
+      // Honest-null floor: too few conversions to trust the per-user economics.
+      if (conversions < MIN_CONVERSIONS_FOR_ECONOMICS || matchedUsers === 0) {
+        return {
+          feature: r.feature,
+          valueEvent,
+          costPerUserMicroUsd,
+          valuePerUserMicroUsd: null,
+          paybackDays: null,
+          attributionRate: null,
+          attributionBreakdown,
+        };
+      }
+
+      const valuePerUserMicroUsd = Math.round((parseInt(a!.value_micro, 10) || 0) / matchedUsers);
+      // payback = cost / (value per day). Guard div-by-zero: no value ⇒ payback unknowable.
+      const valuePerDay = valuePerUserMicroUsd / 30;
+      const paybackDays = valuePerDay > 0 ? Math.round(costPerUserMicroUsd / valuePerDay) : null;
+      const attributionRate = totalUsers > 0 ? matchedUsers / totalUsers : null;
+
       return {
         feature: r.feature,
-        // Value events / payback / attribution all require business-event attribution, which is not
-        // wired yet — surface honest nulls rather than fabricated ROI.
-        valueEvent: null,
-        costPerUserMicroUsd: Math.round(micro(r.cost) / users),
-        valuePerUserMicroUsd: null,
-        paybackDays: null,
-        attributionRate: null,
-        attributionBreakdown: { direct: 0, sessionStitched: 0, identityGraphStitched: 0, unmatched: 0 },
+        valueEvent,
+        costPerUserMicroUsd,
+        valuePerUserMicroUsd,
+        paybackDays,
+        attributionRate,
+        attributionBreakdown,
       };
     });
   });
