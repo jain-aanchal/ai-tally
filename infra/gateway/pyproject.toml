@@ -13,6 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# GCS replay blob-store backend (CTO-152). Optional so the base install stays slim; imported
+# lazily inside GCSReplayBlobStore so the gateway boots without it when the backend is `memory`.
+gcs = [
+    "google-cloud-storage>=2.10",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

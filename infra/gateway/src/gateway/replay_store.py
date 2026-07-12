@@ -63,6 +63,59 @@ class InMemoryReplayBlobStore:
         return len(self._objects)
 
 
+class GCSReplayBlobStore:
+    """Google Cloud Storage backend for replay sample blobs (CTO-152).
+
+    Satisfies the same :class:`ReplayBlobStore` protocol as :class:`InMemoryReplayBlobStore`
+    (and the S3/MinIO path): objects are keyed with the identical
+    ``tenants/{tenant_id}/replay_samples/{yyyy/mm/dd}/{sample_id}.json`` layout produced by
+    :func:`build_replay_object_key`, so the ClickHouse index rows and the executor read path are
+    unchanged regardless of which backend is wired.
+
+    **PII scrub** — the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
+    ``persist_sample`` ingest path, before any ``put_bytes`` call. This backend only moves already
+    scrubbed bytes, so it inherits the scrub unchanged; the CTO-125 candidate-response retention
+    carve-out likewise applies identically here.
+
+    **Auth** — no raw key material is passed. The ``google-cloud-storage`` client is constructed
+    with Application Default Credentials (ADC), so it transparently picks up Workload Identity in
+    GKE / GCE metadata credentials / a ``GOOGLE_APPLICATION_CREDENTIALS`` file / ``gcloud`` user
+    creds, in that resolution order.
+
+    **Retention** — object lifecycle (TTL / deletion) is expected to be enforced by a GCS bucket
+    lifecycle policy provisioned out-of-band (e.g. Terraform), mirroring the replay
+    ``retention_days`` knob. This backend does NOT create or manage lifecycle rules (out of scope
+    for CTO-152).
+
+    The ``google-cloud-storage`` dependency is OPTIONAL (``[gcs]`` extra) and imported lazily at
+    construction — importing this module never requires the package; only instantiating this class
+    does. That keeps the base gateway install slim and lets it boot without GCS when unused.
+    """
+
+    __slots__ = ("_bucket_name", "_bucket", "_client")
+
+    def __init__(self, bucket: str, *, client: object | None = None) -> None:
+        if not bucket:
+            raise ValueError("bucket must be non-empty")
+        if client is None:
+            # Lazy import: keep google-cloud-storage optional. Constructing the client with no
+            # explicit credentials makes it resolve Application Default Credentials (ADC) /
+            # Workload Identity automatically — we never handle a raw key here.
+            from google.cloud import storage  # type: ignore[import-not-found]
+
+            client = storage.Client()
+        self._client = client
+        self._bucket_name = bucket
+        self._bucket = client.bucket(bucket)
+
+    def put_bytes(self, key: str, body: bytes, content_type: str = "application/json") -> None:
+        blob = self._bucket.blob(key)
+        blob.upload_from_string(body, content_type=content_type)
+
+    def get_bytes(self, key: str) -> bytes:
+        return self._bucket.blob(key).download_as_bytes()
+
+
 # --- ClickHouse-side index rows --------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
