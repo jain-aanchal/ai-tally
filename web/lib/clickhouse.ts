@@ -22,7 +22,7 @@ import type {
   SpendByLayer,
   SpendSummary,
 } from "./types";
-import type { CostDayPoint, CostSeries, FeatureCostRow } from "./cost";
+import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "./cost";
 import { LAYERS, type Layer } from "./cost";
 import type { AttributionDiagnostics, FeatureEconomics } from "./features";
 import type {
@@ -287,6 +287,133 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
       (a, b) =>
         LAYERS.reduce((s, l) => s + b.byLayer[l], 0) - LAYERS.reduce((s, l) => s + a.byLayer[l], 0),
     );
+  });
+}
+
+// --- Hidden-cost alerts (CTO-122) ---------------------------------------------------------------
+//
+// Real detection over the telemetry we actually have (otel_spans), replacing the canned
+// lib/cost.ts `hiddenCostAlerts` on the live path. Two rules fire today; both run per-tenant over
+// the last 30 days and only emit above a sane threshold (no fabricated alerts — returns [] when
+// nothing qualifies).
+//
+//   1. Uncosted tool/agent activity — `GenAiOperation = 'tool'` spans with `EstimatedCost = 0`,
+//      i.e. tools running without a cost attached. Emitted only above UNCOSTED_TOOL_THRESHOLD.
+//   2. High LLM-calls-per-session ratio — features whose avg LLM spans per SessionId exceeds
+//      LLM_PER_SESSION_THRESHOLD, a classic retry-loop / fan-out cost smell.
+//
+// DEFERRED: the "vendor-billed vs estimated" reconciliation rule (alert when a connector's billed
+// spend diverges from our estimate) has NO source today — the billing connectors aren't built yet
+// (CTO-143/144). It is intentionally omitted rather than faked.
+//
+// Alerts are ranked by impact = (share of total spend attributable to the offending feature) ×
+// (rule confidence) and capped at the top 5.
+
+// >50 uncosted tool spans before we bother the user (below this is noise).
+export const UNCOSTED_TOOL_THRESHOLD = 50;
+// avg LLM spans per session above this reads as a retry/fan-out smell worth surfacing.
+export const LLM_PER_SESSION_THRESHOLD = 8;
+// Keep the alert list short and high-signal.
+const MAX_HIDDEN_COST_ALERTS = 5;
+
+interface RankedAlert {
+  alert: HiddenCostAlert;
+  impact: number;
+}
+
+/**
+ * Detect hidden-cost alerts from `otel_spans` for the current tenant over the last 30 days.
+ *
+ * Returns the top {@link MAX_HIDDEN_COST_ALERTS} alerts ranked by impact, or `[]` when nothing
+ * qualifies (honest-empty — we never fabricate). Returns `null` (via tryLive) when ClickHouse is
+ * unreachable so the route can fall back to the canned mock for CI / fresh-clone rendering.
+ */
+export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<HiddenCostAlert[] | null> {
+  return tryLive(async (db, tenant) => {
+    const tag = filter?.tag ?? "";
+    const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+
+    // Total tenant spend over the window — the denominator for the impact ranking.
+    const totalRows = await rowsP<{ total: string }>(
+      db,
+      `SELECT sum(EstimatedCost) AS total
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY ${tagClause}`,
+      { tenant, tag },
+    );
+    const totalSpend = micro(totalRows[0]?.total ?? "0");
+
+    // Rule 1: uncosted tool/agent activity. Count tool spans with EstimatedCost = 0 per feature,
+    // alongside that feature's total spend (for the impact ranking).
+    const uncostedRows = await rowsP<{ feature: string; uncosted: string; featureCost: string }>(
+      db,
+      `SELECT
+         if(FeatureTag != '', FeatureTag, ServiceName) AS feature,
+         countIf(GenAiOperation = 'tool' AND EstimatedCost = 0) AS uncosted,
+         sum(EstimatedCost) AS featureCost
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY ${tagClause}
+       GROUP BY feature
+       HAVING uncosted > {threshold:UInt32}
+       ORDER BY uncosted DESC`,
+      { tenant, tag, threshold: UNCOSTED_TOOL_THRESHOLD },
+    );
+
+    // Rule 2: high LLM-calls-per-session ratio. Average LLM spans per SessionId, per feature.
+    const ratioRows = await rowsP<{ feature: string; callsPerSession: string; featureCost: string }>(
+      db,
+      `SELECT
+         if(FeatureTag != '', FeatureTag, ServiceName) AS feature,
+         countIf(${LAYER_CASE} = 'llm') / nullIf(uniqExact(SessionId), 0) AS callsPerSession,
+         sum(EstimatedCost) AS featureCost
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
+         AND SessionId != '' ${tagClause}
+       GROUP BY feature
+       HAVING callsPerSession > {threshold:Float64}
+       ORDER BY callsPerSession DESC`,
+      { tenant, tag, threshold: LLM_PER_SESSION_THRESHOLD },
+    );
+
+    const ranked: RankedAlert[] = [];
+
+    for (const r of uncostedRows) {
+      const feature = r.feature || "untagged";
+      const uncosted = parseInt(r.uncosted, 10) || 0;
+      if (uncosted <= UNCOSTED_TOOL_THRESHOLD) continue;
+      const share = totalSpend > 0 ? micro(r.featureCost) / totalSpend : 0;
+      // Confidence is high — a zero-cost tool span is an unambiguous instrumentation gap.
+      const confidence = 0.9;
+      ranked.push({
+        impact: share * confidence,
+        alert: {
+          severity: "warn",
+          message:
+            `${feature} ran ${uncosted.toLocaleString()} tool calls with no cost attached over the last 30 days. ` +
+            `Those calls are uncosted — the all-in spend for this feature is understated.`,
+        },
+      });
+    }
+
+    for (const r of ratioRows) {
+      const feature = r.feature || "untagged";
+      const ratio = parseFloat(r.callsPerSession);
+      if (!Number.isFinite(ratio) || ratio <= LLM_PER_SESSION_THRESHOLD) continue;
+      const share = totalSpend > 0 ? micro(r.featureCost) / totalSpend : 0;
+      const confidence = 0.7;
+      ranked.push({
+        impact: share * confidence,
+        alert: {
+          severity: "warn",
+          message:
+            `${feature} averaged ${ratio.toFixed(1)} LLM calls per session over the last 30 days ` +
+            `(threshold ${LLM_PER_SESSION_THRESHOLD}). Worth checking for a retry loop or unbounded fan-out.`,
+        },
+      });
+    }
+
+    ranked.sort((a, b) => b.impact - a.impact);
+    return ranked.slice(0, MAX_HIDDEN_COST_ALERTS).map((r) => r.alert);
   });
 }
 

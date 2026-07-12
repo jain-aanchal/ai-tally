@@ -2,7 +2,11 @@
 import { NextResponse } from "next/server";
 
 import { costSeries, featureRows, hiddenCostAlerts } from "@/lib/cost";
-import { queryCostSeries, queryFeatureCostRows } from "@/lib/clickhouse";
+import {
+  queryCostSeries,
+  queryFeatureCostRows,
+  queryHiddenCostAlerts,
+} from "@/lib/clickhouse";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,15 +18,19 @@ export async function GET(req: Request) {
   // Use the standard URL API rather than NextRequest.nextUrl so unit tests can pass plain Request.
   const tag = new URL(req.url).searchParams.get("tag") ?? "";
   const hasFilter = Boolean(tag);
-  const [series, rows] = await Promise.all([
+  const [series, rows, alerts] = await Promise.all([
     queryCostSeries({ tag }),
     queryFeatureCostRows({ tag }),
+    queryHiddenCostAlerts({ tag }),
   ]);
   return NextResponse.json({
     series: series ?? costSeries,
     featureRows: rows && rows.length > 0 ? rows : hasFilter ? [] : featureRows,
-    // Hidden-cost alerts are derived from cross-source comparison (not wired live yet); only show
-    // the canned alert when we're serving mock data.
-    alerts: rows && rows.length > 0 ? [] : hasFilter ? [] : hiddenCostAlerts,
+    // Hidden-cost alerts now come from real detection over otel_spans (CTO-122). On the LIVE path
+    // we serve queryHiddenCostAlerts' result verbatim — including `[]` (honest-empty: nothing
+    // fired). The canned `hiddenCostAlerts` is served ONLY as the ClickHouse-unreachable fallback
+    // (query returns null → CI / fresh-clone still renders something), and never under a ?tag=
+    // filter (the canned set isn't tag-scoped, so it would misrepresent a filtered view).
+    alerts: alerts ?? (hasFilter ? [] : hiddenCostAlerts),
   });
 }
