@@ -1,0 +1,48 @@
+# Example overrides for a real GKE install. Copy, fill in the CAPS values, and pass with:
+#   helm upgrade --install ai-tally deploy/gcp/helm/ai-tally -n ai-tally -f my-values.yaml
+#
+# This example uses external ClickHouse Cloud + Cloud SQL + Secret Manager via CSI — the recommended
+# production shape. For a self-contained staging cluster, set clickhouse.mode=statefulset instead.
+
+gcp:
+  projectId: MY_PROJECT
+  serviceAccount: ai-tally-workload@MY_PROJECT.iam.gserviceaccount.com
+
+secretManager:
+  mode: csi
+  # These are Secret Manager secret NAMES (create the secrets with gcloud — README step 5).
+  secrets:
+    postgresDsn: ai-tally-postgres-dsn
+    clickhousePassword: ai-tally-clickhouse-password
+    openaiApiKey: ai-tally-openai-api-key
+    anthropicApiKey: ai-tally-anthropic-api-key
+
+cloudSql:
+  enabled: true
+  instanceConnectionName: MY_PROJECT:us-central1:ai-tally-pg
+
+clickhouse:
+  mode: external
+  host: my-instance.us-central1.gcp.clickhouse.cloud
+  httpPort: 8443
+  scheme: https   # ClickHouse Cloud is TLS-terminated
+
+gateway:
+  replicaCount: 2
+  image:
+    repository: us-central1-docker.pkg.dev/MY_PROJECT/ai-tally/gateway
+    tag: "1.0.0"
+  config:
+    requireApiKey: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+
+web:
+  replicaCount: 2
+  image:
+    repository: us-central1-docker.pkg.dev/MY_PROJECT/ai-tally/web
+    tag: "1.0.0"
+  config:
+    tenantId: local-dev

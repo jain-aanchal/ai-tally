@@ -1,0 +1,27 @@
+{{- range $tier := (list "gateway" "web") }}
+{{- $cfg := index $.Values $tier }}
+{{- if and $cfg.enabled $cfg.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ai-tally.tierName" (dict "ctx" $ "tier" $tier) }}
+  labels:
+    {{- include "ai-tally.labels" $ | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" $ "tier" $tier) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ai-tally.tierName" (dict "ctx" $ "tier" $tier) }}
+  minReplicas: {{ $cfg.autoscaling.minReplicas }}
+  maxReplicas: {{ $cfg.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

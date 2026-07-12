@@ -1,0 +1,185 @@
+# Default values for the ai-tally GKE chart.
+#
+# The two application tiers (gateway, web) are stateless and 12-factor: everything they read is an
+# env var. This file maps those env vars onto Kubernetes knobs, plus the GCP-native secrets/identity
+# wiring. Backing stores (Postgres, ClickHouse, GCS) are managed OUT of this chart by default —
+# Cloud SQL and GCS are provisioned with gcloud (see deploy/gcp/README.md); ClickHouse is either an
+# in-cluster StatefulSet (clickhouse.mode=statefulset) or an external endpoint (clickhouse.mode=external).
+
+# -- Global naming -------------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+# =================================================================================================
+# GCP identity + secrets
+# =================================================================================================
+gcp:
+  # Your GCP project id. Required — used to construct Secret Manager resource names and the
+  # Workload Identity binding. There is no sane default; deploys fail loudly if left blank.
+  projectId: ""
+  # The Google Service Account (GSA) email that owns access to Secret Manager, Cloud SQL and GCS.
+  # A single KSA (created by this chart) is bound to it via Workload Identity. Example:
+  #   ai-tally-workload@PROJECT.iam.gserviceaccount.com
+  # Grant it: roles/secretmanager.secretAccessor, roles/cloudsql.client, roles/storage.objectAdmin
+  # (on the replay bucket). See README.md step 6.
+  serviceAccount: ""
+
+# Kubernetes ServiceAccount the pods run as. Annotated for Workload Identity so pods federate to the
+# GSA above WITHOUT any exported JSON key. create=false lets you reference a pre-existing KSA.
+serviceAccount:
+  create: true
+  name: ai-tally
+  annotations: {}   # iam.gke.io/gcp-service-account is injected from .Values.gcp.serviceAccount
+
+# -- Secret Manager -> pod wiring -----------------------------------------------------------------
+# Secrets are pulled from Secret Manager by the Secrets Store CSI driver (GCP provider) and synced
+# into a Kubernetes Secret, which the Deployments consume via envFrom/secretKeyRef. No secret value
+# ever appears in this chart or in git. Each entry maps a Secret Manager secret name to the env var
+# the app expects. Provide the secret NAMES here; create the secrets with gcloud (README step 5).
+secretManager:
+  # csi   — pull from Secret Manager via the Secrets Store CSI driver (recommended on GKE).
+  # existingSecret — you manage a Kubernetes Secret out-of-band (e.g. external-secrets operator);
+  #                  set existingSecretName and the chart references it directly.
+  mode: csi
+  existingSecretName: ""
+  # Secret Manager secret names (NOT values). "" disables that mapping (the env var is simply not
+  # set, and the app falls back to its documented default or fail-soft path).
+  secrets:
+    # Postgres control-plane DSN, e.g. postgresql://USER:PASS@127.0.0.1:5432/tally through the
+    # Cloud SQL Auth Proxy sidecar (host 127.0.0.1). Consumed as TALLY_POSTGRES_DSN.
+    postgresDsn: ai-tally-postgres-dsn
+    # ClickHouse password. Consumed as TALLY_CLICKHOUSE_PASSWORD (gateway) and
+    # TALLY_CLICKHOUSE_PASSWORD (web).
+    clickhousePassword: ai-tally-clickhouse-password
+    # Outbound provider keys for model discovery / replay / eval. Optional — the gateway boots
+    # fail-soft without them (CTO-109). Consumed as OPENAI_API_KEY / ANTHROPIC_API_KEY.
+    openaiApiKey: ai-tally-openai-api-key
+    anthropicApiKey: ai-tally-anthropic-api-key
+  # NOTE on Stripe + HMAC: the Stripe webhook *signing secret* is NOT a gateway env var — it is
+  # pasted per-tenant in the dashboard and persisted in Postgres (see db/postgres/0003_*.sql), so
+  # it is protected by protecting Cloud SQL. Per-tenant HMAC user-id keys (CTO-74) live in the
+  # gateway's HmacKeyRegistry, provisioned per-tenant at runtime — also not a deploy-time secret.
+
+# =================================================================================================
+# Gateway tier (FastAPI ingest gateway — infra/gateway)
+# =================================================================================================
+gateway:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: REGION-docker.pkg.dev/PROJECT/ai-tally/gateway
+    pullPolicy: IfNotPresent
+    tag: ""   # defaults to .Chart.AppVersion
+  service:
+    type: ClusterIP
+    port: 8080
+  # Non-secret env (TALLY_*). Secret env is injected from secretManager above. Mirrors the
+  # docker-compose gateway service and infra/gateway/src/gateway/config.py defaults.
+  config:
+    clickhouseDb: default        # the ClickHouse image loads unqualified DDL into `default`
+    clickhouseUser: tally
+    requireApiKey: true          # cloud default: enforce Authorization: Bearer <key>
+    ingestBuffered: false        # flip on to decouple the request edge from ClickHouse (CTO-37)
+    evalJudgeModel: ""           # override TALLY_EVAL_JUDGE_MODEL; "" keeps the app default
+    # Free-form extra TALLY_* pairs merged verbatim into the ConfigMap (rate limits, quotas, etc.).
+    extraEnv: {}
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =================================================================================================
+# Web tier (Next.js dashboard — web/)
+# =================================================================================================
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: REGION-docker.pkg.dev/PROJECT/ai-tally/web
+    pullPolicy: IfNotPresent
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 3000
+  config:
+    # The dashboard queries ClickHouse directly AND calls the gateway. The gateway URL defaults to
+    # the in-cluster Service; leave blank to auto-derive it from the release name.
+    gatewayUrl: ""
+    tenantId: local-dev
+    clickhouseDb: default
+    clickhouseUser: tally
+    dashboardRefreshMs: "5000"   # NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS
+    extraEnv: {}
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits:   { cpu: 500m, memory: 384Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =================================================================================================
+# ClickHouse (telemetry store)
+# =================================================================================================
+# statefulset — run a single-node ClickHouse in-cluster with a PersistentVolume. Fine for staging /
+#               low volume; NOT HA. Applies the same DDL as docker-compose via an initdb ConfigMap
+#               you mount (see README). For production, prefer external ClickHouse Cloud.
+# external    — point the gateway + web at an external ClickHouse HTTP endpoint (e.g. ClickHouse
+#               Cloud). No StatefulSet is rendered.
+clickhouse:
+  mode: external
+  # Used by BOTH modes as the host the app tiers connect to. In statefulset mode this defaults to
+  # the in-cluster Service DNS; in external mode set it to your ClickHouse Cloud host.
+  host: ""
+  httpPort: 8123
+  # URL scheme the web tier uses to reach ClickHouse (TALLY_CLICKHOUSE_URL). Keep "http" for the
+  # in-cluster StatefulSet; set "https" for a TLS endpoint like ClickHouse Cloud (usually port 8443).
+  scheme: http
+  # statefulset-mode knobs (ignored when mode=external).
+  image: clickhouse/clickhouse-server:24.8
+  storage: 50Gi
+  storageClassName: ""   # "" uses the cluster default StorageClass (pd-balanced on GKE)
+  resources:
+    requests: { cpu: "1", memory: 4Gi }
+    limits:   { cpu: "2", memory: 8Gi }
+
+# =================================================================================================
+# Cloud SQL (Postgres control plane) connectivity
+# =================================================================================================
+# The gateway reaches Postgres over the Cloud SQL Auth Proxy running as a sidecar (127.0.0.1:5432),
+# which authenticates via Workload Identity — no DB password on the wire, no public IP required.
+# The DSN itself (with the app-user password) is the Secret Manager `postgresDsn` secret above.
+cloudSql:
+  enabled: true
+  # INSTANCE_CONNECTION_NAME, i.e. PROJECT:REGION:INSTANCE. Required when enabled.
+  instanceConnectionName: ""
+  proxyImage: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4
+
+# =================================================================================================
+# Pod security posture (applied to gateway + web)
+# =================================================================================================
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # Next's standalone server writes a cache dir; keep false for web
+  capabilities:
+    drop:
+      - ALL

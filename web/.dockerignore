@@ -1,0 +1,13 @@
+# Keep the Docker build context small and reproducible. node_modules is reinstalled from the
+# lockfile inside the image; .next is rebuilt. Never ship local env files into the image.
+node_modules
+.next
+.git
+.gitignore
+Dockerfile
+.dockerignore
+npm-debug.log*
+.env
+.env.*
+*.local
+tsconfig.tsbuildinfo

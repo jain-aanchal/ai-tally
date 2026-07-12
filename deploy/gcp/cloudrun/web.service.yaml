@@ -1,0 +1,54 @@
+# ai-tally dashboard (Next.js) on Cloud Run (fully managed).
+#
+# Placeholders to replace before `gcloud run services replace` (see deploy/gcp/README.md):
+#   PROJECT   GCP project id
+#   REGION    e.g. us-central1
+#   TAG       image tag
+#   REPLACE_GATEWAY_URL      the gateway Cloud Run URL (https://ai-tally-gateway-....run.app)
+#   REPLACE_CLICKHOUSE_URL   ClickHouse HTTP endpoint (https://...clickhouse.cloud:8443 or in-VPC)
+#
+# The dashboard queries ClickHouse directly and calls the gateway. Its only secret is the ClickHouse
+# password (pulled from Secret Manager). The runtime SA needs roles/secretmanager.secretAccessor.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ai-tally-web
+  labels:
+    app.kubernetes.io/part-of: ai-tally
+    app.kubernetes.io/component: web
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "6"
+    spec:
+      serviceAccountName: ai-tally-run@PROJECT.iam.gserviceaccount.com
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT/ai-tally/web:TAG
+          ports:
+            # Cloud Run sets PORT=8080; Next's standalone server honours PORT.
+            - containerPort: 8080
+          env:
+            - { name: TALLY_GATEWAY_URL,    value: "REPLACE_GATEWAY_URL" }
+            - { name: TALLY_TENANT_ID,      value: "local-dev" }
+            - { name: TALLY_CLICKHOUSE_URL, value: "REPLACE_CLICKHOUSE_URL" }
+            - { name: TALLY_CLICKHOUSE_DB,  value: "default" }
+            - { name: TALLY_CLICKHOUSE_USER, value: "tally" }
+            - { name: NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS, value: "5000" }
+            - name: TALLY_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ai-tally-clickhouse-password, key: latest }
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet: { path: /, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12

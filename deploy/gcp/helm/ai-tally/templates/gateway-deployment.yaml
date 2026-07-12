@@ -1,0 +1,108 @@
+{{- if .Values.gateway.enabled }}
+{{- $tier := "gateway" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-tally.tierName" (dict "ctx" . "tier" $tier) }}
+  labels:
+    {{- include "ai-tally.labels" . | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 4 }}
+spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
+  replicas: {{ .Values.gateway.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll pods when non-secret config changes so a ConfigMap edit takes effect.
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum }}
+        {{- with .Values.gateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-tally.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ai-tally.tierName" (dict "ctx" . "tier" $tier) }}
+            # DB password + provider keys, synced from Secret Manager (or an existingSecret).
+            - secretRef:
+                name: {{ include "ai-tally.secretName" . }}
+          {{- if eq .Values.secretManager.mode "csi" }}
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+        {{- if .Values.cloudSql.enabled }}
+        # Cloud SQL Auth Proxy sidecar. Authenticates to Cloud SQL via Workload Identity (no DB
+        # password on the wire, no public IP). The gateway's TALLY_POSTGRES_DSN points at
+        # 127.0.0.1:5432, which this proxy tunnels to the instance below.
+        - name: cloud-sql-proxy
+          image: {{ .Values.cloudSql.proxyImage }}
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            {{- if not .Values.cloudSql.instanceConnectionName }}
+            {{- fail "cloudSql.instanceConnectionName is required when cloudSql.enabled" }}
+            {{- end }}
+            - {{ .Values.cloudSql.instanceConnectionName | quote }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+        {{- end }}
+      {{- if eq .Values.secretManager.mode "csi" }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "ai-tally.spcName" . }}
+      {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

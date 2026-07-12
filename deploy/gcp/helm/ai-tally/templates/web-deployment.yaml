@@ -1,0 +1,94 @@
+{{- if .Values.web.enabled }}
+{{- $tier := "web" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-tally.tierName" (dict "ctx" . "tier" $tier) }}
+  labels:
+    {{- include "ai-tally.labels" . | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 4 }}
+spec:
+  {{- if not .Values.web.autoscaling.enabled }}
+  replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/web-configmap.yaml") . | sha256sum }}
+        {{- with .Values.web.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" $tier) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-tally.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: web
+          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.web.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ai-tally.tierName" (dict "ctx" . "tier" $tier) }}
+          env:
+            # The dashboard only needs the ClickHouse password out of the shared Secret — pull just
+            # that key rather than envFrom the whole Secret (keeps provider keys out of the web pod).
+            {{- if .Values.secretManager.secrets.clickhousePassword }}
+            - name: TALLY_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-tally.secretName" . }}
+                  key: TALLY_CLICKHOUSE_PASSWORD
+            {{- end }}
+          {{- if eq .Values.secretManager.mode "csi" }}
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      {{- if eq .Values.secretManager.mode "csi" }}
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "ai-tally.spcName" . }}
+      {{- end }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

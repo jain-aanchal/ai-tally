@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ai-tally
+description: |
+  ai-tally on GKE (CTO-153, epic CTO-148). Deploys the two stateless application tiers — the ingest
+  gateway (FastAPI/uvicorn) and the Next.js dashboard — and wires them to GCP-managed backing stores:
+  Cloud SQL for Postgres (control plane), ClickHouse (in-cluster StatefulSet or an external
+  ClickHouse Cloud endpoint) for telemetry, and GCS for replay blobs (CTO-152).
+
+  Secrets (provider API keys, DB creds) live in Secret Manager and are consumed via Workload
+  Identity + the Secrets Store CSI driver — never as JSON keys on disk or literals in manifests.
+type: application
+# Chart version: bump on any template change. App version tracks the ai-tally release the images
+# were cut from; override per-tier image tags in values.yaml.
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - ai-tally
+  - observability
+  - gke
+  - gcp
+  - clickhouse
+home: https://github.com/jain-aanchal/ai-tally
+sources:
+  - https://github.com/jain-aanchal/ai-tally/tree/main/deploy/gcp

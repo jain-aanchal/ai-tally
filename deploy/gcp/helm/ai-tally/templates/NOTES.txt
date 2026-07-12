@@ -1,0 +1,31 @@
+ai-tally {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+Tiers:
+{{- if .Values.gateway.enabled }}
+  - gateway  {{ include "ai-tally.tierName" (dict "ctx" . "tier" "gateway") }}  (:{{ .Values.gateway.service.port }})
+{{- end }}
+{{- if .Values.web.enabled }}
+  - web      {{ include "ai-tally.tierName" (dict "ctx" . "tier" "web") }}  (:{{ .Values.web.service.port }})
+{{- end }}
+ClickHouse: {{ .Values.clickhouse.mode }} ({{ include "ai-tally.clickhouseHost" . }}:{{ .Values.clickhouse.httpPort }})
+Secrets: {{ .Values.secretManager.mode }}{{ if eq .Values.secretManager.mode "csi" }} (Secret Manager via CSI + Workload Identity){{ end }}
+
+1. Watch the pods come up:
+
+   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+2. Smoke-test the gateway health endpoint:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ai-tally.tierName" (dict "ctx" . "tier" "gateway") }} {{ .Values.gateway.service.port }}:{{ .Values.gateway.service.port }}
+   curl -s localhost:{{ .Values.gateway.service.port }}/healthz    # {"status":"ok"}
+
+3. Open the dashboard:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ai-tally.tierName" (dict "ctx" . "tier" "web") }} {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+   open http://localhost:{{ .Values.web.service.port }}
+
+{{- if not .Values.gcp.serviceAccount }}
+
+WARNING: gcp.serviceAccount is empty — Workload Identity is not wired and Secret Manager access will
+fail. Set gcp.projectId and gcp.serviceAccount and re-run. See deploy/gcp/README.md.
+{{- end }}
