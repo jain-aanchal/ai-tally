@@ -25,6 +25,19 @@ err() { echo "✗ $*" >&2; exit 1; }
 [ -n "${OPENAI_API_KEY:-}" ]    || err "OPENAI_API_KEY is required (export it or put it in ${HERE}/.env)"
 [ -n "${ANTHROPIC_API_KEY:-}" ] || err "ANTHROPIC_API_KEY is required (export it or put it in ${HERE}/.env)"
 
+# CTO-164: Google/Gemini is optional. The picker lists google/* models, but the
+# demo boots on anthropic/openai regardless; if no Google key is present those
+# models just fail on send. Accept either GOOGLE_API_KEY or GEMINI_API_KEY, and
+# normalize to GOOGLE_API_KEY (what @ai-sdk/google reads).
+if [ -z "${GOOGLE_API_KEY:-}" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
+  export GOOGLE_API_KEY="${GEMINI_API_KEY}"
+fi
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+  echo "✓ Google key detected — google/* models (Gemini) enabled in the picker"
+else
+  echo "· No GOOGLE_API_KEY/GEMINI_API_KEY — google/* models will 401 on send (anthropic/openai unaffected)"
+fi
+
 GATEWAY_HEALTH="${GATEWAY_URL%/}/healthz"
 if ! curl -fsS --max-time 3 "${GATEWAY_HEALTH}" >/dev/null; then
   err "ai-tally gateway not reachable at ${GATEWAY_HEALTH}. Run 'make up' from infra/ first."
@@ -65,7 +78,10 @@ if not found:
     sys.exit(0)
 oi = sorted(m.id for m in found if m.provider == "openai")
 an = sorted(m.id for m in found if m.provider == "anthropic")
-print(f"  ✓ lineup refreshed: openai={oi} anthropic={an}")
+# CTO-164: Google discovery only runs when a Google key is present (CTO-149);
+# empty list is expected and fine when GOOGLE_API_KEY/GEMINI_API_KEY is unset.
+go = sorted(m.id for m in found if m.provider == "google")
+print(f"  ✓ lineup refreshed: openai={oi} anthropic={an} google={go}")
 PY
 fi
 

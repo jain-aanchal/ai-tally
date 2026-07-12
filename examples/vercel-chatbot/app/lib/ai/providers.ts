@@ -4,6 +4,7 @@
 // real provider model names here. Real provider is preserved on the span
 // for the dashboard via the existing instrumentation patch.
 import { anthropic } from "@ai-sdk/anthropic";
+import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
 import { customProvider } from "ai";
 import { resolveLatest } from "../resolveModel";
@@ -46,9 +47,19 @@ function resolve(modelId: string) {
   if (modelId.startsWith("openai/")) {
     return openai(modelId.slice("openai/".length));
   }
+  // CTO-164: google/<model> ids route to @ai-sdk/google (Gemini). Needs
+  // GOOGLE_API_KEY or GEMINI_API_KEY at runtime; with neither set the Google
+  // SDK errors on the first call, so the demo boots fine on anthropic/openai
+  // and only Google models fail.
+  if (modelId.startsWith("google/")) {
+    return google(modelId.slice("google/".length));
+  }
   // Legacy / unprefixed ids: keyword-match Claude family, else default.
   if (modelId.includes("claude")) {
     return anthropic(FALLBACK_ANTHROPIC);
+  }
+  if (modelId.includes("gemini")) {
+    return google(modelId);
   }
   return DEFAULT_PROVIDER === "openai"
     ? openai(FALLBACK_OPENAI)

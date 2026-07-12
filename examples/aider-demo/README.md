@@ -21,17 +21,29 @@ see real agent traces in under five minutes.
 3. A provider API key in the environment:
    ```
    export OPENAI_API_KEY=sk-...
-   # or, for the cross-provider variant:
+   # or, for the cross-provider variants:
    export ANTHROPIC_API_KEY=sk-ant-...
+   export GEMINI_API_KEY=...        # (or GOOGLE_API_KEY) for PROVIDER=google
    ```
 
 ## Run it
 
 ```
 cd infra && make aider-demo
-# cross-provider variant:
+# cross-provider variants:
 cd infra && PROVIDER=anthropic make aider-demo
+cd infra && PROVIDER=google make aider-demo    # (PROVIDER=gemini also works)
 ```
+
+**Note on the `google` path:** unlike openai/anthropic, Gemini does **not**
+run through the Go edge-proxy. The proxy is a transparent pass-through built
+for the OpenAI/Anthropic request shape and `Authorization: Bearer` auth;
+Gemini's REST surface differs (LiteLLM's `gemini/*` path posts to
+`generativelanguage.googleapis.com` with the key as a `?key=`/`x-goog-api-key`
+credential). So Aider talks to Gemini **directly**, and `run.sh` still POSTs
+the feature-tagged batch to the gateway (the same side-channel every provider
+uses) so the dashboard gets its rows. Cost enrichment relies on CTO-149 having
+priced `gemini-2.5-flash` in the catalog.
 
 ## What you'll see
 
@@ -91,6 +103,7 @@ cd infra && make aider-demo-stop   # kills the proxy via PID file
 | --- | --- |
 | `ERROR: ai-tally gateway not reachable` | `cd infra && make up && make seed` first |
 | `ERROR: OPENAI_API_KEY not set` | `export OPENAI_API_KEY=…` or pass `PROVIDER=anthropic` |
+| `ERROR: GEMINI_API_KEY (or GOOGLE_API_KEY) not set` | `export GEMINI_API_KEY=…` before `PROVIDER=google make aider-demo` |
 | `ERROR: aider not on PATH` | `pip install aider-chat` |
 | Edge-proxy didn't bind | Check `/tmp/ai-tally-aider-edge-proxy.log` |
 | Dashboard shows "Synthetic preview" | The gateway batch failed — check `make logs` |

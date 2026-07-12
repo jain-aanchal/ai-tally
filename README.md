@@ -7,7 +7,7 @@ Cost-and-value observability for AI products. See what your AI actually costs (a
 Four workflows on one shared data spine:
 
 1. **Agent loop cost visibility.** Why did this run cost 50× median?
-2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks.
+2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks. Google/Gemini is now a first-class priced provider here (CTO-149), not a mock column — Compare ranks it against OpenAI and Anthropic on real cost.
 3. **End-to-end cost.** What does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
 4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
 
@@ -52,13 +52,15 @@ The runbook covers nine end-to-end steps, including the demos that exercise each
 
 | Workflow | Command | What it does |
 |---|---|---|
-| Agent loop + edge proxy | `make aider-demo` | Drives Aider against a fixture repo through the edge proxy |
+| Agent loop + edge proxy | `make aider-demo` | Drives Aider against a fixture repo through the edge proxy (`PROVIDER=anthropic`/`google` for cross-provider variants; Gemini runs direct, see `examples/aider-demo/README.md`) |
 | Business-outcome attribution | `make chatbot-demo` | 50 scripted chat sessions across OpenAI + Anthropic with thumbs-up conversion events |
 | Real revenue via Stripe | RUNNING.md §7 | Verified webhook ingest → `business_events` → `$/conversion` |
 | Replay-backed Compare | RUNNING.md §8 | Opt-in 5% sampling, cross-provider replay with daily budget cap |
 | Pairwise LLM-judge quality | RUNNING.md §9 | Pairwise judge with Wilson 95% CIs on win-rate |
 
-Demos need provider keys exported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+Demos need provider keys exported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. `GOOGLE_API_KEY` / `GEMINI_API_KEY` is optional — the demos run without it, and enable the Google/Gemini models (chatbot picker + `PROVIDER=google make aider-demo`) when present.
+
+Deploying on GCP? See `deploy/gcp/` (CTO-153).
 
 ## Development
 
@@ -85,7 +87,7 @@ cd web && npx vitest run
 
 ## Model auto-discovery
 
-On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU (`claude-3-5-haiku-latest` was the case that prompted this) the next boot picks up the replacement automatically.
+On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and — since CTO-149 — `GOOGLE_API_KEY` / `GEMINI_API_KEY` for Google's model list), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `flash` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU (`claude-3-5-haiku-latest` was the case that prompted this) the next boot picks up the replacement automatically.
 
 Knobs:
 
