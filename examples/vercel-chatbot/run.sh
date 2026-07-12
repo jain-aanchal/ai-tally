@@ -78,7 +78,15 @@ SQL
   echo "✓ Chatbot up (pid $(cat "${PID_FILE}"), log ${LOG_FILE})"
 fi
 
-echo "→ Driving synthetic traffic…"
+# MODE=realistic drives the startup-volume run (~5000 sessions, real LLM spend
+# capped by --max-usd). Default (unset/quick) is the 50-session quick demo. The
+# driver reads MODE from the environment, so just export it for the subprocess.
+export MODE="${MODE:-quick}"
+if [ "${MODE}" = "realistic" ]; then
+  echo "→ Driving REALISTIC-volume synthetic traffic (real LLM spend, capped by --max-usd)…"
+else
+  echo "→ Driving synthetic traffic…"
+fi
 DRIVER_ARGS=()
 if [ $# -gt 0 ] && [ "$1" = "--" ]; then shift; DRIVER_ARGS=("$@"); fi
 # Bash 3.2 (macOS default) under `set -u` rejects "${arr[@]}" for an empty

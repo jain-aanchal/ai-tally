@@ -33,7 +33,10 @@ interface Prompt {
   followups: string[];
 }
 
+type Mode = "quick" | "realistic";
+
 interface Args {
+  mode: Mode;
   sessions: number;
   conversionRate: number;
   provider: "openai" | "anthropic" | "mixed";
@@ -41,10 +44,43 @@ interface Args {
   chatbotUrl: string;
   dryRun: boolean;
   parallel: number;
+  /** Realistic mode: spread sessions over this many minutes (0 = as fast as possible). */
+  windowMin: number;
+  /** Realistic mode: hard cap on estimated live API spend (USD); 0 = no cap. */
+  maxUsd: number;
 }
 
+// ai-tally (CTO-138): realistic-volume mode drives a startup-scale run so a live
+// `make chatbot-demo MODE=realistic` matches the seed story ($52,400/mo) instead
+// of a fraction-of-a-cent quick run. Sessions are tagged across the seed feature
+// mix and conversions fire at per-provider rates from the attribution screenshot.
+const REALISTIC_DEFAULTS = {
+  sessions: 5000,
+  windowMin: 10,
+  maxUsd: 10,
+  parallel: 12,
+};
+
+// Feature mix for realistic mode — share of sessions. Matches the seed fixtures
+// in web/lib/mock.ts. The chatbot route classifies prompts into chatbot.* tags,
+// so we additionally pass these as the run's higher-level feature label.
+const REALISTIC_FEATURE_MIX: { tag: string; share: number }[] = [
+  { tag: "research_agent", share: 0.54 },
+  { tag: "support_triage", share: 0.17 },
+  { tag: "inline_writer", share: 0.12 },
+  { tag: "smart_search", share: 0.1 },
+  { tag: "chatbot", share: 0.07 },
+];
+
+// Per-provider conversion rates (attribution screenshot): 13% openai / 15% anthropic.
+const REALISTIC_CONVERSION = { openai: 0.13, anthropic: 0.15 };
+const REALISTIC_POSITIVE_FEEDBACK = 0.75;
+
 function parseArgs(argv: string[]): Args {
+  const envMode = (process.env.MODE ?? "").toLowerCase();
+  const mode: Mode = envMode === "realistic" ? "realistic" : "quick";
   const defaults: Args = {
+    mode,
     sessions: 50,
     conversionRate: 0.2,
     provider: "mixed",
@@ -52,51 +88,89 @@ function parseArgs(argv: string[]): Args {
     chatbotUrl: process.env.TALLY_CHATBOT_URL ?? "http://localhost:3001",
     dryRun: false,
     parallel: 4,
+    windowMin: 0,
+    maxUsd: 0,
   };
   const out = { ...defaults };
+  // Track whether the operator explicitly set a knob so --mode=realistic can
+  // apply its scaled defaults without clobbering explicit overrides.
+  const explicit = new Set<string>();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = argv[i + 1];
-    switch (a) {
+    const eq = a.indexOf("=");
+    const flag = eq === -1 ? a : a.slice(0, eq);
+    const inlineVal = eq === -1 ? undefined : a.slice(eq + 1);
+    const take = (): string => {
+      if (inlineVal !== undefined) return inlineVal;
+      i++;
+      return next;
+    };
+    switch (flag) {
+      case "--mode": {
+        const v = take().toLowerCase();
+        if (v !== "quick" && v !== "realistic") {
+          throw new Error("--mode must be quick|realistic");
+        }
+        out.mode = v;
+        break;
+      }
       case "--sessions":
-        out.sessions = parseInt(next, 10);
-        i++;
+        out.sessions = parseInt(take(), 10);
+        explicit.add("sessions");
         break;
       case "--conversion-rate":
-        out.conversionRate = parseFloat(next);
-        i++;
+        out.conversionRate = parseFloat(take());
+        explicit.add("conversionRate");
         break;
-      case "--provider":
-        if (next !== "openai" && next !== "anthropic" && next !== "mixed") {
+      case "--provider": {
+        const v = take();
+        if (v !== "openai" && v !== "anthropic" && v !== "mixed") {
           throw new Error("--provider must be openai|anthropic|mixed");
         }
-        out.provider = next;
-        i++;
+        out.provider = v;
         break;
+      }
       case "--seed":
-        out.seed = parseInt(next, 10);
-        i++;
+        out.seed = parseInt(take(), 10);
         break;
       case "--url":
-        out.chatbotUrl = next;
-        i++;
+        out.chatbotUrl = take();
         break;
       case "--dry-run":
         out.dryRun = true;
         break;
       case "--parallel":
-        out.parallel = Math.max(1, parseInt(next, 10));
-        i++;
+        out.parallel = Math.max(1, parseInt(take(), 10));
+        explicit.add("parallel");
+        break;
+      case "--window-min":
+        out.windowMin = Math.max(0, parseFloat(take()));
+        explicit.add("windowMin");
+        break;
+      case "--max-usd":
+        out.maxUsd = Math.max(0, parseFloat(take()));
+        explicit.add("maxUsd");
         break;
       case "--help":
       case "-h":
         console.log(
-          "usage: tsx drive-traffic.ts [--sessions N] [--conversion-rate 0..1] " +
-            "[--provider openai|anthropic|mixed] [--seed N] [--url http://...] [--dry-run] [--parallel N]",
+          "usage: tsx drive-traffic.ts [--mode quick|realistic] [--sessions N] " +
+            "[--conversion-rate 0..1] [--provider openai|anthropic|mixed] [--seed N] " +
+            "[--url http://...] [--dry-run] [--parallel N] [--window-min M] [--max-usd U]\n" +
+            "  quick (default): 50 scripted sessions, ~$0.40.\n" +
+            "  realistic: ~5000 sessions over ~10 min, capped at --max-usd (default $10).",
         );
         process.exit(0);
         break;
     }
+  }
+  // Apply realistic-mode scaled defaults for any knob the operator didn't set.
+  if (out.mode === "realistic") {
+    if (!explicit.has("sessions")) out.sessions = REALISTIC_DEFAULTS.sessions;
+    if (!explicit.has("windowMin")) out.windowMin = REALISTIC_DEFAULTS.windowMin;
+    if (!explicit.has("maxUsd")) out.maxUsd = REALISTIC_DEFAULTS.maxUsd;
+    if (!explicit.has("parallel")) out.parallel = REALISTIC_DEFAULTS.parallel;
   }
   if (!Number.isFinite(out.sessions) || out.sessions <= 0) {
     throw new Error("--sessions must be a positive integer");
@@ -205,16 +279,30 @@ async function postEvent(
   }
 }
 
+function pickFeatureTag(rng: () => number): string {
+  const r = rng();
+  let acc = 0;
+  for (const f of REALISTIC_FEATURE_MIX) {
+    acc += f.share;
+    if (r <= acc) return f.tag;
+  }
+  return REALISTIC_FEATURE_MIX[REALISTIC_FEATURE_MIX.length - 1].tag;
+}
+
 async function runSession(
   args: Args,
   rng: () => number,
   prompts: Prompt[],
   index: number,
 ): Promise<SessionResult> {
+  const realistic = args.mode === "realistic";
   const sessionId = `chatbot-demo-${args.seed}-${index}-${crypto
     .randomBytes(4)
     .toString("hex")}`;
   const prompt = pick(rng, prompts);
+  // Realistic mode labels each session with a seed-mix feature tag; quick mode
+  // keeps the prompt's intrinsic chatbot.* classification.
+  const featureTag = realistic ? pickFeatureTag(rng) : prompt.tag;
   const provider: "openai" | "anthropic" =
     args.provider === "mixed" ? (rng() < 0.5 ? "openai" : "anthropic") : args.provider;
   const turns = 3 + Math.floor(rng() * 6); // 3..8 turns inclusive
@@ -231,7 +319,7 @@ async function runSession(
         messages[t],
         provider,
         t,
-        prompt.tag,
+        featureTag,
       );
       inputTokens += r.inputTokens;
       outputTokens += r.outputTokens;
@@ -264,22 +352,29 @@ async function runSession(
     }
   }
 
-  // ~30% of sessions emit a positive_feedback signal regardless of conversion —
-  // this is what the workflow-4 dashboard counts when filtered by
-  // outcome=positive_feedback.
-  if (rng() < 0.3 && errors === 0) {
+  // positive_feedback signal regardless of conversion — this is what the
+  // workflow-4 dashboard counts when filtered by outcome=positive_feedback.
+  // Quick mode keeps the original ~30%; realistic mode fires ~75% to match the
+  // attribution screenshot.
+  const feedbackRate = realistic ? REALISTIC_POSITIVE_FEEDBACK : 0.3;
+  if (rng() < feedbackRate && errors === 0) {
     try {
-      await postEvent(args, sessionId, "positive_feedback", prompt.tag);
+      await postEvent(args, sessionId, "positive_feedback", featureTag);
     } catch (err) {
       console.warn(`[session ${index}] positive_feedback failed: ${(err as Error).message}`);
     }
   }
 
-  // Hard conversion (monetary) driven off --conversion-rate.
-  const converted = rng() < args.conversionRate && errors === 0;
+  // Hard conversion (monetary). Quick mode uses the flat --conversion-rate;
+  // realistic mode uses per-provider rates (13% openai / 15% anthropic) from
+  // the attribution screenshot.
+  const convThreshold = realistic
+    ? REALISTIC_CONVERSION[provider]
+    : args.conversionRate;
+  const converted = rng() < convThreshold && errors === 0;
   if (converted) {
     try {
-      await postEvent(args, sessionId, "conversion", prompt.tag);
+      await postEvent(args, sessionId, "conversion", featureTag);
     } catch (err) {
       console.warn(`[session ${index}] conversion failed: ${(err as Error).message}`);
     }
@@ -288,7 +383,7 @@ async function runSession(
   return {
     sessionId,
     provider,
-    tag: prompt.tag,
+    tag: featureTag,
     turns: messages.length,
     inputTokens,
     outputTokens,
@@ -298,27 +393,66 @@ async function runSession(
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function runAll(args: Args): Promise<SessionResult[]> {
   const rng = makeRng(args.seed);
   const prompts = loadPrompts();
-  const results: SessionResult[] = new Array(args.sessions);
+  const results: SessionResult[] = [];
   let nextIndex = 0;
+  let spentMicroUsd = 0;
+  let capped = false;
+
+  // Realistic mode paces sessions across a bounded window so the dashboard
+  // shows a live-looking ramp instead of a single instant spike. The delay is
+  // the average gap between session starts given the target session count.
+  const perSessionDelayMs =
+    args.mode === "realistic" && args.windowMin > 0
+      ? (args.windowMin * 60_000) / args.sessions
+      : 0;
+  const maxMicroUsd = args.maxUsd > 0 ? args.maxUsd * 1_000_000 : 0;
+  const t0 = Date.now();
 
   async function worker(): Promise<void> {
     while (true) {
+      // --max-usd cap: stop launching new sessions once the estimated live
+      // spend crosses the cap. Keeps a laptop realistic run bounded (~$5-10).
+      if (maxMicroUsd > 0 && spentMicroUsd >= maxMicroUsd) {
+        capped = true;
+        return;
+      }
       const i = nextIndex++;
       if (i >= args.sessions) return;
-      results[i] = await runSession(args, rng, prompts, i);
-      if ((i + 1) % 10 === 0) {
-        console.log(`  · ${i + 1}/${args.sessions} sessions done`);
+      if (perSessionDelayMs > 0) {
+        // Pace against wall-clock so the whole run spreads across the window
+        // even as workers finish at different speeds.
+        const targetElapsed = i * perSessionDelayMs;
+        const drift = targetElapsed - (Date.now() - t0);
+        if (drift > 0) await sleep(drift);
+      }
+      const r = await runSession(args, rng, prompts, i);
+      results.push(r);
+      spentMicroUsd += r.costMicroUsd;
+      if (results.length % 100 === 0) {
+        console.log(
+          `  · ${results.length} sessions done (est. spend ${fmtUsd(spentMicroUsd)})`,
+        );
       }
     }
   }
 
-  const workers = Array.from({ length: Math.min(args.parallel, args.sessions) }, () =>
-    worker(),
+  const workers = Array.from(
+    { length: Math.min(args.parallel, args.sessions) },
+    () => worker(),
   );
   await Promise.all(workers);
+  if (capped) {
+    console.log(
+      `  · --max-usd cap (${fmtUsd(maxMicroUsd)}) reached — stopped after ${results.length} sessions.`,
+    );
+  }
   return results;
 }
 
@@ -331,11 +465,24 @@ function fmtUsd(micro: number): string {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const t0 = Date.now();
-  console.log(
-    `Driving ${args.sessions} synthetic sessions ` +
-      `(provider=${args.provider}, conversion=${args.conversionRate}, seed=${args.seed})…`,
-  );
-  console.log("  NOTE: these are scripted sessions, not real users.");
+  if (args.mode === "realistic") {
+    console.log(
+      `Driving up to ${args.sessions} synthetic sessions in REALISTIC mode ` +
+        `(provider=${args.provider}, seed=${args.seed}, window=${args.windowMin}min, ` +
+        `max-usd=${args.maxUsd || "∞"})…`,
+    );
+    console.log(
+      "  NOTE: scripted sessions, not real users. This path makes REAL LLM " +
+        "calls — spend is capped by --max-usd. For $0 screenshot data, use the " +
+        "backfill script instead (make chatbot-demo-backfill).",
+    );
+  } else {
+    console.log(
+      `Driving ${args.sessions} synthetic sessions ` +
+        `(provider=${args.provider}, conversion=${args.conversionRate}, seed=${args.seed})…`,
+    );
+    console.log("  NOTE: these are scripted sessions, not real users.");
+  }
 
   const results = await runAll(args);
   const elapsedS = Math.round((Date.now() - t0) / 1000);

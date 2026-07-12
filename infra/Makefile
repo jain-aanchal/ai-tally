@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop chatbot-demo chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -47,10 +47,22 @@ aider-demo-stop: ## Stop the background edge proxy started by aider-demo
 
 CHATBOT_PID := /tmp/ai-tally-chatbot.pid
 
-chatbot-demo: ## Run the Vercel AI chatbot demo (needs OPENAI_API_KEY, ANTHROPIC_API_KEY)
+chatbot-demo: ## Run the Vercel AI chatbot demo (needs OPENAI_API_KEY, ANTHROPIC_API_KEY; pass MODE=realistic for startup volume)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \
 	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
-	@bash ../examples/vercel-chatbot/run.sh
+	@MODE=$(MODE) bash ../examples/vercel-chatbot/run.sh
+
+chatbot-demo-realistic: ## Live realistic-volume run (~5000 sessions/~10min, REAL LLM spend capped ~$10)
+	@$(MAKE) chatbot-demo MODE=realistic
+
+chatbot-demo-backfill: ## $0 backfill — POST 30 days of backdated synthetic spans to match the seed story (no LLM calls, no API keys)
+	@curl -sf http://localhost:8080/healthz >/dev/null || { \
+	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
+	@cd ../examples/vercel-chatbot/app && \
+	  { [ -d node_modules ] || pnpm install --silent --prefer-offline || \
+	    npm install --silent --no-audit --no-fund; } && \
+	  TALLY_GATEWAY_URL="$${TALLY_GATEWAY_URL:-http://localhost:8080/v1/batches}" \
+	  pnpm --silent exec tsx ../scripts/backfill-spans.ts $(BACKFILL_ARGS)
 
 chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-demo
 	@if [ -f $(CHATBOT_PID) ]; then \
