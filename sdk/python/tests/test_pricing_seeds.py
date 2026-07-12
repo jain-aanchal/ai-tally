@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 
 from tally.enrichment import enrich_cost
-from tally.pricing import seed_catalog
+from tally.pricing import PriceType, compute_call_cost_micro_usd, seed_catalog
 from tally.schema import GenAI
 
 AT = date(2026, 6, 1)
@@ -109,6 +109,34 @@ def test_gemini_3_flash_priced() -> None:
 
 def test_gemini_flash_cheaper_than_pro() -> None:
     assert _cost("google", "gemini-2.5-flash") < _cost("google", "gemini-2.5-pro")
+
+
+# --- Vertex AI Vector Search (CTO-151) — Vector cost layer, per-call ----
+
+
+def test_vertex_vector_query_priced() -> None:
+    cost, ver = compute_call_cost_micro_usd(
+        seed_catalog(), "vertex", "query", PriceType.VECTOR_CALL
+    )
+    assert cost == 400
+    assert ver
+
+
+def test_vertex_vector_upsert_priced() -> None:
+    cost, ver = compute_call_cost_micro_usd(
+        seed_catalog(), "vertex", "upsert", PriceType.VECTOR_CALL
+    )
+    assert cost == 200
+    assert ver
+
+
+def test_vertex_node_hours_deferred_not_priced() -> None:
+    # Node-hours are a compute cost deferred to CTO-150 — must not be on the Vector layer.
+    cost, ver = compute_call_cost_micro_usd(
+        seed_catalog(), "vertex", "node-hour", PriceType.VECTOR_CALL
+    )
+    assert cost == 0
+    assert ver == ""
 
 
 # --- Family-classifier intuition ----

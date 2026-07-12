@@ -286,6 +286,23 @@ _VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
     ("pinecone", "upsert", PriceType.VECTOR_CALL, "0.0002"),
     ("weaviate", "query", PriceType.VECTOR_CALL, "0.0003"),
     ("qdrant", "query", PriceType.VECTOR_CALL, "0.00025"),
+    # --- Vertex AI Vector Search (formerly Matching Engine), CTO-151 -------------------------
+    # GCP-native vector provider. Keyed off the operation name (query/upsert) like the other
+    # vector DBs above, so it resolves through the same compute_call_cost_micro_usd path in
+    # record_vector_call (provider="vertex"). Mirrors the CTO-142 span shape — no new wrapper.
+    #
+    # COST SPLIT (important — avoids double-counting):
+    # Vertex Vector Search bills in two parts:
+    #   1. Per-query / serving requests — the online-query request portion. Priced HERE, on the
+    #      Vector cost layer, per call.
+    #   2. Deployed-index node-hours — the compute cost of keeping the index endpoint warm
+    #      (the dominant Vertex Vector Search spend). This is a COMPUTE cost, NOT a per-query
+    #      cost, and is DEFERRED to the GCP Cloud Billing compute connector (CTO-150). It is
+    #      deliberately NOT modeled here so the Vector layer and the future Compute layer do not
+    #      both count node-hours. See CTO-150.
+    # Both rates below are the per-query serving portion only. [unverified at implementation time]
+    ("vertex", "query", PriceType.VECTOR_CALL, "0.0004"),
+    ("vertex", "upsert", PriceType.VECTOR_CALL, "0.0002"),
 ]
 
 
