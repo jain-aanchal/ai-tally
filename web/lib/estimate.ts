@@ -32,7 +32,26 @@ export interface Projection {
   reconcilerLastRunMinutesAgo: number;
 }
 
-export function pctDelta(cur: number, prop: number): number {
+/**
+ * What-if projection returned by `POST /api/estimate` (CTO-128). Same shape as {@link Projection}
+ * except the `proposed` cost/latency fields may be `null`: when fewer than the grounding floor of
+ * samples back the estimate, the route returns `null` rather than fabricate a number, and the page
+ * renders `—`. `groundedSamples` carries how many replayed samples actually grounded it.
+ */
+export interface WhatIfProjection extends Omit<Projection, "proposed"> {
+  proposed: {
+    monthlyCostMicroUsd: MicroUSD | null;
+    p99CostMicroUsd: MicroUSD | null;
+    meanLatencyMs: number | null;
+  };
+  candidate: { provider: string; model: string };
+  systemPromptOverride?: string;
+  groundedSamples: number;
+  replay_source: "replay" | "mock";
+}
+
+export function pctDelta(cur: number, prop: number | null): number | null {
+  if (prop === null) return null;
   if (cur === 0) return 0;
   return (prop - cur) / cur;
 }
