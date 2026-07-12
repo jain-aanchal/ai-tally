@@ -3,8 +3,20 @@
 // (deepseek/, moonshotai/, openai/gpt-oss-*, xai/) all became unreachable —
 // the picker would happily select them and every send would 404. Listing the
 // real OpenAI + Anthropic models we route through @ai-sdk/* keeps the UI
-// honest. CTO-109 will replace this with a runtime fetch of the live model
-// list per provider.
+// honest.
+//
+// CTO-147: the OpenAI entries used to pin `gpt-4o` / `gpt-4o-mini`, which the
+// provider has since retired — `make chatbot-demo` 404'd on every OpenAI send.
+// They're now `gpt-5` / `gpt-5-mini` (both priced in tally.pricing.seed_catalog,
+// so dashboard cost stays non-zero). run.sh refreshes .tally/models.json on each
+// launch (TALLY_MODELS_REFRESH=1) so operators see the live lineup logged and
+// providers.ts's resolveLatest() fallbacks track the current cheapest in-family
+// id. This picker list is still hardcoded (the source of truth for the UI);
+// wiring it to read the cache dynamically without rearchitecting the Vercel
+// template's model picker is the CTO-147 follow-up. Every id below MUST exist in
+// seed_catalog() or its cost silently drops to $0.
+//
+// CTO-109 owns the gateway/SDK discovery that writes the cache.
 export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-5";
 
 export const titleModel = {
@@ -53,16 +65,16 @@ export const chatModels: ChatModel[] = [
     description: "Anthropic's most capable model — slower, pricier",
   },
   {
-    id: "openai/gpt-4o-mini",
-    name: "GPT-4o mini",
+    id: "openai/gpt-5-mini",
+    name: "GPT-5 mini",
     provider: "openai",
     description: "OpenAI cheap-and-fast — needs OPENAI_API_KEY with credit",
   },
   {
-    id: "openai/gpt-4o",
-    name: "GPT-4o",
+    id: "openai/gpt-5",
+    name: "GPT-5",
     provider: "openai",
-    description: "OpenAI flagship multimodal — needs OPENAI_API_KEY with credit",
+    description: "OpenAI flagship — needs OPENAI_API_KEY with credit",
   },
 ];
 
