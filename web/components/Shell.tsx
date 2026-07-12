@@ -9,6 +9,7 @@ const NAV: { label: string; href: string }[] = [
   { label: "Agents", href: "/agents" },
   { label: "Compare", href: "/compare" },
   { label: "Attribution", href: "/attribution" },
+  { label: "Unit Economics", href: "/unit-economics" },
   { label: "Connectors", href: "/connectors" },
   // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
   //   - /settings        — empty shell, no real settings wired
