@@ -8,8 +8,12 @@
 // CTO-115: the `current` row's `latencyP95Ms` and `errorRate` are now derived from live
 // otel_spans over the same 7-day window the cost query uses (see queryCurrentModel in
 // clickhouse.ts). They carry `null` when the live window has fewer than 50 spans, and the
-// page renders "—" in that case. The candidate rows keep numeric mocks until per-candidate
-// CTO-113-extension lands.
+// page renders "—" in that case.
+//
+// CTO-123: candidate rows' `latencyP95Ms` / `errorRate` are now also grounded in real
+// per-candidate replay (p95 latency + error rate over the replayed responses), with the same
+// honest-null floor (null below 50 replayed responses → "—"). The numeric values on the mock
+// candidates below are used only by the unreachable-gateway rescaled-mock fallback path.
 //
 // CTO-114: `qualityScore` is now `number | null`. Non-null only when a pairwise-LLM-judge
 // eval pass has run and judged >= 10 samples for that candidate; the value is the
@@ -39,8 +43,8 @@ export interface CandidateMetrics {
   qualityCi?: { lo: number; hi: number };
   /**
    * p95 latency in milliseconds. `null` on the `current` row when the live 7-day window has
-   * fewer than 50 spans (rendered as "—" — CTO-115). Candidate rows keep numeric mocks until
-   * per-candidate replay latency lands.
+   * fewer than 50 spans, and on candidate rows when fewer than 50 responses were replayed
+   * (rendered as "—" — CTO-115 / CTO-123).
    */
   latencyP95Ms: number | null;
   /** 0..1. `null` on the `current` row under the same low-sample suppression rule (CTO-115). */

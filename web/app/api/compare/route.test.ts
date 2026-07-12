@@ -135,6 +135,65 @@ describe("/api/compare", () => {
     expect(body.diagnostics.contextFidelity).toBe(
       "resolved-context replay (no live retrieval)",
     );
+    // CTO-123: per-candidate p95 latency + error rate come straight from the projection
+    // (both candidates have >= 50 replayed responses), not a borrowed mock.
+    expect(haiku.latencyP95Ms).toBe(1500);
+    expect(haiku.errorRate).toBeCloseTo(0.01, 6);
+  });
+
+  // CTO-123: a candidate with fewer than 50 replayed responses gets null latency/error —
+  // the same honest-null floor the `current` row uses (CTO-115) — so the page renders "—"
+  // rather than a noisy number or a borrowed mock.
+  it("CTO-123: nulls per-candidate latency/error below the 50-replay floor", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 49,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 49, // below the 50-replay floor
+          excluded_budget_count: 0,
+        },
+        {
+          provider: "openai",
+          model: "gpt-5-mini",
+          projected_monthly_cost_micro_usd: 4_000_000,
+          p50_latency_ms: 900,
+          p95_latency_ms: 1700,
+          error_rate: 0.02,
+          samples_replayed: 50, // exactly at the floor — keeps real numbers
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
+    const mini = body.candidates.find((c: { model: string }) => c.model === "gpt-5-mini");
+    // Below the floor → honest null (page renders "—"). Cost is still real (separate rule).
+    expect(haiku.latencyP95Ms).toBeNull();
+    expect(haiku.errorRate).toBeNull();
+    expect(haiku.monthlyCostMicroUsd).toBe(3_000_000);
+    // At the floor → real numbers pass through.
+    expect(mini.latencyP95Ms).toBe(1700);
+    expect(mini.errorRate).toBeCloseTo(0.02, 6);
   });
 
   it("drops the current model from replay candidates to avoid model-vs-itself comparisons", async () => {
