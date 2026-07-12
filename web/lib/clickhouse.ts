@@ -1365,10 +1365,17 @@ const _replayCache = new Map<string, { at: number; data: ReplayProjection | null
 // Default candidate list when the caller doesn't override. Models come from the SDK's expanded
 // catalog (CTO-106) — picked to mirror the existing mock so the dashboard's switcher looks the
 // same when replay is active.
+//
+// CTO-166: Google/Gemini is a first-class priced provider (CTO-149), so the gemini candidate now
+// goes through the SAME /v1/replay + /v1/eval path as anthropic/openai — no provider allowlist.
+// It was previously absent here, which meant the gemini-3-flash row never got real replay/eval
+// data and stayed stuck on the compare.ts mock fallback. Adding it is the whole fix: the route
+// and the gateway clients are already provider-generic.
 const DEFAULT_CANDIDATES = [
   { provider: "anthropic", model: "claude-haiku-4-5" },
   { provider: "openai", model: "gpt-5-mini" },
   { provider: "openai", model: "gpt-4o-mini" },
+  { provider: "google", model: "gemini-3-flash" },
 ];
 
 /**
