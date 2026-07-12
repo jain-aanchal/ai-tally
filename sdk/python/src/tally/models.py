@@ -15,7 +15,8 @@ Discovery flow (see :func:`discover_models`):
 The SDK is dep-light (no ``httpx``/``requests``), so this module uses ``urllib.request``
 just like ``examples/aider-demo/_emit_batch.py``.
 
-API keys come from ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY``. They are never logged.
+API keys come from ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``GOOGLE_API_KEY`` (or
+``GEMINI_API_KEY``). They are never logged.
 
 Env overrides:
     ``TALLY_MODELS_REFRESH=1``      — bypass the cache TTL, always fetch live.
@@ -48,7 +49,7 @@ DEFAULT_CACHE_PATH = Path(".tally/models.json")
 class ModelInfo:
     """A single model entry as returned by a provider's ``/v1/models`` endpoint."""
 
-    provider: str  # "openai" | "anthropic"
+    provider: str  # "openai" | "anthropic" | "google"
     id: str  # canonical id, e.g. "claude-sonnet-4-5" or "gpt-4o-mini"
     family: str  # see classify_family()
     created_at: datetime | None
@@ -83,6 +84,11 @@ _FAMILY_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sonnet", re.I), "sonnet"),
     (re.compile(r"opus", re.I), "opus"),
     (re.compile(r"(text-embedding|embedding)", re.I), "embedding"),
+    # Google Gemini families (CTO-149). "flash" is the cheap/fast tier, "pro" the
+    # flagship. These sit ahead of "mini"/flagship so a Gemini id never lands in an
+    # OpenAI-shaped bucket.
+    (re.compile(r"flash", re.I), "flash"),
+    (re.compile(r"gemini.*pro|pro.*gemini", re.I), "pro"),
     (re.compile(r"mini", re.I), "mini"),
     (re.compile(r"^gpt-4o(?!-mini)", re.I), "flagship"),
     (re.compile(r"^gpt-5(?!-mini)", re.I), "flagship"),
@@ -180,6 +186,44 @@ def fetch_anthropic_models(api_key: str, *, timeout: float = 5.0) -> list[ModelI
     return out
 
 
+def fetch_google_models(api_key: str, *, timeout: float = 5.0) -> list[ModelInfo]:
+    """Hit Google's Gemini ``GET /v1beta/models`` and return the parsed lineup.
+
+    The Gemini API returns ``{"models": [{"name": "models/gemini-2.5-flash", ...}]}`` — the
+    id lives under ``name`` with a ``models/`` prefix that we strip to the bare id (so it
+    matches the catalog + Compare ``gemini-*`` slugs). The key is passed as the ``?key=``
+    query param (Gemini's convention), not a bearer header. There's no per-model created/
+    deprecated timestamp in the list response, so both are left ``None``.
+
+    Parsing is deliberately tolerant: the Vertex/Gemini list shape has shifted across API
+    versions, so anything without a usable id is skipped rather than raising.
+    """
+    payload = _http_get_json(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+        headers={},
+        timeout=timeout,
+    )
+    out: list[ModelInfo] = []
+    for row in payload.get("models", []):
+        raw_id = row.get("name") or row.get("id")
+        if not raw_id or not isinstance(raw_id, str):
+            continue
+        # "models/gemini-2.5-flash" -> "gemini-2.5-flash"
+        model_id = raw_id.split("/", 1)[-1] if raw_id.startswith("models/") else raw_id
+        if not model_id:
+            continue
+        out.append(
+            ModelInfo(
+                provider="google",
+                id=model_id,
+                family=classify_family(model_id),
+                created_at=None,
+                deprecated_at=None,
+            )
+        )
+    return out
+
+
 def save_cache(models: list[ModelInfo], path: Path = DEFAULT_CACHE_PATH) -> None:
     """Persist the discovered list to ``path`` (creating parent dirs)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +304,7 @@ def discover_models(
     cache_path: Path = DEFAULT_CACHE_PATH,
     openai_api_key: str | None = None,
     anthropic_api_key: str | None = None,
+    google_api_key: str | None = None,
     timeout: float = 5.0,
 ) -> list[ModelInfo]:
     """Boot-time discovery entry point. Fail-soft on every error path.
@@ -288,10 +333,14 @@ def discover_models(
 
     openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
     anthropic_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+    google_key = (
+        google_api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    )
 
     discovered: list[ModelInfo] = []
     openai_err: Exception | None = None
     anthropic_err: Exception | None = None
+    google_err: Exception | None = None
 
     if openai_key:
         try:
@@ -311,6 +360,20 @@ def discover_models(
     else:
         logger.info("models: ANTHROPIC_API_KEY not set — skipping anthropic discovery")
 
+    if google_key:
+        try:
+            discovered.extend(fetch_google_models(google_key, timeout=timeout))
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            google_err = exc
+            logger.warning("models: google fetch failed: %s", exc)
+        except (KeyError, TypeError, ValueError) as exc:
+            # Defensive: the Gemini/Vertex list shape has drifted across versions.
+            # A malformed body should skip Google, not crash discovery.
+            google_err = exc
+            logger.warning("models: google parse failed: %s", exc)
+    else:
+        logger.info("models: GOOGLE_API_KEY/GEMINI_API_KEY not set — skipping google discovery")
+
     if discovered:
         try:
             save_cache(discovered, cache_path)
@@ -324,17 +387,21 @@ def discover_models(
     stale = _load_unchecked(cache_path)
     if stale is not None:
         logger.warning(
-            "models: live fetch failed (openai=%s anthropic=%s) — using stale cache (%d entries)",
+            "models: live fetch failed (openai=%s anthropic=%s google=%s) — "
+            "using stale cache (%d entries)",
             openai_err,
             anthropic_err,
+            google_err,
             len(stale),
         )
         return stale
 
     logger.warning(
-        "models: no live data and no cache (openai=%s anthropic=%s) — booting with empty list",
+        "models: no live data and no cache (openai=%s anthropic=%s google=%s) — "
+        "booting with empty list",
         openai_err,
         anthropic_err,
+        google_err,
     )
     return []
 
@@ -342,7 +409,8 @@ def discover_models(
 def _log_summary(models: list[ModelInfo]) -> None:
     openai_ids = sorted(m.id for m in models if m.provider == "openai")
     anth_ids = sorted(m.id for m in models if m.provider == "anthropic")
-    logger.info("models: openai=%s anthropic=%s", openai_ids, anth_ids)
+    google_ids = sorted(m.id for m in models if m.provider == "google")
+    logger.info("models: openai=%s anthropic=%s google=%s", openai_ids, anth_ids, google_ids)
 
 
 __all__ = [
@@ -350,6 +418,7 @@ __all__ = [
     "classify_family",
     "fetch_openai_models",
     "fetch_anthropic_models",
+    "fetch_google_models",
     "save_cache",
     "load_cached",
     "latest",

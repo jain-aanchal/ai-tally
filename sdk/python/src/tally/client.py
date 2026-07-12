@@ -155,6 +155,13 @@ class TallyClient:
     ) -> LlmCallResult:
         """Record an LLM call end-to-end. Never raises.
 
+        ``provider`` is a free-form string used verbatim as ``gen_ai.system`` and as the
+        catalog lookup key — there is no provider allowlist, so any provider the catalog
+        prices (``"openai"``, ``"anthropic"``, ``"google"``, ...) works. Gemini / Vertex AI
+        callers pass ``provider="google"`` and map the Google usage fields onto ``Usage``:
+        ``promptTokenCount`` -> ``input_tokens``, ``candidatesTokenCount`` -> ``output_tokens``,
+        ``cachedContentTokenCount`` -> ``cached_input_tokens`` (CTO-149).
+
         Steps (all inside the safety boundary):
           1. read trace context (note a drop if no active trace),
           2. count the trace for billing at HEAD (before sampling),
