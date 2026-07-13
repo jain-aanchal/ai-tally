@@ -104,16 +104,16 @@ export default async function UnitEconomicsPage() {
             <thead className="text-xs uppercase text-muted">
               <tr>
                 <th className="py-1 text-left font-medium">Period</th>
-                <th className="py-1 text-right font-medium">Marketing spend</th>
-                <th className="py-1 text-right font-medium">Sales spend</th>
-                <th className="py-1 text-right font-medium">New (total)</th>
-                <th className="py-1 text-right font-medium">New (paid)</th>
-                <th className="py-1 text-right font-medium">ARPA</th>
-                <th className="py-1 text-right font-medium">Gross margin</th>
-                <th className="py-1 text-right font-medium">Blended CAC</th>
-                <th className="py-1 text-right font-medium">Paid CAC</th>
-                <th className="py-1 text-right font-medium">Payback</th>
-                <th className="py-1 text-right font-medium">LTV : CAC</th>
+                <th className="py-1 pl-3 text-right font-medium">Marketing spend</th>
+                <th className="py-1 pl-3 text-right font-medium">Sales spend</th>
+                <th className="py-1 pl-3 text-right font-medium">New (total)</th>
+                <th className="py-1 pl-3 text-right font-medium">New (paid)</th>
+                <th className="py-1 pl-3 text-right font-medium">ARPA</th>
+                <th className="py-1 pl-3 text-right font-medium">Gross margin</th>
+                <th className="py-1 pl-3 text-right font-medium">Blended CAC</th>
+                <th className="py-1 pl-3 text-right font-medium">Paid CAC</th>
+                <th className="py-1 pl-3 text-right font-medium">Payback</th>
+                <th className="py-1 pl-3 text-right font-medium">LTV : CAC</th>
               </tr>
             </thead>
             <tbody>
@@ -140,16 +140,16 @@ export default async function UnitEconomicsPage() {
                         </span>
                       )}
                     </td>
-                    <td className="py-2 text-right tabular-nums">{formatUSD(p.paidSpendMicroUsd + p.contentSpendMicroUsd)}</td>
-                    <td className="py-2 text-right tabular-nums">{formatUSD(p.salesSpendMicroUsd)}</td>
-                    <td className="py-2 text-right tabular-nums">{p.newCustomersTotal.toLocaleString()}</td>
-                    <td className="py-2 text-right tabular-nums">{p.newCustomersPaid.toLocaleString()}</td>
-                    <td className="py-2 text-right tabular-nums">{econ ? formatUSD(econ.arpaMicroUsd) : DASH}</td>
-                    <td className="py-2 text-right tabular-nums">{econ ? fmtPct(econ.grossMarginPct) : DASH}</td>
-                    <td className="py-2 text-right tabular-nums">{fmtMoney(blendedCac(p))}</td>
-                    <td className="py-2 text-right tabular-nums">{fmtMoney(marketingCac(p))}</td>
-                    <td className="py-2 text-right tabular-nums">{fmtMonths(paybackMonths(loadedRow, m))}</td>
-                    <td className={`py-2 text-right tabular-nums ${bandText(bandRow)}`}>{fmtRatio(ratioRow)}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{formatUSD(p.paidSpendMicroUsd + p.contentSpendMicroUsd)}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{formatUSD(p.salesSpendMicroUsd)}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{p.newCustomersTotal.toLocaleString()}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{p.newCustomersPaid.toLocaleString()}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{econ ? formatUSD(econ.arpaMicroUsd) : DASH}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{econ ? fmtPct(econ.grossMarginPct) : DASH}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{fmtMoney(blendedCac(p))}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{fmtMoney(marketingCac(p))}</td>
+                    <td className="py-2 pl-3 text-right tabular-nums">{fmtMonths(paybackMonths(loadedRow, m))}</td>
+                    <td className={`py-2 pl-3 text-right tabular-nums ${bandText(bandRow)}`}>{fmtRatio(ratioRow)}</td>
                   </tr>
                 );
               })}
