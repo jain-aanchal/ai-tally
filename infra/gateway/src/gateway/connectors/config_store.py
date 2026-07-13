@@ -12,12 +12,14 @@ recorder contract — it just updates ``last_run_at`` / ``last_status`` on the c
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 
 from gateway.config import Settings
 from gateway.connectors.base import ConnectorConfig
+from gateway.connectors.egress import EgressConfig
 
 _ALLOWED_STATUSES = frozenset({"success", "partial", "failed"})
 
@@ -84,3 +86,106 @@ class TenantComputeConfigStore:
                 params,
             )
             conn.commit()
+
+
+class TenantEgressConfigStore:
+    """Postgres reader/recorder over ``tenant_egress_config`` (CTO-144).
+
+    Egress differs from compute in ONE way at the control plane: a tenant may configure MULTIPLE
+    egress providers (Vercel + Cloudflare + AWS), so the table's PK is ``(tenant_id, egress_provider)``
+    and :meth:`load_configs` returns a LIST (one :class:`EgressConfig` per provider). Running the
+    :class:`gateway.connectors.egress.EgressCostConnector` once per returned config is what makes the
+    providers sum without double-counting — each provider keys a distinct synthetic span id.
+
+    ``record_run`` matches the ``RunRecorder`` protocol the base connector calls through, and is
+    scoped to a single provider (the connector runs one provider at a time).
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._dsn = settings.postgres_dsn
+
+    def load_configs(self, tenant_id: str) -> list[EgressConfig]:
+        """Return every egress provider configured for the tenant (empty list if none).
+
+        An empty list means "egress connector not enabled" — the connector skips the tenant, keeping
+        the migration additive.
+        """
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, egress_provider, credentials_ref, resource_id, usd_per_gb
+                FROM tenant_egress_config
+                WHERE tenant_id = %s
+                ORDER BY egress_provider
+                """,
+                (tenant_id,),
+            )
+            rows = cur.fetchall()
+        configs: list[EgressConfig] = []
+        for row in rows:
+            usd_per_gb = row[4]
+            configs.append(
+                EgressConfig(
+                    tenant_id=str(row[0]),
+                    cloud_provider=str(row[1]),
+                    credentials_ref=str(row[2]),
+                    resource_id=str(row[3] or ""),
+                    usd_per_gb=Decimal(str(usd_per_gb)) if usd_per_gb is not None else None,
+                )
+            )
+        return configs
+
+    def load_config(self, tenant_id: str, provider: str) -> EgressConfig | None:
+        """Return a single tenant+provider egress config, or ``None`` if not configured."""
+        for config in self.load_configs(tenant_id):
+            if config.cloud_provider == provider:
+                return config
+        return None
+
+    def recorder_for(self, provider: str) -> _ProviderScopedRecorder:
+        """A :class:`RunRecorder` bound to one ``(tenant, provider)`` egress row.
+
+        The base connector runs a single provider per instance and calls ``record_run`` with its
+        ``operation`` (``'egress'``), which does not identify the provider. Binding the provider at
+        recorder construction keeps run-status per-provider without changing the reused base contract.
+        """
+        return _ProviderScopedRecorder(self, provider)
+
+    def record_provider_run(self, tenant_id: str, provider: str, status: str) -> None:
+        """Stamp ``last_run_at`` / ``last_status`` on the tenant's ``(tenant, provider)`` egress row."""
+        if status not in _ALLOWED_STATUSES:
+            raise ValueError(f"unknown status '{status}'")
+        params: tuple[Any, ...] = (status, tenant_id, provider)
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tenant_egress_config
+                SET last_run_at = now(), last_status = %s
+                WHERE tenant_id = %s AND egress_provider = %s
+                """,
+                params,
+            )
+            conn.commit()
+
+
+class _ProviderScopedRecorder:
+    """Adapts :class:`TenantEgressConfigStore` to the ``RunRecorder`` protocol for ONE provider.
+
+    The base connector calls ``record_run(tenant, connector_id, status)`` with ``connector_id`` set
+    to its ``operation`` (``'egress'``); this adapter ignores that and stamps the pre-bound provider's
+    row, so multi-provider tenants keep independent run status.
+    """
+
+    def __init__(self, store: TenantEgressConfigStore, provider: str) -> None:
+        self._store = store
+        self._provider = provider
+
+    def record_run(
+        self,
+        tenant_id: str,
+        connector_id: str,  # noqa: ARG002 - always 'egress'; provider is bound at construction
+        status: str,
+        *,
+        error_message: str | None = None,  # noqa: ARG002 - not persisted on the config row (v1)
+    ) -> None:
+        self._store.record_provider_run(tenant_id, self._provider, status)

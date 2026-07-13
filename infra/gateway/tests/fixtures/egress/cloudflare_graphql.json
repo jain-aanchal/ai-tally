@@ -1,0 +1,20 @@
+{
+  "data": {
+    "viewer": {
+      "zones": [
+        {
+          "httpRequests1dGroups": [
+            {"dimensions": {"date": "2026-07-01"}, "sum": {"bytes": 5368709120}},
+            {"dimensions": {"date": "2026-07-02"}, "sum": {"bytes": 21474836480}},
+            {"dimensions": {"date": "2026-07-03"}, "sum": {"bytes": 0}}
+          ]
+        },
+        {
+          "httpRequests1dGroups": [
+            {"dimensions": {"date": "2026-07-01"}, "sum": {"bytes": 5368709120}}
+          ]
+        }
+      ]
+    }
+  }
+}
