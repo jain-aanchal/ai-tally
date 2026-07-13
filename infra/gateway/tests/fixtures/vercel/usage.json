@@ -1,0 +1,10 @@
+{
+  "items": [
+    {"name": "Function Invocations", "type": "function_invocations", "date": "2026-07-01", "amount": "2.00", "unit": "USD"},
+    {"name": "Function Duration (GB-Hours)", "type": "function_duration", "date": "2026-07-01", "amount": "3.50", "unit": "USD"},
+    {"name": "Function Duration (GB-Hours)", "type": "function_duration", "date": "2026-07-02", "amount": "4.00", "unit": "USD"},
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-01", "amount": "1.25", "unit": "USD"},
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-02", "amount": "6.25", "unit": "USD"},
+    {"name": "Function Invocations", "type": "function_invocations", "date": "2026-07-03", "amount": "0", "unit": "USD"}
+  ]
+}
