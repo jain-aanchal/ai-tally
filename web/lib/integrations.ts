@@ -25,10 +25,10 @@ export interface IntegrationDef {
 }
 
 /**
- * The third-party integrations we surface cards for. Stripe is wired today (CTO-110 webhook ⇒
- * record_run); Segment, HubSpot, and Pendo are placeholders that will light up as their workers
- * land and call record_run. Order is deliberate — Stripe first because it's the only one with
- * real data flowing on day one.
+ * The third-party integrations we surface cards for. Each is wired to a gateway worker that calls
+ * record_run per cycle: Stripe (CTO-110 webhook), Segment / HubSpot / Pendo ingest workers
+ * (CTO-127). A card only lights up once its worker has recorded a run for the tenant — until then
+ * it stays "not-connected", the honest default. Order is deliberate — Stripe first.
  */
 export const INTEGRATIONS: IntegrationDef[] = [
   {
