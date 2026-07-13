@@ -98,6 +98,11 @@ from gateway.tenant_guardrails import (
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
 from gateway.tenant_stripe import TenantStripeStore
+from gateway.tenant_unit_economics import (
+    TenantUnitEconomicsStore,
+    UnitEconomicsConfigError,
+    UnitEconomicsConfigInput,
+)
 from gateway.validation import SpanValidator, span_item_id
 
 from tally.hmac_keys import HmacKeyRegistry
@@ -159,6 +164,9 @@ async def lifespan(app: FastAPI):
     app.state.reconciliation = ReconciliationStore(settings)
     # Per-tenant monthly CAC inputs (CTO-111): finance fills serially, locked when next month opens.
     app.state.tenant_cac = TenantCacStore(settings)
+    # Per-tenant LTV/CAC band thresholds (CTO-126): overrides the hardcoded B2B-SaaS defaults the
+    # dashboard's ltvCacBand/paybackBand classifiers use. A tenant with no row keeps the defaults.
+    app.state.tenant_unit_economics = TenantUnitEconomicsStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -1075,6 +1083,62 @@ def download_tenant_cac_template(
         csv_template(),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="cac_template.csv"'},
+    )
+
+
+@app.get("/v1/tenant/unit-economics/config")
+def get_tenant_unit_economics_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """LTV/CAC band thresholds for the caller's tenant (CTO-126).
+
+    Returns ``config: null`` when the tenant has no row — the web classify helpers then fall back to
+    the hardcoded B2B-SaaS defaults. Same per-tenant auth as the CAC route.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantUnitEconomicsStore = app.state.tenant_unit_economics
+    config = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "config": config.as_dict() if config else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/unit-economics/config")
+async def upsert_tenant_unit_economics_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert the tenant's LTV/CAC band thresholds. Idempotent on ``change_id`` (CTO-126).
+
+    Body: ``{ltv_cac_green_threshold, ltv_cac_yellow_threshold, payback_months_green,
+    payback_months_yellow, change_id, updated_by?}``. Replaying the same change_id is a no-op
+    (returns the existing config unchanged). Rejects inverted bands (422).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    change_id = body.get("change_id")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    try:
+        config_input = UnitEconomicsConfigInput.from_json(body)
+        config = app.state.tenant_unit_economics.upsert(
+            tenant_id,
+            config_input,
+            change_id=change_id,
+            actor=body.get("updated_by"),
+        )
+    except UnitEconomicsConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200
     )
 
 

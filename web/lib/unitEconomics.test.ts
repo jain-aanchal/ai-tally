@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CacPeriod } from "./cac";
 import {
+  DEFAULT_THRESHOLDS,
   blendedCac,
   costPerUser,
   fullyLoadedCac,
@@ -12,7 +13,9 @@ import {
   marginPct,
   marginPerUser,
   marketingCac,
+  paybackBand,
   paybackMonths,
+  resolveThresholds,
   valuePerUser,
 } from "./unitEconomics";
 
@@ -131,5 +134,52 @@ describe("LTV / CAC", () => {
     expect(ltvCacBand(1.0)).toBe("yellow");
     expect(ltvCacBand(0.5)).toBe("red");
     expect(ltvCacBand(null)).toBe("unknown");
+  });
+});
+
+describe("configurable band thresholds (CTO-126)", () => {
+  it("resolveThresholds falls back to defaults when no override row", () => {
+    expect(resolveThresholds(null)).toEqual(DEFAULT_THRESHOLDS);
+    expect(resolveThresholds(undefined)).toEqual(DEFAULT_THRESHOLDS);
+  });
+
+  it("resolveThresholds layers partial overrides ON TOP of defaults", () => {
+    const resolved = resolveThresholds({ ltvCacGreen: 5.0 });
+    expect(resolved.ltvCacGreen).toBe(5.0); // overridden
+    expect(resolved.ltvCacYellow).toBe(DEFAULT_THRESHOLDS.ltvCacYellow); // default fallback
+    expect(resolved.paybackGreen).toBe(DEFAULT_THRESHOLDS.paybackGreen);
+    expect(resolved.paybackYellow).toBe(DEFAULT_THRESHOLDS.paybackYellow);
+  });
+
+  it("null fields in an override fall back to the default", () => {
+    const resolved = resolveThresholds({ ltvCacGreen: null, paybackGreen: 6 });
+    expect(resolved.ltvCacGreen).toBe(DEFAULT_THRESHOLDS.ltvCacGreen);
+    expect(resolved.paybackGreen).toBe(6);
+  });
+
+  it("ltvCacBand applies a tenant override (green now needs >5)", () => {
+    const t = resolveThresholds({ ltvCacGreen: 5.0, ltvCacYellow: 2.0 });
+    // 3.5 was green under defaults; with the override it's only yellow.
+    expect(ltvCacBand(3.5, t)).toBe("yellow");
+    expect(ltvCacBand(3.5)).toBe("green"); // default arg unchanged (fallback)
+    expect(ltvCacBand(6.0, t)).toBe("green");
+    expect(ltvCacBand(1.5, t)).toBe("red"); // below the 2.0 yellow cutoff
+  });
+
+  it("paybackBand: lower is healthier; defaults are 12/18", () => {
+    expect(paybackBand(10)).toBe("green");
+    expect(paybackBand(12)).toBe("green");
+    expect(paybackBand(15)).toBe("yellow");
+    expect(paybackBand(18)).toBe("yellow");
+    expect(paybackBand(24)).toBe("red");
+    expect(paybackBand(null)).toBe("unknown");
+  });
+
+  it("paybackBand applies a tenant override and defaults remain the fallback", () => {
+    const t = resolveThresholds({ paybackGreen: 6, paybackYellow: 10 });
+    expect(paybackBand(8, t)).toBe("yellow"); // was green under defaults
+    expect(paybackBand(8)).toBe("green"); // default arg fallback
+    expect(paybackBand(5, t)).toBe("green");
+    expect(paybackBand(12, t)).toBe("red");
   });
 });

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Unit Economics page (CTO-121): renders CAC flavors / payback / LTV from the already-wired libs
-// (web/lib/cac.ts + web/lib/unitEconomics.ts). Read-only. Band colors come from the lib's
-// `ltvCacBand` helper — NO hardcoded thresholds live in this file.
+// (web/lib/cac.ts + web/lib/unitEconomics.ts). Band colors come from the lib's `ltvCacBand` /
+// `paybackBand` classifiers — NO hardcoded thresholds live in this file. The cutoffs are per-tenant
+// configurable (CTO-126): resolved thresholds come from /api/unit-economics/config and thread into
+// every classify call; a tenant with no override falls back to the hardcoded defaults.
 
 import { Card } from "@/components/Card";
 import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
 import type { CacPayload } from "@/app/api/cac/route";
+import type { ThresholdConfigPayload } from "@/app/api/unit-economics/config/route";
 import type { CacPeriod, PeriodEconomics } from "@/lib/cac";
 import {
   blendedCac,
@@ -16,9 +19,13 @@ import {
   ltvOverCac,
   marginPerUser,
   marketingCac,
+  paybackBand,
   paybackMonths,
+  type Band,
+  type UnitEconomicsThresholds,
 } from "@/lib/unitEconomics";
 import { formatUSD } from "@/lib/types";
+import { ThresholdSettings } from "./ThresholdSettings";
 
 const DASH = "—";
 
@@ -53,8 +60,8 @@ function fmtMonthLabel(periodStart: string): string {
   return d.toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
 }
 
-/** Tailwind text color for a band from the lib's `ltvCacBand` classifier. */
-function bandText(band: ReturnType<typeof ltvCacBand>): string {
+/** Tailwind text color for a band from the lib's `ltvCacBand` / `paybackBand` classifiers. */
+function bandText(band: Band): string {
   return band === "green"
     ? "text-good"
     : band === "yellow"
@@ -65,8 +72,14 @@ function bandText(band: ReturnType<typeof ltvCacBand>): string {
 }
 
 export default async function UnitEconomicsPage() {
-  const data = await apiGet<CacPayload>("/api/cac");
+  // Fetch CAC periods + the tenant's band thresholds in parallel. The thresholds default to the
+  // hardcoded values when the tenant has no override (CTO-126); they thread into every band call.
+  const [data, cfg] = await Promise.all([
+    apiGet<CacPayload>("/api/cac"),
+    apiGet<ThresholdConfigPayload>("/api/unit-economics/config"),
+  ]);
   const { periods, economics, isMock } = data;
+  const thresholds: UnitEconomicsThresholds = cfg.thresholds;
 
   // Headline cards reflect the most recent period for which we have both CAC inputs and economics.
   // Falling to the latest period regardless keeps the CAC flavors visible even when economics is
@@ -81,14 +94,19 @@ export default async function UnitEconomicsPage() {
   const payback = paybackMonths(loaded, margin);
   const ltvValue = ltv(margin, latestEcon?.retentionMonths ?? 0);
   const ratio = ltvOverCac(ltvValue, loaded);
-  const band = ltvCacBand(ratio);
+  const band = ltvCacBand(ratio, thresholds);
 
   const body = (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Metric label="Blended CAC" value={fmtMoney(blended)} hint="(paid+sales+content) / new customers" />
         <Metric label="Paid CAC" value={fmtMoney(paid)} hint="paid spend / new paid customers" />
-        <Metric label="Payback" value={fmtMonths(payback)} hint="fully-loaded CAC / monthly margin" />
+        <Metric
+          label="Payback"
+          value={fmtMonths(payback)}
+          valueClass={bandText(paybackBand(payback, thresholds))}
+          hint="fully-loaded CAC / monthly margin"
+        />
         <Metric label="LTV" value={fmtMoney(ltvValue)} hint="margin × expected retention" />
         <Metric
           label="LTV : CAC"
@@ -97,6 +115,12 @@ export default async function UnitEconomicsPage() {
           hint="vs. fully-loaded CAC"
         />
       </div>
+
+      <ThresholdSettings
+        initial={thresholds}
+        defaults={cfg.defaults}
+        hasOverride={cfg.hasOverride}
+      />
 
       <Card title="Monthly history">
         <div className="overflow-x-auto">
@@ -123,7 +147,7 @@ export default async function UnitEconomicsPage() {
                 const loadedRow = fullyLoadedCac(p);
                 const ltvRow = ltv(m, econ?.retentionMonths ?? 0);
                 const ratioRow = ltvOverCac(ltvRow, loadedRow);
-                const bandRow = ltvCacBand(ratioRow);
+                const bandRow = ltvCacBand(ratioRow, thresholds);
                 return (
                   <tr
                     key={p.periodStart}
@@ -148,7 +172,7 @@ export default async function UnitEconomicsPage() {
                     <td className="py-2 pl-3 text-right tabular-nums">{econ ? fmtPct(econ.grossMarginPct) : DASH}</td>
                     <td className="py-2 pl-3 text-right tabular-nums">{fmtMoney(blendedCac(p))}</td>
                     <td className="py-2 pl-3 text-right tabular-nums">{fmtMoney(marketingCac(p))}</td>
-                    <td className="py-2 pl-3 text-right tabular-nums">{fmtMonths(paybackMonths(loadedRow, m))}</td>
+                    <td className={`py-2 pl-3 text-right tabular-nums ${bandText(paybackBand(paybackMonths(loadedRow, m), thresholds))}`}>{fmtMonths(paybackMonths(loadedRow, m))}</td>
                     <td className={`py-2 pl-3 text-right tabular-nums ${bandText(bandRow)}`}>{fmtRatio(ratioRow)}</td>
                   </tr>
                 );
