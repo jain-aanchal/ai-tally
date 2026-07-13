@@ -12,12 +12,16 @@ import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { getCapabilities } from "@/lib/ai/models";
+// CTO-170: the resolved lineup (ids self-healed from discovery) lives in the
+// server-only module; allowedModelIds/DEFAULT_CHAT_MODEL/chatModels here must be
+// the resolved values so validation, the default, and capability lookups all key
+// off the ids the picker actually offers.
 import {
   allowedModelIds,
   chatModels,
   DEFAULT_CHAT_MODEL,
-  getCapabilities,
-} from "@/lib/ai/models";
+} from "@/lib/ai/models.server";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { createDocument } from "@/lib/ai/tools/create-document";
@@ -253,7 +257,7 @@ export async function POST(request: Request) {
     }
 
     const modelConfig = chatModels.find((m) => m.id === chatModel);
-    const modelCapabilities = await getCapabilities();
+    const modelCapabilities = await getCapabilities(chatModels);
     const capabilities = modelCapabilities[chatModel];
     const isReasoningModel = capabilities?.reasoning === true;
     const supportsTools = capabilities?.tools === true;

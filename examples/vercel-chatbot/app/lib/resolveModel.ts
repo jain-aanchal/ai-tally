@@ -7,8 +7,22 @@
 import fs from "node:fs";
 import path from "node:path";
 
-type Provider = "openai" | "anthropic";
-type Family = "haiku" | "sonnet" | "opus" | "mini" | "flagship" | "embedding" | "other";
+// CTO-170: added "google" so the chatbot picker's Gemini slots (CTO-164) self-heal
+// from discovery like the OpenAI/Anthropic slots already do. The family union gains
+// "flash"/"pro" — the exact strings tally.models.classify_family() writes for Gemini
+// ids (see _FAMILY_RULES in sdk/python/src/tally/models.py: `flash` is the cheap
+// tier, `pro` the flagship). Keep these in lockstep with that classifier.
+export type Provider = "openai" | "anthropic" | "google";
+export type Family =
+  | "haiku"
+  | "sonnet"
+  | "opus"
+  | "mini"
+  | "flagship"
+  | "flash"
+  | "pro"
+  | "embedding"
+  | "other";
 
 interface CachedModel {
   provider: Provider;
