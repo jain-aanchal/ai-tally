@@ -37,9 +37,40 @@ def test_classify_family_truth_table() -> None:
         "gemini-2.5-flash": "flash",
         "gemini-3-flash": "flash",
         "gemini-2.5-pro": "pro",
+        # Non-chat OpenAI SKUs must NOT land in a chat family — they'd 404 on
+        # chat-completions if resolveLatest handed them over.
+        "gpt-4o-mini-tts": "other",
+        "gpt-4o-mini-transcribe": "other",
+        "gpt-4o-mini-realtime-preview": "other",
+        "gpt-4o-audio-preview": "other",
+        "gpt-4o-realtime-preview": "other",
+        "gpt-4o-search-preview": "other",
+        "gpt-3.5-turbo-instruct": "other",
+        "dall-e-3": "other",
+        "whisper-1": "other",
+        "omni-moderation-latest": "other",
+        # o-series reasoning minis are chat-capable — they stay in "mini".
+        "o3-mini": "mini",
     }
     for model_id, expected in cases.items():
         assert M.classify_family(model_id) == expected, model_id
+
+
+def test_latest_openai_mini_skips_non_chat_skus() -> None:
+    # Regression (chatbot demo 404 "not a chat model"): OpenAI's /v1/models returns
+    # non-chat SKUs carrying "mini" (e.g. gpt-4o-mini-tts). Even when one is NEWER than
+    # the real chat mini, latest_openai("mini", …) must return the chat model, because
+    # the non-chat SKUs are classified out of the "mini" family entirely.
+    older = datetime(2024, 7, 18, tzinfo=timezone.utc)
+    newer = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    lineup = [
+        _make("openai", "gpt-4o-mini", created=older),          # real chat mini
+        _make("openai", "gpt-4o-mini-tts", created=newer),      # non-chat, but newer
+        _make("openai", "gpt-4o-mini-realtime-preview", created=newer),
+    ]
+    picked = M.latest_openai("mini", lineup)
+    assert picked is not None
+    assert picked.id == "gpt-4o-mini"
 
 
 def _make(
