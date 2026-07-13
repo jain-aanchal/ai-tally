@@ -307,7 +307,7 @@ _VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
 
 
 def seed_catalog() -> PriceCatalog:
-    """Multi-provider seed catalog (OpenAI + Anthropic + Google Gemini/Vertex).
+    """Multi-provider seed catalog (OpenAI + Anthropic + Google Gemini/Vertex + Amazon Bedrock).
 
     Expanded for CTO-106; previously the gpt-5-mini pinning workaround in
     examples/* was needed because of catalog gaps. The scraper (CTO-53) will
@@ -381,6 +381,49 @@ def seed_catalog() -> PriceCatalog:
         ("google", "gemini-3-flash", PriceType.INPUT, "0.30"),
         ("google", "gemini-3-flash", PriceType.CACHED_INPUT, "0.075"),
         ("google", "gemini-3-flash", PriceType.OUTPUT, "2.50"),
+        # --- Amazon Bedrock (https://aws.amazon.com/bedrock/pricing/) ---------
+        # CTO-157. Bedrock is a *managed* re-seller of third-party + Amazon-first
+        # models, so it gets its own provider dimension ("bedrock") rather than
+        # sharing the vendor-direct keys. The model slot holds Bedrock's native
+        # modelId minus the "-vN:0" version tag (e.g. "anthropic.claude-sonnet-4-5"),
+        # which is exactly what a Bedrock caller passes as gen_ai.request_model and
+        # what list_foundation_models advertises. This deliberately does NOT collide
+        # with the vendor-direct entries above (provider="anthropic",
+        # model="claude-sonnet-4-5") — same model, different surface, different price.
+        #
+        # Bedrock re-prices some models ABOVE the vendor-direct rate (the managed
+        # infra premium): e.g. Bedrock's Claude Sonnet output is listed higher than
+        # Anthropic-direct. These capture Bedrock's OWN published on-demand rates,
+        # not the vendor-direct numbers. Bedrock's prompt-caching read tier maps to
+        # CACHED_INPUT (steady-state read price); the cache-write premium is not
+        # modeled by the current PriceType enum. Usage field mapping mirrors the
+        # Bedrock Converse API: usage.inputTokens -> input,
+        # usage.outputTokens -> output, usage.cacheReadInputTokens -> cached_input.
+        # All rates [unverified at implementation time] — the live Bedrock pricing
+        # page was not reachable from the implementation environment, so values are
+        # taken from training-data values for the published per-MTok on-demand
+        # prices; update once the scraper (CTO-53) lands.
+        #
+        # Anthropic on Bedrock — priced above Anthropic-direct (managed premium).
+        ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.INPUT, "3.30"),
+        ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.CACHED_INPUT, "0.33"),
+        ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.OUTPUT, "16.50"),
+        ("bedrock", "anthropic.claude-haiku-4-5", PriceType.INPUT, "1.10"),
+        ("bedrock", "anthropic.claude-haiku-4-5", PriceType.CACHED_INPUT, "0.11"),
+        ("bedrock", "anthropic.claude-haiku-4-5", PriceType.OUTPUT, "5.50"),
+        # Meta Llama on Bedrock — no cached tier published on-demand.
+        ("bedrock", "meta.llama3-3-70b-instruct", PriceType.INPUT, "0.72"),
+        ("bedrock", "meta.llama3-3-70b-instruct", PriceType.OUTPUT, "0.72"),
+        # Amazon Nova (first-party flagship-ish + micro tiers).
+        ("bedrock", "amazon.nova-pro", PriceType.INPUT, "0.80"),
+        ("bedrock", "amazon.nova-pro", PriceType.CACHED_INPUT, "0.20"),
+        ("bedrock", "amazon.nova-pro", PriceType.OUTPUT, "3.20"),
+        ("bedrock", "amazon.nova-micro", PriceType.INPUT, "0.035"),
+        ("bedrock", "amazon.nova-micro", PriceType.CACHED_INPUT, "0.00875"),
+        ("bedrock", "amazon.nova-micro", PriceType.OUTPUT, "0.14"),
+        # Amazon Titan (legacy first-party text) — no cached tier.
+        ("bedrock", "amazon.titan-text-express", PriceType.INPUT, "0.20"),
+        ("bedrock", "amazon.titan-text-express", PriceType.OUTPUT, "0.60"),
     ]
     for provider, model, pt, rate in seeds:
         cat.add(_mtok(provider, model, pt, rate))

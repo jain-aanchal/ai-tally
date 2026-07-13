@@ -49,7 +49,7 @@ DEFAULT_CACHE_PATH = Path(".tally/models.json")
 class ModelInfo:
     """A single model entry as returned by a provider's ``/v1/models`` endpoint."""
 
-    provider: str  # "openai" | "anthropic" | "google"
+    provider: str  # "openai" | "anthropic" | "google" | "bedrock"
     id: str  # canonical id, e.g. "claude-sonnet-4-5" or "gpt-4o-mini"
     family: str  # see classify_family()
     created_at: datetime | None
@@ -240,6 +240,78 @@ def fetch_google_models(api_key: str, *, timeout: float = 5.0) -> list[ModelInfo
     return out
 
 
+def _default_bedrock_client(region: str | None):
+    """Build a boto3 ``bedrock`` (control-plane) client via the AWS default credential chain.
+
+    Imported lazily because ``boto3`` is an OPTIONAL dependency — the SDK is dep-light and must
+    import fine without it. Callers that want Bedrock discovery either install ``boto3`` or inject
+    their own client. Region resolves from the ``region`` arg, then ``AWS_REGION`` /
+    ``AWS_DEFAULT_REGION``. Credentials come from the standard chain (env vars, shared config,
+    SSO, instance/task role) — no raw keys are handled here.
+    """
+    import boto3  # optional dep; ImportError is caught by the discover_models fail-soft path
+
+    region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    return boto3.client("bedrock", region_name=region)
+
+
+def fetch_bedrock_models(*, client=None, region: str | None = None) -> list[ModelInfo]:
+    """List Amazon Bedrock foundation models via the Bedrock control-plane (CTO-157).
+
+    Uses the ``bedrock`` client's ``list_foundation_models`` (NOT ``bedrock-runtime`` — the
+    control plane is where the catalog lives). ``client`` is injectable so tests never hit AWS;
+    when omitted, a boto3 client is built via :func:`_default_bedrock_client` using the AWS
+    default credential chain.
+
+    Response shape: ``{"modelSummaries": [{"modelId": "anthropic.claude-...", ...}]}``. The
+    ``modelId`` is used verbatim as the ``ModelInfo.id`` — it matches what a Bedrock caller
+    passes as ``gen_ai.request_model`` and the ``bedrock/`` catalog slugs.
+
+    Only TEXT-output (chat/completion) models are returned: a summary whose ``outputModalities``
+    is present and excludes ``"TEXT"`` (image/embedding-only SKUs) is skipped, mirroring the
+    CTO-172 non-chat guard so a chat family never receives a non-chat model.
+    """
+    if client is None:
+        client = _default_bedrock_client(region)
+    payload = client.list_foundation_models()
+    out: list[ModelInfo] = []
+    for row in payload.get("modelSummaries", []):
+        model_id = row.get("modelId")
+        if not model_id or not isinstance(model_id, str):
+            continue
+        modalities = row.get("outputModalities")
+        if modalities and "TEXT" not in modalities:
+            continue
+        out.append(
+            ModelInfo(
+                provider="bedrock",
+                id=model_id,
+                family=classify_family(model_id),
+                created_at=None,
+                deprecated_at=None,
+            )
+        )
+    return out
+
+
+def _aws_configured() -> bool:
+    """True when the environment carries enough AWS config to attempt Bedrock discovery.
+
+    We can't validate credentials without a call, so this is a cheap gate on the default-chain
+    signals (a region plus some credential source). When false, Bedrock discovery is skipped
+    entirely — exactly like a missing ``GOOGLE_API_KEY`` skips Google.
+    """
+    has_region = bool(os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
+    has_creds = bool(
+        os.environ.get("AWS_ACCESS_KEY_ID")
+        or os.environ.get("AWS_PROFILE")
+        or os.environ.get("AWS_ROLE_ARN")
+        or os.environ.get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+        or os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
+    )
+    return has_region and has_creds
+
+
 def save_cache(models: list[ModelInfo], path: Path = DEFAULT_CACHE_PATH) -> None:
     """Persist the discovered list to ``path`` (creating parent dirs)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,6 +393,7 @@ def discover_models(
     openai_api_key: str | None = None,
     anthropic_api_key: str | None = None,
     google_api_key: str | None = None,
+    bedrock_client=None,
     timeout: float = 5.0,
 ) -> list[ModelInfo]:
     """Boot-time discovery entry point. Fail-soft on every error path.
@@ -357,6 +430,7 @@ def discover_models(
     openai_err: Exception | None = None
     anthropic_err: Exception | None = None
     google_err: Exception | None = None
+    bedrock_err: Exception | None = None
 
     if openai_key:
         try:
@@ -390,6 +464,20 @@ def discover_models(
     else:
         logger.info("models: GOOGLE_API_KEY/GEMINI_API_KEY not set — skipping google discovery")
 
+    # Bedrock is behind an injectable client (tests never touch AWS). Attempt it when a client
+    # is injected OR the AWS default credential chain looks configured. Fail-soft on EVERY error
+    # — missing boto3 (ImportError), no/invalid creds, region issues, or a botocore API error must
+    # skip Bedrock, never crash discovery. boto3's exception hierarchy can't be imported when boto3
+    # isn't installed, so this catch is intentionally broad.
+    if bedrock_client is not None or _aws_configured():
+        try:
+            discovered.extend(fetch_bedrock_models(client=bedrock_client))
+        except Exception as exc:  # noqa: BLE001 - optional dep + external SDK; must fail soft
+            bedrock_err = exc
+            logger.warning("models: bedrock fetch failed: %s", exc)
+    else:
+        logger.info("models: AWS creds/region not set — skipping bedrock discovery")
+
     if discovered:
         try:
             save_cache(discovered, cache_path)
@@ -403,21 +491,23 @@ def discover_models(
     stale = _load_unchecked(cache_path)
     if stale is not None:
         logger.warning(
-            "models: live fetch failed (openai=%s anthropic=%s google=%s) — "
+            "models: live fetch failed (openai=%s anthropic=%s google=%s bedrock=%s) — "
             "using stale cache (%d entries)",
             openai_err,
             anthropic_err,
             google_err,
+            bedrock_err,
             len(stale),
         )
         return stale
 
     logger.warning(
-        "models: no live data and no cache (openai=%s anthropic=%s google=%s) — "
+        "models: no live data and no cache (openai=%s anthropic=%s google=%s bedrock=%s) — "
         "booting with empty list",
         openai_err,
         anthropic_err,
         google_err,
+        bedrock_err,
     )
     return []
 
@@ -426,7 +516,14 @@ def _log_summary(models: list[ModelInfo]) -> None:
     openai_ids = sorted(m.id for m in models if m.provider == "openai")
     anth_ids = sorted(m.id for m in models if m.provider == "anthropic")
     google_ids = sorted(m.id for m in models if m.provider == "google")
-    logger.info("models: openai=%s anthropic=%s google=%s", openai_ids, anth_ids, google_ids)
+    bedrock_ids = sorted(m.id for m in models if m.provider == "bedrock")
+    logger.info(
+        "models: openai=%s anthropic=%s google=%s bedrock=%s",
+        openai_ids,
+        anth_ids,
+        google_ids,
+        bedrock_ids,
+    )
 
 
 __all__ = [
@@ -435,6 +532,7 @@ __all__ = [
     "fetch_openai_models",
     "fetch_anthropic_models",
     "fetch_google_models",
+    "fetch_bedrock_models",
     "save_cache",
     "load_cached",
     "latest",
