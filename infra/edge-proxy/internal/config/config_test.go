@@ -165,3 +165,41 @@ func TestInvalidMode(t *testing.T) {
 		t.Fatal("expected error for invalid mode")
 	}
 }
+
+// TestProviderSelection covers CTO-167: the provider flag validates its value and switches the
+// default upstream to Google's origin for gemini while leaving an explicit upstream untouched.
+func TestProviderSelection(t *testing.T) {
+	// Default: no provider, pure pass-through, OpenAI default upstream.
+	if cfg, _ := FromEnv(envMap(nil)); cfg.Provider != "" {
+		t.Errorf("default Provider = %q, want empty", cfg.Provider)
+	}
+
+	// gemini with no explicit upstream defaults to Google's Generative Language origin.
+	cfg, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_PROVIDER": "gemini"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Provider != ProviderGemini {
+		t.Errorf("Provider = %q, want gemini", cfg.Provider)
+	}
+	if cfg.Upstream.String() != DefaultGeminiUpstream {
+		t.Errorf("Upstream = %q, want %q", cfg.Upstream, DefaultGeminiUpstream)
+	}
+
+	// An explicit upstream still wins for gemini.
+	cfg, err = FromEnv(envMap(map[string]string{
+		"EDGE_PROXY_PROVIDER": "gemini",
+		"EDGE_PROXY_UPSTREAM": "https://gemini.internal.example",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Upstream.String() != "https://gemini.internal.example" {
+		t.Errorf("Upstream = %q, want explicit override", cfg.Upstream)
+	}
+
+	// An unknown provider is rejected.
+	if _, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_PROVIDER": "bard"})); err == nil {
+		t.Error("expected error for unknown provider")
+	}
+}
