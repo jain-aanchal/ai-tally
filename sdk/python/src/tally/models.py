@@ -89,6 +89,22 @@ _FAMILY_RULES: list[tuple[re.Pattern[str], str]] = [
     # OpenAI-shaped bucket.
     (re.compile(r"flash", re.I), "flash"),
     (re.compile(r"gemini.*pro|pro.*gemini", re.I), "pro"),
+    # Non-chat OpenAI SKUs. `GET /v1/models` lists audio / realtime / tts / transcribe /
+    # image / moderation / instruct / search / legacy-base models, and many carry a chat
+    # keyword in their id (e.g. "gpt-4o-mini-tts", "gpt-4o-realtime-preview"). Without this
+    # guard they'd fall through to the "mini"/"flagship" buckets below, and resolveLatest
+    # could hand one to the chat-completions path — which 404s with "not a chat model".
+    # Route them to "other" so a chat family only ever contains chat-capable models. This
+    # sits AFTER the embedding rule (embeddings are a real cost family) and BEFORE the
+    # OpenAI chat buckets. o1/o3/o4 reasoning "mini"s are chat-capable, so they're not listed.
+    (
+        re.compile(
+            r"(audio|realtime|transcribe|whisper|tts|moderation|dall-e|image|"
+            r"instruct|search-preview|davinci|babbage|computer-use|codex)",
+            re.I,
+        ),
+        "other",
+    ),
     (re.compile(r"mini", re.I), "mini"),
     (re.compile(r"^gpt-4o(?!-mini)", re.I), "flagship"),
     (re.compile(r"^gpt-5(?!-mini)", re.I), "flagship"),
