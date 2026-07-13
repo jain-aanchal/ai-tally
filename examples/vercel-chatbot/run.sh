@@ -91,7 +91,18 @@ if curl -fsS --max-time 2 "${CHATBOT_URL}/api/demo-chat" -X POST \
   echo "✓ Chatbot already up at ${CHATBOT_URL}"
 else
   echo "→ Booting chatbot on ${CHATBOT_URL}…"
-  if [ ! -d "${APP_DIR}/node_modules" ]; then
+  # Install deps when node_modules is missing OR stale relative to the
+  # lockfile/manifest (CTO-174). The old "install only if node_modules is
+  # absent" guard skipped reinstalls after a dependency bump (e.g. @ai-sdk/google
+  # via CTO-164), so a pre-existing node_modules kept a stale install and the
+  # build failed with "Module not found". Reinstall if node_modules is absent,
+  # or if pnpm-lock.yaml / package.json is newer than node_modules.
+  need_install=0
+  if [ ! -d "${APP_DIR}/node_modules" ]; then need_install=1
+  elif [ "${APP_DIR}/pnpm-lock.yaml" -nt "${APP_DIR}/node_modules" ] || \
+       [ "${APP_DIR}/package.json" -nt "${APP_DIR}/node_modules" ]; then need_install=1
+  fi
+  if [ "$need_install" -eq 1 ]; then
     echo "  · installing chatbot deps (pnpm install)…"
     (cd "${APP_DIR}" && pnpm install --silent --prefer-offline) || \
       (cd "${APP_DIR}" && npm install --silent --no-audit --no-fund)

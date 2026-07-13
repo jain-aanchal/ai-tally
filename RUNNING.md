@@ -172,6 +172,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 cd infra && make chatbot-demo
 ```
 
+`run.sh` (re)installs the chatbot's deps whenever `node_modules` is missing **or
+stale** — i.e. `pnpm-lock.yaml` / `package.json` is newer than `node_modules`
+(CTO-174) — so a dependency bump is picked up automatically instead of failing
+the build with `Module not found`. If a run ever trips over a stale install,
+recover manually with `cd examples/vercel-chatbot/app && pnpm install`.
+
 On launch the demo **refreshes the model lineup** (CTO-147): before booting the
 chatbot, `run.sh` force-refreshes the gateway's discovery cache
 (`.tally/models.json`, CTO-109) with `TALLY_MODELS_REFRESH=1` and logs the live
