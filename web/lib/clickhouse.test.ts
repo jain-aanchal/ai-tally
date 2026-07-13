@@ -95,3 +95,47 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
     expect(out!.sampleCount).toBe(75);
   });
 });
+
+// CTO-171: guard the Compare candidate list against silently shipping a retired model id.
+//
+// The gateway discovers its live provider lineup at boot but does not expose it over HTTP yet
+// (no `/v1/models` route — that's the follow-up), so DEFAULT_CANDIDATES stays hardcoded. This
+// test is the safety net: it mirrors the current, catalog-priced ids from the SDK's seed_catalog()
+// (sdk/python/src/tally/pricing.py) and asserts every candidate is one of them. A retired id like
+// `gpt-4o-mini` — which is still *priced* in the catalog for backward compat but is NOT a model we
+// want the switcher to surface — must not appear. If seed_catalog() gains/loses a current model,
+// update KNOWN_CURRENT_CANDIDATES here in the same change.
+describe("DEFAULT_CANDIDATES guard (CTO-171)", () => {
+  // Current, non-retired models we're willing to surface in Compare, keyed "provider/model".
+  // Kept in sync by hand with seed_catalog() until discovery is exposed over HTTP.
+  const KNOWN_CURRENT_CANDIDATES = new Set([
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-opus-4-8",
+    "openai/gpt-5-mini",
+    "openai/gpt-5",
+    "google/gemini-3-flash",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+  ]);
+
+  // Priced-but-retired ids that must never leak back into the switcher.
+  const RETIRED_IDS = new Set(["openai/gpt-4o-mini"]);
+
+  it("lists only current, catalog-priced models", async () => {
+    const { DEFAULT_CANDIDATES } = await freshSut();
+    expect(DEFAULT_CANDIDATES.length).toBeGreaterThan(0);
+    for (const c of DEFAULT_CANDIDATES) {
+      const id = `${c.provider}/${c.model}`;
+      expect(KNOWN_CURRENT_CANDIDATES.has(id), `${id} is not a current catalog model`).toBe(true);
+    }
+  });
+
+  it("does not include the retired gpt-4o-mini", async () => {
+    const { DEFAULT_CANDIDATES } = await freshSut();
+    for (const c of DEFAULT_CANDIDATES) {
+      const id = `${c.provider}/${c.model}`;
+      expect(RETIRED_IDS.has(id), `${id} is retired and must not be a candidate`).toBe(false);
+    }
+  });
+});
