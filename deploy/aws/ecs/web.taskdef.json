@@ -1,0 +1,51 @@
+{
+  "family": "ai-tally-web",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-ecs-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-workload",
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/ai-tally/web:1.0.0",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3000, "protocol": "tcp", "name": "http" }
+      ],
+      "environment": [
+        { "name": "PORT", "value": "3000" },
+        { "name": "TALLY_GATEWAY_URL", "value": "REPLACE_GATEWAY_URL" },
+        { "name": "TALLY_TENANT_ID", "value": "local-dev" },
+        { "name": "TALLY_CLICKHOUSE_URL", "value": "REPLACE_CLICKHOUSE_URL" },
+        { "name": "TALLY_CLICKHOUSE_DB", "value": "default" },
+        { "name": "TALLY_CLICKHOUSE_USER", "value": "tally" },
+        { "name": "NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS", "value": "5000" }
+      ],
+      "secrets": [
+        { "name": "TALLY_CLICKHOUSE_PASSWORD", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-clickhouse-password" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/ || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ai-tally-web",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "web",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

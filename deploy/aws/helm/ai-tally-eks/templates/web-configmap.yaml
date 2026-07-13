@@ -1,0 +1,22 @@
+{{- if .Values.web.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-tally.tierName" (dict "ctx" . "tier" "web") }}
+  labels:
+    {{- include "ai-tally.labels" . | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "web") | nindent 4 }}
+data:
+  # Non-secret web config. The dashboard queries ClickHouse directly (TALLY_CLICKHOUSE_*) and calls
+  # the gateway (TALLY_GATEWAY_URL). The ClickHouse password comes from the synced Secret.
+  PORT: {{ .Values.web.service.port | quote }}
+  TALLY_GATEWAY_URL: {{ include "ai-tally.gatewayUrl" . | quote }}
+  TALLY_TENANT_ID: {{ .Values.web.config.tenantId | quote }}
+  TALLY_CLICKHOUSE_URL: {{ printf "%s://%s:%d" .Values.clickhouse.scheme (include "ai-tally.clickhouseHost" .) (int .Values.clickhouse.httpPort) | quote }}
+  TALLY_CLICKHOUSE_DB: {{ .Values.web.config.clickhouseDb | quote }}
+  TALLY_CLICKHOUSE_USER: {{ .Values.web.config.clickhouseUser | quote }}
+  NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS: {{ .Values.web.config.dashboardRefreshMs | quote }}
+  {{- range $k, $v := .Values.web.config.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}

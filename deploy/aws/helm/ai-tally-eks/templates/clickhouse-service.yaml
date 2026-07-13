@@ -1,0 +1,17 @@
+{{- if eq .Values.clickhouse.mode "statefulset" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-tally.fullname" . }}-clickhouse
+  labels:
+    {{- include "ai-tally.labels" . | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "clickhouse") | nindent 4 }}
+spec:
+  # Headless: stable per-pod DNS for the StatefulSet. The app tiers connect over the HTTP port.
+  clusterIP: None
+  ports:
+    - { name: http,   port: 8123, targetPort: http }
+    - { name: native, port: 9000, targetPort: native }
+  selector:
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "clickhouse") | nindent 4 }}
+{{- end }}

@@ -1,0 +1,56 @@
+# Example overrides for a real EKS install. Copy, fill in the CAPS values, and pass with:
+#   helm upgrade --install ai-tally deploy/aws/helm/ai-tally-eks -n ai-tally -f my-values.yaml
+#
+# This example uses external ClickHouse Cloud + RDS + Secrets Manager via CSI — the recommended
+# production shape. For a self-contained staging cluster, set clickhouse.mode=statefulset instead.
+
+aws:
+  region: us-east-1
+  accountId: "123456789012"
+
+serviceAccount:
+  create: true
+  # The IRSA role the KSA assumes (create with: eksctl create iamserviceaccount ...). Its policy is
+  # deploy/aws/ecs/iam/task-role-policy.json (S3 replay + Cost Explorer + Bedrock) plus Secrets
+  # Manager GetSecretValue on the secrets below.
+  roleArn: arn:aws:iam::123456789012:role/ai-tally-workload
+
+secretsManager:
+  mode: csi
+  # Secrets Manager secret NAMES (expanded to ARNs via aws.region + aws.accountId) or full ARNs.
+  secrets:
+    postgresDsn: ai-tally-postgres-dsn
+    clickhousePassword: ai-tally-clickhouse-password
+    openaiApiKey: ai-tally-openai-api-key
+    anthropicApiKey: ai-tally-anthropic-api-key
+
+rds:
+  endpoint: ai-tally-pg.abcdefghijkl.us-east-1.rds.amazonaws.com   # informational
+
+clickhouse:
+  mode: external
+  host: my-instance.us-east-1.aws.clickhouse.cloud
+  httpPort: 8443
+  scheme: https   # ClickHouse Cloud is TLS-terminated
+
+gateway:
+  replicaCount: 2
+  image:
+    repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-tally/gateway
+    tag: "1.0.0"
+  config:
+    requireApiKey: true
+    replayBlobBackend: s3
+    replayS3Bucket: my-org-ai-tally-replay
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+
+web:
+  replicaCount: 2
+  image:
+    repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-tally/web
+    tag: "1.0.0"
+  config:
+    tenantId: local-dev

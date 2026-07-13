@@ -1,0 +1,197 @@
+# Default values for the ai-tally EKS chart.
+#
+# The two application tiers (gateway, web) are stateless and 12-factor: everything they read is an
+# env var. This file maps those env vars onto Kubernetes knobs, plus the AWS-native secrets/identity
+# wiring. Backing stores (RDS Postgres, ClickHouse, S3) are managed OUT of this chart by default —
+# RDS and S3 are provisioned with the AWS CLI / eksctl / Terraform (see deploy/aws/README.md);
+# ClickHouse is either an in-cluster StatefulSet (clickhouse.mode=statefulset) or an external
+# endpoint (clickhouse.mode=external).
+
+# -- Global naming -------------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+# =================================================================================================
+# AWS identity + secrets
+# =================================================================================================
+aws:
+  # AWS region the workload runs in. Required — used to construct Secrets Manager ARNs when only a
+  # secret NAME is given, and surfaced to the app tiers (AWS_REGION) for the AWS SDK. No default.
+  region: ""
+  # AWS account id. Optional but recommended: used to expand bare secret names into full ARNs and
+  # to document the IRSA role. Leave blank if you provide full secret ARNs in secretsManager.secrets.
+  accountId: ""
+
+# Kubernetes ServiceAccount the pods run as. Annotated for IRSA so pods assume the IAM role below
+# WITHOUT any static AWS access key. create=false lets you reference a pre-existing KSA.
+serviceAccount:
+  create: true
+  name: ai-tally
+  # The IAM role ARN the KSA assumes via IRSA (the OIDC trust is created out-of-band with eksctl /
+  # the AWS CLI — see deploy/aws/README.md). Example:
+  #   arn:aws:iam::123456789012:role/ai-tally-workload
+  # Grant it: Secrets Manager GetSecretValue on the secrets below, S3 access on the replay bucket,
+  # ce:GetCostAndUsage (Cost Explorer), and bedrock:InvokeModel (see deploy/aws/ecs/iam/*.json).
+  roleArn: ""
+  annotations: {}   # eks.amazonaws.com/role-arn is injected from .Values.serviceAccount.roleArn
+
+# -- Secrets Manager -> pod wiring ----------------------------------------------------------------
+# Secrets are pulled from AWS Secrets Manager by the Secrets Store CSI driver (AWS provider) and
+# synced into a Kubernetes Secret, which the Deployments consume via envFrom/secretKeyRef. No secret
+# value ever appears in this chart or in git. Each entry maps a Secrets Manager secret (NAME or full
+# ARN) to the env var the app expects. Create the secrets with the AWS CLI (README).
+secretsManager:
+  # csi   — pull from Secrets Manager via the Secrets Store CSI driver (recommended on EKS).
+  # existingSecret — you manage a Kubernetes Secret out-of-band (e.g. external-secrets operator);
+  #                  set existingSecretName and the chart references it directly.
+  mode: csi
+  existingSecretName: ""
+  # Secrets Manager secret NAMES or full ARNs (NOT values). "" disables that mapping (the env var is
+  # simply not set, and the app falls back to its documented default or fail-soft path). A bare name
+  # is expanded to arn:aws:secretsmanager:<region>:<accountId>:secret:<name> when both aws.region and
+  # aws.accountId are set; otherwise provide the full ARN here.
+  secrets:
+    # Postgres control-plane DSN, e.g. postgresql://USER:PASS@ai-tally-pg.xxxx.us-east-1.rds.amazonaws.com:5432/tally
+    # RDS is reached directly over the VPC (no auth-proxy sidecar). Consumed as TALLY_POSTGRES_DSN.
+    postgresDsn: ai-tally-postgres-dsn
+    # ClickHouse password. Consumed as TALLY_CLICKHOUSE_PASSWORD by both tiers.
+    clickhousePassword: ai-tally-clickhouse-password
+    # Outbound provider keys for model discovery / replay / eval. Optional — the gateway boots
+    # fail-soft without them (CTO-109). Consumed as OPENAI_API_KEY / ANTHROPIC_API_KEY. If you use
+    # Amazon Bedrock instead of direct provider keys, leave these blank and grant bedrock:InvokeModel
+    # to the IRSA role (the SDK uses the role, not a key).
+    openaiApiKey: ai-tally-openai-api-key
+    anthropicApiKey: ai-tally-anthropic-api-key
+  # NOTE on Stripe + HMAC: the Stripe webhook *signing secret* is NOT a gateway env var — it is
+  # pasted per-tenant in the dashboard and persisted in Postgres (see db/postgres/0003_*.sql), so it
+  # is protected by protecting RDS. Per-tenant HMAC user-id keys (CTO-74) live in the gateway's
+  # HmacKeyRegistry, provisioned per-tenant at runtime — also not a deploy-time secret.
+
+# =================================================================================================
+# Gateway tier (FastAPI ingest gateway — infra/gateway)
+# =================================================================================================
+gateway:
+  enabled: true
+  replicaCount: 2
+  image:
+    # Amazon ECR, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-tally/gateway
+    repository: ACCOUNT.dkr.ecr.REGION.amazonaws.com/ai-tally/gateway
+    pullPolicy: IfNotPresent
+    tag: ""   # defaults to .Chart.AppVersion
+  service:
+    type: ClusterIP
+    port: 8080
+  # Non-secret env (TALLY_*). Secret env is injected from secretsManager above. Mirrors the
+  # docker-compose gateway service and infra/gateway/src/gateway/config.py defaults.
+  config:
+    clickhouseDb: default        # the ClickHouse image loads unqualified DDL into `default`
+    clickhouseUser: tally
+    requireApiKey: true          # cloud default: enforce Authorization: Bearer <key>
+    ingestBuffered: false        # flip on to decouple the request edge from ClickHouse (CTO-37)
+    evalJudgeModel: ""           # override TALLY_EVAL_JUDGE_MODEL; "" keeps the app default
+    # S3 replay blob store (CTO-152). Leave replayS3Bucket blank to keep the in-memory backend.
+    replayBlobBackend: memory    # memory | s3
+    replayS3Bucket: ""           # required when replayBlobBackend=s3; the IRSA role needs S3 access
+    # Free-form extra TALLY_* pairs merged verbatim into the ConfigMap (rate limits, quotas, etc.).
+    extraEnv: {}
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =================================================================================================
+# Web tier (Next.js dashboard — web/)
+# =================================================================================================
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ACCOUNT.dkr.ecr.REGION.amazonaws.com/ai-tally/web
+    pullPolicy: IfNotPresent
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 3000
+  config:
+    # The dashboard queries ClickHouse directly AND calls the gateway. The gateway URL defaults to
+    # the in-cluster Service; leave blank to auto-derive it from the release name.
+    gatewayUrl: ""
+    tenantId: local-dev
+    clickhouseDb: default
+    clickhouseUser: tally
+    dashboardRefreshMs: "5000"   # NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS
+    extraEnv: {}
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits:   { cpu: 500m, memory: 384Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =================================================================================================
+# ClickHouse (telemetry store)
+# =================================================================================================
+# statefulset — run a single-node ClickHouse in-cluster with a PersistentVolume. Fine for staging /
+#               low volume; NOT HA. Applies the same DDL as docker-compose via an initdb ConfigMap
+#               you mount (see README). For production, prefer external ClickHouse Cloud.
+# external    — point the gateway + web at an external ClickHouse HTTP endpoint (e.g. ClickHouse
+#               Cloud). No StatefulSet is rendered.
+clickhouse:
+  mode: external
+  # Used by BOTH modes as the host the app tiers connect to. In statefulset mode this defaults to
+  # the in-cluster Service DNS; in external mode set it to your ClickHouse Cloud host.
+  host: ""
+  httpPort: 8123
+  # URL scheme the web tier uses to reach ClickHouse (TALLY_CLICKHOUSE_URL). Keep "http" for the
+  # in-cluster StatefulSet; set "https" for a TLS endpoint like ClickHouse Cloud (usually port 8443).
+  scheme: http
+  # statefulset-mode knobs (ignored when mode=external).
+  image: clickhouse/clickhouse-server:24.8
+  storage: 50Gi
+  storageClassName: ""   # "" uses the cluster default StorageClass (gp3 on EKS via the EBS CSI driver)
+  resources:
+    requests: { cpu: "1", memory: 4Gi }
+    limits:   { cpu: "2", memory: 8Gi }
+
+# =================================================================================================
+# RDS (Postgres control plane) connectivity
+# =================================================================================================
+# Unlike Cloud SQL on GCP, RDS is reached DIRECTLY over the VPC — no auth-proxy sidecar. Put the EKS
+# nodes and the RDS instance in the same VPC and allow the nodes' security group to reach RDS:5432.
+# The DSN itself (with the app-user password and the RDS endpoint host) is the Secrets Manager
+# `postgresDsn` secret above. IAM database authentication is an optional hardening step documented in
+# the README; the default DSN form uses a password.
+rds:
+  # Informational only (the actual endpoint lives inside the postgresDsn secret). Recorded here so
+  # `helm get values` documents which instance a release points at.
+  endpoint: ""
+
+# =================================================================================================
+# Pod security posture (applied to gateway + web)
+# =================================================================================================
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # Next's standalone server writes a cache dir; keep false for web
+  capabilities:
+    drop:
+      - ALL

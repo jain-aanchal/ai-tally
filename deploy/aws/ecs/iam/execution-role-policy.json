@@ -1,0 +1,37 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrPull",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/ecs/ai-tally-*:*"
+    },
+    {
+      "Sid": "SecretsInjection",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:ai-tally-postgres-dsn*",
+        "arn:aws:secretsmanager:*:*:secret:ai-tally-clickhouse-password*",
+        "arn:aws:secretsmanager:*:*:secret:ai-tally-openai-api-key*",
+        "arn:aws:secretsmanager:*:*:secret:ai-tally-anthropic-api-key*"
+      ]
+    }
+  ]
+}
