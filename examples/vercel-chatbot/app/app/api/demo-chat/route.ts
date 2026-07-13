@@ -99,7 +99,10 @@ async function callOpenAI(prompt: string, model: string): Promise<ProviderResult
     body: JSON.stringify({
       model,
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 256,
+      // GPT-5 / o-series reject `max_tokens` and require `max_completion_tokens`;
+      // the newer param is accepted by all current OpenAI chat models (incl. gpt-4o-mini),
+      // so use it unconditionally. (Anthropic's API below still uses `max_tokens`.)
+      max_completion_tokens: 256,
     }),
   });
   if (!res.ok) throw new Error(`openai ${res.status}: ${await res.text()}`);
