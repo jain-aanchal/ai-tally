@@ -42,6 +42,8 @@ class FakeCacStore:
             new_customers_total=form.new_customers_total,
             notes=form.notes,
             closed_at=None,
+            arpa_micro_usd=form.arpa_micro_usd,
+            gross_margin_pct=form.gross_margin_pct,
         )
         self._rows[(tenant_id, form.period_start)] = period
         for (t, ps), row in list(self._rows.items()):
@@ -87,6 +89,40 @@ def test_round_trip_form(client: TestClient) -> None:
     listing = client.get("/v1/tenant/cac", headers={"X-Tenant-Id": T}).json()
     assert len(listing["periods"]) == 1
     assert listing["periods"][0]["new_customers_total"] == 120
+
+
+def test_round_trip_revenue_fields(client: TestClient) -> None:
+    """CTO-145: ARPA + gross margin round-trip through POST → GET."""
+    r = client.post(
+        "/v1/tenant/cac",
+        headers={"X-Tenant-Id": T},
+        json=_payload(arpa_micro_usd=220_000_000, gross_margin_pct=0.78),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["period"]["arpa_micro_usd"] == 220_000_000
+    assert r.json()["period"]["gross_margin_pct"] == 0.78
+
+    period = client.get("/v1/tenant/cac", headers={"X-Tenant-Id": T}).json()["periods"][0]
+    assert period["arpa_micro_usd"] == 220_000_000
+    assert period["gross_margin_pct"] == 0.78
+
+
+def test_revenue_fields_default_null_when_omitted(client: TestClient) -> None:
+    """Omitting ARPA / margin leaves them null so the page renders payback/LTV as '—'."""
+    r = client.post("/v1/tenant/cac", headers={"X-Tenant-Id": T}, json=_payload())
+    assert r.status_code == 200, r.text
+    assert r.json()["period"]["arpa_micro_usd"] is None
+    assert r.json()["period"]["gross_margin_pct"] is None
+
+
+def test_rejects_gross_margin_out_of_range(client: TestClient) -> None:
+    r = client.post(
+        "/v1/tenant/cac",
+        headers={"X-Tenant-Id": T},
+        json=_payload(gross_margin_pct=1.5),
+    )
+    assert r.status_code == 422
+    assert "gross_margin_pct" in r.text
 
 
 def test_sanity_guard_rejects_paid_gt_total(client: TestClient) -> None:

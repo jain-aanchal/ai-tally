@@ -25,10 +25,15 @@ export async function GET(): Promise<NextResponse<CacPayload>> {
   // Mirror the established fallback (see /api/attribution, /api/cost): serve the clearly-labelled
   // mock so the page is useful before the CAC backend has data, never fabricate as real.
   const live = await queryCacPeriods();
-  if (live.length > 0) {
-    // Real gateway data: no economics yet (the CAC backend doesn't store ARPA / gross margin), so
-    // payback / LTV honest-null until a revenue source is wired. Periods + CAC flavors are real.
-    return NextResponse.json({ periods: live, economics: {}, isMock: false });
+  if (live.periods.length > 0) {
+    // Real gateway data. Economics (ARPA + gross margin) come from the same cac_periods rows
+    // (CTO-145, Option A); months where finance hasn't entered both are simply absent from the
+    // map, so the page renders payback / LTV as "—" (honest-null) for those.
+    return NextResponse.json({
+      periods: live.periods,
+      economics: live.economics,
+      isMock: false,
+    });
   }
   return NextResponse.json({
     periods: MOCK_CAC_PERIODS,

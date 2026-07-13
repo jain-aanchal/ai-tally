@@ -36,6 +36,9 @@ interface CacApiPeriod {
   notes: string | null;
   closed_at: string | null;
   locked: boolean;
+  // Revenue-side inputs (CTO-145). Null until finance enters them → payback/LTV render "—".
+  arpa_micro_usd: number | null;
+  gross_margin_pct: number | null;
 }
 
 function fromApi(p: CacApiPeriod): CacPeriod {
@@ -55,24 +58,60 @@ function fromApi(p: CacApiPeriod): CacPeriod {
   };
 }
 
+export interface CacQueryResult {
+  periods: CacPeriod[];
+  /** Per-period economics keyed by `periodStart` — only months where finance entered BOTH ARPA
+   *  and gross margin. Months missing either are omitted, so the page renders payback/LTV "—". */
+  economics: Record<string, PeriodEconomics>;
+}
+
 /**
- * Fetch all CAC periods for the tenant, newest first. Returns ``[]`` when the gateway is
- * unreachable or has no data — the page falls back to its "Need 3+ months" empty state, which is
- * the right behavior for CI / fresh clones.
+ * Fetch all CAC periods for the tenant, newest first, plus the revenue-side economics map (CTO-145).
+ * Returns empty `periods`/`economics` when the gateway is unreachable or has no data — the caller
+ * falls back to the labelled mock, which is the right behavior for CI / fresh clones.
  */
-export async function queryCacPeriods(): Promise<CacPeriod[]> {
+export async function queryCacPeriods(): Promise<CacQueryResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cac`, {
       headers: { "x-tenant-id": TENANT },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return { periods: [], economics: {} };
     const body = (await res.json()) as { periods: CacApiPeriod[] };
-    return (body.periods ?? []).map(fromApi);
+    const rows = body.periods ?? [];
+    const periods = rows.map(fromApi);
+    const economics: Record<string, PeriodEconomics> = {};
+    for (const p of rows) {
+      const econ = economicsFromApi(p);
+      if (econ) economics[p.period_start] = econ;
+    }
+    return { periods, economics };
   } catch {
-    return [];
+    return { periods: [], economics: {} };
   }
+}
+
+/**
+ * Expected retention in months used for LTV when the gateway doesn't store it. Retention is not a
+ * finance-entered field in Option A (CTO-145 persists ARPA + gross margin only); tenant-configurable
+ * retention/bands are CTO-126. Until then LTV uses this house default so a fully-entered month
+ * (ARPA + margin) lights up rather than staying blank.
+ */
+export const DEFAULT_RETENTION_MONTHS = 24;
+
+/**
+ * Build a `PeriodEconomics` from a gateway CAC row, or `null` when either revenue field is missing.
+ * A month needs BOTH ARPA and gross margin to compute payback/LTV; if either is null we omit the
+ * record so the page shows "—" (honest-null) rather than a half-computed number.
+ */
+function economicsFromApi(p: CacApiPeriod): PeriodEconomics | null {
+  if (p.arpa_micro_usd === null || p.gross_margin_pct === null) return null;
+  return {
+    arpaMicroUsd: p.arpa_micro_usd,
+    grossMarginPct: p.gross_margin_pct,
+    retentionMonths: DEFAULT_RETENTION_MONTHS,
+  };
 }
 
 /**
