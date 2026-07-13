@@ -8,7 +8,7 @@ Four workflows on one shared data spine:
 
 1. **Agent loop cost visibility.** Why did this run cost 50× median?
 2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks. Google/Gemini is now a first-class priced provider here (CTO-149), not a mock column — Compare ranks it against OpenAI and Anthropic on real cost.
-3. **End-to-end cost.** What does this feature really cost? LLM tokens land today; vector / tools / compute / egress connectors are placeholders ("Coming soon" on `/connectors`) until their ingest workers ship.
+3. **End-to-end cost.** What does this feature really cost? Every cost layer now has a real ingest path: LLM tokens, tools, and embeddings from instrumented spans; vector from wrapped clients (Pinecone/Weaviate/Qdrant + Vertex Vector Search); and compute + egress from daily cloud-billing connectors (AWS Cost Explorer / GCP Billing / Vercel / Cloudflare). Compute and egress are configured per-tenant via the gateway API today; their `/connectors` tiles land with the per-tenant connector UI.
 4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
 
 A fifth surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
@@ -95,7 +95,9 @@ Knobs:
 - `TALLY_PINNED_MODELS=<path>`: skip discovery entirely, load the lineup from that file (useful for CI runs that must be hermetic).
 - `TALLY_MODELS_CACHE=<path>`: Node-side override for where `resolveLatest()` reads the cache from.
 
-Discovery is fail-soft: if both providers are unreachable and the cache file doesn't exist, the gateway boots with an empty list and a warning. The demos fall back to their hardcoded defaults.
+Discovery is fail-soft: if all providers are unreachable and the cache file doesn't exist, the gateway boots with an empty list and a warning, and consumers fall back to pinned defaults.
+
+Both the demo and the dashboard now consume that cache rather than shipping frozen SKUs. The chatbot demo resolves each picker slot (OpenAI / Anthropic / Google `flash`+`pro`) from the discovered lineup at launch, falling back to a pinned id per slot when the cache is missing, so a retired SKU self-heals on the next boot with no code change. The dashboard's Compare candidate list is validated against the current catalog by a guard test, so a retired id can't silently persist.
 
 ## Replay-backed Compare
 
@@ -145,11 +147,12 @@ Once events start landing, `/attribution` adds two columns: **Value/user** and *
 
 ## Per-tenant control plane
 
-Stored in Postgres (`db/postgres/000{1..7}_*.sql`), accessed only through the gateway (the web app never talks to Postgres directly):
+Stored in Postgres (`db/postgres/*.sql`, migrations `0001`–`0012`), accessed only through the gateway (the web app never talks to Postgres directly):
 
 - **Tenants + API keys + HMAC key versions** for per-tenant user-id hashing
 - **Cost-layer connector declarations** (which of LLM / vector / tools / compute / egress this tenant streams in)
-- **Stripe config**, **replay config**, **eval config**, **guardrail rules** + audit log
+- **Compute + egress connector config** (`tenant_compute_config`, `tenant_egress_config`): cloud provider, a credentials *reference* (Secret Manager / KMS, never a raw key), and `last_run_at` / `last_status`
+- **Stripe config**, **replay config**, **eval config**, **guardrail rules** + audit log, **BigQuery export config**
 - **CAC periods** for the unit-economics workflow (one row per finance-entered month)
 - **Integration run status** for third-party connectors (workers call `record_run` after each cycle with `last_run_at` + 24h/7d event counts; the surfacing UI card was removed pending the real per-connector UI)
 
@@ -157,7 +160,7 @@ Every control-plane write is audited with an idempotent `change_id` (UUID), and 
 
 ## Status
 
-The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. The remaining backlog turns those `—`s into real numbers (per-feature attribution, candidate-response replay for honest eval grading, body-driven pre-deploy estimation, real workers for the "Coming soon" connectors).
+The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. Every `/cost` column now has a real ingest path (LLM / tools / embeddings / vector from spans, compute / egress from cloud-billing connectors). The remaining backlog turns the last `—`s into real numbers (per-feature attribution, Unit-Economics ARPA + margin, guardrail trip counts, body-driven pre-deploy estimation) and broadens provider/cloud coverage (Amazon Bedrock, the Vercel AI Gateway, AWS/Vercel deploys).
 
 Decisions and the full system spec live in the project tracker. Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
 
