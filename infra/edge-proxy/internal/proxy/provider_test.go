@@ -49,7 +49,7 @@ func TestGeminiModelFromPath(t *testing.T) {
 		"/v1beta/models/gemini-2.5-flash:generateContent":       "gemini-2.5-flash",
 		"/v1beta/models/gemini-1.5-pro:streamGenerateContent":   "gemini-1.5-pro",
 		"/v1beta/models/gemini-2.5-flash-002:generateContent":   "gemini-2.5-flash-002",
-		"/v1/chat/completions":                                  "", // not a gemini path
+		"/v1/chat/completions":                                  "",                 // not a gemini path
 		"/v1beta/models/gemini-2.5-flash:generateContent?extra": "gemini-2.5-flash", // ':' precedes '?'
 	}
 	for path, want := range cases {

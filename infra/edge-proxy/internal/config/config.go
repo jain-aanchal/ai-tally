@@ -95,11 +95,11 @@ type Config struct {
 
 // Defaults applied when the corresponding env var is unset.
 const (
-	DefaultListenAddr       = ":8088"
-	DefaultUpstream         = "https://api.openai.com"
+	DefaultListenAddr = ":8088"
+	DefaultUpstream   = "https://api.openai.com"
 	// DefaultGeminiUpstream is the origin used when Provider is gemini and EDGE_PROXY_UPSTREAM is
 	// unset — Google's Generative Language API (CTO-167).
-	DefaultGeminiUpstream = "https://generativelanguage.googleapis.com"
+	DefaultGeminiUpstream   = "https://generativelanguage.googleapis.com"
 	DefaultTenantHeader     = "X-Tenant-Key"
 	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"
 	// DefaultUpstreamTimeout is generous because LLM completions are slow and may stream for
