@@ -30,6 +30,12 @@ function respond(row: RowShape | null) {
   });
 }
 
+function respondRows(rowsData: RowShape[]) {
+  queryMock.mockResolvedValueOnce({
+    json: async () => rowsData,
+  });
+}
+
 beforeEach(() => {
   queryMock.mockReset();
 });
@@ -105,6 +111,67 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
 // `gpt-4o-mini` — which is still *priced* in the catalog for backward compat but is NOT a model we
 // want the switcher to surface — must not appear. If seed_catalog() gains/loses a current model,
 // update KNOWN_CURRENT_CANDIDATES here in the same change.
+// CTO-146: per-rule trip counts sourced from guardrail-verdict spans.
+//
+// queryGuardrailActivity aggregates SpanAttributes['gen_ai.guardrail.{rule_id}.verdict'] over 7d:
+//   runsThisWeek           = every verdict row for the rule (it was evaluated)
+//   wouldHaveFiredThisWeek = verdict ∈ {enforced, shadow_observed}
+// We stub the ClickHouse rows the ARRAY JOIN would produce and assert the mapping.
+describe("queryGuardrailActivity — verdict-span trip counts (CTO-146)", () => {
+  it("maps verdict rows to runs/wouldFire counts per rule", async () => {
+    const { queryGuardrailActivity } = await freshSut();
+    respondRows([
+      { ruleId: "gr_research_cost", runs: "8680", wouldFire: "312" },
+      { ruleId: "gr_support_steps", runs: "58100", wouldFire: "1240" },
+    ]);
+    const activity = await queryGuardrailActivity();
+    expect(activity).not.toBeNull();
+    expect(activity!.get("gr_research_cost")).toEqual({
+      runsThisWeek: 8680,
+      wouldHaveFiredThisWeek: 312,
+    });
+    expect(activity!.get("gr_support_steps")).toEqual({
+      runsThisWeek: 58100,
+      wouldHaveFiredThisWeek: 1240,
+    });
+  });
+
+  it("counts a shadow rule's would-fires without counting them as enforcement", async () => {
+    // A rule fully in shadow: every fire is shadow_observed, so wouldFire tracks would-have-fired,
+    // and it never enforces. The query does not distinguish enforced vs shadow in wouldFire — both
+    // count toward 'would have fired' — which is exactly the graduation signal.
+    const { queryGuardrailActivity } = await freshSut();
+    respondRows([{ ruleId: "gr_shadow", runs: "1000", wouldFire: "47" }]);
+    const activity = await queryGuardrailActivity();
+    const a = activity!.get("gr_shadow")!;
+    expect(a.runsThisWeek).toBe(1000);
+    expect(a.wouldHaveFiredThisWeek).toBe(47);
+    expect(a.wouldHaveFiredThisWeek).toBeLessThan(a.runsThisWeek);
+  });
+
+  it("is honest about a rule with no telemetry — absent from the map (renders as —)", async () => {
+    const { queryGuardrailActivity } = await freshSut();
+    respondRows([{ ruleId: "gr_active", runs: "500", wouldFire: "5" }]);
+    const activity = await queryGuardrailActivity();
+    // A rule the query never saw is simply not in the map — the caller leaves its counts at 0,
+    // which the UI renders as `—`, never a fabricated number.
+    expect(activity!.has("gr_never_ran")).toBe(false);
+    expect(activity!.get("gr_active")).toEqual({ runsThisWeek: 500, wouldHaveFiredThisWeek: 5 });
+  });
+
+  it("drops rows with an empty extracted rule id", async () => {
+    const { queryGuardrailActivity } = await freshSut();
+    respondRows([
+      { ruleId: "", runs: "10", wouldFire: "1" },
+      { ruleId: "gr_ok", runs: "20", wouldFire: "2" },
+    ]);
+    const activity = await queryGuardrailActivity();
+    expect(activity!.has("")).toBe(false);
+    expect(activity!.size).toBe(1);
+    expect(activity!.get("gr_ok")).toEqual({ runsThisWeek: 20, wouldHaveFiredThisWeek: 2 });
+  });
+});
+
 describe("DEFAULT_CANDIDATES guard (CTO-171)", () => {
   // Current, non-retired models we're willing to surface in Compare, keyed "provider/model".
   // Kept in sync by hand with seed_catalog() until discovery is exposed over HTTP.
