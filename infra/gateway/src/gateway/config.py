@@ -96,6 +96,22 @@ class Settings(BaseSettings):
     # Fallback export table (`project.dataset.gcp_billing_export_v1_XXXX`) for a tenant whose
     # tenant_compute_config row leaves bq_billing_export_table blank. Empty means "require per-tenant".
     compute_gcp_default_billing_export_table: str = ""
+    # Vercel compute + egress cost connector (CTO-163). Pulls a tenant's Vercel usage/billing
+    # (Functions compute + bandwidth) into the compute + egress cost layers. DISABLED by default at
+    # both the process level (this flag) and per-tenant (``tenant_vercel_config.enabled``), so no
+    # existing deployment starts pulling on upgrade. Auth is via a Vercel access token stored BY
+    # REFERENCE per-tenant (``tenant_vercel_config.access_token_ref``, a Secret Manager pointer) —
+    # never a raw token in config, the DB, or logs. Requires the optional ``requests`` dep, imported
+    # lazily in :mod:`gateway.connectors.vercel` so the gateway boots without it.
+    vercel_connector_enabled: bool = False
+    # Vercel API base (override for a proxy / test double). No credentials in the URL.
+    vercel_api_base: str = "https://api.vercel.com"
+    # Egress double-count reconciliation with CTO-144 (default off): when false, Vercel egress flows
+    # solely through the CTO-144 egress connector and this connector emits ONLY compute spans. A
+    # per-tenant ``tenant_vercel_config.emit_egress`` flag can opt a tenant into egress here instead —
+    # set it ONLY when the tenant has no CTO-144 Vercel egress row. This process flag is the default
+    # for tenants that leave the column NULL.
+    vercel_emit_egress: bool = False
 
 
 _settings: Settings | None = None
