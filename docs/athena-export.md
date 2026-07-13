@@ -141,9 +141,9 @@ Process-level settings (env, `TALLY_`-prefixed — see `gateway/config.py`):
 | `TALLY_ATHENA_EXPORT_AWS_REGION`       | `""`           | AWS region (else resolved from the environment). |
 | `TALLY_ATHENA_EXPORT_BATCH_LIMIT`      | `10000`        | Max rows pulled per (tenant, table) pass.      |
 
-Per-tenant config (`tenant_athena_export_config`, migration `db/postgres/0013_...`): `enabled`,
+Per-tenant config (`tenant_athena_export_config`, migration `db/postgres/0020_...`): `enabled`,
 `bucket`, `prefix`, `database`, `region`, `credential_ref`. Incremental cursor
-(`athena_export_watermarks`, migration `db/postgres/0014_...`): one row per (tenant, source table).
+(`athena_export_watermarks`, migration `db/postgres/0021_...`): one row per (tenant, source table).
 
 ### Auth — reference only, never a raw key
 
