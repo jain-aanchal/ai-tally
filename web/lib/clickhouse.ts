@@ -1372,10 +1372,17 @@ const _replayCache = new Map<string, { at: number; data: ReplayProjection | null
 // It was previously absent here, which meant the gemini-3-flash row never got real replay/eval
 // data and stayed stuck on the compare.ts mock fallback. Adding it is the whole fix: the route
 // and the gateway clients are already provider-generic.
-const DEFAULT_CANDIDATES = [
+//
+// CTO-171: dropped the retired `openai/gpt-4o-mini` — it is no longer a model we want the Compare
+// switcher to surface. Every id below MUST be a current, catalog-priced model (see the SDK's
+// `seed_catalog()` in sdk/python/src/tally/pricing.py). This list is hardcoded rather than derived
+// from live provider discovery: the gateway discovers its lineup at boot (`app.state.models` via
+// `discover_models()`), but it does NOT yet expose that over HTTP — there is no `/v1/models` route.
+// Building one is the follow-up; until then, the guard test in clickhouse.test.ts asserts every id
+// here is present in a current known-good catalog set, so a retired id can't silently return.
+export const DEFAULT_CANDIDATES = [
   { provider: "anthropic", model: "claude-haiku-4-5" },
   { provider: "openai", model: "gpt-5-mini" },
-  { provider: "openai", model: "gpt-4o-mini" },
   { provider: "google", model: "gemini-3-flash" },
 ];
 
