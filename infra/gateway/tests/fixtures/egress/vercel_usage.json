@@ -1,0 +1,9 @@
+{
+  "items": [
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-01", "amount": "3.00", "unit": "USD"},
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-01", "amount": "1.50", "unit": "USD"},
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-02", "amount": "6.25", "unit": "USD"},
+    {"name": "Serverless Functions", "type": "compute", "date": "2026-07-01", "amount": "99.00", "unit": "USD"},
+    {"name": "Bandwidth", "type": "bandwidth", "date": "2026-07-03", "amount": "0", "unit": "USD"}
+  ]
+}

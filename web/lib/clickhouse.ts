@@ -79,10 +79,11 @@ function zeroLayers(): SpendByLayer {
   return { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 };
 }
 
-// Map a gen_ai operation to a cost layer. LLM-family spans come from the SDK; `compute` spans are
-// synthetic daily rows the cloud-billing connector lands (CTO-143) so the Compute layer populates.
+// Map a gen_ai operation to a cost layer. LLM-family spans come from the SDK; `compute` (CTO-143)
+// and `egress` (CTO-144) spans are synthetic daily rows the cloud-billing connectors land so the
+// Compute and Egress layers populate.
 const LAYER_CASE =
-  "multiIf(GenAiOperation = 'tool', 'tools', GenAiOperation = 'embeddings', 'embeddings', GenAiOperation = 'vector', 'vector', GenAiOperation = 'compute', 'compute', 'llm')";
+  "multiIf(GenAiOperation = 'tool', 'tools', GenAiOperation = 'embeddings', 'embeddings', GenAiOperation = 'vector', 'vector', GenAiOperation = 'compute', 'compute', GenAiOperation = 'egress', 'egress', 'llm')";
 
 async function rows<T>(db: ClickHouseClient, query: string, tenant: string): Promise<T[]> {
   const rs = await db.query({
