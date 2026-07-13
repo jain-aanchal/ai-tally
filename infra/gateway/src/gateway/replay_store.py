@@ -116,6 +116,103 @@ class GCSReplayBlobStore:
         return self._bucket.blob(key).download_as_bytes()
 
 
+class S3ReplayBlobStore:
+    """AWS S3 (or S3-compatible, e.g. MinIO) backend for replay sample blobs (CTO-158).
+
+    Mirror of :class:`GCSReplayBlobStore` — satisfies the same :class:`ReplayBlobStore` protocol
+    as :class:`InMemoryReplayBlobStore` and the GCS path: objects are keyed with the identical
+    ``tenants/{tenant_id}/replay_samples/{yyyy/mm/dd}/{sample_id}.json`` layout produced by
+    :func:`build_replay_object_key`, so the ClickHouse index rows and the executor read path are
+    unchanged regardless of which backend is wired. An optional ``prefix`` is prepended to every
+    key (e.g. to share a bucket across environments) without touching the stored index key — the
+    prefix is a storage-layout detail applied on the way in/out only.
+
+    **PII scrub** — the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
+    ``persist_sample`` ingest path, before any ``put_bytes`` call. This backend only moves already
+    scrubbed bytes, so it inherits the scrub unchanged; the CTO-125 candidate-response retention
+    carve-out likewise applies identically here.
+
+    **Auth** — no raw key material is passed. The ``boto3`` S3 client is constructed with the AWS
+    default credential chain, so it transparently picks up an IAM role / IRSA (EKS) / EC2 instance
+    profile / ``AWS_*`` environment credentials / a shared credentials file, in boto3's normal
+    resolution order. We never handle an access key or secret here.
+
+    **Retention** — object lifecycle (TTL / expiration) is expected to be enforced by an S3 bucket
+    lifecycle policy provisioned out-of-band (e.g. Terraform), mirroring the replay
+    ``retention_days`` knob. This backend does NOT create or manage lifecycle rules (out of scope
+    for CTO-158).
+
+    The ``boto3`` dependency is OPTIONAL (``[s3]`` extra) and imported lazily at construction —
+    importing this module never requires the package; only instantiating this class does. That
+    keeps the base gateway install slim and lets it boot without boto3 when unused.
+    """
+
+    __slots__ = ("_bucket", "_prefix", "_client")
+
+    def __init__(
+        self,
+        bucket: str,
+        *,
+        prefix: str = "",
+        region: str | None = None,
+        client: object | None = None,
+    ) -> None:
+        if not bucket:
+            raise ValueError("bucket must be non-empty")
+        if client is None:
+            # Lazy import: keep boto3 optional. Constructing the client with no explicit
+            # credentials makes it resolve the AWS default credential chain (IAM role / IRSA /
+            # instance profile / env / shared file) automatically — we never handle a raw key here.
+            import boto3  # type: ignore[import-not-found]
+
+            client = boto3.client("s3", region_name=region)
+        self._client = client
+        self._bucket = bucket
+        # Normalise prefix to a bare, slash-terminated segment (or empty) so key joins are clean.
+        self._prefix = prefix.strip("/")
+
+    def _full_key(self, key: str) -> str:
+        return f"{self._prefix}/{key}" if self._prefix else key
+
+    def put_bytes(self, key: str, body: bytes, content_type: str = "application/json") -> None:
+        self._client.put_object(
+            Bucket=self._bucket,
+            Key=self._full_key(key),
+            Body=body,
+            ContentType=content_type,
+        )
+
+    def get_bytes(self, key: str) -> bytes:
+        resp = self._client.get_object(Bucket=self._bucket, Key=self._full_key(key))
+        return resp["Body"].read()
+
+    def exists(self, key: str) -> bool:
+        """True if an object lives at ``key``. Uses ``head_object``; a 404/NoSuchKey means absent."""
+        try:
+            self._client.head_object(Bucket=self._bucket, Key=self._full_key(key))
+        except Exception as exc:  # noqa: BLE001 — normalise botocore ClientError (404) to False.
+            if _is_s3_not_found(exc):
+                return False
+            raise
+        return True
+
+
+def _is_s3_not_found(exc: BaseException) -> bool:
+    """Return True for a boto3/botocore 'object not found' error (404 / NoSuchKey / NotFound).
+
+    Kept structural (duck-typed on ``response``) so tests can raise a lightweight stand-in and so
+    the module never needs botocore imported to interpret the error."""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error", {})
+        if str(error.get("Code")) in {"404", "NoSuchKey", "NotFound"}:
+            return True
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 404:
+            return True
+    return False
+
+
 # --- ClickHouse-side index rows --------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)

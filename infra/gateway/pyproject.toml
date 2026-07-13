@@ -18,6 +18,12 @@ dependencies = [
 gcs = [
     "google-cloud-storage>=2.10",
 ]
+# S3 / MinIO replay blob-store backend (CTO-158). Optional so the base install stays slim;
+# imported lazily inside S3ReplayBlobStore so the gateway boots without it when the backend is
+# not `s3`.
+s3 = [
+    "boto3>=1.34",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

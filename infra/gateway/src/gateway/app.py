@@ -73,6 +73,7 @@ from gateway.replay_store import (
     GCSReplayBlobStore,
     InMemoryReplayBlobStore,
     ReplayBlobStore,
+    S3ReplayBlobStore,
     persist_sample,
 )
 from gateway.eval_executor import (
@@ -108,9 +109,10 @@ def _build_replay_blob_store(settings) -> ReplayBlobStore:
     """Select the replay blob-store backend from settings (CTO-152).
 
     ``memory`` (default) -> in-process dict store; ``gcs`` -> Google Cloud Storage via ADC /
-    Workload Identity. The GCS client + its optional ``google-cloud-storage`` dependency are only
-    touched when the backend is actually ``gcs`` (lazy import lives inside the store), so the
-    default install/boot never needs the package.
+    Workload Identity; ``s3`` -> AWS S3 (or S3-compatible, e.g. MinIO) via the AWS default
+    credential chain. Each cloud client + its optional dependency (``google-cloud-storage`` /
+    ``boto3``) is only touched when that backend is actually selected (lazy import lives inside the
+    store), so the default install/boot never needs either package.
     """
     backend = (settings.replay_blob_backend or "memory").lower()
     if backend == "memory":
@@ -121,7 +123,19 @@ def _build_replay_blob_store(settings) -> ReplayBlobStore:
                 "TALLY_REPLAY_GCS_BUCKET must be set when TALLY_REPLAY_BLOB_BACKEND=gcs"
             )
         return GCSReplayBlobStore(bucket=settings.replay_gcs_bucket)
-    raise ValueError(f"unknown TALLY_REPLAY_BLOB_BACKEND: {backend!r} (expected 'memory' or 'gcs')")
+    if backend == "s3":
+        if not settings.replay_s3_bucket:
+            raise ValueError(
+                "TALLY_REPLAY_S3_BUCKET must be set when TALLY_REPLAY_BLOB_BACKEND=s3"
+            )
+        return S3ReplayBlobStore(
+            bucket=settings.replay_s3_bucket,
+            prefix=settings.replay_s3_prefix,
+            region=settings.replay_s3_region or None,
+        )
+    raise ValueError(
+        f"unknown TALLY_REPLAY_BLOB_BACKEND: {backend!r} (expected 'memory', 'gcs', or 's3')"
+    )
 
 
 @asynccontextmanager

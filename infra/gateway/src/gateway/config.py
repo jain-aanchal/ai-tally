@@ -51,11 +51,19 @@ class Settings(BaseSettings):
     ingest_buffer_drain_batch: int = 2_000
     ingest_buffer_poll_interval_s: float = 0.05
 
-    # Replay blob-store backend (CTO-152). ``memory`` (default) uses the in-process dict store;
-    # ``gcs`` persists scrubbed replay samples to a Google Cloud Storage bucket via ADC / Workload
-    # Identity (no raw key material). ``replay_gcs_bucket`` is required when the backend is ``gcs``.
+    # Replay blob-store backend (CTO-152 / CTO-158). ``memory`` (default) uses the in-process dict
+    # store; ``gcs`` persists scrubbed replay samples to a Google Cloud Storage bucket via ADC /
+    # Workload Identity; ``s3`` persists them to an AWS S3 (or S3-compatible, e.g. MinIO) bucket via
+    # the AWS default credential chain (IAM role / IRSA / instance profile / env) — no raw keys for
+    # either. ``replay_gcs_bucket`` is required when the backend is ``gcs``; ``replay_s3_bucket`` is
+    # required when the backend is ``s3``.
     replay_blob_backend: str = "memory"
     replay_gcs_bucket: str = ""
+    # S3 backend (CTO-158). Bucket is required for ``s3``; prefix/region are optional. Region empty
+    # means "resolve from the AWS default chain" (``AWS_REGION`` / config / instance metadata).
+    replay_s3_bucket: str = ""
+    replay_s3_prefix: str = ""
+    replay_s3_region: str = ""
 
     # BigQuery export sink (CTO-154). OPTIONAL, additive analytics mirror that copies
     # spans / business_events / attribution / daily rollups into a tenant's OWN BigQuery
