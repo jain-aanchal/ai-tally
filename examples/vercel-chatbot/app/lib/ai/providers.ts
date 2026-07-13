@@ -37,6 +37,9 @@ const FALLBACK_ANTHROPIC = resolveLatest("anthropic", "sonnet", "claude-sonnet-4
 // is present; this literal only bites when discovery has never run.
 const FALLBACK_OPENAI = resolveLatest("openai", "mini", "gpt-5-mini");
 const FALLBACK_ANTHROPIC_TITLE = resolveLatest("anthropic", "haiku", "claude-haiku-4-5");
+// CTO-170: google fallback for legacy/unprefixed gemini ids, resolved from the
+// discovery cache like the openai/anthropic ones above.
+const FALLBACK_GOOGLE = resolveLatest("google", "flash", "gemini-3-flash");
 
 function resolve(modelId: string) {
   // Honor an explicit anthropic/<model> id — strip the prefix; pass the rest
@@ -59,7 +62,7 @@ function resolve(modelId: string) {
     return anthropic(FALLBACK_ANTHROPIC);
   }
   if (modelId.includes("gemini")) {
-    return google(modelId);
+    return google(FALLBACK_GOOGLE);
   }
   return DEFAULT_PROVIDER === "openai"
     ? openai(FALLBACK_OPENAI)

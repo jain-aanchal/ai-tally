@@ -17,6 +17,13 @@
 // seed_catalog() or its cost silently drops to $0.
 //
 // CTO-109 owns the gateway/SDK discovery that writes the cache.
+//
+// CTO-170: this module is now the CLIENT-SAFE, plain-data half. The literals below
+// are the pinned fail-soft fallbacks (and what the picker renders offline / before
+// /api/models loads). The discovery-RESOLVED lineup is built server-side in
+// ./models.server.ts (it imports resolveModel.ts, which uses node:fs — so it must
+// never reach the browser bundle). Client components import from HERE; the chat
+// route, /api/models, and actions import the resolved shape from ./models.server.
 export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-5";
 
 export const titleModel = {
@@ -92,11 +99,75 @@ export const chatModels: ChatModel[] = [
   },
 ];
 
-export async function getCapabilities(): Promise<
-  Record<string, ModelCapabilities>
-> {
+// CTO-170: discovery-slot metadata. Each entry maps a picker slot to the
+// (provider, family) that the CTO-109 gateway discovery classifies it under, so
+// ./models.server.ts can resolve the newest non-deprecated id per slot from
+// .tally/models.json. `provider`/`family` strings MUST match
+// tally.models.classify_family (sdk/python/src/tally/models.py) — that's what's
+// written into the cache. Kept as plain data (parallel arrays / consts) here so
+// the client bundle never needs the fs-backed discovery machinery.
+export type DiscoveryProvider = "openai" | "anthropic" | "google";
+export type DiscoveryFamily =
+  | "haiku"
+  | "sonnet"
+  | "opus"
+  | "mini"
+  | "flagship"
+  | "flash"
+  | "pro";
+export type ModelSlot = {
+  provider: DiscoveryProvider;
+  family: DiscoveryFamily;
+};
+
+// Parallel to `chatModels` (same order). Zipped with it in ./models.server.ts.
+export const chatModelSlots: ModelSlot[] = [
+  { provider: "anthropic", family: "sonnet" }, // anthropic/claude-sonnet-4-5
+  { provider: "anthropic", family: "haiku" }, // anthropic/claude-haiku-4-5
+  { provider: "anthropic", family: "opus" }, // anthropic/claude-opus-4-8
+  { provider: "openai", family: "mini" }, // openai/gpt-5-mini
+  { provider: "openai", family: "flagship" }, // openai/gpt-5
+  { provider: "google", family: "flash" }, // google/gemini-3-flash
+  { provider: "google", family: "pro" }, // google/gemini-2.5-pro
+];
+
+export const titleModelSlot: ModelSlot = {
+  provider: "anthropic",
+  family: "haiku",
+};
+export const defaultChatModelSlot: ModelSlot = {
+  provider: "anthropic",
+  family: "sonnet",
+};
+
+// CTO-170 catalog guard allowlist. Every id the picker offers MUST be priced in
+// tally.pricing.seed_catalog() (sdk/python/src/tally/pricing.py) or its dashboard
+// cost silently drops to $0 (a "catalog_miss"). A discovery-resolved id that isn't
+// in this set is rejected in favor of the pinned literal (see models.server.ts).
+// There's no build-time export of the Python catalog into JS, so this small set is
+// maintained by hand — keep it in sync with seed_catalog()'s chat SKUs.
+export const catalogPricedIds: ReadonlySet<string> = new Set<string>([
+  "anthropic/claude-sonnet-4-5",
+  "anthropic/claude-haiku-4-5",
+  "anthropic/claude-opus-4-8",
+  "openai/gpt-5",
+  "openai/gpt-5-mini",
+  "openai/gpt-4o",
+  "openai/gpt-4o-mini",
+  "openai/gpt-4-turbo",
+  "google/gemini-3-flash",
+  "google/gemini-2.5-flash",
+  "google/gemini-2.5-pro",
+]);
+
+export async function getCapabilities(
+  // CTO-170: defaults to the pinned list, but the server routes pass the
+  // discovery-resolved lineup so capabilities are keyed by the ids the picker
+  // actually offers.
+  models: ChatModel[] = chatModels
+): Promise<Record<string, ModelCapabilities>> {
   const results = await Promise.all(
-    chatModels.map(async (model) => {
+    models.map(async (model) => {
       try {
         const res = await fetch(
           `https://ai-gateway.vercel.sh/v1/models/${model.id}/endpoints`,
