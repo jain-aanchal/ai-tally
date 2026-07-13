@@ -102,6 +102,29 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
   });
 });
 
+describe("queryDistinctBusinessEventNames (CTO-140)", () => {
+  it("maps observed events into {name, count}, most-frequent first as returned", async () => {
+    const { queryDistinctBusinessEventNames } = await freshSut();
+    queryMock.mockResolvedValueOnce({
+      json: async () => [
+        { name: "subscription_created", n: "120" },
+        { name: "paid_conversion", n: "42" },
+      ],
+    });
+    const out = await queryDistinctBusinessEventNames();
+    expect(out).toEqual([
+      { name: "subscription_created", count: 120 },
+      { name: "paid_conversion", count: 42 },
+    ]);
+  });
+
+  it("returns an empty array (not null) when no events exist", async () => {
+    const { queryDistinctBusinessEventNames } = await freshSut();
+    respond(null);
+    expect(await queryDistinctBusinessEventNames()).toEqual([]);
+  });
+});
+
 // CTO-171: guard the Compare candidate list against silently shipping a retired model id.
 //
 // The gateway discovers its live provider lineup at boot but does not expose it over HTTP yet

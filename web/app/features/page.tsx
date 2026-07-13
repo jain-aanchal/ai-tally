@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Card } from "@/components/Card";
-import {
-  PartialDataBanner,
-  StaleBadge,
-  SyntheticPreviewBanner,
-} from "@/components/DataStateBanner";
+import { StaleBadge, SyntheticPreviewBanner } from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
 import { deriveDataState, relativeAge, STALE_AFTER_MS } from "@/lib/dataState";
 import {
   type AttributionDiagnostics,
   type FeatureEconomics,
-  margin,
 } from "@/lib/features";
-import { formatUSD } from "@/lib/types";
+import { FeatureValueEvents } from "./FeatureValueEvents";
 
 interface FeaturesPayload {
   features: FeatureEconomics[];
@@ -36,55 +31,12 @@ export default async function FeaturesPage() {
   });
   const reconcilerStale = diagnostics.reconcilerLastRunMinutesAgo * 60_000 > STALE_AFTER_MS;
 
+  // The "Finish setup" onboarding banner and the per-row "configure value event →" CTA live inside
+  // FeatureValueEvents (CTO-140) — a client component so both can open the config modal and clear
+  // the banner reactively as each feature gets a value event.
   const body = (
     <div className="space-y-6">
-      <Card title="Unit economics — per feature">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-xs uppercase text-muted">
-              <tr>
-                <th className="py-1 text-left font-medium">Feature</th>
-                <th className="py-1 text-right font-medium">Cost/user</th>
-                <th className="py-1 text-right font-medium">Value/user</th>
-                <th className="py-1 text-right font-medium">Margin</th>
-                <th className="py-1 text-right font-medium">Payback</th>
-                <th className="py-1 text-right font-medium">Attribution rate</th>
-                <th className="py-1 pl-3 text-left font-medium">Value event</th>
-              </tr>
-            </thead>
-            <tbody>
-              {features.map((f) => {
-                const m = margin(f);
-                return (
-                  <tr key={f.feature} className="border-t border-edge">
-                    <td className="py-2 font-medium">{f.feature}</td>
-                    <td className="py-2 text-right tabular-nums">{formatUSD(f.costPerUserMicroUsd)}</td>
-                    <td className="py-2 text-right tabular-nums">
-                      {f.valuePerUserMicroUsd === null ? <Dash /> : formatUSD(f.valuePerUserMicroUsd)}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">
-                      {m === null ? <Dash /> : <MarginCell m={m} />}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">
-                      {f.paybackDays === null ? <Dash /> : `${f.paybackDays}d`}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">
-                      {f.attributionRate === null ? <Dash /> : `${Math.round(f.attributionRate * 100)}%`}
-                    </td>
-                    <td className="py-2 pl-3">
-                      {f.valueEvent === null ? (
-                        <span className="text-warn text-xs">configure value event →</span>
-                      ) : (
-                        <span className="font-mono text-xs text-gray-300">{f.valueEvent}</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      <FeatureValueEvents initialFeatures={features} />
 
       <Card title="Attribution diagnostics">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -138,8 +90,6 @@ export default async function FeaturesPage() {
         )}
       </div>
 
-      {state === "partial" && <PartialDataBanner missing="value-event tracking for every feature" />}
-
       {state === "empty" ? (
         <SyntheticPreviewBanner workflow="Features">{body}</SyntheticPreviewBanner>
       ) : (
@@ -147,15 +97,6 @@ export default async function FeaturesPage() {
       )}
     </div>
   );
-}
-
-function Dash() {
-  return <span className="text-muted">—</span>;
-}
-
-function MarginCell({ m }: { m: number }) {
-  const pct = Math.round(m * 100);
-  return <span className={m > 0.5 ? "text-good" : m > 0 ? "" : "text-bad"}>{pct}%</span>;
 }
 
 function ConfidenceBar({
