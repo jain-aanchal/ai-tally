@@ -24,6 +24,13 @@ from gateway.connectors.egress import EgressConfig
 _ALLOWED_STATUSES = frozenset({"success", "partial", "failed"})
 
 
+def _as_dict(value: Any) -> dict[str, str]:
+    """Coerce a JSONB column (dict, raw JSON text, or NULL) to a plain ``dict``."""
+    if isinstance(value, str):  # driver returned raw JSON text
+        value = json.loads(value)
+    return dict(value or {})
+
+
 class TenantComputeConfigStore:
     """Tiny Postgres-backed reader/recorder over ``tenant_compute_config``."""
 
@@ -39,7 +46,8 @@ class TenantComputeConfigStore:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT tenant_id, cloud_provider, credentials_ref, tag_filter
+                SELECT tenant_id, cloud_provider, credentials_ref, tag_filter,
+                       bq_billing_export_table, label_filter
                 FROM tenant_compute_config
                 WHERE tenant_id = %s
                 """,
@@ -48,14 +56,13 @@ class TenantComputeConfigStore:
             row = cur.fetchone()
         if row is None:
             return None
-        tag_filter = row[3]
-        if isinstance(tag_filter, str):  # driver returned raw JSON text
-            tag_filter = json.loads(tag_filter)
         return ConnectorConfig(
             tenant_id=str(row[0]),
             cloud_provider=str(row[1]),
             credentials_ref=str(row[2]),
-            tag_filter=dict(tag_filter or {}),
+            tag_filter=_as_dict(row[3]),
+            bq_billing_export_table=str(row[4] or ""),
+            label_filter=_as_dict(row[5]),
         )
 
     def record_run(

@@ -15,14 +15,17 @@ touches boto3, BigQuery, ClickHouse, or Postgres.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from gateway.connectors.base import ConnectorConfig, DailyCost, synthetic_span_id
 from gateway.connectors.compute import (
+    DEFAULT_GCP_LABEL_FILTER,
     ComputeCostConnector,
+    GcpCloudBillingClient,
+    build_gcp_billing_query,
     parse_aws_cost_response,
     parse_gcp_billing_rows,
 )
@@ -86,6 +89,18 @@ def _config(provider: str = "aws") -> ConnectorConfig:
         cloud_provider=provider,
         credentials_ref="aws-default-chain",
         tag_filter={"tally:workload": "ai"},
+    )
+
+
+def _gcp_config(
+    *, table: str = "acme-prod.billing.gcp_billing_export_v1_ABC", label_filter=None
+) -> ConnectorConfig:
+    return ConnectorConfig(
+        tenant_id="t-acme",
+        cloud_provider="gcp",
+        credentials_ref="sm://projects/acme/secrets/tally-billing-sa",
+        bq_billing_export_table=table,
+        label_filter=label_filter if label_filter is not None else {},
     )
 
 
@@ -225,3 +240,123 @@ def test_connector_requires_operation_and_client() -> None:
     connector = ComputeCostConnector(store=FakeStore(), recorder=FakeRecorder(), billing_client=None)
     result = connector.run(_config(), day=date(2026, 7, 1))
     assert result.status == "failed"
+
+
+# --- GCP Cloud Billing (BigQuery export) source (CTO-150) --------------------------------------
+
+
+def test_build_gcp_billing_query_binds_days_and_labels() -> None:
+    # Every label + the day range is a BOUND parameter (no interpolation), and the default label
+    # filter is applied when the tenant hasn't set one.
+    sql, params = build_gcp_billing_query(
+        _gcp_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 30)
+    )
+    assert "`acme-prod.billing.gcp_billing_export_v1_ABC`" in sql
+    assert "BETWEEN @start_day AND @end_day" in sql
+    assert "UNNEST(labels)" in sql and "l.key = @label_key_0 AND l.value = @label_val_0" in sql
+    assert params["start_day"] == date(2026, 7, 1)
+    assert params["end_day"] == date(2026, 7, 30)
+    # DEFAULT_GCP_LABEL_FILTER == {"tally-workload": "ai"} — note the '-' (GCP keys can't hold ':').
+    assert params["label_key_0"] == "tally-workload"
+    assert params["label_val_0"] == "ai"
+    assert DEFAULT_GCP_LABEL_FILTER == {"tally-workload": "ai"}
+
+
+def test_build_gcp_billing_query_rejects_missing_or_unsafe_table() -> None:
+    with pytest.raises(ValueError, match="bq_billing_export_table"):
+        build_gcp_billing_query(
+            _gcp_config(table=""), start_day=date(2026, 7, 1), end_day=date(2026, 7, 2)
+        )
+    with pytest.raises(ValueError, match="bq_billing_export_table"):
+        build_gcp_billing_query(
+            _gcp_config(table="billing`; DROP TABLE x --"),
+            start_day=date(2026, 7, 1),
+            end_day=date(2026, 7, 2),
+        )
+
+
+def test_gcp_client_parses_injected_export_rows() -> None:
+    # The BQ-touching client never needs google-cloud-bigquery: inject a query_runner that returns
+    # the recorded export fixture. Per-SKU rows for the same day are summed into ONE DailyCost.
+    rows = _fixture("gcp_billing_export.json")
+    client = GcpCloudBillingClient(query_runner=lambda config, s, e: rows)
+    costs = client.get_daily_costs(
+        _gcp_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3)
+    )
+    assert costs == [
+        DailyCost(day=date(2026, 7, 1), cost_micro_usd=7_500_000),  # 3.00 + 4.50
+        DailyCost(day=date(2026, 7, 2), cost_micro_usd=8_250_000),
+        # 2026-07-03 is $0 → dropped.
+    ]
+
+
+def test_parse_gcp_billing_rows_accepts_date_and_datetime_objects() -> None:
+    # The live BigQuery client hands back date/datetime objects, not ISO strings.
+    costs = parse_gcp_billing_rows(
+        [
+            {"day": date(2026, 7, 1), "cost": 3.0},
+            {"usage_start_time": datetime(2026, 7, 1, 6, tzinfo=timezone.utc), "cost": 4.5},
+            {"day": date(2026, 7, 2), "cost": "8.25"},
+        ]
+    )
+    assert costs == [
+        DailyCost(day=date(2026, 7, 1), cost_micro_usd=7_500_000),
+        DailyCost(day=date(2026, 7, 2), cost_micro_usd=8_250_000),
+    ]
+
+
+def test_gcp_run_emits_one_compute_span_per_day() -> None:
+    store, recorder = FakeStore(), FakeRecorder()
+    rows = _fixture("gcp_billing_export.json")
+    connector = ComputeCostConnector(
+        store=store,
+        recorder=recorder,
+        billing_client=GcpCloudBillingClient(query_runner=lambda config, s, e: rows),
+    )
+
+    result = connector.run_backfill(
+        _gcp_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3)
+    )
+
+    assert result.status == "success"
+    assert result.spans_emitted == 2  # two non-zero days
+    assert len(store.rows) == 2
+    assert all(r[_OP] == "compute" and r[_SYSTEM] == "gcp" for r in store.rows)
+    assert float(store.rows[0][_COST]) == pytest.approx(7.50)
+    assert recorder.calls == [("t-acme", "compute", "success", None)]
+
+
+def test_gcp_backfill_is_idempotent() -> None:
+    store = FakeStore()
+    rows = _fixture("gcp_billing_export.json")
+    connector = ComputeCostConnector(
+        store=store,
+        recorder=FakeRecorder(),
+        billing_client=GcpCloudBillingClient(query_runner=lambda config, s, e: rows),
+    )
+    first = connector.run_backfill(_gcp_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3))
+    second = connector.run_backfill(_gcp_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3))
+    assert first.spans_emitted == 2
+    assert second.spans_emitted == 0  # deterministic span-id guard → no double-count
+    assert len(store.rows) == 2
+
+
+def test_gcp_failed_fetch_records_failed_and_emits_no_span() -> None:
+    store, recorder = FakeStore(), FakeRecorder()
+
+    def _boom(config, s, e):
+        raise RuntimeError("bigquery 403 permission denied")
+
+    connector = ComputeCostConnector(
+        store=store,
+        recorder=recorder,
+        billing_client=GcpCloudBillingClient(query_runner=_boom),
+    )
+
+    result = connector.run(_gcp_config(), day=date(2026, 7, 1))
+
+    assert result.status == "failed"
+    assert result.spans_emitted == 0
+    assert store.rows == []  # honest-under-uncertainty: never a guessed number
+    assert recorder.calls[0][2] == "failed"
+    assert "bigquery 403" in (recorder.calls[0][3] or "")

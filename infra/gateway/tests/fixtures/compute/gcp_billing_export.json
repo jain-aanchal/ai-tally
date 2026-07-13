@@ -1,0 +1,6 @@
+[
+  {"usage_start_time": "2026-07-01T00:00:00+00:00", "cost": "3.00", "labels": [{"key": "tally-workload", "value": "ai"}]},
+  {"usage_start_time": "2026-07-01T06:00:00+00:00", "cost": "4.50", "labels": [{"key": "tally-workload", "value": "ai"}]},
+  {"usage_start_time": "2026-07-02T00:00:00+00:00", "cost": "8.25", "labels": [{"key": "tally-workload", "value": "ai"}]},
+  {"usage_start_time": "2026-07-03T00:00:00+00:00", "cost": "0", "labels": [{"key": "tally-workload", "value": "ai"}]}
+]
