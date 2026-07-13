@@ -33,13 +33,16 @@ describe("api routes", () => {
     expect(body.dq).toBeDefined();
   });
 
-  it("GET /api/agents returns agents + runs + reconciler freshness", async () => {
-    const body = await json<{ agents: unknown[]; runs: unknown[]; reconcilerLastRunMinutesAgo: number }>(
+  it("GET /api/agents returns agents + runs + real-or-null reconciler freshness (CTO-169)", async () => {
+    const body = await json<{ agents: unknown[]; runs: unknown[]; reconcilerLastRunMinutesAgo: number | null }>(
       await AgentsGET(new Request("http://test/api/agents") as never),
     );
     expect(body.agents.length).toBeGreaterThan(0);
     expect(body.runs.length).toBeGreaterThan(0);
-    expect(body.reconcilerLastRunMinutesAgo).toBeTypeOf("number");
+    // No reconciler gateway runs in CI, so the route applies honest-null (renders `—`) rather than
+    // the old hardcoded constant (23). Real value or null — never a fabricated number.
+    expect(body.reconcilerLastRunMinutesAgo === null || typeof body.reconcilerLastRunMinutesAgo === "number").toBe(true);
+    expect(body.reconcilerLastRunMinutesAgo).not.toBe(23);
   });
 
   it("GET /api/agents/runs/:runId returns the run, 404 on miss", async () => {

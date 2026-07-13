@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/clickhouse", () => ({
   queryReplayCandidates: vi.fn(),
   queryReplayEstimate: vi.fn(),
+  // CTO-169: reconciler last-run is read from the real source; default to null (honest-null) here.
+  queryReconcilerLastRun: vi.fn().mockResolvedValue(null),
 }));
 
 import { POST as EstimatePOST } from "./route";

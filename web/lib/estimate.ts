@@ -27,9 +27,11 @@ export interface Projection {
   };
   /**
    * Minutes since the reconciler last trued-up the historical window this projection samples.
-   * An estimate built on a stale baseline must not be presented as fresh (CTO-80).
+   * An estimate built on a stale baseline must not be presented as fresh (CTO-80). Sourced from the
+   * real reconciliation_runs log on the live path (CTO-169); `null` when the reconciler has never
+   * run / the source is unavailable, rendered as `—` rather than the fixture constant.
    */
-  reconcilerLastRunMinutesAgo: number;
+  reconcilerLastRunMinutesAgo: number | null;
 }
 
 /**

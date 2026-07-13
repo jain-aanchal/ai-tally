@@ -4,6 +4,7 @@ import { comparison, deriveRecommendation, deriveWorkload } from "@/lib/compare"
 import {
   queryCurrentModel,
   queryEvalCandidates,
+  queryReconcilerLastRun,
   queryReplayCandidates,
   type EvalCandidateRow,
 } from "@/lib/clickhouse";
@@ -54,6 +55,10 @@ export async function GET(req: Request) {
   // Pull it in parallel so the route doesn't add 30s of latency stacked behind the replay call.
   const evalProj = await queryEvalCandidates(featureTag);
 
+  // CTO-169: the baseline's freshness signal is the real reconciliation_runs last-run, not the
+  // fixture constant — null (→ `—`) when the reconciler has never run / the source is unavailable.
+  const reconcilerLastRunMinutesAgo = await queryReconcilerLastRun();
+
   // The "current model" half is the one we can ground in real traffic today: most-trafficked
   // model over the last 7 days. Quality/latency on `current` stay mocked because we don't yet
   // have an eval harness — flagged honestly via SyntheticPreviewBanner on the page.
@@ -73,6 +78,7 @@ export async function GET(req: Request) {
       ...comparison,
       current: { ...comparison.current, qualityScore: null },
       candidates,
+      diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
       replay_source: replay ? "replay" : "mock",
     });
   }
@@ -149,6 +155,7 @@ export async function GET(req: Request) {
           (replay.diagnostics.context_fidelity as
             | "resolved-context replay (no live retrieval)"
             | "live retrieval") ?? comparison.diagnostics.contextFidelity,
+        reconcilerLastRunMinutesAgo,
       },
       replay_source: "replay",
     });
@@ -216,6 +223,7 @@ export async function GET(req: Request) {
     },
     candidates,
     recommendation,
+    diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
     replay_source: "mock",
   });
 }

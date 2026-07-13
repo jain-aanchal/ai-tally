@@ -5,7 +5,7 @@
 // the function under test is the small adapter that converts rows into the typed return value
 // (and applies the n < 50 suppression rule), so we don't need a real ClickHouse to test it.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type RowShape = Record<string, unknown>;
 
@@ -204,5 +204,50 @@ describe("DEFAULT_CANDIDATES guard (CTO-171)", () => {
       const id = `${c.provider}/${c.model}`;
       expect(RETIRED_IDS.has(id), `${id} is retired and must not be a candidate`).toBe(false);
     }
+  });
+});
+
+// CTO-169: reconciler "last run" freshness is derived from the real reconciliation_runs source
+// (gateway GET /v1/tenant/reconciliation/status), not a hardcoded constant. Honest-null when the
+// reconciler has never run or the gateway is unavailable — the caller renders `—`.
+describe("queryReconcilerLastRun (CTO-169)", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function stubFetch(impl: () => Promise<Response>) {
+    globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  }
+
+  it("derives minutes-ago from the latest run's finished_at", async () => {
+    const finished = new Date(Date.now() - 12 * 60_000).toISOString(); // 12 minutes ago
+    stubFetch(async () => new Response(
+      JSON.stringify({ run: { events_late: 3, lag_seconds_median: 120, finished_at: finished } }),
+      { status: 200 },
+    ));
+    const { queryReconcilerLastRun } = await freshSut();
+    const out = await queryReconcilerLastRun();
+    expect(out).toBe(12);
+  });
+
+  it("returns null (honest-null → `—`) when no reconciler run exists yet", async () => {
+    stubFetch(async () => new Response(JSON.stringify({ run: null }), { status: 200 }));
+    const { queryReconcilerLastRun } = await freshSut();
+    expect(await queryReconcilerLastRun()).toBeNull();
+  });
+
+  it("returns null when the gateway is unreachable", async () => {
+    stubFetch(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    const { queryReconcilerLastRun } = await freshSut();
+    expect(await queryReconcilerLastRun()).toBeNull();
+  });
+
+  it("returns null on a non-2xx gateway response", async () => {
+    stubFetch(async () => new Response("nope", { status: 503 }));
+    const { queryReconcilerLastRun } = await freshSut();
+    expect(await queryReconcilerLastRun()).toBeNull();
   });
 });

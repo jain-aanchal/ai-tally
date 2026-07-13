@@ -17,12 +17,11 @@ export function p99Ratio(a: AgentSummary): number {
   return a.p50MicroUsd === 0 ? 0 : a.p99MicroUsd / a.p50MicroUsd;
 }
 
-/**
- * Minutes since the reconciler last trued-up these per-agent cost numbers. Agents presents
- * reconciled cost (cost/day, p50/p99), so it carries the same freshness signal as Cost/Features
- * and must surface staleness the same way (CTO-80, "never show stale as fresh").
- */
-export const RECONCILER_LAST_RUN_MINUTES_AGO = 23;
+// Agents presents reconciled cost (cost/day, p50/p99), so it carries the same "reconciler last
+// trued-up N min ago" freshness signal as Cost/Features and must surface staleness the same way
+// (CTO-80, "never show stale as fresh"). That value is NO LONGER a hardcoded constant here: the
+// /api/agents route derives it from the real reconciliation_runs source via
+// queryReconcilerLastRun() (CTO-169), rendering `—` when the reconciler has never run.
 
 export interface RunSpan {
   spanId: string;

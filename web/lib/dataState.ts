@@ -28,8 +28,13 @@ export function ageMs(reconciledThrough: string, now: number = Date.now()): numb
  * Build a reconciliation-boundary ISO timestamp from "minutes since the reconciler last ran".
  * Surfaces that don't carry an explicit boundary date (Agents, Compare, Estimate) report freshness
  * as a minutes-ago number instead; this converts it so they share the same stale/fresh logic.
+ *
+ * `null` means the reconciler last-run is unknown (never ran / source unavailable, CTO-169). We map
+ * it to the epoch sentinel so downstream logic reads it as pre-data — no "as of" label, no stale
+ * badge — rather than inventing a boundary. The surface shows an honest `—` instead of a claim.
  */
-export function boundaryFromMinutesAgo(minutesAgo: number, now: number = Date.now()): string {
+export function boundaryFromMinutesAgo(minutesAgo: number | null, now: number = Date.now()): string {
+  if (minutesAgo === null) return new Date(0).toISOString();
   return new Date(now - minutesAgo * 60_000).toISOString();
 }
 

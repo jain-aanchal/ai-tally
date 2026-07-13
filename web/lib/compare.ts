@@ -87,9 +87,11 @@ export interface Comparison {
     contextFidelity: "resolved-context replay (no live retrieval)" | "live retrieval";
     /**
      * Minutes since the reconciler last trued-up the baseline traffic this comparison is built
-     * from. A projection off a stale baseline must not be presented as fresh (CTO-80).
+     * from. A projection off a stale baseline must not be presented as fresh (CTO-80). Sourced from
+     * the real reconciliation_runs log on the live path (CTO-169); `null` when the reconciler has
+     * never run / the source is unavailable, rendered as `—` rather than the fixture constant.
      */
-    reconcilerLastRunMinutesAgo: number;
+    reconcilerLastRunMinutesAgo: number | null;
   };
 }
 
