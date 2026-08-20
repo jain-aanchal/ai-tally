@@ -19,7 +19,15 @@ describe("connector catalog", () => {
 
   it("covers the v1 cost + CDP connectors", () => {
     const ids = new Set(CONNECTORS.map((c) => c.id));
-    for (const id of ["llm_proxy", "pinecone", "tavily", "aws_cost_explorer", "vercel"]) {
+    for (const id of [
+      "llm_proxy",
+      "pinecone",
+      "tavily",
+      "aws_cost_explorer",
+      "gcp_billing",
+      "vercel",
+      "cloudflare",
+    ]) {
       expect(ids.has(id)).toBe(true);
     }
     for (const id of ["segment", "rudderstack", "stripe", "hubspot"]) {
