@@ -112,6 +112,26 @@ class Settings(BaseSettings):
     # set it ONLY when the tenant has no CTO-144 Vercel egress row. This process flag is the default
     # for tenants that leave the column NULL.
     vercel_emit_egress: bool = False
+    # S3 / Athena (+ Redshift) export sink (CTO-160). The AWS analog of the BigQuery export above:
+    # an OPTIONAL, additive analytics mirror that copies the SAME reconciled facts (spans /
+    # business_events / attribution / daily rollups, via the shared ExportTableSpec set) into a
+    # tenant's OWN S3 bucket as partitioned Parquet, queryable through Athena / Glue and loadable
+    # into Redshift. ClickHouse stays the primary store and the dashboard keeps reading it — this
+    # is a mirror, never a replacement. DISABLED by default at both the process level (this flag)
+    # and per-tenant (``tenant_athena_export_config.enabled``, also default false), so no existing
+    # deployment starts exporting on upgrade. Auth is via an assumed IAM role / instance profile /
+    # IRSA referenced per-tenant — never a raw AWS access key. Requires the optional ``[athena]``
+    # extra (``pyarrow`` + ``boto3``), lazy-imported in :mod:`gateway.athena_export` so the gateway
+    # boots without it.
+    athena_export_enabled: bool = False
+    # S3 bucket owning the export prefixes. Empty means "resolve per-tenant".
+    athena_export_s3_bucket: str = ""
+    # Defaults for a tenant that enables export without overriding prefix/database/region.
+    athena_export_default_prefix: str = "tally/"
+    athena_export_default_database: str = "tally_export"
+    athena_export_aws_region: str = ""
+    # Max rows pulled from ClickHouse per (tenant, table) export pass.
+    athena_export_batch_limit: int = 10_000
 
 
 _settings: Settings | None = None

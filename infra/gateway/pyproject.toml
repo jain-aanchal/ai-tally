@@ -35,6 +35,13 @@ dev = [
 bigquery = [
     "google-cloud-bigquery>=3.20",
 ]
+# Optional AWS analytics-mirror sink (CTO-160). Only needed by deployments that turn on the
+# per-tenant S3/Athena export; `gateway.athena_export` lazy-imports pyarrow + boto3, so the gateway
+# imports and boots fine without this extra installed.
+athena = [
+    "pyarrow>=16.0",
+    "boto3>=1.34",
+]
 
 [tool.uv.sources]
 # The gateway reuses the SDK's wire/enrichment/timekeeping/pricing logic directly.
