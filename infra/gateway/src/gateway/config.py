@@ -83,6 +83,20 @@ class Settings(BaseSettings):
     # Max rows pulled from ClickHouse per (tenant, table) export pass.
     bq_export_batch_limit: int = 10_000
 
+    # GCP Cloud Billing compute connector (CTO-150). The compute cost layer's GCP source reads a
+    # tenant's Cloud Billing BigQuery *export* table (GCP has no fine-grained REST cost API — the BQ
+    # export is the source of truth) and lands one synthetic `compute` span/day. A tenant opts in via
+    # a `tenant_compute_config` row with cloud_provider='gcp'; these settings only tune the live BQ
+    # job. Auth is via ADC / Workload Identity / a per-tenant Secret Manager reference — never a raw
+    # service-account key. Requires the optional `[bigquery]` extra (google-cloud-bigquery),
+    # lazy-imported in gateway.connectors.compute so the gateway boots without it.
+    compute_gcp_enabled: bool = False
+    # GCP project that runs the BigQuery billing-export jobs. Empty means "resolve from ADC".
+    compute_gcp_bq_project: str = ""
+    # Fallback export table (`project.dataset.gcp_billing_export_v1_XXXX`) for a tenant whose
+    # tenant_compute_config row leaves bq_billing_export_table blank. Empty means "require per-tenant".
+    compute_gcp_default_billing_export_table: str = ""
+
 
 _settings: Settings | None = None
 

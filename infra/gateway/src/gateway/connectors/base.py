@@ -55,14 +55,23 @@ class ConnectorConfig:
     """One tenant's cloud-billing connector config — the loaded control-plane row.
 
     ``credentials_ref`` is a Secret Manager / KMS / ARN reference (or ``'aws-default-chain'``),
-    NEVER raw credentials. ``tag_filter`` is the cost-allocation tag set the billing query is scoped
-    to (default ``{'tally:workload': 'ai'}``).
+    NEVER raw credentials. ``tag_filter`` is the cost-allocation tag set the AWS billing query is
+    scoped to (default ``{'tally:workload': 'ai'}``).
+
+    The last two fields are GCP-only (CTO-150) and stay empty for AWS: ``bq_billing_export_table`` is
+    the fully-qualified Cloud Billing BigQuery *export* table (``project.dataset.table``) the GCP
+    source reads — GCP has no fine-grained REST cost API, so the BQ export is the source of truth —
+    and ``label_filter`` is the GCP label set the export query is scoped to (default
+    ``{'tally-workload': 'ai'}``; GCP label keys can't contain ``:`` so they use ``-``, unlike the
+    AWS cost-allocation ``tag_filter``).
     """
 
     tenant_id: str
     cloud_provider: str  # 'aws' | 'gcp'
     credentials_ref: str
     tag_filter: dict[str, str] = field(default_factory=dict)
+    bq_billing_export_table: str = ""
+    label_filter: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
