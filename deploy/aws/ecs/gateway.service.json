@@ -1,0 +1,28 @@
+{
+  "cluster": "ai-tally",
+  "serviceName": "ai-tally-gateway",
+  "taskDefinition": "ai-tally-gateway",
+  "desiredCount": 2,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 100,
+    "maximumPercent": 200
+  },
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["subnet-PRIVATE_A", "subnet-PRIVATE_B"],
+      "securityGroups": ["sg-AI_TALLY_GATEWAY"],
+      "assignPublicIp": "DISABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT:targetgroup/ai-tally-gateway/REPLACE",
+      "containerName": "gateway",
+      "containerPort": 8080
+    }
+  ],
+  "healthCheckGracePeriodSeconds": 30,
+  "enableExecuteCommand": true
+}

@@ -1,0 +1,29 @@
+apiVersion: v2
+name: ai-tally
+description: |
+  ai-tally on Amazon EKS (CTO-159, epic CTO-148). Deploys the two stateless application tiers — the
+  ingest gateway (FastAPI/uvicorn) and the Next.js dashboard — and wires them to AWS-managed backing
+  stores: RDS for PostgreSQL (control plane), ClickHouse (in-cluster StatefulSet or an external
+  ClickHouse Cloud endpoint) for telemetry, and S3 for replay blobs (CTO-152).
+
+  Secrets (provider API keys, DB creds) live in AWS Secrets Manager and are consumed via IRSA
+  (IAM Roles for Service Accounts) + the Secrets Store CSI driver (AWS provider) — never as static
+  IAM access keys on disk or literals in manifests.
+
+  This is the EKS counterpart to the GKE chart in deploy/gcp/helm/ai-tally. The ECS-on-Fargate
+  task definitions in deploy/aws/ecs are the PRIMARY AWS path; this chart is the "you already run
+  a cluster" alternative, mirroring the GKE-vs-Cloud-Run split from CTO-153.
+type: application
+# Chart version: bump on any template change. App version tracks the ai-tally release the images
+# were cut from; override per-tier image tags in values.yaml.
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - ai-tally
+  - observability
+  - eks
+  - aws
+  - clickhouse
+home: https://github.com/jain-aanchal/ai-tally
+sources:
+  - https://github.com/jain-aanchal/ai-tally/tree/main/deploy/aws

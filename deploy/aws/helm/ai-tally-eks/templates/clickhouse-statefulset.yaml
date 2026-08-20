@@ -1,0 +1,72 @@
+{{- if eq .Values.clickhouse.mode "statefulset" }}
+{{- /*
+Single-node in-cluster ClickHouse for staging / low volume. NOT highly available. For production,
+prefer clickhouse.mode=external pointed at ClickHouse Cloud. The canonical DDL from db/clickhouse
+is applied via an initdb ConfigMap you create out-of-band and reference here (see README) — the
+official image runs /docker-entrypoint-initdb.d/*.sql on first boot, exactly like docker-compose.
+The ClickHouse password is read from the same synced Secret as the app tiers. On EKS the volume is
+provisioned by the EBS CSI driver (gp3 by default via the cluster's default StorageClass).
+*/ -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ai-tally.fullname" . }}-clickhouse
+  labels:
+    {{- include "ai-tally.labels" . | nindent 4 }}
+    {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "clickhouse") | nindent 4 }}
+spec:
+  serviceName: {{ include "ai-tally.fullname" . }}-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "clickhouse") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-tally.selectorLabels" (dict "ctx" . "tier" "clickhouse") | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: clickhouse
+          image: {{ .Values.clickhouse.image }}
+          ports:
+            - { name: http,   containerPort: 8123 }
+            - { name: native, containerPort: 9000 }
+          env:
+            - name: CLICKHOUSE_USER
+              value: {{ .Values.gateway.config.clickhouseUser | quote }}
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+            {{- if .Values.secretsManager.secrets.clickhousePassword }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-tally.secretName" . }}
+                  key: TALLY_CLICKHOUSE_PASSWORD
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.clickhouse.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.clickhouse.storageClassName }}
+        storageClassName: {{ .Values.clickhouse.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.clickhouse.storage | quote }}
+{{- end }}

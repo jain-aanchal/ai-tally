@@ -1,0 +1,54 @@
+{
+  "family": "ai-tally-gateway",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-ecs-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-workload",
+  "containerDefinitions": [
+    {
+      "name": "gateway",
+      "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/ai-tally/gateway:1.0.0",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8080, "protocol": "tcp", "name": "http" }
+      ],
+      "environment": [
+        { "name": "TALLY_CLICKHOUSE_HOST", "value": "REPLACE_CLICKHOUSE_HOST" },
+        { "name": "TALLY_CLICKHOUSE_PORT", "value": "8123" },
+        { "name": "TALLY_CLICKHOUSE_DB", "value": "default" },
+        { "name": "TALLY_CLICKHOUSE_USER", "value": "tally" },
+        { "name": "TALLY_REQUIRE_API_KEY", "value": "true" },
+        { "name": "AWS_REGION", "value": "REGION" },
+        { "name": "TALLY_REPLAY_BLOB_BACKEND", "value": "memory" }
+      ],
+      "secrets": [
+        { "name": "TALLY_POSTGRES_DSN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-postgres-dsn" },
+        { "name": "TALLY_CLICKHOUSE_PASSWORD", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-clickhouse-password" },
+        { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-openai-api-key" },
+        { "name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-anthropic-api-key" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz').status==200 else 1)\""],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ai-tally-gateway",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "gateway",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}
