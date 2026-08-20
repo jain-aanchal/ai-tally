@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
-import { agents, RECONCILER_LAST_RUN_MINUTES_AGO, runs } from "@/lib/agents";
-import { queryAgents } from "@/lib/clickhouse";
+import { agents, runs } from "@/lib/agents";
+import { queryAgents, queryReconcilerLastRun } from "@/lib/clickhouse";
 
 // Read live data per request (never statically cached); fall back to mock when ClickHouse is down.
 export const dynamic = "force-dynamic";
@@ -17,10 +17,16 @@ export async function GET(req: Request) {
   const tag = searchParams.get("tag") ?? "";
   const run = searchParams.get("run") ?? "";
   const hasFilter = Boolean(tag || run);
-  const live = await queryAgents({ tag, run });
+  // Read agents telemetry and the reconciler's real last-run in parallel. The freshness signal is
+  // the real reconciliation_runs value (CTO-169) — or null when the reconciler has never run / the
+  // gateway is unavailable, which the page renders as `—` rather than a fabricated constant.
+  const [live, reconcilerLastRunMinutesAgo] = await Promise.all([
+    queryAgents({ tag, run }),
+    queryReconcilerLastRun(),
+  ]);
   return NextResponse.json({
     agents: live && live.agents.length > 0 ? live.agents : hasFilter ? [] : agents,
     runs: live && live.runs.length > 0 ? live.runs : hasFilter ? [] : runs,
-    reconcilerLastRunMinutesAgo: RECONCILER_LAST_RUN_MINUTES_AGO,
+    reconcilerLastRunMinutesAgo,
   });
 }

@@ -31,6 +31,12 @@ describe("boundaryFromMinutesAgo", () => {
     const boundary = boundaryFromMinutesAgo(180, NOW);
     expect(deriveDataState({ isEmpty: false, isPartial: true, reconciledThrough: boundary, now: NOW })).toBe("stale");
   });
+  it("maps null (unknown reconciler last-run, CTO-169) to the epoch sentinel — no as-of, no stale badge", () => {
+    const boundary = boundaryFromMinutesAgo(null, NOW);
+    expect(isSentinelBoundary(boundary)).toBe(true);
+    expect(asOfLabel(boundary)).toBeNull();
+    expect(isStale(boundary, NOW)).toBe(false);
+  });
 });
 
 describe("isSentinelBoundary", () => {

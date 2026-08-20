@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 import { projection, type WhatIfProjection } from "@/lib/estimate";
-import { queryReplayCandidates, queryReplayEstimate } from "@/lib/clickhouse";
+import {
+  queryReconcilerLastRun,
+  queryReplayCandidates,
+  queryReplayEstimate,
+} from "@/lib/clickhouse";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,15 +26,19 @@ export async function GET(req: Request) {
   const candidateProvider = url.searchParams.get("candidate_provider") ?? "anthropic";
   const featureTag = url.searchParams.get("tag") ?? undefined;
 
+  // CTO-169: baseline freshness is the real reconciliation_runs last-run, not the fixture constant —
+  // null (→ `—`) when the reconciler has never run / the source is unavailable.
+  const reconcilerLastRunMinutesAgo = await queryReconcilerLastRun();
+
   if (!candidateModel) {
-    return NextResponse.json({ ...projection, replay_source: "mock" });
+    return NextResponse.json({ ...projection, reconcilerLastRunMinutesAgo, replay_source: "mock" });
   }
 
   const replay = await queryReplayCandidates(featureTag, [
     { provider: candidateProvider, model: candidateModel },
   ]);
   if (!replay || replay.per_candidate.length === 0) {
-    return NextResponse.json({ ...projection, replay_source: "mock" });
+    return NextResponse.json({ ...projection, reconcilerLastRunMinutesAgo, replay_source: "mock" });
   }
 
   // GET replays the captured envelope as-is against the candidate model (no prompt rewrite).
@@ -38,6 +46,7 @@ export async function GET(req: Request) {
   const proposed = replay.per_candidate[0];
   return NextResponse.json({
     ...projection,
+    reconcilerLastRunMinutesAgo,
     proposed: {
       monthlyCostMicroUsd: proposed.projected_monthly_cost_micro_usd,
       // p99 cost not available from per-call replay yet — keep the mock p99 multiplier as a
@@ -86,12 +95,16 @@ export async function POST(req: Request) {
       : undefined;
 
   const candidate = { provider, model: candidateModel };
-  const replay = await queryReplayEstimate({
-    candidateModel: candidate,
-    systemPromptOverride,
-    featureTag,
-    sampleSize,
-  });
+  const [replay, reconcilerLastRunMinutesAgo] = await Promise.all([
+    queryReplayEstimate({
+      candidateModel: candidate,
+      systemPromptOverride,
+      featureTag,
+      sampleSize,
+    }),
+    // CTO-169: real reconciler last-run (or null → `—`), not the fixture constant.
+    queryReconcilerLastRun(),
+  ]);
 
   const row = replay?.per_candidate[0];
   const grounded = row?.samples_replayed ?? 0;
@@ -101,6 +114,7 @@ export async function POST(req: Request) {
   const monthly = sufficient ? row!.projected_monthly_cost_micro_usd : null;
   const result: WhatIfProjection = {
     ...projection,
+    reconcilerLastRunMinutesAgo,
     proposed: {
       monthlyCostMicroUsd: monthly,
       // p99 cost not available from per-call replay yet — keep the mock 1.4x multiplier as a

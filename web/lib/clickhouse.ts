@@ -565,16 +565,23 @@ export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null
   });
 }
 
+interface ReconciliationRun {
+  events_late: number;
+  lag_seconds_median: number;
+  finished_at: string;
+}
+
 /**
- * Late-arrival diagnostics for the /features attribution card (CTO-139), read from the gateway's
- * reconciler run log via GET /v1/tenant/reconciliation/status. The gateway returns the latest
- * reconciliation run (event-late count + lag distribution in seconds + finished_at); we convert to
- * the page's units (hours / minutes-ago).
+ * The single real source for the reconciler's "last run" freshness (CTO-80): the latest
+ * reconciliation_runs row (CTO-139) for this tenant, read from the gateway's reconciler run log via
+ * GET /v1/tenant/reconciliation/status. Every surface that carries "reconciler last trued-up N min
+ * ago" — Features diagnostics, Agents, Compare, Estimate — derives it from THIS function so they all
+ * reflect one truth instead of independent hardcoded constants.
  *
- * Honest-null: when no reconciler run exists yet (`run` is null) — or the gateway is unreachable /
- * non-2xx — we return null so the /api/features route falls back to its mock via `?? diagnostics`.
+ * Returns null when no reconciler run exists yet (`run` is null) — or the gateway is unreachable /
+ * non-2xx — so callers can apply honest-null (`—`) rather than fabricate a value.
  */
-export async function queryAttributionDiagnostics(): Promise<AttributionDiagnostics | null> {
+async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/reconciliation/status`, {
       headers: { "x-tenant-id": TENANT },
@@ -585,26 +592,47 @@ export async function queryAttributionDiagnostics(): Promise<AttributionDiagnost
       console.warn(`[reconciliation] /v1/tenant/reconciliation/status HTTP ${res.status}; falling back`);
       return null;
     }
-    const body = (await res.json()) as {
-      run?: {
-        events_late: number;
-        lag_seconds_median: number;
-        finished_at: string;
-      } | null;
-    };
-    const run = body.run;
-    // No reconciler run yet → null so the route falls back to the mock (honest "no data" state).
-    if (!run) return null;
-    const minutesAgo = Math.max(0, Math.round((Date.now() - Date.parse(run.finished_at)) / 60000));
-    return {
-      lateArrivalEvents7d: run.events_late,
-      lateArrivalMedianHours: Math.round((run.lag_seconds_median / 3600) * 10) / 10,
-      reconcilerLastRunMinutesAgo: minutesAgo,
-    };
+    const body = (await res.json()) as { run?: ReconciliationRun | null };
+    // No reconciler run yet → null so callers render the honest "no data" state.
+    return body.run ?? null;
   } catch (err) {
     console.warn("[reconciliation] gateway unreachable:", (err as Error).message);
     return null;
   }
+}
+
+function minutesSince(finishedAt: string): number {
+  return Math.max(0, Math.round((Date.now() - Date.parse(finishedAt)) / 60000));
+}
+
+/**
+ * Minutes since the reconciler last finished a pass for the current tenant, from the real
+ * reconciliation_runs source (see {@link fetchLatestReconciliationRun}). Returns null when the
+ * reconciler has never run or the gateway is unavailable — the caller renders `—` (honest-null),
+ * NEVER a fabricated constant (CTO-169 / the CTO-80 staleness guard).
+ */
+export async function queryReconcilerLastRun(): Promise<number | null> {
+  const run = await fetchLatestReconciliationRun();
+  return run ? minutesSince(run.finished_at) : null;
+}
+
+/**
+ * Late-arrival diagnostics for the /features attribution card (CTO-139). The gateway returns the
+ * latest reconciliation run (event-late count + lag distribution in seconds + finished_at); we
+ * convert to the page's units (hours / minutes-ago). Reads the same real source as
+ * {@link queryReconcilerLastRun} so the freshness signal agrees across surfaces.
+ *
+ * Honest-null: when no reconciler run exists yet — or the gateway is unreachable / non-2xx — we
+ * return null so the /api/features route falls back to its mock via `?? diagnostics`.
+ */
+export async function queryAttributionDiagnostics(): Promise<AttributionDiagnostics | null> {
+  const run = await fetchLatestReconciliationRun();
+  if (!run) return null;
+  return {
+    lateArrivalEvents7d: run.events_late,
+    lateArrivalMedianHours: Math.round((run.lag_seconds_median / 3600) * 10) / 10,
+    reconcilerLastRunMinutesAgo: minutesSince(run.finished_at),
+  };
 }
 
 // --- Data Quality (dedicated report) ------------------------------------------------------------
