@@ -90,6 +90,7 @@ from gateway.tenant_cac import (
 )
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
+from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
 from gateway.tenant_guardrails import (
     ALLOWED_KINDS as GUARDRAIL_KINDS,
     ALLOWED_STATES as GUARDRAIL_STATES,
@@ -154,6 +155,9 @@ async def lifespan(app: FastAPI):
     # config-refresh window and enforces matching rules in-process. Shadow rules emit span
     # attrs but never alter the call; enabled rules do.
     app.state.tenant_guardrails = TenantGuardrailStore(settings)
+    # Per-tenant feature value-event config (CTO-140): onboarding pins each feature's ROI to a
+    # business value event. The /features page reads/writes via /v1/tenant/feature-value-events.
+    app.state.tenant_feature_value_events = TenantFeatureValueEventStore(settings)
     app.state.tenant_stripe = TenantStripeStore(settings)
     # Per-tenant third-party integration run status (CTO-117): Stripe / Segment / HubSpot / Pendo.
     # Workers call .record_run after each cycle; the dashboard reads via /v1/tenant/integrations/status.
@@ -781,6 +785,101 @@ def list_tenant_guardrail_audit(
         "rule_id": rule_id,
         "changes": [c.as_dict() for c in changes],
     })
+
+
+@app.get("/v1/tenant/feature-value-events")
+def list_tenant_feature_value_events(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """List the caller tenant's feature -> value-event mappings (CTO-140).
+
+    The /features page reads this to overlay the configured value event onto each feature row and
+    to decide whether the onboarding "Finish setup" banner should still show.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantFeatureValueEventStore = app.state.tenant_feature_value_events
+    events = store.list(tenant_id)
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "value_events": [e.as_dict() for e in events],
+    })
+
+
+@app.post("/v1/tenant/feature-value-events")
+async def upsert_tenant_feature_value_event(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Pin a value event to a feature. Idempotent on client-supplied change_id (CTO-140).
+
+    Body: ``{feature_tag, event_name, change_id, actor?, notes?}``. Replaying the same change_id is
+    a no-op (returns the existing mapping unchanged).
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    feature_tag = body.get("feature_tag")
+    event_name = body.get("event_name")
+    change_id = body.get("change_id")
+    notes = body.get("notes")
+    if not isinstance(feature_tag, str) or not feature_tag:
+        raise HTTPException(status_code=422, detail="feature_tag required")
+    if not isinstance(event_name, str) or not event_name:
+        raise HTTPException(status_code=422, detail="event_name required")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    if notes is not None and not isinstance(notes, str):
+        raise HTTPException(status_code=422, detail="notes must be a string when provided")
+    store: TenantFeatureValueEventStore = app.state.tenant_feature_value_events
+    try:
+        event = store.upsert(
+            tenant_id,
+            feature_tag,
+            event_name=event_name,
+            change_id=change_id,
+            actor=body.get("actor"),
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "value_event": event.as_dict()})
+
+
+@app.delete("/v1/tenant/feature-value-events")
+async def delete_tenant_feature_value_event(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Remove a feature's value-event mapping. Idempotent on change_id (CTO-140).
+
+    Body: ``{feature_tag, change_id, actor?}``. Deleting an absent mapping (or replaying a change_id)
+    is a no-op that still returns 200.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    feature_tag = body.get("feature_tag")
+    change_id = body.get("change_id")
+    if not isinstance(feature_tag, str) or not feature_tag:
+        raise HTTPException(status_code=422, detail="feature_tag required")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    store: TenantFeatureValueEventStore = app.state.tenant_feature_value_events
+    removed = store.delete(
+        tenant_id, feature_tag, change_id=change_id, actor=body.get("actor")
+    )
+    return JSONResponse({"tenant_id": tenant_id, "feature_tag": feature_tag, "removed": removed})
 
 
 @app.post("/v1/tenant/stripe/connect")

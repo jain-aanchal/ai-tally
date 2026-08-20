@@ -565,6 +565,33 @@ export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null
   });
 }
 
+/** One observed business event name + how often it occurred in the window. */
+export interface ObservedBusinessEvent {
+  name: string;
+  count: number;
+}
+
+/**
+ * Distinct `business_events.EventName` for the current tenant over the last 30 days, most-frequent
+ * first — the live source for the /features "configure value event" modal (CTO-140). Returns null
+ * when ClickHouse is unreachable so the route can distinguish "infra down" from "no events yet"
+ * (an empty array), which drives the honest-empty state in the modal.
+ */
+export async function queryDistinctBusinessEventNames(): Promise<ObservedBusinessEvent[] | null> {
+  return tryLive(async (db, tenant) => {
+    const out = await rows<{ name: string; n: string }>(
+      db,
+      `SELECT EventName AS name, count() AS n
+       FROM business_events
+       WHERE TenantId = {tenant:String} AND OccurredAt >= now() - INTERVAL 30 DAY AND EventName != ''
+       GROUP BY name
+       ORDER BY n DESC`,
+      tenant,
+    );
+    return out.map((r) => ({ name: r.name, count: parseInt(r.n, 10) || 0 }));
+  });
+}
+
 interface ReconciliationRun {
   events_late: number;
   lag_seconds_median: number;
@@ -1123,6 +1150,45 @@ export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
     return rules;
   } catch (err) {
     console.warn("[guardrails] gateway unreachable, falling back to mock:", (err as Error).message);
+    return null;
+  }
+}
+
+// --- Feature value-event config (CTO-140) -------------------------------------------------------
+//
+// Onboarding pins each feature's ROI to a business value event; the config lives in the control
+// plane (Postgres), reached via the gateway. The /features route overlays these onto the economics
+// rows so a just-configured feature shows its value event even before attribution has run. Returns
+// null on any error (gateway unreachable, non-2xx, parse failure) so the route falls back to
+// whatever the economics query produced.
+
+export interface FeatureValueEventConfig {
+  featureTag: string;
+  eventName: string;
+}
+
+export async function queryFeatureValueEvents(): Promise<FeatureValueEventConfig[] | null> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
+      headers: { "x-tenant-id": TENANT },
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      console.warn(`[value-events] /v1/tenant/feature-value-events HTTP ${res.status}; falling back`);
+      return null;
+    }
+    const body = (await res.json()) as {
+      value_events?: { feature_tag?: string; event_name?: string }[];
+    };
+    if (!Array.isArray(body.value_events)) return [];
+    return body.value_events
+      .filter((e): e is { feature_tag: string; event_name: string } =>
+        typeof e.feature_tag === "string" && typeof e.event_name === "string",
+      )
+      .map((e) => ({ featureTag: e.feature_tag, eventName: e.event_name }));
+  } catch (err) {
+    console.warn("[value-events] gateway unreachable:", (err as Error).message);
     return null;
   }
 }
