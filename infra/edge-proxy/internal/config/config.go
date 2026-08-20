@@ -28,6 +28,30 @@ const (
 	ModeBroker Mode = "broker"
 )
 
+// Provider names the upstream API protocol so the proxy knows how to read scalar metadata (model,
+// token usage) out of the relayed response (CTO-167). It is orthogonal to Mode: it changes what the
+// proxy *understands* about the traffic, never how the request is forwarded — every provider is
+// still a byte-for-byte pass-through.
+//
+// The empty Provider ("") is the CTO-39 default: pure pass-through with zero response inspection, so
+// the hot path stays byte-identical and pays no parsing overhead. Set a provider only when you want
+// per-request model/usage metadata on the TraceRecord.
+type Provider string
+
+const (
+	// ProviderOpenAI reads the OpenAI chat/completions response shape: top-level "model" and
+	// usage.prompt_tokens / usage.completion_tokens.
+	ProviderOpenAI Provider = "openai"
+	// ProviderAnthropic reads the Anthropic Messages response shape: top-level "model" and
+	// usage.input_tokens / usage.output_tokens.
+	ProviderAnthropic Provider = "anthropic"
+	// ProviderGemini reads Google's Generative Language API: the model comes from the request path
+	// (/v1beta/models/{model}:generateContent), token usage from usageMetadata.promptTokenCount /
+	// usageMetadata.candidatesTokenCount, and auth is a ?key= query param or x-goog-api-key header
+	// rather than Authorization: Bearer.
+	ProviderGemini Provider = "gemini"
+)
+
 // Config is the fully-resolved, validated proxy configuration.
 type Config struct {
 	// ListenAddr is the address the proxy binds (e.g. ":8088").
@@ -52,6 +76,10 @@ type Config struct {
 
 	// Mode selects passthrough (default) or broker key handling.
 	Mode Mode
+	// Provider selects the upstream protocol for response-metadata extraction (CTO-167). Empty means
+	// pure pass-through with no response inspection (the CTO-39 default). When set (openai, anthropic,
+	// gemini) the proxy reads scalar model/usage metadata off each response into the TraceRecord.
+	Provider Provider
 	// BrokerFile is the path to the JSON KMS-export consumed in broker mode (required when Mode is
 	// broker). The file maps ai-tally tenant key -> provider Authorization header value.
 	BrokerFile string
@@ -67,8 +95,11 @@ type Config struct {
 
 // Defaults applied when the corresponding env var is unset.
 const (
-	DefaultListenAddr       = ":8088"
-	DefaultUpstream         = "https://api.openai.com"
+	DefaultListenAddr = ":8088"
+	DefaultUpstream   = "https://api.openai.com"
+	// DefaultGeminiUpstream is the origin used when Provider is gemini and EDGE_PROXY_UPSTREAM is
+	// unset — Google's Generative Language API (CTO-167).
+	DefaultGeminiUpstream   = "https://generativelanguage.googleapis.com"
 	DefaultTenantHeader     = "X-Tenant-Key"
 	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"
 	// DefaultUpstreamTimeout is generous because LLM completions are slow and may stream for
@@ -93,7 +124,22 @@ func FromEnv(lookup Env) (Config, error) {
 		TelemetryURL:     lookup("EDGE_PROXY_TELEMETRY_URL"),
 	}
 
-	rawUpstream := firstNonEmpty(lookup("EDGE_PROXY_UPSTREAM"), DefaultUpstream)
+	// Provider is orthogonal to upstream selection but changes the default upstream: a gemini proxy
+	// with no explicit EDGE_PROXY_UPSTREAM defaults to Google's origin rather than OpenAI's.
+	if v := lookup("EDGE_PROXY_PROVIDER"); v != "" {
+		switch Provider(v) {
+		case ProviderOpenAI, ProviderAnthropic, ProviderGemini:
+			cfg.Provider = Provider(v)
+		default:
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_PROVIDER %q (want openai|anthropic|gemini)", v)
+		}
+	}
+
+	defaultUpstream := DefaultUpstream
+	if cfg.Provider == ProviderGemini {
+		defaultUpstream = DefaultGeminiUpstream
+	}
+	rawUpstream := firstNonEmpty(lookup("EDGE_PROXY_UPSTREAM"), defaultUpstream)
 	u, err := url.Parse(rawUpstream)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid EDGE_PROXY_UPSTREAM %q: %w", rawUpstream, err)

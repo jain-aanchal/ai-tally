@@ -53,6 +53,12 @@ func main() {
 		log.Printf("edge-proxy: telemetry -> %s (deployment=%s)", cfg.TelemetryURL, dep)
 	}
 
+	// Provider-protocol mode (CTO-167): the proxy reads scalar model/usage metadata off responses.
+	// Empty is pure pass-through (CTO-39), the byte-identical default.
+	if cfg.Provider != "" {
+		log.Printf("edge-proxy: provider protocol = %s (response metadata extraction on)", cfg.Provider)
+	}
+
 	p := proxy.New(cfg, opts...)
 
 	mux := http.NewServeMux()

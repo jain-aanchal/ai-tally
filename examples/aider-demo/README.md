@@ -1,9 +1,10 @@
 # make aider-demo
 
 A one-command live demo of ai-tally: [Aider](https://aider.chat) edits a small
-Python fixture, talking to OpenAI (or Anthropic) **through the ai-tally edge
-proxy** with a per-request `X-Tally-Feature-Tag: aider-demo` header. When all
-three tasks finish, the dashboard auto-opens, pre-filtered to that tag.
+Python fixture, talking to OpenAI (or Anthropic, or Gemini) **through the
+ai-tally edge proxy** with a per-request `X-Tally-Feature-Tag: aider-demo`
+header. When all three tasks finish, the dashboard auto-opens, pre-filtered to
+that tag.
 
 Goal: a stranger who just finished `make demo` can run `make aider-demo` and
 see real agent traces in under five minutes.
@@ -35,15 +36,16 @@ cd infra && PROVIDER=anthropic make aider-demo
 cd infra && PROVIDER=google make aider-demo    # (PROVIDER=gemini also works)
 ```
 
-**Note on the `google` path:** unlike openai/anthropic, Gemini does **not**
-run through the Go edge-proxy. The proxy is a transparent pass-through built
-for the OpenAI/Anthropic request shape and `Authorization: Bearer` auth;
-Gemini's REST surface differs (LiteLLM's `gemini/*` path posts to
-`generativelanguage.googleapis.com` with the key as a `?key=`/`x-goog-api-key`
-credential). So Aider talks to Gemini **directly**, and `run.sh` still POSTs
-the feature-tagged batch to the gateway (the same side-channel every provider
-uses) so the dashboard gets its rows. Cost enrichment relies on CTO-149 having
-priced `gemini-2.5-flash` in the catalog.
+**Note on the `google` path:** as of CTO-167, Gemini routes through the Go
+edge-proxy just like openai/anthropic. The proxy runs in native-Gemini mode
+(`EDGE_PROXY_PROVIDER=gemini`): LiteLLM's `gemini/*` calls are pointed at the
+proxy via `GEMINI_API_BASE`, and the proxy forwards them to
+`generativelanguage.googleapis.com` with the `?key=`/`x-goog-api-key`
+credential preserved untouched — never logged — while reading the model and
+token usage off the response into its metadata-only `TraceRecord`. As with
+every provider, `run.sh` also POSTs the feature-tagged batch to the gateway so
+the dashboard gets its rows; cost enrichment relies on CTO-149 having priced
+`gemini-2.5-flash` in the catalog.
 
 ## What you'll see
 

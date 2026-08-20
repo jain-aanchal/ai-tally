@@ -6,9 +6,14 @@
 // only thing we keep is a TraceRecord of metadata + byte counts (never content), handed to a Sink.
 //
 // Design invariants:
-//   - Bodies are never mutated, buffered, or persisted. We count bytes as they stream; that's it.
-//   - The customer's provider key (Authorization header) is forwarded as-is and never read into
-//     any field, log line, or stored struct — it lives only in the in-flight request.
+//   - Bodies are never mutated or persisted. In the default pass-through mode they are never even
+//     buffered — we count bytes as they stream; that's it. In the opt-in provider-protocol mode
+//     (CTO-167) a bounded copy of the response is teed aside transiently to parse scalar usage
+//     metadata (model, token counts) and then discarded: content is never logged, stored, or handed
+//     to a Sink, and the bytes still stream to the client unbuffered on the wire.
+//   - The customer's provider key (Authorization header, or Gemini's ?key= / x-goog-api-key) is
+//     forwarded as-is and never read into any field, log line, or stored struct — it lives only in
+//     the in-flight request.
 //   - Stateless: no per-request state survives the response, so instances scale horizontally.
 //   - FlushInterval -1 streams responses immediately, so SSE token streams pass through with no
 //     added buffering latency (token *reconstruction* is CTO-40's job, not the proxy core's).
@@ -99,10 +104,41 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 		ErrorHandler:  errorHandler,
 	}
 
+	// CTO-167: when a provider protocol is configured, tee each response through a bounded scanner
+	// that extracts scalar model/usage metadata. Left nil in pure pass-through mode so the hot path
+	// never inspects a response body.
+	if cfg.Provider != "" {
+		p.rp.ModifyResponse = p.captureMeta
+	}
+
 	for _, opt := range opts {
 		opt(p)
 	}
 	return p
+}
+
+// metaKey is the request-context key under which ServeHTTP stashes the responseMeta holder that
+// captureMeta fills in as the response streams.
+type metaKey struct{}
+
+// captureMeta wraps the upstream response body so scalar metadata (model, token usage) is parsed
+// out as it streams — without buffering it on the wire or retaining any content. It is installed as
+// the ReverseProxy's ModifyResponse only when a provider protocol is configured.
+func (p *Proxy) captureMeta(resp *http.Response) error {
+	if resp.Body == nil || resp.Request == nil {
+		return nil
+	}
+	holder, _ := resp.Request.Context().Value(metaKey{}).(*responseMeta)
+	if holder == nil {
+		return nil
+	}
+	resp.Body = &metaCapture{
+		inner:    resp.Body,
+		provider: p.cfg.Provider,
+		path:     resp.Request.URL.Path,
+		out:      holder,
+	}
+	return nil
 }
 
 // ServeHTTP forwards the request and records a telemetry copy.
@@ -155,19 +191,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Mark whether the upstream was reachable so the telemetry copy can distinguish a real 502
 	// from us synthesizing one.
 	ctx := context.WithValue(r.Context(), failedKey{}, &rec.failed)
+	// In provider-protocol mode, hand captureMeta a holder to fill as the response streams (CTO-167).
+	var meta responseMeta
+	if p.cfg.Provider != "" {
+		ctx = context.WithValue(ctx, metaKey{}, &meta)
+	}
 	p.rp.ServeHTTP(rec, r.WithContext(ctx))
 
 	p.sink.Record(TraceRecord{
-		TenantKey:  tenant,
-		FeatureTag: featureTag,
-		Method:     r.Method,
-		Path:       r.URL.Path,
-		StatusCode: rec.status,
-		ReqBytes:   reqBytes,
-		RespBytes:  rec.written,
-		Duration:   p.now().Sub(start),
-		StartedAt:  start,
-		Failed:     rec.failed,
+		TenantKey:        tenant,
+		FeatureTag:       featureTag,
+		Method:           r.Method,
+		Path:             r.URL.Path,
+		Model:            meta.Model,
+		PromptTokens:     meta.PromptTokens,
+		CompletionTokens: meta.CompletionTokens,
+		StatusCode:       rec.status,
+		ReqBytes:         reqBytes,
+		RespBytes:        rec.written,
+		Duration:         p.now().Sub(start),
+		StartedAt:        start,
+		Failed:           rec.failed,
 	})
 }
 
