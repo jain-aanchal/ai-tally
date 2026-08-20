@@ -12,6 +12,7 @@ vi.mock("@/lib/clickhouse", () => ({
 }));
 
 import { GET as CompareGET } from "./route";
+import { comparison } from "@/lib/compare";
 import * as ch from "@/lib/clickhouse";
 
 const queryCurrentModel = ch.queryCurrentModel as unknown as ReturnType<typeof vi.fn>;
@@ -502,5 +503,189 @@ describe("/api/compare", () => {
     // Below the judge floor → honest null quality; NEVER a fabricated Gemini number.
     expect(gemini.qualityScore).toBeNull();
     expect(gemini.qualityCi).toBeUndefined();
+  });
+
+  // --- CTO-168: data-driven workload label + recommendation prose --------------------------------
+
+  it("CTO-168: workload + verdict + summary are derived from computed data on the live path", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 60,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000, // 70% cheaper than current
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 60,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+    queryEvalCandidates.mockResolvedValueOnce({
+      samples_available: 40,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          samples_judged: 30,
+          current_wins: 12,
+          candidate_wins: 16,
+          ties: 2,
+          errors: 0,
+          win_rate: 0.6, // candidate wins the majority of judged pairs → "switch"
+          win_rate_ci_lo: 0.42,
+          win_rate_ci_hi: 0.76,
+          judge_cost_micro_usd: 60_000,
+        },
+      ],
+      diagnostics: { judge_model: "claude-opus-4-8", rubric_version: "rubric-v1", judge_cost_micro_usd: 60_000 },
+    });
+
+    const res = await CompareGET(
+      new Request("http://test/api/compare?tag=chat_assistant") as never,
+    );
+    const body = await res.json();
+
+    // Workload derived from the ?tag= filter + the 7-day current-model window — NOT the fixture
+    // (a distinct tag proves the label tracks the query context rather than the hardcoded string).
+    expect(body.workload).toBe("chat_assistant / production / last 7 days");
+    expect(body.workload).not.toBe(comparison.workload);
+
+    // Verdict + summary reflect the REAL deltas: 70% cheaper + 60% judge win-rate → switch.
+    expect(body.recommendation.verdict).toBe("switch");
+    expect(body.recommendation.summary).toContain("claude-haiku-4-5");
+    expect(body.recommendation.summary).toContain("70%");
+    expect(body.recommendation.summary).toContain("60%");
+    // The old hardcoded fixture prose must never appear on the live path.
+    expect(body.recommendation.summary).not.toContain("$12.2K");
+    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    // Savings computed off the cheapest candidate vs live current cost.
+    expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
+    expect(body.recommendation.projectedSavingsPct).toBeCloseTo(0.7, 6);
+  });
+
+  it("CTO-168: workload defaults to 'all traffic' when no ?tag= filter is set", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 60,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 60,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.workload).toBe("all traffic / production / last 7 days");
+    // No eval judged (< floor is moot — none ran) → quality unknown → verdict "mixed".
+    expect(body.recommendation.verdict).toBe("mixed");
+    expect(body.recommendation.summary).toContain("run an eval pass");
+  });
+
+  it("CTO-168: honest 'insufficient data' recommendation when replay samples are thin", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 20,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 3_000_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 20, // total replayed (20) below the recommend floor (50)
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 5_000,
+      },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    // Thin data → say so honestly, never the fixture prose.
+    expect(body.recommendation.summary).toMatch(/insufficient replay data/i);
+    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    // Savings are still projected off the (thin) cheapest candidate for the display.
+    expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
+  });
+
+  it("CTO-168: rescaled-mock branch (live current, no replay) drops the fixture prose", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 1_310_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    });
+    queryReplayCandidates.mockResolvedValueOnce(null); // no cross-provider replay behind this
+
+    const res = await CompareGET(
+      new Request("http://test/api/compare?tag=research_agent") as never,
+    );
+    const body = await res.json();
+    expect(body.replay_source).toBe("mock");
+    // Live current model exists → workload derived, fixture label gone.
+    expect(body.workload).toBe("research_agent / production / last 7 days");
+    // No real replay → honest "insufficient replay data", not the hardcoded "$12.2K" prose.
+    expect(body.recommendation.summary).toMatch(/insufficient replay data/i);
+    expect(body.recommendation.summary).not.toContain("$12.2K");
+  });
+
+  it("CTO-168: the unreachable-gateway fallback KEEPS the fixture workload + recommendation", async () => {
+    queryCurrentModel.mockResolvedValueOnce(null); // gateway/DB unreachable
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.replay_source).toBe("mock");
+    // This is the only path that still ships the fixture prose (labeled by SyntheticPreviewBanner).
+    expect(body.workload).toBe(comparison.workload);
+    expect(body.recommendation.summary).toBe(comparison.recommendation.summary);
+    expect(body.recommendation.verdict).toBe(comparison.recommendation.verdict);
   });
 });

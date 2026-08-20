@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
-import { comparison } from "@/lib/compare";
+import { comparison, deriveRecommendation, deriveWorkload } from "@/lib/compare";
 import {
   queryCurrentModel,
   queryEvalCandidates,
@@ -18,6 +18,10 @@ const MIN_JUDGED_SAMPLES = 10;
 // error rate are shown as real numbers. Below this, both are null and the page renders "—" —
 // the same honest-null rule the `current` row uses for its live otel window (CTO-115).
 const MIN_REPLAYED_SAMPLES = 50;
+
+// CTO-168: the current-model cost window queryCurrentModel reads (last 7 days). Used to derive the
+// `workload` label on the live path instead of shipping the fixture string.
+const WORKLOAD_WINDOW_DAYS = 7;
 
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
@@ -101,18 +105,26 @@ export async function GET(req: Request) {
           errorRate: enoughReplayed ? c.error_rate : null,
         };
       });
-    const cheapest = candidates.reduce(
-      (best, c) => (c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best),
-      candidates[0] ?? null,
-    );
-    const projectedSavingsMicroUsd = cheapest
-      ? Math.max(0, live.monthlyCostMicroUsd - cheapest.monthlyCostMicroUsd)
-      : 0;
-    const projectedSavingsPct = live.monthlyCostMicroUsd > 0
-      ? projectedSavingsMicroUsd / live.monthlyCostMicroUsd
-      : 0;
+    // CTO-168: verdict + summary + projected savings are all generated from the REAL replayed
+    // deltas here — cost savings %, pairwise-judge quality, latency — never the fixture prose.
+    // Gated on total replayed responses; a thin projection yields an honest "insufficient data"
+    // summary rather than a confident recommendation off noise.
+    const totalReplayed = replay.per_candidate.reduce((s, c) => s + c.samples_replayed, 0);
+    const recommendation = deriveRecommendation({
+      currentModel: live.model,
+      currentCostMicroUsd: live.monthlyCostMicroUsd,
+      candidates: candidates.map((c) => ({
+        model: c.model,
+        monthlyCostMicroUsd: c.monthlyCostMicroUsd,
+        qualityScore: c.qualityScore,
+        latencyP95Ms: c.latencyP95Ms,
+      })),
+      samplesReplayed: totalReplayed,
+    });
     return NextResponse.json({
       ...comparison,
+      // CTO-168: real query context (tag filter + 7-day window), not the fixture label.
+      workload: deriveWorkload(featureTag, WORKLOAD_WINDOW_DAYS),
       current: {
         ...comparison.current,
         model: live.model,
@@ -127,14 +139,10 @@ export async function GET(req: Request) {
         qualityScore: null,
       },
       candidates,
-      recommendation: {
-        ...comparison.recommendation,
-        projectedSavingsMicroUsd,
-        projectedSavingsPct,
-      },
+      recommendation,
       diagnostics: {
         ...comparison.diagnostics,
-        samplesReplayed: replay.per_candidate.reduce((s, c) => s + c.samples_replayed, 0),
+        samplesReplayed: totalReplayed,
         samplesAvailable: replay.samples_available,
         replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
         contextFidelity:
@@ -172,12 +180,29 @@ export async function GET(req: Request) {
         ...(quality ? { qualityCi: quality.qualityCi } : {}),
       };
     });
-  const projectedSavingsMicroUsd = Math.round(
-    comparison.recommendation.projectedSavingsMicroUsd * scale,
-  );
+  // CTO-168: this branch has a LIVE current model but only rescaled-mock candidate costs — there
+  // is no real cross-provider replay behind it. So we do NOT ship the fixture verdict/summary
+  // (that would be the hardcoded "$12.2K/mo … haiku-4.5" prose on live data). Instead we pass
+  // samplesReplayed: 0, which deriveRecommendation surfaces as an honest "insufficient replay data"
+  // recommendation while still projecting savings off the rescaled cheapest candidate.
+  const recommendation = deriveRecommendation({
+    currentModel: live.model,
+    currentCostMicroUsd: live.monthlyCostMicroUsd,
+    candidates: candidates.map((c) => ({
+      model: c.model,
+      monthlyCostMicroUsd: c.monthlyCostMicroUsd,
+      qualityScore: c.qualityScore,
+      // Candidate latency here is still the fixture mock (no replay); deriveRecommendation ignores
+      // it on the insufficient-data path, so no mock latency leaks into the summary.
+      latencyP95Ms: c.latencyP95Ms,
+    })),
+    samplesReplayed: 0,
+  });
 
   return NextResponse.json({
     ...comparison,
+    // CTO-168: real query context (tag filter + 7-day window), not the fixture label.
+    workload: deriveWorkload(featureTag, WORKLOAD_WINDOW_DAYS),
     current: {
       ...comparison.current,
       model: live.model,
@@ -190,10 +215,7 @@ export async function GET(req: Request) {
       qualityScore: null,
     },
     candidates,
-    recommendation: {
-      ...comparison.recommendation,
-      projectedSavingsMicroUsd,
-    },
+    recommendation,
     replay_source: "mock",
   });
 }
