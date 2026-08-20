@@ -20,6 +20,7 @@ import psycopg
 from gateway.config import Settings
 from gateway.connectors.base import ConnectorConfig
 from gateway.connectors.egress import EgressConfig
+from gateway.connectors.vercel import VercelConfig
 
 _ALLOWED_STATUSES = frozenset({"success", "partial", "failed"})
 
@@ -169,6 +170,74 @@ class TenantEgressConfigStore:
                 UPDATE tenant_egress_config
                 SET last_run_at = now(), last_status = %s
                 WHERE tenant_id = %s AND egress_provider = %s
+                """,
+                params,
+            )
+            conn.commit()
+
+
+class TenantVercelConfigStore:
+    """Postgres reader/recorder over ``tenant_vercel_config`` (CTO-163).
+
+    One row per tenant (like compute's 0011, unlike egress's composite key). :meth:`load_config`
+    returns a :class:`gateway.connectors.vercel.VercelConfig` with ``cloud_provider`` pinned to
+    ``'vercel'`` so the reused compute/egress connectors key their spans on the right provider.
+    ``emit_egress`` carries the CTO-144 reconciliation gate straight off the row.
+
+    ``record_run`` matches the ``RunRecorder`` protocol the reused connectors call through; the
+    Vercel connector runs both a compute and (gated) an egress sub-run, and both stamp this single
+    row — ``connector_id`` is ignored (only ``last_run_at`` / ``last_status`` are persisted for v1).
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._dsn = settings.postgres_dsn
+
+    def load_config(self, tenant_id: str) -> VercelConfig | None:
+        """Return the tenant's Vercel connector config, or ``None`` if not configured.
+
+        ``None`` means "Vercel connector not enabled for this tenant" — the connector skips it,
+        keeping the migration additive (existing tenants have zero rows).
+        """
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, access_token_ref, team_id, project_id, enabled, emit_egress
+                FROM tenant_vercel_config
+                WHERE tenant_id = %s
+                """,
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return VercelConfig(
+            tenant_id=str(row[0]),
+            cloud_provider="vercel",
+            credentials_ref=str(row[1]),
+            team_id=str(row[2] or ""),
+            project_id=str(row[3] or ""),
+            enabled=bool(row[4]),
+            emit_egress=bool(row[5]),
+        )
+
+    def record_run(
+        self,
+        tenant_id: str,
+        connector_id: str,  # noqa: ARG002 - 'compute'|'egress' from the reused connectors; not stored
+        status: str,
+        *,
+        error_message: str | None = None,  # noqa: ARG002 - not persisted on the config row (v1)
+    ) -> None:
+        """Stamp ``last_run_at`` / ``last_status`` on the tenant's ``tenant_vercel_config`` row."""
+        if status not in _ALLOWED_STATUSES:
+            raise ValueError(f"unknown status '{status}'")
+        params: tuple[Any, ...] = (status, tenant_id)
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tenant_vercel_config
+                SET last_run_at = now(), last_status = %s
+                WHERE tenant_id = %s
                 """,
                 params,
             )
