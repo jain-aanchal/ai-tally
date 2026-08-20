@@ -180,6 +180,23 @@ class RuleVerdict:
         }
 
 
+def verdict_span_attributes(verdicts: list[RuleVerdict]) -> dict[str, str]:
+    """Merge a batch of per-rule verdicts into a single span-attribute dict.
+
+    This is what the enforcement path attaches to the active span after
+    :meth:`GuardrailEngine.apply_rules` — one ``gen_ai.guardrail.{rule_id}.verdict``
+    (plus ``.kind``) key per rule evaluated. The dashboard (CTO-146) counts these over
+    the trailing 7d to source ``runsThisWeek`` (every verdict) and
+    ``wouldHaveFiredThisWeek`` (verdict ∈ {enforced, shadow_observed}).
+
+    PII bar: verdict/kind only — never the request/response body or any rule input.
+    """
+    attrs: dict[str, str] = {}
+    for v in verdicts:
+        attrs.update(v.attrs())
+    return attrs
+
+
 @dataclass(slots=True)
 class GuardrailEngine:
     """Evaluates guardrails against per-trace state. Holds the OBSERVE-mode would-fire tally.

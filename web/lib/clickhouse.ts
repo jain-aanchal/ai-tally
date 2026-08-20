@@ -1016,10 +1016,56 @@ function mapGuardrailRule(r: GatewayGuardrailRule): GuardrailRule {
   };
 }
 
+// Per-rule trip telemetry (CTO-146). The control plane stores config, not counts — the real
+// runsThisWeek / wouldHaveFiredThisWeek come from guardrail-verdict spans the SDK emits. When a
+// rule is evaluated on a trace the SDK sets one map attribute per rule:
+//   SpanAttributes['gen_ai.guardrail.{rule_id}.verdict'] ∈ {enforced, shadow_observed, passed}
+// We count those over the trailing 7d:
+//   runsThisWeek           = every verdict present (the rule was evaluated)
+//   wouldHaveFiredThisWeek = verdict ∈ {enforced, shadow_observed} (it fired / would have)
+// The key is dynamic per rule_id, so we ARRAY JOIN the attribute map and extract the rule_id from
+// keys matching `gen_ai.guardrail.%.verdict` — no need to enumerate rule ids in SQL.
+export interface GuardrailActivity {
+  runsThisWeek: number;
+  wouldHaveFiredThisWeek: number;
+}
+
+export async function queryGuardrailActivity(): Promise<Map<string, GuardrailActivity> | null> {
+  return tryLive(async (db, tenant) => {
+    const out = await rows<{ ruleId: string; runs: string; wouldFire: string }>(
+      db,
+      `SELECT
+         extract(key, '^gen_ai\\\\.guardrail\\\\.(.+)\\\\.verdict$') AS ruleId,
+         count() AS runs,
+         countIf(val IN ('enforced', 'shadow_observed')) AS wouldFire
+       FROM otel_spans
+       ARRAY JOIN mapKeys(SpanAttributes) AS key, mapValues(SpanAttributes) AS val
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 7 DAY
+         AND key LIKE 'gen_ai.guardrail.%.verdict'
+       GROUP BY ruleId`,
+      tenant,
+    );
+    const activity = new Map<string, GuardrailActivity>();
+    for (const r of out) {
+      if (!r.ruleId) continue;
+      activity.set(r.ruleId, {
+        runsThisWeek: parseInt(r.runs, 10) || 0,
+        wouldHaveFiredThisWeek: parseInt(r.wouldFire, 10) || 0,
+      });
+    }
+    return activity;
+  });
+}
+
 /**
  * Fetch the caller's per-tenant guardrail rules from the gateway and map them onto the web's
  * GuardrailRule shape. Returns null on any error (gateway unreachable, non-2xx, parse failure) so
  * the route can fall back to the static mock (`?? guardrailRules`) rather than blanking the page.
+ *
+ * The gateway carries config only, so trip counts are merged in from verdict-span telemetry
+ * (queryGuardrailActivity). A rule with no verdict spans keeps runsThisWeek = 0, which the UI
+ * renders as `—` (honest null) rather than a fabricated count.
  */
 export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
   try {
@@ -1033,7 +1079,20 @@ export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
       return null;
     }
     const body = (await res.json()) as { rules?: GatewayGuardrailRule[] };
-    return Array.isArray(body.rules) ? body.rules.map(mapGuardrailRule) : [];
+    const rules = Array.isArray(body.rules) ? body.rules.map(mapGuardrailRule) : [];
+    // Overlay live trip counts from verdict spans. If telemetry is unavailable (null), leave the
+    // config-default 0s — never fabricate a count.
+    const activity = await queryGuardrailActivity();
+    if (activity) {
+      for (const rule of rules) {
+        const a = activity.get(rule.id);
+        if (a) {
+          rule.runsThisWeek = a.runsThisWeek;
+          rule.wouldHaveFiredThisWeek = a.wouldHaveFiredThisWeek;
+        }
+      }
+    }
+    return rules;
   } catch (err) {
     console.warn("[guardrails] gateway unreachable, falling back to mock:", (err as Error).message);
     return null;

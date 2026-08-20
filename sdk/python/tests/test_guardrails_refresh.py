@@ -17,6 +17,8 @@ from tally.guardrails import (
     GuardrailEngine,
     RuleKind,
     RuleState,
+    RuleVerdict,
+    verdict_span_attributes,
 )
 
 
@@ -178,6 +180,61 @@ def test_disabled_rule_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = GuardrailEngine.from_gateway("http://gw.local", "t-acme", start=False)
     verdicts = engine.apply_rules({"cost_micro_usd": 999_999})
     assert verdicts == []
+
+
+def test_verdict_span_attributes_merges_batch_counts_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A trace that evaluates two rules: one enforced, one shadow-observed, one passed.
+    rules = [
+        {
+            "rule_id": "gr_cost",
+            "kind": "cost_cap",
+            "state": "enabled",
+            "params": {"max_cost_micro_usd": 1000},
+        },
+        {
+            "rule_id": "gr_loop",
+            "kind": "loop_limit",
+            "state": "shadow",
+            "params": {"max_steps": 3},
+        },
+        {
+            "rule_id": "gr_pii",
+            "kind": "pii_gate",
+            "state": "enabled",
+            "params": {},
+        },
+    ]
+    monkeypatch.setattr("tally.guardrails.urllib.request.urlopen", _ok_response(rules))
+    engine = GuardrailEngine.from_gateway("http://gw.local", "t-acme", start=False)
+
+    verdicts = engine.apply_rules(
+        {"cost_micro_usd": 5000, "step_count": 9, "contains_pii": False, "body": "secret"}
+    )
+    attrs = verdict_span_attributes(verdicts)
+
+    # One verdict + kind key per evaluated rule — this is exactly what the 7d dashboard counts.
+    assert attrs["gen_ai.guardrail.gr_cost.verdict"] == "enforced"
+    assert attrs["gen_ai.guardrail.gr_loop.verdict"] == "shadow_observed"
+    assert attrs["gen_ai.guardrail.gr_pii.verdict"] == "passed"
+    assert attrs["gen_ai.guardrail.gr_cost.kind"] == "cost_cap"
+    # PII bar: only verdict/kind keys leak — never the call body or rule inputs.
+    assert all(k.startswith("gen_ai.guardrail.") for k in attrs)
+    assert all(k.endswith(".verdict") or k.endswith(".kind") for k in attrs)
+    assert not any("secret" in v for v in attrs.values())
+
+
+def test_verdict_span_attributes_empty_batch_is_empty() -> None:
+    assert verdict_span_attributes([]) == {}
+
+
+def test_verdict_span_attributes_typed_verdict_roundtrips() -> None:
+    v = RuleVerdict(rule_id="gr_x", kind=RuleKind.MODEL_DEPRECATION, verdict="enforced")
+    assert verdict_span_attributes([v]) == {
+        "gen_ai.guardrail.gr_x.verdict": "enforced",
+        "gen_ai.guardrail.gr_x.kind": "model_deprecation",
+    }
 
 
 def test_refresh_loop_interval(monkeypatch: pytest.MonkeyPatch) -> None:
