@@ -26,7 +26,7 @@ s3 = [
 ]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    "ruff>=0.6,<0.16",
     "httpx>=0.27",
 ]
 # Optional analytics-mirror sink (CTO-154). Only needed by deployments that turn on the
