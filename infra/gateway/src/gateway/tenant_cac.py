@@ -40,6 +40,10 @@ class CacPeriod:
     new_customers_total: int
     notes: str | None
     closed_at: datetime | None
+    # Revenue-side inputs for payback / LTV (CTO-145). Nullable: a row entered before these fields
+    # existed (or left blank) carries None → the page renders payback/LTV as "—" (honest-null).
+    arpa_micro_usd: int | None = None
+    gross_margin_pct: float | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +59,8 @@ class CacPeriod:
             "notes": self.notes,
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
             "locked": self.closed_at is not None,
+            "arpa_micro_usd": self.arpa_micro_usd,
+            "gross_margin_pct": self.gross_margin_pct,
         }
 
 
@@ -98,6 +104,9 @@ class CacFormInput:
     new_customers_paid: int
     new_customers_total: int
     notes: str | None
+    # Revenue side (CTO-145). Nullable — finance may fill spend one month and ARPA/margin later.
+    arpa_micro_usd: int | None = None
+    gross_margin_pct: float | None = None
 
     @classmethod
     def from_json(cls, body: dict) -> "CacFormInput":
@@ -115,6 +124,8 @@ class CacFormInput:
             new_customers_paid=_as_count(body.get("new_customers_paid", 0), "new_customers_paid"),
             new_customers_total=_as_count(body.get("new_customers_total", 0), "new_customers_total"),
             notes=_as_notes(body.get("notes")),
+            arpa_micro_usd=_as_micro_opt(body.get("arpa_micro_usd"), "arpa_micro_usd"),
+            gross_margin_pct=_as_fraction_opt(body.get("gross_margin_pct"), "gross_margin_pct"),
         )
 
     def sanity_check(self) -> None:
@@ -169,6 +180,33 @@ def _as_notes(v: object) -> str | None:
     if not isinstance(v, str):
         raise CacPeriodError("notes must be a string")
     return v
+
+
+def _as_micro_opt(v: object, field: str) -> int | None:
+    """Nullable micro-USD: absent / None / "" ⇒ None (honest-null), else reuse ``_as_micro``."""
+    if v is None or v == "":
+        return None
+    return _as_micro(v, field)
+
+
+def _as_fraction_opt(v: object, field: str) -> float | None:
+    """Nullable fraction in [0,1] (gross margin). Absent / None / "" ⇒ None."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        raise CacPeriodError(f"{field} must be a number")
+    if isinstance(v, (int, float)):
+        result = float(v)
+    elif isinstance(v, str):
+        try:
+            result = float(v)
+        except ValueError as exc:
+            raise CacPeriodError(f"{field} must be a number, got {v!r}") from exc
+    else:
+        raise CacPeriodError(f"{field} must be a number")
+    if not (0.0 <= result <= 1.0):
+        raise CacPeriodError(f"{field} must be between 0 and 1 (got {result})")
+    return result
 
 
 def parse_csv(body: str) -> list[CacFormInput]:
@@ -235,7 +273,7 @@ class TenantCacStore:
                 SELECT period_start, period_end, currency,
                        paid_spend_micro_usd, sales_spend_micro_usd, content_spend_micro_usd,
                        overhead_micro_usd, new_customers_paid, new_customers_total,
-                       notes, closed_at
+                       notes, closed_at, arpa_micro_usd, gross_margin_pct
                 FROM cac_periods
                 WHERE tenant_id = %s
                 ORDER BY period_start DESC
@@ -263,8 +301,8 @@ class TenantCacStore:
                     tenant_id, period_start, period_end, currency,
                     paid_spend_micro_usd, sales_spend_micro_usd, content_spend_micro_usd,
                     overhead_micro_usd, new_customers_paid, new_customers_total,
-                    notes, updated_at
-                ) VALUES (%s,%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s, now())
+                    notes, arpa_micro_usd, gross_margin_pct, updated_at
+                ) VALUES (%s,%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 ON CONFLICT (tenant_id, period_start) DO UPDATE
                   SET period_end              = EXCLUDED.period_end,
                       paid_spend_micro_usd    = EXCLUDED.paid_spend_micro_usd,
@@ -274,16 +312,19 @@ class TenantCacStore:
                       new_customers_paid      = EXCLUDED.new_customers_paid,
                       new_customers_total     = EXCLUDED.new_customers_total,
                       notes                   = EXCLUDED.notes,
+                      arpa_micro_usd          = EXCLUDED.arpa_micro_usd,
+                      gross_margin_pct        = EXCLUDED.gross_margin_pct,
                       updated_at              = now()
                 RETURNING period_start, period_end, currency,
                           paid_spend_micro_usd, sales_spend_micro_usd, content_spend_micro_usd,
                           overhead_micro_usd, new_customers_paid, new_customers_total,
-                          notes, closed_at
+                          notes, closed_at, arpa_micro_usd, gross_margin_pct
                 """,
                 (tenant_id, form.period_start, period_end,
                  form.paid_spend_micro_usd, form.sales_spend_micro_usd,
                  form.content_spend_micro_usd, form.overhead_micro_usd,
-                 form.new_customers_paid, form.new_customers_total, form.notes),
+                 form.new_customers_paid, form.new_customers_total, form.notes,
+                 form.arpa_micro_usd, form.gross_margin_pct),
             )
             row = cur.fetchone()
             cur.execute(
@@ -311,6 +352,8 @@ def _row_to_period(row: tuple) -> CacPeriod:
         new_customers_total=int(row[8]),
         notes=row[9],
         closed_at=_as_aware(row[10]),
+        arpa_micro_usd=int(row[11]) if row[11] is not None else None,
+        gross_margin_pct=float(row[12]) if row[12] is not None else None,
     )
 
 
