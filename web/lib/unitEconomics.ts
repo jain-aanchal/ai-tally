@@ -100,10 +100,86 @@ export function ltvOverCac(ltvValue: number | null, cac: number | null): number 
   return ltvValue / cac;
 }
 
-/** Color band for LTV/CAC. B2B SaaS defaults — tenant-configurable in v2. */
-export function ltvCacBand(ratio: number | null): "green" | "yellow" | "red" | "unknown" {
+export type Band = "green" | "yellow" | "red" | "unknown";
+
+/**
+ * Band cutoffs for the LTV:CAC ratio and payback months (CTO-126).
+ *
+ * These were hardcoded B2B-SaaS defaults inline in `ltvCacBand` ("tenant-configurable in v2"). They
+ * are now per-tenant configurable: the gateway stores a partial or full override per tenant, and
+ * `resolveThresholds` layers those overrides ON TOP of `DEFAULT_THRESHOLDS`. A tenant with no row (or
+ * a field left unset) keeps the default — the defaults are always the fallback.
+ *
+ * Semantics: higher LTV:CAC is healthier (green is the high end); lower payback is healthier (green
+ * is the low end).
+ */
+export interface UnitEconomicsThresholds {
+  /** LTV:CAC strictly ABOVE this is green. */
+  ltvCacGreen: number;
+  /** LTV:CAC at/above this (but not green) is yellow; below is red. */
+  ltvCacYellow: number;
+  /** Payback at/below this many months is green. */
+  paybackGreen: number;
+  /** Payback at/below this (but not green) is yellow; above is red. */
+  paybackYellow: number;
+}
+
+/** The historical hardcoded B2B-SaaS cutoffs — the fallback for any tenant without an override. */
+export const DEFAULT_THRESHOLDS: UnitEconomicsThresholds = {
+  ltvCacGreen: 3.0,
+  ltvCacYellow: 1.0,
+  paybackGreen: 12,
+  paybackYellow: 18,
+};
+
+/** A per-tenant override read from the gateway. Any field omitted/null falls back to the default. */
+export interface UnitEconomicsThresholdOverrides {
+  ltvCacGreen?: number | null;
+  ltvCacYellow?: number | null;
+  paybackGreen?: number | null;
+  paybackYellow?: number | null;
+}
+
+/**
+ * Layer a tenant's (possibly partial) overrides on top of `DEFAULT_THRESHOLDS`. Passing
+ * `null`/`undefined` (no tenant row) returns the defaults unchanged — the defaults are the fallback.
+ */
+export function resolveThresholds(
+  overrides?: UnitEconomicsThresholdOverrides | null,
+): UnitEconomicsThresholds {
+  if (!overrides) return DEFAULT_THRESHOLDS;
+  return {
+    ltvCacGreen: overrides.ltvCacGreen ?? DEFAULT_THRESHOLDS.ltvCacGreen,
+    ltvCacYellow: overrides.ltvCacYellow ?? DEFAULT_THRESHOLDS.ltvCacYellow,
+    paybackGreen: overrides.paybackGreen ?? DEFAULT_THRESHOLDS.paybackGreen,
+    paybackYellow: overrides.paybackYellow ?? DEFAULT_THRESHOLDS.paybackYellow,
+  };
+}
+
+/**
+ * Color band for LTV/CAC. Cutoffs default to the hardcoded B2B-SaaS values; pass a tenant's resolved
+ * thresholds to apply their overrides (CTO-126).
+ */
+export function ltvCacBand(
+  ratio: number | null,
+  thresholds: UnitEconomicsThresholds = DEFAULT_THRESHOLDS,
+): Band {
   if (ratio === null) return "unknown";
-  if (ratio > 3.0) return "green";
-  if (ratio >= 1.0) return "yellow";
+  if (ratio > thresholds.ltvCacGreen) return "green";
+  if (ratio >= thresholds.ltvCacYellow) return "yellow";
+  return "red";
+}
+
+/**
+ * Color band for payback months — lower is healthier. Null (undefined payback) → "unknown". Cutoffs
+ * default to the hardcoded values; pass a tenant's resolved thresholds to apply their overrides.
+ */
+export function paybackBand(
+  months: number | null,
+  thresholds: UnitEconomicsThresholds = DEFAULT_THRESHOLDS,
+): Band {
+  if (months === null) return "unknown";
+  if (months <= thresholds.paybackGreen) return "green";
+  if (months <= thresholds.paybackYellow) return "yellow";
   return "red";
 }
