@@ -111,6 +111,30 @@ def test_gemini_flash_cheaper_than_pro() -> None:
     assert _cost("google", "gemini-2.5-flash") < _cost("google", "gemini-2.5-pro")
 
 
+# --- Amazon Bedrock (CTO-157) — managed LLM provider, own price dimension ----
+
+
+def test_bedrock_claude_sonnet_priced() -> None:
+    _cost("bedrock", "anthropic.claude-sonnet-4-5")
+
+
+def test_bedrock_llama_priced() -> None:
+    _cost("bedrock", "meta.llama3-3-70b-instruct")
+
+
+def test_bedrock_nova_pro_priced() -> None:
+    _cost("bedrock", "amazon.nova-pro")
+
+
+def test_bedrock_titan_priced() -> None:
+    _cost("bedrock", "amazon.titan-text-express")
+
+
+def test_bedrock_sonnet_repriced_above_anthropic_direct() -> None:
+    # Same model, different surface: Bedrock's managed rate exceeds the vendor-direct rate.
+    assert _cost("bedrock", "anthropic.claude-sonnet-4-5") > _cost("anthropic", "claude-sonnet-4-5")
+
+
 # --- Vertex AI Vector Search (CTO-151) — Vector cost layer, per-call ----
 
 
