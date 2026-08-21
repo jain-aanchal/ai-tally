@@ -1,0 +1,14 @@
+# Local demo override: lift the per-tenant rate limit so the chatbot-demo
+# backfill (~297k spans posted in ~800 batches) lands in a single run instead
+# of tripping the gateway's default 500 rps / 2000 burst cap (a 429 partway
+# through). See infra/gateway/src/gateway/config.py (rate_limit_rps / _burst).
+#
+# CAVEAT: docker compose auto-merges docker-compose.override.yml on every
+# `make up`, so with this file present the per-tenant rate limit is effectively
+# disabled for ALL local dev, not just during a backfill. That is fine for a
+# laptop demo. Do not carry this pattern to any shared or deployed environment.
+services:
+  gateway:
+    environment:
+      TALLY_RATE_LIMIT_RPS: "1000000"
+      TALLY_RATE_LIMIT_BURST: "5000000"
