@@ -61,7 +61,9 @@ export function HomeLive({
         <div className="text-3xl font-semibold">{formatUSD(s.totalMicroUsd)}</div>
         <div className="mt-2 text-sm text-muted">
           estimated {formatUSD(s.estimatedMicroUsd)} · reconciled {formatUSD(s.reconciledMicroUsd)}
-          <span className="ml-1 text-xs">(through {s.reconciledThrough})</span>
+          {s.reconciledThrough > "1970-01-01" ? (
+            <span className="ml-1 text-xs">(through {s.reconciledThrough})</span>
+          ) : null}
         </div>
         <div className="mt-3 text-sm text-warn">
           Hidden cost: {formatUSD(hidden)} ({hiddenPct}%) — vector + tools + compute
