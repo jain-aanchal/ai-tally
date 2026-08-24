@@ -4,6 +4,7 @@
 
 [![Watch the Demo Video](https://github.com/jain-aanchal/ai-tally/blob/main/Thumbnail.png)](https://github.com/jain-aanchal/ai-tally/releases/download/V1.0/AI-tally.Demo.mov)
 
+Click on the thumbnail to watch the demo.
 
 Cost-and-value observability for AI products. See what your AI actually costs (all-in) and what it returns.
 
