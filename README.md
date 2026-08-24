@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-[![Watch the demo video]]([https://github.com/jain-aanchal/ai-tally/releases/download/V1.0/AI-tally.Demo.mov])
+[![Watch the Demo Video](https://github.com/jain-aanchal/ai-tally/blob/main/Thumbnail.png)](https://github.com/jain-aanchal/ai-tally/releases/download/V1.0/AI-tally.Demo.mov)
 
 
 Cost-and-value observability for AI products. See what your AI actually costs (all-in) and what it returns.
