@@ -899,6 +899,7 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
          AND Timestamp >= now() - INTERVAL 30 DAY
          AND ServiceName != ''
          AND ServiceName != 'unknown'
+         AND GenAiOperation NOT IN ('compute', 'egress')
          ${tagClause}
          ${runClause}
        GROUP BY TraceId`,
