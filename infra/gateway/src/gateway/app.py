@@ -88,6 +88,11 @@ from gateway.tenant_cac import (
     csv_template,
     parse_csv,
 )
+from gateway.connectors.config_admin import (
+    ALL_CONNECTORS,
+    ConfigError,
+    CostConnectorAdmin,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
@@ -151,6 +156,9 @@ async def lifespan(app: FastAPI):
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
     app.state.tenant_connectors = TenantConnectorStore(settings)
+    # CTO-176: write path for the cloud cost-connector config rows (compute / egress /
+    # vercel). Until now those rows could only be inserted straight into Postgres.
+    app.state.cost_connector_admin = CostConnectorAdmin(settings)
     # Per-tenant guardrail registry (CTO-116) — the SDK polls /v1/tenant/guardrails on its
     # config-refresh window and enforces matching rules in-process. Shadow rules emit span
     # attrs but never alter the call; enabled rules do.
@@ -694,6 +702,79 @@ async def set_tenant_connector(
     store: TenantConnectorStore = app.state.tenant_connectors
     row = store.set(tenant_id, layer, enabled=enabled, notes=notes)
     return JSONResponse({"tenant_id": tenant_id, "connector": row.as_dict()}, status_code=200)
+
+
+@app.get("/v1/tenant/cost-connectors")
+def list_cost_connectors(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Configured cloud cost connectors for the caller's tenant (CTO-176).
+
+    Safe view only: every ``*_ref`` returned is a secret-manager REFERENCE, which is all the column
+    ever holds. No raw credential exists to leak here.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    admin: CostConnectorAdmin = app.state.cost_connector_admin
+    try:
+        rows = admin.list_configs(tenant_id)
+    except Exception as exc:  # noqa: BLE001 - control plane read, degrade rather than 500 the page
+        logger.warning("cost connector list failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="control plane unavailable") from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "configs": [r.as_dict() for r in rows]}, status_code=200
+    )
+
+
+@app.post("/v1/tenant/cost-connectors")
+async def upsert_cost_connector(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Create or replace one cloud cost connector's config.
+
+    Body: ``{"connector": "aws_cost_explorer", "credentials_ref": "arn:...", ...}``. Per-connector
+    required fields are enforced in :mod:`gateway.connectors.config_admin`, which also rejects
+    anything shaped like a raw credential before it can reach Postgres.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    connector = body.get("connector")
+    if not isinstance(connector, str) or connector not in ALL_CONNECTORS:
+        raise HTTPException(
+            status_code=422, detail=f"connector must be one of {sorted(ALL_CONNECTORS)}"
+        )
+    admin: CostConnectorAdmin = app.state.cost_connector_admin
+    try:
+        result = admin.upsert(tenant_id, connector, body)
+    except ConfigError as exc:
+        # Validation messages are authored for the operator and carry no secret material.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, **result}, status_code=200)
+
+
+@app.delete("/v1/tenant/cost-connectors/{connector}")
+def delete_cost_connector(
+    connector: str,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Disconnect one cloud cost connector. Idempotent: deleting an absent row is a 200."""
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    admin: CostConnectorAdmin = app.state.cost_connector_admin
+    try:
+        deleted = admin.delete(tenant_id, connector)
+    except ConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "connector": connector, "deleted": deleted}, status_code=200
+    )
 
 
 @app.get("/v1/tenant/guardrails")

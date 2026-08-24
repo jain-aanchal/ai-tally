@@ -1203,21 +1203,36 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
     const records: Record<string, number> = {};
     const lastAt: Record<string, string> = {};
 
-    // Cost layers from telemetry. Map each layer back to the connector that feeds it.
-    const layerToId = new Map<Layer, string>();
+    // Cost layers from telemetry, resolved back to the connector that produced them.
+    //
+    // Two connectors can feed the same layer (AWS and GCP both feed `compute`; Vercel and
+    // Cloudflare both feed `egress`), so a plain layer→connector map collides and credits every
+    // row to whichever connector the catalog lists last. Group by GenAiSystem as well and prefer
+    // the connector that claims that system; fall back to the layer's sole connector when a layer
+    // has exactly one, so single-connector layers (llm, vector, tools) are unaffected.
+    const bySystem = new Map<string, string>();
+    const layerOwners = new Map<Layer, string[]>();
     for (const c of CONNECTORS) {
-      if (c.liveKey.kind === "cost-layer") layerToId.set(c.liveKey.layer, c.id);
+      if (c.liveKey.kind !== "cost-layer") continue;
+      const owners = layerOwners.get(c.liveKey.layer) ?? [];
+      owners.push(c.id);
+      layerOwners.set(c.liveKey.layer, owners);
+      for (const sys of c.liveKey.systems ?? []) bySystem.set(`${c.liveKey.layer}:${sys}`, c.id);
     }
-    const costRows = await rows<{ layer: Layer; n: string; last: string | null }>(
+    const costRows = await rows<{ layer: Layer; system: string; n: string; last: string | null }>(
       db,
-      `SELECT ${LAYER_CASE} AS layer, count() AS n, toString(max(Timestamp)) AS last
+      `SELECT ${LAYER_CASE} AS layer, GenAiSystem AS system, count() AS n,
+              toString(max(Timestamp)) AS last
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
-       GROUP BY layer`,
+       GROUP BY layer, system`,
       tenant,
     );
     for (const r of costRows) {
-      const id = layerToId.get(r.layer);
+      const owners = layerOwners.get(r.layer) ?? [];
+      // Exact system match wins; otherwise only credit a layer that has a single connector. A
+      // shared layer with an unrecognised system stays unattributed rather than guessing.
+      const id = bySystem.get(`${r.layer}:${r.system}`) ?? (owners.length === 1 ? owners[0] : null);
       if (!id) continue;
       const n = parseInt(r.n, 10) || 0;
       if (n <= 0) continue;

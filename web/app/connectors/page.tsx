@@ -10,7 +10,9 @@ import {
   connectedCount,
   liveAvailableCount,
 } from "@/lib/connectors";
+import { type CostConnectorConfig, isConfigurable, queryCostConnectorConfigs } from "@/lib/costConnectors";
 import { queryEnabledConnectors } from "@/lib/tenant";
+import { ConnectForm } from "./ConnectForm";
 import { ConnectorToggle } from "./ConnectorToggle";
 
 interface ConnectorsPayload {
@@ -54,9 +56,11 @@ function StateBadge({ row }: { row: ConnectorStatus }) {
 function ConnectorTable({
   rows,
   enabledLayers,
+  configs,
 }: {
   rows: ConnectorStatus[];
   enabledLayers: readonly string[];
+  configs: Map<string, CostConnectorConfig>;
 }) {
   return (
     <div className="overflow-x-auto">
@@ -68,6 +72,7 @@ function ConnectorTable({
             <th className="py-1 text-left font-medium">Status</th>
             <th className="py-1 text-right font-medium">Records (30d)</th>
             <th className="py-1 text-right font-medium">Last sync</th>
+            <th className="py-1 text-right font-medium">Connection</th>
             <th className="py-1 text-right font-medium">Banner</th>
           </tr>
         </thead>
@@ -94,6 +99,18 @@ function ConnectorTable({
                   {r.lastAt ? relativeAge(r.lastAt) : "—"}
                 </td>
                 <td className="py-2 text-right">
+                  {isConfigurable(r.id) ? (
+                    <ConnectForm
+                      connector={r.id}
+                      configured={configs.get(r.id)?.configured ?? false}
+                      credentialsRef={configs.get(r.id)?.credentialsRef ?? null}
+                      details={configs.get(r.id)?.details ?? {}}
+                    />
+                  ) : (
+                    <span className="text-xs text-muted">—</span>
+                  )}
+                </td>
+                <td className="py-2 text-right">
                   {layer && r.state !== "coming_soon" ? (
                     <ConnectorToggle layer={layer} initialEnabled={isEnabled} />
                   ) : (
@@ -110,10 +127,14 @@ function ConnectorTable({
 }
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live }, enabledLayers] = await Promise.all([
+  const [{ connectors, live }, enabledLayers, costConfigs] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
+    queryCostConnectorConfigs(),
   ]);
+  // `null` means the gateway is unreachable. Render the forms anyway (they report their own
+  // errors on submit) rather than hiding the only way to configure anything.
+  const configs = new Map((costConfigs ?? []).map((c) => [c.connector, c]));
   // Only cost-layer sources surface in the UI today; revenue/CDP and the third-party integration
   // cards were purely decorative (no real status), removed in the cleanup wave following #100.
   const visibleConnectors = connectors.filter((c) => c.category === "cost");
@@ -130,7 +151,7 @@ export default async function ConnectorsPage() {
         return (
           <Card key={s.category} title={`${s.title} — ${n}/${live} connected${suffix}`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
-            <ConnectorTable rows={rows} enabledLayers={enabledLayers} />
+            <ConnectorTable rows={rows} enabledLayers={enabledLayers} configs={configs} />
           </Card>
         );
       })}
@@ -151,9 +172,10 @@ export default async function ConnectorsPage() {
       </div>
 
       <p className="max-w-prose text-sm text-muted">
-        Pluggable cost sources. Each normalizes one provider into the shared cost model;
-        credentials and sync schedules are configured in the backend connector runner. A source
-        shows <span className="text-good">Connected</span> once it has produced data.
+        Pluggable cost sources. Each normalizes one provider into the shared cost model. Connect a
+        source here by pointing it at a credential reference; sync schedules run in the backend
+        connector runner. A source shows <span className="text-good">Connected</span> once it has
+        produced data.
       </p>
 
       {live ? body : <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>}
