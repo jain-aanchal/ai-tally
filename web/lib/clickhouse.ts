@@ -130,14 +130,14 @@ export async function querySpendSummary(): Promise<SpendSummary | null> {
          sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY`,
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY`,
       tenant,
     );
     const byLayerRows = await rows<{ layer: Layer; cost: string }>(
       db,
       `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY
        GROUP BY layer`,
       tenant,
     );
@@ -166,6 +166,7 @@ export async function queryOutliers(): Promise<CostOutlier[] | null> {
          FROM otel_spans
          WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
            AND ServiceName != '' AND ServiceName != 'unknown'
+           AND GenAiOperation NOT IN ('compute', 'egress')
          GROUP BY TraceId
        )
        SELECT runId, agent, cost,
@@ -239,14 +240,14 @@ export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSe
       db,
       `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 14 DAY ${tagClause}
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY ${tagClause}
        GROUP BY day, layer
        ORDER BY day`,
       { tenant, tag },
     );
     // Pivot into one CostDayPoint per calendar day (fill gaps with zero layers).
     const byDay = new Map<string, CostDayPoint>();
-    for (let i = 13; i >= 0; i--) {
+    for (let i = 29; i >= 0; i--) {
       const d = new Date();
       d.setUTCDate(d.getUTCDate() - i);
       const iso = d.toISOString().slice(0, 10);
@@ -273,7 +274,7 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
       db,
       `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != '' ${tagClause}
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY AND FeatureTag != '' ${tagClause}
        GROUP BY feature, layer`,
       { tenant, tag },
     );
@@ -898,6 +899,7 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
          AND Timestamp >= now() - INTERVAL 30 DAY
          AND ServiceName != ''
          AND ServiceName != 'unknown'
+         AND GenAiOperation NOT IN ('compute', 'egress')
          ${tagClause}
          ${runClause}
        GROUP BY TraceId`,
@@ -1286,6 +1288,7 @@ export async function queryAttribution(
        FROM otel_spans s
        WHERE s.TenantId = {tenant:String}
          AND s.Timestamp >= now() - INTERVAL 30 DAY
+         AND s.GenAiOperation NOT IN ('compute', 'egress')
          ${tagSql}
          ${providerSql}
        GROUP BY provider`,
@@ -1304,6 +1307,7 @@ export async function queryAttribution(
        WHERE b.TenantId = {tenant:String}
          AND b.EventName = {outcome:String}
          AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         AND s.GenAiOperation NOT IN ('compute', 'egress')
          ${tagSql}
          ${providerSql}
        GROUP BY provider`,

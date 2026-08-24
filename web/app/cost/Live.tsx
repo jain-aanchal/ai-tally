@@ -69,11 +69,12 @@ export function CostLive({
 
   const body = (
     <div className="space-y-6">
-      <Card title="Cost by layer — last 14 days">
+      <Card title="Cost by layer — last 30 days">
         <div className="mb-2 flex items-baseline gap-3 text-sm">
           <span className="text-2xl font-semibold">{formatUSD(total)}</span>
           <span className="text-muted">
-            reconciled {formatUSD(reconciled)} (through {costSeries.reconciledThrough}) · estimated {formatUSD(estimated)}
+            reconciled {formatUSD(reconciled)}
+            {costSeries.reconciledThrough > "1970-01-01" ? ` (through ${costSeries.reconciledThrough})` : ""} · estimated {formatUSD(estimated)}
           </span>
         </div>
         <StackedBarChart series={costSeries} />
