@@ -16,15 +16,28 @@ export type ConnectorCategory = "cost" | "revenue";
 
 /** How a connector's live activity is found in the telemetry store. */
 export type LiveKey =
-  | { kind: "cost-layer"; layer: Layer }
+  | {
+      kind: "cost-layer";
+      layer: Layer;
+      /**
+       * `GenAiSystem` values that belong to this connector. Required whenever two connectors feed
+       * the SAME layer (AWS vs GCP on `compute`, Vercel vs Cloudflare on `egress`) — without it the
+       * layer→connector lookup collides and credits every row to whichever connector the catalog
+       * happens to list last.
+       */
+      systems?: readonly string[];
+    }
   | { kind: "revenue-source"; source: string };
 
 /**
  * Whether the backend ingest path for this connector actually exists today.
- * - `live`        — a real worker / SDK / webhook ingests data when configured (LLM proxy, Stripe)
+ * - `live`        — a real worker / SDK / webhook ingests data when configured.
  * - `coming_soon` — catalog entry only; no worker yet, the UI advertises a placeholder so users
- *                   know it's planned. Re-classify to `live` when the corresponding integration
- *                   ships (Pinecone, Tavily, AWS Cost Explorer, Vercel via CTO-127 follow-ups).
+ *                   know it's planned.
+ *
+ * The four cloud connectors moved to `live` once their workers shipped: AWS Cost Explorer and GCP
+ * Cloud Billing (CTO-143 / CTO-150) feed `compute`, Vercel (CTO-163) feeds `compute` and can feed
+ * `egress`, Cloudflare (CTO-144) feeds `egress`. Configure them from /connectors (CTO-176).
  */
 export type Availability = "live" | "coming_soon";
 
@@ -85,8 +98,8 @@ export const CONNECTORS: ConnectorDef[] = [
     category: "cost",
     feeds: "Compute cost",
     description: "Cloud billing line items for compute backing the AI workload.",
-    liveKey: { kind: "cost-layer", layer: "compute" },
-    availability: "coming_soon",
+    liveKey: { kind: "cost-layer", layer: "compute", systems: ["aws"] },
+    availability: "live",
   },
   {
     id: "gcp_billing",
@@ -94,8 +107,8 @@ export const CONNECTORS: ConnectorDef[] = [
     category: "cost",
     feeds: "Compute cost",
     description: "Cloud billing line items for compute backing the AI workload.",
-    liveKey: { kind: "cost-layer", layer: "compute" },
-    availability: "coming_soon",
+    liveKey: { kind: "cost-layer", layer: "compute", systems: ["gcp"] },
+    availability: "live",
   },
   {
     id: "vercel",
@@ -103,8 +116,8 @@ export const CONNECTORS: ConnectorDef[] = [
     category: "cost",
     feeds: "Egress cost",
     description: "Edge/serverless and bandwidth usage for the serving tier.",
-    liveKey: { kind: "cost-layer", layer: "egress" },
-    availability: "coming_soon",
+    liveKey: { kind: "cost-layer", layer: "egress", systems: ["vercel"] },
+    availability: "live",
   },
   {
     id: "cloudflare",
@@ -112,8 +125,8 @@ export const CONNECTORS: ConnectorDef[] = [
     category: "cost",
     feeds: "Egress cost",
     description: "CDN/egress bandwidth usage for the serving tier.",
-    liveKey: { kind: "cost-layer", layer: "egress" },
-    availability: "coming_soon",
+    liveKey: { kind: "cost-layer", layer: "egress", systems: ["cloudflare"] },
+    availability: "live",
   },
   {
     id: "segment",
@@ -187,9 +200,16 @@ export function connectedCount(rows: ConnectorStatus[]): number {
   return rows.filter((r) => r.state === "connected").length;
 }
 
-/** Number of rows that aren't connected today but are claimed to be possible to connect now. */
+/**
+ * Denominator for "N of M sources connected": every source that CAN be connected today, which is
+ * the connected ones plus the ones still merely available. Rows still marked `coming_soon` are
+ * excluded and counted separately, so the two numbers always add up to the row count.
+ *
+ * Previously this returned `availability === "live"` only, which counted a *smaller* set than
+ * `connectedCount` and produced headers like "4 of 1 sources connected".
+ */
 export function liveAvailableCount(rows: ConnectorStatus[]): number {
-  return rows.filter((r) => r.availability === "live").length;
+  return rows.filter((r) => r.state !== "coming_soon").length;
 }
 
 export function comingSoonCount(rows: ConnectorStatus[]): number {
