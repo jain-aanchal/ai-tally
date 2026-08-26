@@ -275,6 +275,214 @@ describe("queryReconcilerLastRun (CTO-169)", () => {
   });
 });
 
+// --- Per-customer cost (CTO-187, D1) ------------------------------------------------------------
+//
+// The test that matters here is RECONCILIATION: per-account direct cost plus the unattributed
+// bucket must equal the tenant's direct total for the window. If it does not, this tab contradicts
+// /cost and loses trust immediately (docs/cost-per-customer-plan.md, "Risks carried from the
+// scope"). The rest guard the three ways that identity is easy to break by accident: folding
+// compute and egress in, counting distinct users with a raw count instead of merging the uniq
+// state, and drifting off the calendar-aligned window the other surfaces use.
+
+const ACCT_A = "a".repeat(64);
+const ACCT_B = "b".repeat(64);
+
+// One fixture, stated in plain USD, feeding both the query stubs and the expected total below, so
+// the assertion cannot drift away from the input it is checking.
+const FIXTURE = [
+  { account: ACCT_A, layer: "llm", usd: 10.5 },
+  { account: ACCT_A, layer: "tools", usd: 2.25 },
+  { account: ACCT_B, layer: "llm", usd: 4 },
+  { account: ACCT_B, layer: "vector", usd: 1 },
+  { account: "", layer: "llm", usd: 3.25 },
+  { account: "", layer: "embeddings", usd: 0.5 },
+];
+const TENANT_DIRECT_MICRO = Math.round(FIXTURE.reduce((s, r) => s + r.usd, 0) * 1_000_000);
+
+function respondAccountCosts() {
+  respondRows([
+    { account: ACCT_A, spans: "100", users: "7" },
+    { account: ACCT_B, spans: "50", users: "3" },
+    { account: "", spans: "25", users: "2" },
+  ]);
+  respondRows(FIXTURE.map((r) => ({ account: r.account, layer: r.layer, cost: String(r.usd) })));
+}
+
+describe("queryAccountCosts — reconciliation (CTO-187)", () => {
+  it("per-account plus unattributed equals the tenant direct total", async () => {
+    const { queryAccountCosts } = await freshSut();
+    respondAccountCosts();
+    const out = await queryAccountCosts();
+    expect(out).not.toBeNull();
+
+    const sumAccounts = out!.accounts.reduce((s, a) => s + a.directCostMicroUsd, 0);
+    const reconciled = sumAccounts + out!.unattributed.directCostMicroUsd;
+
+    // The identity, two ways: against the total the function reports, and against the fixture
+    // totalled independently of the code under test.
+    expect(reconciled).toBe(out!.totalDirectMicroUsd);
+    expect(reconciled).toBe(TENANT_DIRECT_MICRO);
+  });
+
+  it("keeps the unattributed bucket out of the ranked accounts and flags it", async () => {
+    const { queryAccountCosts } = await freshSut();
+    respondAccountCosts();
+    const out = await queryAccountCosts();
+    expect(out!.accounts.map((a) => a.accountIdHash)).toEqual([ACCT_A, ACCT_B]);
+    expect(out!.accounts.every((a) => !a.unattributed)).toBe(true);
+    expect(out!.unattributed.unattributed).toBe(true);
+    expect(out!.unattributed.accountIdHash).toBe("");
+    expect(out!.unattributed.directCostMicroUsd).toBe(3_750_000); // 3.25 + 0.50
+  });
+
+  it("ranks accounts by direct cost, most expensive first", async () => {
+    const { queryAccountCosts } = await freshSut();
+    respondAccountCosts();
+    const out = await queryAccountCosts();
+    expect(out!.accounts[0].directCostMicroUsd).toBe(12_750_000); // 10.50 + 2.25
+    expect(out!.accounts[1].directCostMicroUsd).toBe(5_000_000); // 4.00 + 1.00
+  });
+
+  it("returns a zeroed unattributed bucket when the window holds no unattributed spans", async () => {
+    const { queryAccountCosts } = await freshSut();
+    // A tenant that has instrumented every span. The bucket must still be present so the page can
+    // state the unattributed share as zero rather than omitting the sentence entirely.
+    respondRows([{ account: ACCT_A, spans: "100", users: "7" }]);
+    respondRows([{ account: ACCT_A, layer: "llm", cost: "10.5" }]);
+    const out = await queryAccountCosts();
+    expect(out!.unattributed.unattributed).toBe(true);
+    expect(out!.unattributed.directCostMicroUsd).toBe(0);
+    expect(out!.unattributed.spanCount).toBe(0);
+    expect(out!.totalDirectMicroUsd).toBe(10_500_000);
+  });
+
+  it("carries distinct users and span count through per account", async () => {
+    const { queryAccountCosts } = await freshSut();
+    respondAccountCosts();
+    const out = await queryAccountCosts();
+    expect(out!.accounts[0].distinctUsers).toBe(7);
+    expect(out!.accounts[0].spanCount).toBe(100);
+    expect(out!.windowDays).toBe(30);
+  });
+});
+
+describe("queryAccountCosts — SQL contract (CTO-187)", () => {
+  async function sqlOf(): Promise<string[]> {
+    const { queryAccountCosts } = await freshSut();
+    respondAccountCosts();
+    await queryAccountCosts();
+    return queryMock.mock.calls.map((c) => (c[0] as { query: string }).query);
+  }
+
+  it("reads the account rollup, never a per-account scan of otel_spans", async () => {
+    for (const q of await sqlOf()) {
+      expect(q).toContain("FROM daily_account_rollup");
+      expect(q).not.toContain("otel_spans");
+    }
+  });
+
+  it("excludes compute and egress from direct cost (CTO-189 surfaces them separately)", async () => {
+    for (const q of await sqlOf()) {
+      expect(q).toContain("GenAiOperation NOT IN ('compute', 'egress')");
+    }
+  });
+
+  it("merges the uniq aggregate state rather than counting rows", async () => {
+    const [totals] = await sqlOf();
+    expect(totals).toContain("uniqMerge(UserCountState)");
+    expect(totals).not.toContain("uniqExact(UserIdHash)");
+  });
+
+  it("uses the calendar-aligned window Home and /cost use, not a rolling one", async () => {
+    for (const q of await sqlOf()) {
+      expect(q).toContain("Day >= toDate(now()) - INTERVAL 29 DAY");
+      expect(q).not.toContain("now() - INTERVAL 30 DAY");
+    }
+  });
+
+  it("normalises the NUL-padded FixedString so the unattributed bucket is a real empty string", async () => {
+    for (const q of await sqlOf()) {
+      expect(q).toContain("if(empty(AccountIdHash), '', toString(AccountIdHash))");
+    }
+  });
+});
+
+describe("queryAccountDetail (CTO-187)", () => {
+  const WINDOW_START = "2026-07-28";
+
+  function respondDetail(opts: { seen: string; spans: string; users: string; trend?: RowShape[] }) {
+    respondRows([
+      { seen: opts.seen, spans: opts.spans, users: opts.users, windowStart: WINDOW_START },
+    ]);
+    respondRows([
+      { layer: "llm", cost: "10.5" },
+      { layer: "tools", cost: "2.25" },
+    ]);
+    respondRows([{ feature: "research_agent", cost: "9", spans: "80" }]);
+    respondRows(opts.trend ?? [{ day: "2026-08-01", cost: "12.75" }]);
+  }
+
+  it("returns null for an account the tenant has never seen", async () => {
+    const { queryAccountDetail } = await freshSut();
+    // An aggregate with no GROUP BY always returns a row, so `seen` is what separates "unknown
+    // account" from "account that cost nothing". Honest-null beats inventing a customer at $0.
+    respondRows([{ seen: "0", spans: "0", users: "0", windowStart: WINDOW_START }]);
+    expect(await queryAccountDetail(ACCT_A)).toBeNull();
+  });
+
+  it("agrees with the list row for the same account", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail({ seen: "12", spans: "100", users: "7" });
+    const out = await queryAccountDetail(ACCT_A);
+    expect(out!.accountIdHash).toBe(ACCT_A);
+    expect(out!.unattributed).toBe(false);
+    expect(out!.directCostMicroUsd).toBe(12_750_000);
+    expect(out!.distinctUsers).toBe(7);
+    expect(out!.spanCount).toBe(100);
+  });
+
+  it("flags the unattributed bucket when asked for ''", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail({ seen: "12", spans: "100", users: "7" });
+    const out = await queryAccountDetail("");
+    expect(out!.unattributed).toBe(true);
+  });
+
+  it("anchors the trend on ClickHouse's window start, not the Node clock", async () => {
+    const { queryAccountDetail } = await freshSut();
+    // The oldest day in the window must have a slot to land in. Anchoring the day list on the Node
+    // clock instead shifts it by a day whenever the two timezones straddle midnight, silently
+    // dropping this point from the chart while it still counts toward the total above it.
+    respondDetail({
+      seen: "12",
+      spans: "100",
+      users: "7",
+      trend: [{ day: WINDOW_START, cost: "12.75" }],
+    });
+    const out = await queryAccountDetail(ACCT_A);
+    expect(out!.trend).toHaveLength(30);
+    expect(out!.trend[0].date).toBe(WINDOW_START);
+    expect(out!.trend[29].date).toBe("2026-08-26");
+    expect(out!.trend[0].directCostMicroUsd).toBe(12_750_000);
+    // Filled days are real zeroes for this account, not missing data.
+    expect(out!.trend[1].directCostMicroUsd).toBe(0);
+    // And the trend must add up to the headline it sits under.
+    expect(out!.trend.reduce((s, p) => s + p.directCostMicroUsd, 0)).toBe(out!.directCostMicroUsd);
+  });
+
+  it("caps top features and leaves untagged traffic out of the list", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail({ seen: "12", spans: "100", users: "7" });
+    const out = await queryAccountDetail(ACCT_A);
+    expect(out!.topFeatures).toEqual([
+      { feature: "research_agent", directCostMicroUsd: 9_000_000, spanCount: 80 },
+    ]);
+    const featureSql = (queryMock.mock.calls[2][0] as { query: string }).query;
+    expect(featureSql).toContain("LIMIT 5");
+    expect(featureSql).toContain("FeatureTag != ''");
+  });
+});
+
 // CTO-184: account stitching + the multi-account refusal.
 //
 // Same shape as the tests above: we stub @clickhouse/client and exercise the adapter that turns
