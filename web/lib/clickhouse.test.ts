@@ -407,6 +407,70 @@ describe("queryAccountCosts — SQL contract (CTO-187)", () => {
   });
 });
 
+describe("queryExcludedInfraCost: what the per-account table leaves out (CTO-189)", () => {
+  async function sqlOf(): Promise<string> {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([]);
+    await queryExcludedInfraCost();
+    return (queryMock.mock.calls[0][0] as { query: string }).query;
+  }
+
+  it("sums compute and egress separately and totals them", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([
+      { layer: "compute", cost: "40.5" },
+      { layer: "egress", cost: "6.5" },
+    ]);
+    const out = await queryExcludedInfraCost();
+    expect(out).toEqual({
+      windowDays: 30,
+      computeMicroUsd: 40_500_000,
+      egressMicroUsd: 6_500_000,
+      totalMicroUsd: 47_000_000,
+    });
+  });
+
+  it("reports a real zero when the tenant has no infrastructure spend", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([]);
+    const out = await queryExcludedInfraCost();
+    expect(out!.totalMicroUsd).toBe(0);
+  });
+
+  it("returns null when ClickHouse is unreachable, so the page cannot read failure as zero", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    queryMock.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    expect(await queryExcludedInfraCost()).toBeNull();
+  });
+
+  it("ignores a direct layer that somehow reaches it rather than folding it into the excluded total", async () => {
+    // Belt and braces against the SQL filter regressing: an llm row here would otherwise inflate
+    // the banner and understate the coverage of the table beneath it.
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([
+      { layer: "llm", cost: "100.0" },
+      { layer: "compute", cost: "1.0" },
+    ]);
+    const out = await queryExcludedInfraCost();
+    expect(out!.totalMicroUsd).toBe(1_000_000);
+  });
+
+  it("reads exactly the complement of the direct-cost filter, so the two sum to the tenant total", async () => {
+    expect(await sqlOf()).toContain("NOT (GenAiOperation NOT IN ('compute', 'egress'))");
+  });
+
+  it("uses the same rollup and the same calendar-aligned window as the table", async () => {
+    const q = await sqlOf();
+    expect(q).toContain("FROM daily_account_rollup");
+    expect(q).toContain("Day >= toDate(now()) - INTERVAL 29 DAY");
+    expect(q).not.toContain("otel_spans");
+  });
+
+  it("is scoped to one tenant", async () => {
+    expect(await sqlOf()).toContain("TenantId = {tenant:String}");
+  });
+});
+
 describe("queryAccountDetail (CTO-187)", () => {
   const WINDOW_START = "2026-07-28";
 

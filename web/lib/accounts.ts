@@ -201,3 +201,42 @@ export function formatShare(share: number): string {
 export function attributedSpend(costs: AccountCosts): MicroUSD {
   return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
 }
+
+// --- Excluded infrastructure cost (CTO-189, plan D3) ---------------------------------------------
+
+/**
+ * Compute and egress over the same window the per-account table covers.
+ *
+ * These are the two layers {@link DIRECT_LAYERS} deliberately leaves out. They arrive from the
+ * cloud billing connectors as tenant-level daily totals that carry no account, so the tab cannot
+ * split them per customer without an allocation rule, and that rule is workstream C (CTO-192/193).
+ * Carrying the figure here is what lets the page state the SIZE of what it omits rather than a
+ * vague "some costs are excluded": on current data the omission is roughly half of all spend, and
+ * an account figure that quietly understates true cost by half is the exact failure this product
+ * exists to fix.
+ */
+export interface ExcludedInfraCost {
+  /** Calendar days covered. Must match {@link AccountCosts.windowDays} or the share is meaningless. */
+  windowDays: number;
+  computeMicroUsd: MicroUSD;
+  egressMicroUsd: MicroUSD;
+  /** `compute + egress`, summed from the same rounded parts so it cannot contradict them. */
+  totalMicroUsd: MicroUSD;
+}
+
+/**
+ * Excluded spend as a share of ALL spend in the window, or `null` when there is nothing to divide.
+ *
+ * The denominator is direct plus excluded, i.e. the tenant's whole bill for the window, because the
+ * sentence this feeds ("excludes $X, N% of spend") is only meaningful against the total. Dividing
+ * by direct spend alone would print a share above 100 percent the moment infrastructure outweighs
+ * the model bill, which on a compute-heavy tenant it does.
+ *
+ * Both inputs are read over the same window from the same rollup under complementary filters, so
+ * they add to the tenant total exactly and this share reconciles with /cost.
+ */
+export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts): number | null {
+  const all = costs.totalDirectMicroUsd + excluded.totalMicroUsd;
+  if (all <= 0) return null;
+  return excluded.totalMicroUsd / all;
+}

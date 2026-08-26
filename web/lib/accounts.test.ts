@@ -6,9 +6,11 @@ import {
   SHORT_HASH_CHARS,
   type AccountCostRow,
   type AccountCosts,
+  type ExcludedInfraCost,
   attributedSpend,
   costPerUser,
   emptyAccountRow,
+  excludedShare,
   formatShare,
   shortenAccountHash,
   unattributedShare,
@@ -127,5 +129,60 @@ describe("attributedSpend", () => {
     });
     expect(attributedSpend(c)).toBe(500_000);
     expect(attributedSpend(c)).toBe(accounts.reduce((s, a) => s + a.directCostMicroUsd, 0));
+  });
+});
+
+describe("excludedShare (CTO-189)", () => {
+  function excluded(over: Partial<ExcludedInfraCost> = {}): ExcludedInfraCost {
+    const compute = over.computeMicroUsd ?? 0;
+    const egress = over.egressMicroUsd ?? 0;
+    return {
+      windowDays: 30,
+      computeMicroUsd: compute,
+      egressMicroUsd: egress,
+      totalMicroUsd: compute + egress,
+      ...over,
+    };
+  }
+
+  it("is excluded over ALL spend, so it reads as a share of the whole bill", () => {
+    // The plan's worked example: direct 53, excluded 47, banner says 47 percent.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 40_000_000, egressMicroUsd: 7_000_000 }),
+      costs({ totalDirectMicroUsd: 53_000_000 }),
+    );
+    expect(share).toBeCloseTo(0.47);
+  });
+
+  it("never exceeds 100 percent when infrastructure outweighs the model bill", () => {
+    // Dividing by direct spend alone would print 400%. The denominator is the total for a reason.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 4_000_000 }),
+      costs({ totalDirectMicroUsd: 1_000_000 }),
+    );
+    expect(share).toBeCloseTo(0.8);
+    expect(share!).toBeLessThanOrEqual(1);
+  });
+
+  it("is the whole bill when a tenant's only spend is compute and egress", () => {
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 2_000_000 }),
+      costs({ totalDirectMicroUsd: 0 }),
+    );
+    expect(share).toBe(1);
+  });
+
+  it("is null when the window holds no spend at all, never a flattering zero", () => {
+    expect(excludedShare(excluded(), costs({ totalDirectMicroUsd: 0 }))).toBeNull();
+  });
+
+  it("hands formatShare a value it will not round to a flat 100%", () => {
+    // A sliver of direct spend against a mountain of compute. "100.0%" would say the table below
+    // covers nothing, while it plainly covers something. Same trap D2 hit on the unattributed share.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 100_000_000 }),
+      costs({ totalDirectMicroUsd: 100 }),
+    );
+    expect(formatShare(share!)).toBe(">99.9%");
   });
 });
