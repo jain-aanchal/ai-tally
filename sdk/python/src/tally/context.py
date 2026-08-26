@@ -11,12 +11,19 @@ Public surface:
 - :func:`with_trace_context` — context manager to set/restore explicitly (the escape hatch for
   places where automatic propagation fails: Celery, Temporal, Lambda cold starts, etc.).
 - :func:`current_context` — read the active context.
+- :func:`with_account` sets the tenant's own customer (``account_id``) for a block (CTO-181).
 - :func:`note_context_drop` — two modes (CTO-118):
     (a) record that an expected trace context was missing (feeds
         ``SelfObservability.context_drop_count``); or
     (b) emit ``gen_ai.context.*`` span attributes describing how many messages /
         tokens were trimmed to fit the model's context window. Counts only — never
         the dropped message text.
+
+The account dimension (CTO-181) rides here rather than on every call site. A web app knows which
+customer a request belongs to once, at request start, so it sets it once and every span inside the
+request picks it up; an individual call can still override it. The value held here is the RAW
+account id, and it stays raw only in process memory: it is HMAC'd at emit time in
+:class:`~tally.client.TallyClient` and only the digest plus its key version reach the wire.
 """
 
 from __future__ import annotations
@@ -32,6 +39,9 @@ from tally.safety import SelfObservability
 _trace_id: ContextVar[str | None] = ContextVar("tally_trace_id", default=None)
 _feature_tag: ContextVar[str | None] = ContextVar("tally_feature_tag", default=None)
 _session_id: ContextVar[str | None] = ContextVar("tally_session_id", default=None)
+# Raw account id + optional label (CTO-181). Never emitted raw; see the module docstring.
+_account_id: ContextVar[str | None] = ContextVar("tally_account_id", default=None)
+_account_label: ContextVar[str | None] = ContextVar("tally_account_label", default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +49,10 @@ class TraceContext:
     trace_id: str | None
     feature_tag: str | None
     session_id: str | None
+    #: Raw account id (CTO-181). Hashed at emit time; never placed on a span as-is.
+    account_id: str | None = None
+    #: Optional human-readable account label. Wire-only, for the gateway's label store.
+    account_label: str | None = None
 
     @property
     def is_active(self) -> bool:
@@ -51,7 +65,13 @@ def new_trace_id() -> str:
 
 def current_context() -> TraceContext:
     """Snapshot the active context (may be inactive)."""
-    return TraceContext(_trace_id.get(), _feature_tag.get(), _session_id.get())
+    return TraceContext(
+        _trace_id.get(),
+        _feature_tag.get(),
+        _session_id.get(),
+        _account_id.get(),
+        _account_label.get(),
+    )
 
 
 @contextmanager
@@ -60,6 +80,8 @@ def with_trace_context(
     trace_id: str | None = None,
     feature_tag: str | None = None,
     session_id: str | None = None,
+    account_id: str | None = None,
+    account_label: str | None = None,
     inherit: bool = True,
 ) -> Iterator[TraceContext]:
     """Set the trace context for the duration of the block, then restore prior values.
@@ -70,32 +92,90 @@ def with_trace_context(
     Args:
         trace_id: explicit id; if ``None`` and no active trace, a new one is generated.
         feature_tag / session_id: optional tags.
+        account_id: raw id of the tenant's own customer (CTO-181). Hashed at emit time.
+        account_label: optional display name for that account. Wire-only.
         inherit: when True, unset fields fall back to the currently-active context.
     """
     cur = current_context()
     resolved_trace = trace_id or (cur.trace_id if inherit else None) or new_trace_id()
     resolved_feature = feature_tag or (cur.feature_tag if inherit else None)
     resolved_session = session_id or (cur.session_id if inherit else None)
+    resolved_account = account_id or (cur.account_id if inherit else None)
+    resolved_label = account_label or (cur.account_label if inherit else None)
 
     t_tok = _trace_id.set(resolved_trace)
     f_tok = _feature_tag.set(resolved_feature)
     s_tok = _session_id.set(resolved_session)
+    a_tok = _account_id.set(resolved_account)
+    l_tok = _account_label.set(resolved_label)
     try:
-        yield TraceContext(resolved_trace, resolved_feature, resolved_session)
+        yield TraceContext(
+            resolved_trace, resolved_feature, resolved_session, resolved_account, resolved_label
+        )
     finally:
         _trace_id.reset(t_tok)
         _feature_tag.reset(f_tok)
         _session_id.reset(s_tok)
+        _account_id.reset(a_tok)
+        _account_label.reset(l_tok)
+
+
+@contextmanager
+def with_account(
+    account_id: str | None,
+    *,
+    label: str | None = None,
+) -> Iterator[TraceContext]:
+    """Scope an account to a block without touching the trace (CTO-181).
+
+    The intended shape for a web app: resolve the customer once in a request middleware, wrap the
+    handler, and every span emitted inside the request carries the account. Nothing else about the
+    context changes, so this composes with an already-active trace and with :func:`start_trace`
+    in either order.
+
+    ``account_id`` is the RAW id. It is HMAC'd per tenant at emit time and only the digest travels.
+    Passing ``None`` clears the account for the block, which is how a background job that must not
+    inherit a caller's account opts out.
+
+    ``label`` is optional and is carried on the wire for the gateway to upsert into its label
+    store. It is never written to the span row in ClickHouse, so a tenant that wants no customer
+    names in the telemetry store simply omits it and everything still works off the hash.
+    """
+    cur = current_context()
+    a_tok = _account_id.set(account_id)
+    l_tok = _account_label.set(label if account_id else None)
+    try:
+        yield TraceContext(
+            cur.trace_id,
+            cur.feature_tag,
+            cur.session_id,
+            account_id,
+            label if account_id else None,
+        )
+    finally:
+        _account_id.reset(a_tok)
+        _account_label.reset(l_tok)
 
 
 def start_trace(
-    *, feature_tag: str | None = None, session_id: str | None = None
+    *,
+    feature_tag: str | None = None,
+    session_id: str | None = None,
+    account_id: str | None = None,
+    account_label: str | None = None,
 ) -> AbstractContextManager[TraceContext]:
-    """Begin a fresh trace (always a new trace_id). Returns the context manager."""
+    """Begin a fresh trace (always a new trace_id). Returns the context manager.
+
+    ``account_id`` / ``account_label`` are here for the common case where the trace and the
+    account are both known at the same boundary (CTO-181). ``inherit=False`` means an outer
+    account is deliberately not carried in: a fresh trace is a fresh attribution.
+    """
     return with_trace_context(
         trace_id=new_trace_id(),
         feature_tag=feature_tag,
         session_id=session_id,
+        account_id=account_id,
+        account_label=account_label,
         inherit=False,
     )
 
