@@ -16,6 +16,12 @@ the move to managed services later is a config change, not a rewrite.
 The canonical DDL in [`../db`](../db) is mounted into the containers and applied automatically on
 first boot — `otel_spans` and the rollup MVs into ClickHouse, the control-plane schema into Postgres.
 
+> **First boot only.** The init directory runs once, against an empty volume. A stack that is
+> already up will not pick up a column added to those files later. For ClickHouse, replay the DDL
+> with `make ch-migrate`: every statement is `IF NOT EXISTS`, so it is idempotent and safe against a
+> populated database. Postgres has no equivalent yet, which is why migrations 0011, 0012, 0015 and
+> 0016 need applying by hand on an existing volume.
+
 > The Go edge proxy (transparent OpenAI passthrough) lives in [`edge-proxy/`](./edge-proxy) and is
 > intentionally **not** wired into this Docker stack — the SDK ingestion path covers end-to-end flow
 > without it, and the proxy is a standalone, stateless binary you run wherever the customer's
