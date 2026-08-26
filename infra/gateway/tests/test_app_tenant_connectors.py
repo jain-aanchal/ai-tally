@@ -10,20 +10,38 @@ from fastapi.testclient import TestClient
 
 from gateway.app import app
 from gateway.tenant_connectors import ALLOWED_LAYERS, ConnectorDeclaration
+from gateway.tenant_lookup import TenantNotFoundError
 
 T = "t-acme"
 
+# CTO-201: a tenant is addressed by NAME (``local-dev``) or by its ``tenants.id`` UUID, and both
+# spellings must fold onto one tenant the way the UUID foreign key forces.
+TENANT_NAME = "local-dev"
+TENANT_UUID = "8f14e45f-ceea-467a-9a3c-2f0e4d1b7c60"
+UNKNOWN_TENANT = "no-such-tenant"
+
 
 class FakeStore:
-    """In-memory stand-in for :class:`TenantConnectorStore` — no Postgres required."""
+    """In-memory stand-in for :class:`TenantConnectorStore`, no Postgres required.
+
+    Mirrors the resolution contract the store enforces (CTO-201): the name and the UUID address one
+    tenant, and an unknown name raises :class:`TenantNotFoundError` the same way the real resolver
+    does. Any other id passes through unchanged so the isolation tests keep their distinct tenants.
+    """
 
     def __init__(self) -> None:
         # (tenant_id, layer) -> ConnectorDeclaration
         self._rows: dict[tuple[str, str], ConnectorDeclaration] = {}
 
+    def _resolve(self, tenant_id: str) -> str:
+        if tenant_id == UNKNOWN_TENANT:
+            raise TenantNotFoundError(f"no tenant named '{tenant_id}'")
+        return TENANT_UUID if tenant_id in {TENANT_NAME, TENANT_UUID} else tenant_id
+
     def list(self, tenant_id: str) -> list[ConnectorDeclaration]:
+        resolved = self._resolve(tenant_id)
         return sorted(
-            [r for (t, _), r in self._rows.items() if t == tenant_id],
+            [r for (t, _), r in self._rows.items() if t == resolved],
             key=lambda r: r.layer,
         )
 
@@ -37,6 +55,7 @@ class FakeStore:
     ) -> ConnectorDeclaration:
         if layer not in ALLOWED_LAYERS:
             raise ValueError(f"unknown layer '{layer}'")
+        tenant_id = self._resolve(tenant_id)
         now = datetime.now(tz=timezone.utc).isoformat()
         existing = self._rows.get((tenant_id, layer))
         enabled_at = existing.enabled_at if existing else now
@@ -174,3 +193,38 @@ def test_tenant_isolation(client: TestClient) -> None:
     b = client.get("/v1/tenant/connectors", headers={"X-Tenant-Id": "t-b"}).json()
     assert a["enabled_layers"] == ["llm"]
     assert b["enabled_layers"] == ["vector"]
+
+
+def test_name_based_caller_does_not_500(client: TestClient) -> None:
+    """A tenant NAME and its UUID address the same connector rows (CTO-201).
+
+    ``tenant_connectors`` keys on ``tenants.id`` but the dashboard identifies a tenant as
+    ``local-dev``. Without the resolver a name-based caller trips InvalidTextRepresentation deep in
+    the driver and surfaces as an opaque 500, breaking the /connectors toggle in local dev.
+    """
+    written = client.post(
+        "/v1/tenant/connectors",
+        headers={"X-Tenant-Id": TENANT_NAME},
+        json={"layer": "llm", "enabled": True},
+    )
+    assert written.status_code == 200, written.text
+
+    by_name = client.get("/v1/tenant/connectors", headers={"X-Tenant-Id": TENANT_NAME})
+    by_uuid = client.get("/v1/tenant/connectors", headers={"X-Tenant-Id": TENANT_UUID})
+    assert by_name.status_code == 200 and by_uuid.status_code == 200, by_uuid.text
+    # A toggle set through one spelling must be visible through the other, or the two doors would
+    # look like two different tenants.
+    assert by_name.json()["enabled_layers"] == by_uuid.json()["enabled_layers"] == ["llm"]
+
+
+def test_unknown_tenant_name_is_404_not_500(client: TestClient) -> None:
+    """An unresolvable tenant name is a clean 404, never an opaque 500 from the driver (CTO-201)."""
+    listed = client.get("/v1/tenant/connectors", headers={"X-Tenant-Id": UNKNOWN_TENANT})
+    assert listed.status_code == 404, listed.text
+
+    toggled = client.post(
+        "/v1/tenant/connectors",
+        headers={"X-Tenant-Id": UNKNOWN_TENANT},
+        json={"layer": "llm", "enabled": True},
+    )
+    assert toggled.status_code == 404, toggled.text

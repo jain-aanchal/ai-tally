@@ -21,6 +21,7 @@ from decimal import Decimal
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 DEFAULT_JUDGE_MODEL = os.environ.get("TALLY_EVAL_JUDGE_MODEL", "claude-opus-4-8")
@@ -60,13 +61,16 @@ class TenantEvalStore:
 
     def get(self, tenant_id: str) -> EvalConfig:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_eval_config keys on the tenants.id UUID, but the dashboard identifies
+            # a tenant by NAME. Fold the name onto the UUID so a name-based caller does not 500.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT enabled, judge_model, daily_budget_usd
                 FROM tenant_eval_config
                 WHERE tenant_id = %s
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             row = cur.fetchone()
             if row is None:
@@ -98,6 +102,8 @@ class TenantEvalStore:
         if new.daily_budget_usd < 0:
             raise ValueError("daily_budget_usd must be non-negative")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the write.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 INSERT INTO tenant_eval_config
@@ -110,7 +116,7 @@ class TenantEvalStore:
                       updated_at       = now()
                 """,
                 (
-                    tenant_id,
+                    resolved,
                     new.enabled,
                     new.judge_model,
                     new.daily_budget_usd,

@@ -19,6 +19,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 ALLOWED_KINDS: frozenset[str] = frozenset(
     {"pii_gate", "cost_cap", "loop_limit", "model_deprecation"}
@@ -100,6 +101,10 @@ class TenantGuardrailStore:
 
     def list(self, tenant_id: str) -> list[GuardrailRule]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_guardrails keys on the tenants.id UUID, but the dashboard identifies a
+            # tenant by NAME. Fold the name onto the UUID so a name-based caller does not 500. A
+            # UUID caller (the SDK config poll under api-key auth) passes through unchanged.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT rule_id, kind, params, state, created_at, updated_at, created_by, notes
@@ -107,7 +112,7 @@ class TenantGuardrailStore:
                 WHERE tenant_id = %s
                 ORDER BY rule_id
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             return [_row_to_rule(row) for row in cur.fetchall()]
 
@@ -134,13 +139,16 @@ class TenantGuardrailStore:
         if state not in ALLOWED_STATES:
             raise ValueError(f"unknown state '{state}'")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK once, and use it for the rule
+            # row and the audit rows alike so both key on the same tenant.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT rule_id, kind, params, state, created_at, updated_at, created_by, notes
                 FROM tenant_guardrails
                 WHERE tenant_id = %s AND rule_id = %s
                 """,
-                (tenant_id, rule_id),
+                (resolved, rule_id),
             )
             existing_row = cur.fetchone()
             before_rule = _row_to_rule(existing_row) if existing_row else None
@@ -155,7 +163,7 @@ class TenantGuardrailStore:
                 """,
                 (
                     change_id,
-                    tenant_id,
+                    resolved,
                     rule_id,
                     actor,
                     Json(before_rule.as_dict()) if before_rule is not None else None,
@@ -173,7 +181,7 @@ class TenantGuardrailStore:
                         FROM tenant_guardrails
                         WHERE tenant_id = %s AND rule_id = %s
                         """,
-                        (tenant_id, rule_id),
+                        (resolved, rule_id),
                     )
                     row = cur.fetchone()
                     if row is None:
@@ -196,7 +204,7 @@ class TenantGuardrailStore:
                       updated_at = now()
                 RETURNING rule_id, kind, params, state, created_at, updated_at, created_by, notes
                 """,
-                (tenant_id, rule_id, kind, Json(params), state, actor, notes),
+                (resolved, rule_id, kind, Json(params), state, actor, notes),
             )
             row = cur.fetchone()
             assert row is not None
@@ -208,7 +216,7 @@ class TenantGuardrailStore:
                 SET after = %s
                 WHERE tenant_id = %s AND change_id = %s
                 """,
-                (Json(after_rule.as_dict()), tenant_id, change_id),
+                (Json(after_rule.as_dict()), resolved, change_id),
             )
             conn.commit()
             return after_rule
@@ -220,6 +228,8 @@ class TenantGuardrailStore:
         limit: int = 100,
     ) -> list[GuardrailChange]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before reading the audit log.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             if rule_id is None:
                 cur.execute(
                     """
@@ -229,7 +239,7 @@ class TenantGuardrailStore:
                     ORDER BY changed_at DESC
                     LIMIT %s
                     """,
-                    (tenant_id, limit),
+                    (resolved, limit),
                 )
             else:
                 cur.execute(
@@ -240,7 +250,7 @@ class TenantGuardrailStore:
                     ORDER BY changed_at DESC
                     LIMIT %s
                     """,
-                    (tenant_id, rule_id, limit),
+                    (resolved, rule_id, limit),
                 )
             return [
                 GuardrailChange(

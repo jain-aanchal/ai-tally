@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,10 @@ class TenantStripeStore:
 
     def get(self, tenant_id: str) -> StripeConfig | None:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_stripe_config keys on the tenants.id UUID, but the dashboard and the
+            # webhook can identify a tenant by NAME. Fold the name onto the UUID so a name-based
+            # caller does not 500; a UUID caller passes through unchanged.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT tenant_id, webhook_secret, stripe_account_id,
@@ -63,7 +68,7 @@ class TenantStripeStore:
                 FROM tenant_stripe_config
                 WHERE tenant_id = %s
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             row = cur.fetchone()
             if row is None:
@@ -91,9 +96,13 @@ class TenantStripeStore:
         if not webhook_secret.startswith("whsec_"):
             raise ValueError("Stripe webhook signing secrets start with 'whsec_'")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before any read or write, and
+            # key the audit change_id on the resolved id so a name caller and a UUID caller for the
+            # same tenant converge on one idempotent change rather than two.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 "SELECT webhook_secret FROM tenant_stripe_config WHERE tenant_id = %s",
-                (tenant_id,),
+                (resolved,),
             )
             existing = cur.fetchone()
             kind = "connected"
@@ -116,13 +125,13 @@ class TenantStripeStore:
                 RETURNING tenant_id, webhook_secret, stripe_account_id,
                           connected_at, disconnected_at
                 """,
-                (tenant_id, webhook_secret, stripe_account_id),
+                (resolved, webhook_secret, stripe_account_id),
             )
             row = cur.fetchone()
             assert row is not None
             # Audit row — UUID5 keyed on (tenant, secret) so retried pastes don't duplicate.
             change_id = uuid.uuid5(
-                uuid.NAMESPACE_URL, f"stripe-change|{tenant_id}|{kind}|{webhook_secret}"
+                uuid.NAMESPACE_URL, f"stripe-change|{resolved}|{kind}|{webhook_secret}"
             )
             cur.execute(
                 """
@@ -130,7 +139,7 @@ class TenantStripeStore:
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (change_id) DO NOTHING
                 """,
-                (str(change_id), tenant_id, kind, actor),
+                (str(change_id), resolved, kind, actor),
             )
             conn.commit()
             return StripeConfig(
@@ -143,17 +152,19 @@ class TenantStripeStore:
 
     def disconnect(self, tenant_id: str, *, actor: str | None = None) -> None:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the update.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 UPDATE tenant_stripe_config
                    SET disconnected_at = now()
                  WHERE tenant_id = %s AND disconnected_at IS NULL
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             change_id = uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                f"stripe-change|{tenant_id}|disconnected|{conn.info.transaction_status}",
+                f"stripe-change|{resolved}|disconnected|{conn.info.transaction_status}",
             )
             cur.execute(
                 """
@@ -161,6 +172,6 @@ class TenantStripeStore:
                 VALUES (%s, %s, 'disconnected', %s)
                 ON CONFLICT (change_id) DO NOTHING
                 """,
-                (str(change_id), tenant_id, actor),
+                (str(change_id), resolved, actor),
             )
             conn.commit()

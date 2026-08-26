@@ -19,6 +19,7 @@ from typing import Literal
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 # The cost-layer enum mirrors the same six layers the web app and ClickHouse use.
 Layer = Literal["llm", "vector", "tools", "compute", "embeddings", "egress"]
@@ -59,6 +60,10 @@ class TenantConnectorStore:
 
     def list(self, tenant_id: str) -> list[ConnectorDeclaration]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_connectors.tenant_id is a UUID FK, but the dashboard and local dev
+            # identify a tenant by NAME (``local-dev``). Fold the name onto the UUID via the shared
+            # helper so a name-based caller resolves instead of tripping InvalidTextRepresentation.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT layer, enabled_at, disabled_at, notes
@@ -66,7 +71,7 @@ class TenantConnectorStore:
                 WHERE tenant_id = %s
                 ORDER BY layer
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             return [
                 ConnectorDeclaration(
@@ -96,6 +101,9 @@ class TenantConnectorStore:
         if layer not in ALLOWED_LAYERS:
             raise ValueError(f"unknown layer '{layer}'")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the write, same as the
+            # read path. Without this the toggle 500s in any name-based environment (local dev).
+            tenant_id = resolve_tenant_uuid(cur, tenant_id)
             if enabled:
                 cur.execute(
                     """
