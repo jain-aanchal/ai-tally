@@ -57,6 +57,7 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.reconciliation import ReconciliationStore
+from gateway.scheduler import build_scheduler
 from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
@@ -310,6 +311,23 @@ async def lifespan(app: FastAPI):
         await buffer.start()
         app.state.ingest_buffer = buffer
         logger.info("ingest buffer enabled (capacity=%d)", settings.ingest_buffer_capacity)
+    # Scheduler (CTO-213): periodic per-tenant job execution. A tick loop that asks each registered
+    # job "are you due for this tenant" and answers from run history in Postgres, rather than
+    # sleeping for a day and losing its place on the next redeploy. Disabled → no task at all
+    # (None), which is byte-identical to the behaviour before this landed. It registers NO jobs
+    # yet: wiring the cost connectors is CTO-215 and the ingest workers CTO-216, so an enabled
+    # scheduler currently ticks over an empty registry. Single-replica only until advisory locking
+    # lands (phase 2 of docs/scheduler-scope.md).
+    app.state.scheduler = None
+    if settings.scheduler_enabled:
+        scheduler = build_scheduler(settings)
+        await scheduler.start()
+        app.state.scheduler = scheduler
+        logger.info(
+            "scheduler enabled (tick=%.0fs, jobs=%d)",
+            settings.scheduler_tick_interval_s,
+            scheduler.job_count,
+        )
     # Auto-discover provider model lineups (CTO-109). Fail-soft: if both providers
     # are unreachable AND there's no cached file, we still boot — just with an empty
     # list and a WARNING. Demos read app.state.models so they don't hardcode SKUs
@@ -327,6 +345,9 @@ async def lifespan(app: FastAPI):
         app.state.models = []
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
+    if app.state.scheduler is not None:
+        # Stopped before the stores close: a job in flight is holding one of them.
+        await app.state.scheduler.stop()
     if app.state.ingest_buffer is not None:
         await app.state.ingest_buffer.stop()  # flush buffered rows before closing the store
     app.state.store.close()
