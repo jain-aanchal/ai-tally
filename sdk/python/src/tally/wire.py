@@ -57,6 +57,11 @@ class BusinessEvent:
     value_currency: str = "USD"
     value_type: str = "monetary"
     source: str = "sdk"
+    # Account dimension (CTO-180), populated by the CSV revenue upload (CTO-198). The tenant's own
+    # paying customer, HMAC-SHA256 hex under the per-tenant key, never the raw id. Defaults to ''
+    # so every existing producer is unchanged and its events read back as unattributed, which is a
+    # fact about our instrumentation rather than a customer named "unknown".
+    account_id_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)

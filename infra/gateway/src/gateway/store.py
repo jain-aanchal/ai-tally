@@ -13,8 +13,8 @@ from gateway.config import Settings
 from gateway.mapping import COLUMNS
 
 _BUSINESS_EVENT_COLS = (
-    "TenantId", "BusinessEventId", "EventName", "UserIdHash", "OccurredAt", "IngestedAt",
-    "ValueAmountMicro", "ValueCurrency", "ValueType", "Source", "RawPayload",
+    "TenantId", "BusinessEventId", "EventName", "UserIdHash", "AccountIdHash", "OccurredAt",
+    "IngestedAt", "ValueAmountMicro", "ValueCurrency", "ValueType", "Source", "RawPayload",
 )
 
 _IDENTITY_COLS = (
@@ -77,6 +77,9 @@ class ClickHouseStore:
                 e.business_event_id,
                 e.event_name,
                 e.user_id_hash[:64],
+                # CTO-180 added the column; CTO-198's CSV upload is the first producer to fill it.
+                # Every other producer leaves it '' rather than guessing an account.
+                e.account_id_hash[:64],
                 _ts(e.occurred_at_ns),
                 now,
                 e.value_amount_micro,
@@ -89,6 +92,33 @@ class ClickHouseStore:
         ]
         self.client.insert("business_events", rows, column_names=list(_BUSINESS_EVENT_COLS))
         return len(rows)
+
+    def delete_business_events_by_id_prefix(
+        self, tenant_id: str, source: str, id_prefix: str
+    ) -> None:
+        """Synchronously drop every business event of one source whose id starts with a prefix.
+
+        The delete half of the CSV revenue upload's replace-a-period (CTO-198). ``business_events``
+        is a ``ReplacingMergeTree`` on ``(TenantId, BusinessEventId)``, which collapses a re-upload
+        of the SAME account onto one row but does nothing about an account that was in the previous
+        upload and is absent from this one — that row would linger and inflate revenue forever.
+        Deleting the whole period first is what makes an upload a true snapshot replacement.
+
+        Scoped by ``Source`` as well as by the derived-id prefix so this can never reach a row a
+        real connector wrote, whatever a caller passes as the prefix.
+
+        ``lightweight_deletes_sync = 2`` waits for the delete to be visible on every replica before
+        returning, so the INSERT that follows can never race it and momentarily double the total.
+        """
+        self.client.command(
+            """
+            DELETE FROM business_events
+            WHERE TenantId = %(tenant)s AND Source = %(source)s
+              AND startsWith(BusinessEventId, %(prefix)s)
+            """,
+            parameters={"tenant": tenant_id, "source": source, "prefix": id_prefix},
+            settings={"lightweight_deletes_sync": 2},
+        )
 
     def insert_identity_links(self, tenant_id: str, links: list[IdentityLink]) -> int:
         if not links:

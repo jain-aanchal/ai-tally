@@ -44,10 +44,22 @@ export function isSentinelBoundary(reconciledThrough: string): boolean {
   return Number.isNaN(t) || t <= SENTINEL_BEFORE_MS;
 }
 
-/** Stale = a real (non-sentinel) boundary older than the 2h freshness window. */
-export function isStale(reconciledThrough: string, now: number = Date.now()): boolean {
+/**
+ * Stale = a real (non-sentinel) boundary older than the freshness window.
+ *
+ * `staleAfterMs` defaults to the 2h telemetry window from spec 13.8. It is a parameter because not
+ * every surface reconciles on a telemetry cadence: an uploaded revenue snapshot (CTO-198) is
+ * refreshed when finance closes the month, so judging it against two hours would paint every
+ * healthy tenant permanently amber and train people to ignore the badge. The staleness LOGIC is
+ * shared; only the window a surface is measured against differs.
+ */
+export function isStale(
+  reconciledThrough: string,
+  now: number = Date.now(),
+  staleAfterMs: number = STALE_AFTER_MS,
+): boolean {
   if (isSentinelBoundary(reconciledThrough)) return false;
-  return ageMs(reconciledThrough, now) > STALE_AFTER_MS;
+  return ageMs(reconciledThrough, now) > staleAfterMs;
 }
 
 export interface DataStateInput {
@@ -59,6 +71,8 @@ export interface DataStateInput {
   reconciledThrough?: string;
   /** Override "now" for testing. */
   now?: number;
+  /** Freshness window for this surface. Defaults to the 2h telemetry window. See `isStale`. */
+  staleAfterMs?: number;
 }
 
 /**
@@ -69,7 +83,11 @@ export interface DataStateInput {
  */
 export function deriveDataState(input: DataStateInput): DataState {
   if (input.isEmpty) return "empty";
-  if (input.reconciledThrough && isStale(input.reconciledThrough, input.now)) return "stale";
+  if (
+    input.reconciledThrough &&
+    isStale(input.reconciledThrough, input.now, input.staleAfterMs)
+  )
+    return "stale";
   if (input.isPartial) return "partial";
   return "fresh";
 }

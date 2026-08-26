@@ -11,9 +11,11 @@ import {
   liveAvailableCount,
 } from "@/lib/connectors";
 import { type CostConnectorConfig, isConfigurable, queryCostConnectorConfigs } from "@/lib/costConnectors";
+import { queryRevenueUploads } from "@/lib/revenueUpload";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import { ConnectForm } from "./ConnectForm";
 import { ConnectorToggle } from "./ConnectorToggle";
+import { RevenueUpload } from "./RevenueUpload";
 
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
@@ -127,10 +129,11 @@ function ConnectorTable({
 }
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live }, enabledLayers, costConfigs] = await Promise.all([
+  const [{ connectors, live }, enabledLayers, costConfigs, revenueUploads] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
     queryCostConnectorConfigs(),
+    queryRevenueUploads(),
   ]);
   // `null` means the gateway is unreachable. Render the forms anyway (they report their own
   // errors on submit) rather than hiding the only way to configure anything.
@@ -179,6 +182,16 @@ export default async function ConnectorsPage() {
       </p>
 
       {live ? body : <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>}
+
+      {/*
+        Revenue is the other half of margin, and for plenty of B2B companies it has no API worth
+        polling. This sits outside the sample-data wrapper above on purpose: the upload is a real
+        write against the real control plane whether or not any telemetry has arrived yet, and
+        wrapping it in a "sample data" frame would suggest otherwise.
+      */}
+      <Card title="Revenue upload — CSV">
+        <RevenueUpload snapshots={revenueUploads ?? []} unreachable={revenueUploads === null} />
+      </Card>
     </div>
   );
 }

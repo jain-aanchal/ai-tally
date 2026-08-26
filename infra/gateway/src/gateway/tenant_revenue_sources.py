@@ -28,6 +28,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 class RevenueSourceConfigError(ValueError):
@@ -139,6 +140,7 @@ class TenantRevenueSourceStore:
 
     def get(self, tenant_id: str) -> RevenueSourceConfig | None:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            tenant_id = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(_SELECT, (tenant_id,))
             row = cur.fetchone()
             return _row_to_config(row) if row else None
@@ -158,6 +160,7 @@ class TenantRevenueSourceStore:
         write — return the existing row unchanged.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            tenant_id = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(_SELECT, (tenant_id,))
             existing_row = cur.fetchone()
             before = _row_to_config(existing_row) if existing_row else None
