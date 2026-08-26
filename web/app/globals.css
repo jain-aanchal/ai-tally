@@ -44,4 +44,24 @@
 
 body {
   @apply bg-ink text-gray-100;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Additive shell chrome (CTO-225): a thin, token-tinted scrollbar so the sidebar's overflow does not
+   render the OS default heavy bar over the panel surface. Purely cosmetic and opt-in via the class;
+   it adds no new color, reusing the existing edge/panel tokens. */
+.app-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: theme("colors.edge") transparent;
+}
+.app-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.app-scroll::-webkit-scrollbar-thumb {
+  background-color: theme("colors.edge");
+  border-radius: 9999px;
+}
+.app-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }

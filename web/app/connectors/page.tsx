@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Card } from "@/components/Card";
 import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import { PageHeader } from "@/components/PageHeader";
 import { apiGet } from "@/lib/api";
 import {
   type ConnectorCategory,
@@ -66,20 +67,23 @@ export default async function ConnectorsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Connectors</h1>
-        <span className="text-sm text-muted">
-          {connected} of {totalLive} sources connected
-          {totalSoon > 0 ? ` · ${totalSoon} coming soon` : ""}
-        </span>
-      </div>
-
-      <p className="max-w-prose text-sm text-muted">
-        Pluggable cost sources. Each normalizes one provider into the shared cost model. Connect a
-        source here by pointing it at a credential reference; sync schedules run in the backend
-        connector runner. A source shows <span className="text-good">Connected</span> once it has
-        produced data.
-      </p>
+      <PageHeader
+        title="Connectors"
+        subtitle={
+          <span className="block max-w-prose">
+            Pluggable cost sources. Each normalizes one provider into the shared cost model. Connect
+            a source here by pointing it at a credential reference; sync schedules run in the backend
+            connector runner. A source shows <span className="text-good">Connected</span> once it
+            has produced data.
+          </span>
+        }
+        actions={
+          <span className="rounded-full border border-edge bg-panel px-3 py-1 text-sm text-muted">
+            {connected} of {totalLive} sources connected
+            {totalSoon > 0 ? ` · ${totalSoon} coming soon` : ""}
+          </span>
+        }
+      />
 
       {live ? body : <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>}
 
