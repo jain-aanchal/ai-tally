@@ -36,6 +36,20 @@
 // The chart's day axis is built from ClickHouse's dates, never the Node clock (CTO-203). The card
 // checks that the chart's own days still sum to the settled figure printed beside them and says so
 // on screen when they do not, the way the account detail view does with its allocation rows.
+//
+// CTO-211 (F7) adds the scope selector and the roster above the headline, and everything below the
+// selector is then the SELECTED scope's section rather than the tenant's. Two rules that section
+// inherits and this file must not break:
+//
+//  * A scope with no budget shows its forecast with no variance. Never a variance against zero, and
+//    never a variance against the tenant-wide budget, which covers different dollars.
+//  * A scope below its own history floor shows requirement 1's refusal, per scope. A feature
+//    introduced last week hits it on a tenant that has been running for a year, which is the case
+//    the guard exists for.
+//
+// The roster's arithmetic is not this file's: `lib/scopedForecast.ts` decides what may be summed
+// (spend, within one kind) and what may not (spend across kinds; budgets, ever). This file renders
+// what that module concluded and prints its reasons verbatim.
 
 import Link from "next/link";
 
@@ -45,6 +59,13 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import type { BurndownSection, ForecastPayload, LayerProjection } from "@/lib/burndown";
 import { LAYER_LABEL } from "@/lib/cost";
+import type {
+  ScopedForecast,
+  ScopedForecastPayload,
+  ScopeLine,
+  ScopeStanding,
+} from "@/lib/scopedForecast";
+import { isTenantScope, scopeLabel } from "@/lib/spendScopes";
 
 import type { BudgetPayload } from "./BudgetVsActualCard";
 
@@ -58,12 +79,29 @@ export type { ForecastPayload };
  */
 export interface CostBudgetPayload extends BudgetPayload {
   forecast: ForecastPayload;
+  /** The roster, the selection and the reconciliation (CTO-211). `forecast` holds the selected
+   *  scope's section, so this never has to be consulted to know what is being drawn. */
+  scoped: ScopedForecastPayload;
 }
 
 /** Where a budget is set. Same path the month-to-date card links to; CTO-208 owns that surface. */
 const BUDGET_SETTINGS_PATH = "/settings/budgets";
 
-export function BurndownCard({ payload }: { payload: ForecastPayload }) {
+/** Default scope link. Overridden by `/cost` so the `?tag=` breakdown filter survives a scope change. */
+function defaultScopeHref(key: string): string {
+  return `/cost?scope=${encodeURIComponent(key)}`;
+}
+
+export function BurndownCard({
+  payload,
+  scoped,
+  scopeHref = defaultScopeHref,
+}: {
+  payload: ForecastPayload;
+  /** Optional: without it the card renders exactly the tenant-wide section CTO-210 shipped. */
+  scoped?: ScopedForecastPayload;
+  scopeHref?: (key: string) => string;
+}) {
   const section = payload.section;
   if (!section) {
     return (
@@ -77,9 +115,13 @@ export function BurndownCard({ payload }: { payload: ForecastPayload }) {
   }
 
   const { forecast } = section;
+  const roster = scoped?.scoped ?? null;
 
   return (
     <Card title="Projected month-end spend">
+      {roster ? <ScopeSelector roster={roster} scopeHref={scopeHref} /> : null}
+      {roster ? <ScopeHeading section={section} /> : null}
+
       {forecast.status === "insufficient_history" ? (
         <InsufficientHistory section={section} />
       ) : (
@@ -104,6 +146,8 @@ export function BurndownCard({ payload }: { payload: ForecastPayload }) {
         </>
       )}
 
+      {roster ? <ScopeRoster roster={roster} scopeHref={scopeHref} /> : null}
+
       <Provenance section={section} />
     </Card>
   );
@@ -119,6 +163,9 @@ export function BurndownCard({ payload }: { payload: ForecastPayload }) {
 function InsufficientHistory({ section }: { section: BurndownSection }) {
   const { window, period } = section;
   const short = Math.max(0, window.requiredDays - window.dayCount);
+  // Per scope (CTO-211): a feature introduced last week fails this floor on a tenant that has been
+  // running for a year, and the sentence has to name what it is short of history about.
+  const subject = isTenantScope(section.scope) ? "This tenant" : scopeLabel(section.scope);
   return (
     <div data-testid="burndown-insufficient-history">
       <div className="text-2xl font-semibold text-muted">
@@ -126,7 +173,7 @@ function InsufficientHistory({ section }: { section: BurndownSection }) {
         Not enough history to project
       </div>
       <p className="mt-2 max-w-prose text-sm text-muted">
-        This tenant has {window.dayCount} settled{" "}
+        {subject} has {window.dayCount} settled{" "}
         {window.dayCount === 1 ? "day" : "days"} of history, and a projection needs{" "}
         {window.requiredDays}.
         {window.trimmedLeadingDays > 0 && window.firstObservedDay !== null ? (
@@ -134,8 +181,9 @@ function InsufficientHistory({ section }: { section: BurndownSection }) {
             {" "}
             Spend was first seen on {window.firstObservedDay}, so the {window.trimmedLeadingDays}{" "}
             earlier {window.trimmedLeadingDays === 1 ? "day" : "days"} in the window are not counted
-            as history: they are days before this tenant was sending anything, not days it spent
-            nothing.
+            as history: they are days before this{" "}
+            {isTenantScope(section.scope) ? "tenant" : section.scope.kind} was sending anything, not
+            days it spent nothing.
           </>
         ) : null} {short > 0 ? `${short} more ${short === 1 ? "day" : "days"} ` : "More history "}
         will settle it. Fourteen days is two full weeks, which is the point: below that every weekday
@@ -181,9 +229,14 @@ function Headline({ section }: { section: BurndownSection }) {
           projected for {period.start.slice(0, 7)}, a forecast and not a commitment
         </div>
         <p className="mt-3 max-w-prose text-sm text-muted">
-          <Blank reason={section.noBudgetReason ?? "no budget set"} /> No budget is set, so there is
-          no breach date and no variance: the projection is drawn without a reference line rather
-          than compared against a budget of zero.{" "}
+          <Blank reason={section.noBudgetReason ?? "no budget set"} /> No budget is set
+          {isTenantScope(section.scope) ? "" : ` for ${scopeLabel(section.scope)}`}, so there is no
+          breach date and no variance: the projection is drawn without a reference line rather than
+          compared against a budget of zero
+          {isTenantScope(section.scope)
+            ? ""
+            : ", and not against the tenant-wide budget, which covers all spend rather than this slice"}
+          .{" "}
           <Link href={BUDGET_SETTINGS_PATH} className="text-accent underline">
             Set a monthly budget
           </Link>{" "}
@@ -360,8 +413,289 @@ function LayerSplit({ section }: { section: BurndownSection }) {
           </>
         )}
       </p>
+      {section.layerBudgetReason === null ? null : (
+        <p className="mt-2 max-w-prose text-xs text-muted">
+          <Blank reason={section.layerBudgetReason} /> No layer-budget column here:{" "}
+          {section.layerBudgetReason}.
+        </p>
+      )}
     </div>
   );
+}
+
+// --- The scope selector, the heading and the roster (CTO-211, F7) --------------------------------
+
+const STANDING_LABEL: Record<ScopeStanding, string> = {
+  on_track: "On track",
+  projected_breach: "Projected breach",
+  already_over: "Already over",
+  no_budget: "No budget",
+  unknown: "Cannot say",
+};
+
+/**
+ * Colour carries meaning here, so it is spent carefully. Red is reserved for the two states that
+ * are actually bad. `unknown` is deliberately NOT green: refusing to project is not a clean bill of
+ * health, and the whole epic's failure mode is a reader taking silence for safety.
+ */
+const STANDING_CLASS: Record<ScopeStanding, string> = {
+  on_track: "text-good",
+  projected_breach: "text-bad",
+  already_over: "text-bad",
+  no_budget: "text-muted",
+  unknown: "text-warn",
+};
+
+function Standing({ line }: { line: ScopeLine }) {
+  return (
+    <span className={STANDING_CLASS[line.standing]} title={line.standingReason}>
+      {STANDING_LABEL[line.standing]}
+      <span className="sr-only"> ({line.standingReason})</span>
+    </span>
+  );
+}
+
+/**
+ * The selector. Links rather than client state: the scope is a server-side query
+ * (`querySettledCostSeries(scope)`), so a `?scope=` in the URL is both the mechanism and a
+ * shareable address for one feature owner's view. Every entry carries its standing, so an owner
+ * finds their own line without reading anyone else's numbers.
+ */
+function ScopeSelector({
+  roster,
+  scopeHref,
+}: {
+  roster: ScopedForecast;
+  scopeHref: (key: string) => string;
+}) {
+  return (
+    <div className="mb-4" data-testid="forecast-scope-selector">
+      <div className="mb-1 text-xs uppercase tracking-wide text-muted">Forecast scope</div>
+      <div className="flex flex-wrap gap-2">
+        {roster.lines.map((line) => (
+          <Link
+            key={line.key}
+            href={scopeHref(line.key)}
+            aria-current={line.selected ? "page" : undefined}
+            title={line.standingReason}
+            className={`rounded-full border px-3 py-1 text-sm ${
+              line.selected
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-edge text-muted hover:text-fg"
+            }`}
+          >
+            {line.label}{" "}
+            <span className={`ml-1 text-xs ${STANDING_CLASS[line.standing]}`}>
+              {STANDING_LABEL[line.standing]}
+            </span>
+          </Link>
+        ))}
+      </div>
+      {roster.lines.length === 1 ? (
+        <p className="mt-2 max-w-prose text-xs text-muted">
+          Only the tenant-wide forecast is offered because no scoped monthly budget covers today. A
+          budget is what says somebody owns a slice, so{" "}
+          <Link href={BUDGET_SETTINGS_PATH} className="text-accent underline">
+            set a scoped budget
+          </Link>{" "}
+          to get a line here for a feature, model or layer.
+        </p>
+      ) : null}
+      {roster.selectionFallbackReason === null ? null : (
+        <p className="mt-2 max-w-prose text-sm text-warn" data-testid="forecast-scope-fallback">
+          {roster.selectionFallbackReason}.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Names the slice everything below belongs to, and where it does not agree with the card above. */
+function ScopeHeading({ section }: { section: BurndownSection }) {
+  if (isTenantScope(section.scope)) return null;
+  return (
+    <p className="mb-3 max-w-prose text-sm" data-testid="forecast-scope-heading">
+      Everything below is <span className="font-medium">{scopeLabel(section.scope)}</span> only,
+      projected from that {section.scope.kind}&rsquo;s own settled history.{" "}
+      <span className="text-muted">
+        The month-to-date card above stays tenant-wide: one page with two definitions of &ldquo;month
+        to date&rdquo; would be worse than one that says which is which.
+      </span>
+    </p>
+  );
+}
+
+/**
+ * The roster: every budgeted scope on one line, and the reconciliation underneath.
+ *
+ * The reconciliation is the correctness question of this ticket, rendered in two visually different
+ * registers on purpose. Spend that fails to reconcile is a BUG and is shown as a warning. Budgets
+ * that do not reconcile are NORMAL and are shown as a neutral note. See `lib/scopedForecast.ts`.
+ */
+function ScopeRoster({
+  roster,
+  scopeHref,
+}: {
+  roster: ScopedForecast;
+  scopeHref: (key: string) => string;
+}) {
+  const { reconciliation } = roster;
+  if (roster.lines.length <= 1) return null;
+  return (
+    <div className="mt-5" data-testid="forecast-scope-roster">
+      <h3 className="mb-2 text-xs uppercase tracking-wide text-muted">
+        Every budgeted scope: what is on track and what is projected to breach
+      </h3>
+      <DataTable
+        columns={rosterColumns(scopeHref)}
+        rows={roster.lines}
+        rowKey={(r) => r.key}
+        pageSize={0}
+        empty="No scope has a monthly budget covering today."
+      />
+
+      {reconciliation.groups.map((g) => (
+        <p key={g.kind} className="mt-2 max-w-prose text-xs text-muted">
+          The budgeted {g.kind} scopes account for <Money micro={g.settledMicroUsd} /> of the{" "}
+          <Money micro={reconciliation.tenantSettledMicroUsd} /> settled this month; the remaining{" "}
+          <Money micro={g.residualMicroUsd} /> is spend no budgeted {g.kind} covers. Scopes of one
+          kind are disjoint, so those two add up to the whole bill exactly.
+        </p>
+      ))}
+
+      {reconciliation.mixesKinds ? (
+        <p className="mt-2 max-w-prose text-xs text-muted">
+          Budgets are set across more than one kind of scope, and those overlap by construction: the
+          same dollar is both a feature&rsquo;s and a model&rsquo;s. So the rows above are never
+          added together across kinds, and there is no roster-wide total on this page.
+        </p>
+      ) : null}
+
+      {reconciliation.spendReconciles ? null : (
+        <div className="mt-2 max-w-prose space-y-1 text-sm text-warn">
+          {reconciliation.spendWarnings.map((w) => (
+            <p key={w}>{w}</p>
+          ))}
+        </div>
+      )}
+
+      {reconciliation.budgetAllocation.note === null ? null : (
+        <p className="mt-2 max-w-prose text-xs text-muted" data-testid="forecast-budget-allocation">
+          {reconciliation.budgetAllocation.perKind.map((k) => (
+            <span key={k.kind}>
+              {k.count} {k.kind} {k.count === 1 ? "budget" : "budgets"} summing to{" "}
+              <Money micro={k.budgetMicroUsd} />
+              {". "}
+            </span>
+          ))}
+          Tenant-wide budget:{" "}
+          <Money
+            micro={reconciliation.budgetAllocation.tenantBudgetMicroUsd}
+            reason="no monthly tenant-wide budget is set"
+          />
+          . {reconciliation.budgetAllocation.note}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function rosterColumns(scopeHref: (key: string) => string): Column<ScopeLine>[] {
+  return [
+    {
+      key: "scope",
+      header: "Scope",
+      render: (r) =>
+        r.selected ? (
+          <span className="font-medium">{r.label}</span>
+        ) : (
+          <Link href={scopeHref(r.key)} className="text-accent underline">
+            {r.label}
+          </Link>
+        ),
+      sortValue: (r) => r.label,
+    },
+    {
+      key: "settled",
+      header: "Settled to date",
+      align: "right",
+      render: (r) => <Money micro={r.settledMicroUsd} />,
+      sortValue: (r) => r.settledMicroUsd,
+    },
+    {
+      key: "projected",
+      header: "Projected month end",
+      align: "right",
+      render: (r) => (
+        <Money
+          micro={r.projectedMicroUsd}
+          reason={`${r.label} has ${r.historyDays} settled days of its own history and ${r.requiredDays} are needed`}
+        />
+      ),
+      sortValue: (r) => r.projectedMicroUsd,
+    },
+    {
+      key: "budget",
+      header: "Budget (month)",
+      align: "right",
+      render: (r) => (
+        <Money micro={r.budgetMicroUsd} reason={r.noBudgetReason ?? "no monthly budget is set"} />
+      ),
+      sortValue: (r) => r.budgetMicroUsd,
+    },
+    {
+      key: "variance",
+      header: "Projected variance",
+      align: "right",
+      // Null here has two very different causes and each gets its own reason: no budget (normal,
+      // and never a variance against zero) and no projection (the per-scope history floor).
+      render: (r) =>
+        r.varianceMicroUsd === null ? (
+          <Blank
+            reason={
+              r.budgetMicroUsd === null
+                ? (r.noBudgetReason ?? "no monthly budget is set for this scope")
+                : `nothing was projected for ${r.label}, so there is no projected variance`
+            }
+          />
+        ) : (
+          <span className={r.varianceMicroUsd > 0 ? "text-bad" : "text-good"}>
+            {r.varianceMicroUsd > 0 ? "+" : r.varianceMicroUsd < 0 ? "−" : ""}
+            <Money micro={Math.abs(r.varianceMicroUsd)} />
+            {r.variancePct === null ? null : (
+              <>
+                {" "}
+                (<Pct value={Math.abs(r.variancePct)} />)
+              </>
+            )}
+          </span>
+        ),
+      sortValue: (r) => r.varianceMicroUsd,
+    },
+    {
+      key: "standing",
+      header: "Standing",
+      render: (r) => <Standing line={r} />,
+      sortValue: (r) => r.standing,
+    },
+    {
+      key: "breach",
+      header: "Crosses budget",
+      render: (r) =>
+        r.breachDate ?? (
+          <Blank
+            reason={
+              r.standing === "unknown"
+                ? `nothing was projected for ${r.label}, so no crossing date is claimed either way`
+                : r.standing === "no_budget"
+                  ? (r.noBudgetReason ?? "no monthly budget is set for this scope")
+                  : `${r.label} is not projected to cross its budget this period`
+            }
+          />
+        ),
+      sortValue: (r) => r.breachDate,
+    },
+  ];
 }
 
 function layerColumns(section: BurndownSection): Column<LayerProjection>[] {
