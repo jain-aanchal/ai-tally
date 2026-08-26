@@ -82,6 +82,9 @@ services:
       - ../db/postgres/0023_tenant_account_labels.sql:/docker-entrypoint-initdb.d/0023_tenant_account_labels.sql:ro
       - ../db/postgres/0024_tenant_allocation_config.sql:/docker-entrypoint-initdb.d/0024_tenant_allocation_config.sql:ro
       - ../db/postgres/0025_tenant_revenue_uploads.sql:/docker-entrypoint-initdb.d/0025_tenant_revenue_uploads.sql:ro
+      # What a tenant intends to SPEND on AI (CTO-205). Needs btree_gist for the no-overlap
+      # EXCLUDE constraint; the extension is created by the migration itself.
+      - ../db/postgres/0026_tenant_budgets.sql:/docker-entrypoint-initdb.d/0026_tenant_budgets.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s
