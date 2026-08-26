@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from tally.account_identity import AccountLinker
 from tally.enrichment import enrich_cost
 from tally.models import discover_models
 from tally.pricing import seed_catalog
@@ -55,6 +56,7 @@ from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
     hash_customer_email,
+    hash_stripe_customer,
     map_stripe_event,
     verify_stripe_signature,
 )
@@ -207,6 +209,11 @@ async def lifespan(app: FastAPI):
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
     app.state.stripe_event_seen = set()
+    # CTO-195: per-tenant user→account map shared by every revenue connector in this process.
+    # It learns from events that state both, and refuses to answer for a user seen against two
+    # accounts (see tally.account_identity). In-process for the same reason the dedup set above
+    # is: losing it on restart costs an honest blank, never a wrong account.
+    app.state.account_linker = AccountLinker()
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -1135,6 +1142,24 @@ async def stripe_webhook(
     hashed = hash_customer_email(registry, tenant, mapped.customer_email)
     user_id_hash = hashed[0] if hashed else ""
 
+    # CTO-195: the Stripe Customer is the account that owns this subscription/invoice, so it goes
+    # to AccountIdHash. UserIdHash above is untouched. When Stripe named no customer (rare, but a
+    # manual charge can arrive without one) the linker may still know which account this user
+    # belongs to from an earlier event; if that user has ever been seen under two accounts it
+    # answers with '' rather than picking one, and the conflict is logged as a DQ finding.
+    stated = hash_stripe_customer(registry, tenant, mapped.stripe_customer_id)
+    linker: AccountLinker = app.state.account_linker
+    resolution = linker.resolve(
+        tenant,
+        user_id_hash=user_id_hash,
+        stated_account_id_hash=stated[0] if stated else "",
+        source="stripe",
+    )
+    if resolution.conflict is not None:
+        logger.warning(
+            "account identity conflict (tenant=%s): %s", tenant, resolution.conflict.as_dict()
+        )
+
     # Build the BusinessEvent. ValueType is "monetary" for everything except churn (which is a
     # count event with value 0). Currency comes off the Stripe payload, defaulting to USD.
     value_type = "monetary"
@@ -1154,6 +1179,7 @@ async def stripe_webhook(
         value_currency=mapped.currency,
         value_type=value_type,
         source="stripe",
+        account_id_hash=resolution.account_id_hash,
     )
 
     store: ClickHouseStore = app.state.store
@@ -1182,6 +1208,11 @@ async def stripe_webhook(
             "event_name": mapped.event_name,
             "value_amount_micro": mapped.value_amount_micro,
             "currency": mapped.currency,
+            # CTO-195: whether this revenue reached an account, and whether that account was
+            # stated by Stripe or inferred from the user. Never the hash itself: the response
+            # goes back over the wire to Stripe and a hash is still an identifier.
+            "account_attributed": resolution.is_attributed,
+            "account_inferred": resolution.inferred,
         },
         status_code=200,
     )
