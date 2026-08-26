@@ -26,6 +26,26 @@ import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "
 import { LAYERS, type Layer } from "./cost";
 import type { AttributionDiagnostics, FeatureEconomics } from "./features";
 import type {
+  AccountCostRow,
+  AccountCosts,
+  AccountDetail,
+  AccountTrendPoint,
+  DirectLayer,
+  DirectSpendByLayer,
+  ExcludedInfraCost,
+} from "./accounts";
+import {
+  DIRECT_LAYERS,
+  MAX_ACCOUNT_TOP_FEATURES,
+  MAX_ACCOUNT_TOP_RUNS,
+  UNATTRIBUTED_ACCOUNT,
+  emptyAccountRow,
+  totalDirect,
+  zeroDirectLayers,
+} from "./accounts";
+import type {
+  AccountStitchConflict,
+  AccountStitching,
   AttributionByFeature,
   CalibrationDay,
   ContextDropsByService,
@@ -47,6 +67,12 @@ import {
   queryRevenuePolicy,
   revenueSourceFilter,
 } from "./revenueSources";
+import {
+  accountRevenueReport,
+  accountRevenueSql,
+  type AccountRevenueReport,
+  type AccountRevenueSqlRow,
+} from "./accountRevenue";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -298,6 +324,351 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
         LAYERS.reduce((s, l) => s + b.byLayer[l], 0) - LAYERS.reduce((s, l) => s + a.byLayer[l], 0),
     );
   });
+}
+
+// --- Per-customer cost (CTO-187, D1) ------------------------------------------------------------
+//
+// These read `daily_account_rollup` (CTO-183), not `otel_spans`. AccountIdHash sits nowhere near the
+// front of the spans table's ORDER BY, so grouping by it there cannot skip a granule and degrades
+// into a full tenant scan; the rollup leads with (TenantId, AccountIdHash, Day) and turns both reads
+// below into index range scans. Read db/clickhouse/account_rollups.sql before changing anything
+// here, in particular why its sorting key also carries FeatureTag and GenAiOperation: they are in
+// the key for correctness, because SummingMergeTree collapses rows sharing the FULL key and would
+// otherwise stamp an arbitrary feature and operation onto a merged total, silently destroying the
+// per-layer split these queries depend on.
+//
+// DIRECT COST ONLY. `compute` and `egress` are excluded from every query here, per Decision 2 in
+// docs/cost-per-customer-plan.md. They are tenant-level infrastructure that no span carries an
+// account for, so putting them on a customer's bill means inventing an allocation rule (workstream
+// C, deferred). CTO-189 surfaces the excluded total separately so the page can state it out loud.
+// On the current demo tenant it is about 47 percent of spend, which makes quietly folding it in a
+// large lie rather than a small one.
+//
+// Window: the calendar-aligned `toDate(now()) - INTERVAL 29 DAY` that Home and /cost already use, so
+// all three surfaces agree. A rolling `now() - INTERVAL 30 DAY` drifts by the second and clips a
+// partial day, which would show this tab disagreeing with /cost for a reason nobody can see.
+
+/** Calendar days in the window, inclusive of today. Kept in step with the SQL below. */
+const ACCOUNT_WINDOW_DAYS = 30;
+const ACCOUNT_WINDOW = "Day >= toDate(now()) - INTERVAL 29 DAY";
+
+// The same window expressed against otel_spans, whose time column is a Timestamp rather than a Day.
+// Deliberately the SAME calendar-aligned boundary rather than `now() - INTERVAL 30 DAY`: the run
+// list on the detail view sits under the account total, and a rolling boundary would let a run
+// appear that the total above it does not count.
+const ACCOUNT_SPAN_WINDOW = "Timestamp >= toDate(now()) - INTERVAL 29 DAY";
+
+/** The four directly attributable layers, expressed as an operation filter. See DIRECT_LAYERS. */
+const DIRECT_ONLY = "GenAiOperation NOT IN ('compute', 'egress')";
+
+// AccountIdHash is FixedString(64), which pads to width with NUL bytes, and the unattributed bucket
+// is stored as the empty string. Selecting the column raw therefore hands JavaScript a string of 64
+// NUL characters rather than '', and every `=== ""` check downstream silently fails. Normalise at the
+// SQL boundary so a row's account id is either a real 64-char hex hash or a genuinely empty string.
+const ACCOUNT_ID = "if(empty(AccountIdHash), '', toString(AccountIdHash))";
+
+/** `count` consecutive ISO dates starting at `startIso` (yyyy-mm-dd), inclusive. UTC arithmetic. */
+function isoDaysFrom(startIso: string, count: number): string[] {
+  const [y, m, d] = startIso.split("-").map(Number);
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push(new Date(Date.UTC(y, m - 1, d + i)).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+/**
+ * Direct cost per account over the window: layer split, distinct users, span count.
+ *
+ * Real accounts come back ranked by cost; the unattributed bucket is returned separately and is
+ * always present even at zero, because the page's headline honesty valve is the share of spend with
+ * no account and it must be statable unconditionally. Returns `null` (via tryLive) when ClickHouse
+ * is unreachable so the route can fall back.
+ */
+export async function queryAccountCosts(): Promise<AccountCosts | null> {
+  return tryLive(async (db, tenant) => {
+    // Two reads rather than one, and that is forced. Distinct users comes from a `uniq`
+    // AggregateFunction state, and merged states cannot be added together: a user who touched both
+    // the llm and the tools layer would be counted once per layer if we summed a per-layer
+    // uniqMerge. So users and spans are merged at account grain here, and the layer split is a
+    // second pass that only ever sums money.
+    const totals = await rows<{ account: string; spans: string; users: string }>(
+      db,
+      `SELECT ${ACCOUNT_ID} AS account,
+              sum(SpanCount) AS spans,
+              uniqMerge(UserCountState) AS users
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY account`,
+      tenant,
+    );
+    const byLayerRows = await rows<{ account: string; layer: DirectLayer; cost: string }>(
+      db,
+      `SELECT ${ACCOUNT_ID} AS account, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY account, layer`,
+      tenant,
+    );
+
+    const layers = new Map<string, DirectSpendByLayer>();
+    for (const r of byLayerRows) {
+      let m = layers.get(r.account);
+      if (!m) {
+        m = zeroDirectLayers();
+        layers.set(r.account, m);
+      }
+      if ((DIRECT_LAYERS as readonly string[]).includes(r.layer)) m[r.layer] = micro(r.cost);
+    }
+
+    const accounts: AccountCostRow[] = [];
+    let unattributed = emptyAccountRow(UNATTRIBUTED_ACCOUNT, true);
+    for (const t of totals) {
+      const byLayer = layers.get(t.account) ?? zeroDirectLayers();
+      const row: AccountCostRow = {
+        accountIdHash: t.account,
+        unattributed: t.account === UNATTRIBUTED_ACCOUNT,
+        byLayer,
+        // Sum the rounded per-layer figures rather than rounding the account's own total
+        // separately, so a row's layers always add up to the number printed beside them.
+        directCostMicroUsd: totalDirect(byLayer),
+        distinctUsers: parseInt(t.users, 10) || 0,
+        spanCount: parseInt(t.spans, 10) || 0,
+      };
+      if (row.unattributed) unattributed = row;
+      else accounts.push(row);
+    }
+    accounts.sort((a, b) => b.directCostMicroUsd - a.directCostMicroUsd);
+
+    return {
+      windowDays: ACCOUNT_WINDOW_DAYS,
+      accounts,
+      unattributed,
+      // Deliberately the sum of the rows as returned, not a separately rounded tenant-level sum, so
+      // the headline can never contradict the table beneath it. This is the figure that must
+      // reconcile with /cost's direct spend for the same window.
+      totalDirectMicroUsd:
+        accounts.reduce((s, a) => s + a.directCostMicroUsd, 0) + unattributed.directCostMicroUsd,
+    };
+  });
+}
+
+/**
+ * Compute and egress for the window, the exact complement of what {@link queryAccountCosts} counts.
+ *
+ * This is the other half of the tenant's bill, and the per-customer tab cannot attribute it: these
+ * rows land from the cloud billing connectors as tenant-level daily totals with no account on them.
+ * The page states the figure so a reader knows how much of their spend the table below leaves out
+ * (CTO-189). Read from the same rollup, over the same window, under the negation of DIRECT_ONLY,
+ * so direct plus excluded is the tenant total for the window with nothing double counted and
+ * nothing dropped.
+ *
+ * Returns `null` (via tryLive) when ClickHouse is unreachable; the caller must not read that as
+ * zero excluded cost, which would be the most flattering possible reading of a failed query.
+ */
+export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null> {
+  return tryLive(async (db, tenant) => {
+    // Grouped by layer rather than summed flat so the two figures stay separable: compute and
+    // egress have very different fixes, and a later drill-down needs them apart. LAYER_CASE is
+    // reused rather than reading GenAiOperation directly so the operation-to-layer mapping keeps
+    // living in exactly one place.
+    const out = await rows<{ layer: string; cost: string }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND NOT (${DIRECT_ONLY})
+       GROUP BY layer`,
+      tenant,
+    );
+    let computeMicroUsd = 0;
+    let egressMicroUsd = 0;
+    for (const r of out) {
+      if (r.layer === "compute") computeMicroUsd = micro(r.cost);
+      else if (r.layer === "egress") egressMicroUsd = micro(r.cost);
+    }
+    return {
+      windowDays: ACCOUNT_WINDOW_DAYS,
+      computeMicroUsd,
+      egressMicroUsd,
+      totalMicroUsd: computeMicroUsd + egressMicroUsd,
+    };
+  });
+}
+
+/**
+ * One account: layer split, top features, and a day-by-day trend across the window.
+ *
+ * Pass `''` for the unattributed bucket. Returns `null` when the tenant has no rollup rows at all
+ * for this account in the window, i.e. we know nothing about it — that is a genuinely unknown
+ * account, not one that cost zero, and the caller should render it as not found rather than as a
+ * free customer. An account we HAVE seen but whose spend is entirely compute and egress comes back
+ * as a real row with zeroes, which is a different and true statement.
+ */
+export async function queryAccountDetail(accountIdHash: string): Promise<AccountDetail | null> {
+  return tryLive((db, tenant) => accountDetail(db, tenant, accountIdHash));
+}
+
+/**
+ * What the detail view actually knows about an account (CTO-190, plan D4).
+ *
+ * {@link queryAccountDetail} collapses two very different facts into one `null`: "ClickHouse is
+ * down" and "this tenant has never emitted a span for this account". A page that renders them the
+ * same way tells a reader "no spend recorded for this account" while the store is unreachable,
+ * which is the page confidently asserting something it cannot know. The three states are kept
+ * apart here so the view can say which one it is looking at.
+ */
+export type AccountDetailResult =
+  | { state: "ok"; detail: AccountDetail }
+  /** Reachable, and it holds no rollup row for this account in the window. */
+  | { state: "unknown" }
+  /** ClickHouse could not be read at all, so nothing is known either way. */
+  | { state: "unreachable" };
+
+export async function queryAccountDetailResult(
+  accountIdHash: string,
+): Promise<AccountDetailResult> {
+  // Boxed so the two nulls stay distinguishable: tryLive's own null (query threw) is the outer one,
+  // and the query's null (no such account) is the inner one. Without the box they are the same
+  // value and the caller has to guess.
+  const boxed = await tryLive(async (db, tenant) => ({
+    detail: await accountDetail(db, tenant, accountIdHash),
+  }));
+  if (boxed === null) return { state: "unreachable" };
+  return boxed.detail === null ? { state: "unknown" } : { state: "ok", detail: boxed.detail };
+}
+
+async function accountDetail(
+  db: ClickHouseClient,
+  tenant: string,
+  accountIdHash: string,
+): Promise<AccountDetail | null> {
+  {
+    const params = { tenant, account: accountIdHash };
+    // Comparing FixedString(64) to a String parameter works in both directions: ClickHouse pads the
+    // literal, so `''` matches the unattributed bucket and a 64-char hex hash matches exactly.
+    const scope = `TenantId = {tenant:String} AND AccountIdHash = {account:String} AND ${ACCOUNT_WINDOW}`;
+
+    // `seen` counts rollup rows WITHOUT the direct-only filter, which is what separates "never heard
+    // of this account" from "this account's spend is all infrastructure". The two aggregates beside
+    // it carry the filter via the -If combinator so this stays one read.
+    const totals = await rowsP<{ seen: string; spans: string; users: string; windowStart: string }>(
+      db,
+      `SELECT count() AS seen,
+              sumIf(SpanCount, ${DIRECT_ONLY}) AS spans,
+              uniqMergeIf(UserCountState, ${DIRECT_ONLY}) AS users,
+              toString(toDate(now()) - INTERVAL 29 DAY) AS windowStart
+       FROM daily_account_rollup
+       WHERE ${scope}`,
+      params,
+    );
+    const t = totals[0];
+    if (!t || (parseInt(t.seen, 10) || 0) === 0) return null;
+
+    const byLayerRows = await rowsP<{ layer: DirectLayer; cost: string }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY}
+       GROUP BY layer`,
+      params,
+    );
+    const byLayer = zeroDirectLayers();
+    for (const r of byLayerRows) {
+      if ((DIRECT_LAYERS as readonly string[]).includes(r.layer)) byLayer[r.layer] = micro(r.cost);
+    }
+
+    // FeatureTag = '' is untagged traffic, not a feature. It is left out of the top-features list
+    // rather than shown as a nameless row, matching queryFeatureCostRows.
+    const featureRows = await rowsP<{ feature: string; cost: string; spans: string }>(
+      db,
+      `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, sum(SpanCount) AS spans
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY} AND FeatureTag != ''
+       GROUP BY feature
+       ORDER BY cost DESC
+       LIMIT ${MAX_ACCOUNT_TOP_FEATURES}`,
+      params,
+    );
+
+    const trendRows = await rowsP<{ day: string; cost: string }>(
+      db,
+      `SELECT toString(Day) AS day, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY}
+       GROUP BY day`,
+      params,
+    );
+    // Fill every calendar day so the chart has no invisible gaps: a day with no spans is a real
+    // zero for this account, not missing data.
+    //
+    // The day list is generated from the window start ClickHouse itself reported, NOT from the
+    // Node process clock. Those are two different clocks in two different timezones, and when they
+    // straddle midnight the JS-generated list is shifted a day against the SQL window: the oldest
+    // day in the result set has no slot to land in and is silently dropped from the trend while
+    // still counting toward the account's total, so the chart quietly fails to add up to the number
+    // printed above it. Deriving both ends from the same clock removes the seam.
+    const byDay = new Map<string, AccountTrendPoint>();
+    for (const iso of isoDaysFrom(t.windowStart, ACCOUNT_WINDOW_DAYS)) {
+      byDay.set(iso, { date: iso, directCostMicroUsd: 0 });
+    }
+    for (const r of trendRows) {
+      const point = byDay.get(r.day);
+      if (point) point.directCostMicroUsd = micro(r.cost);
+    }
+
+    // Heaviest runs. This is the ONE read here that cannot come from daily_account_rollup: the
+    // rollup is grouped to (account, day, feature, operation) and has no trace id in it at all, so
+    // run-grain has to come from otel_spans. That is a wider scan than the rollup reads above, but
+    // it is bounded by the same tenant + account + 30 day predicate and returns at most
+    // MAX_ACCOUNT_TOP_RUNS rows.
+    //
+    // Grouping is over THIS ACCOUNT'S SPANS only, not over whole traces that happen to touch the
+    // account. A trace serving several customers would otherwise report its full cost against each
+    // of them, so the same money would appear on several customers' pages. See AccountRunCost.
+    const runRows = await rowsP<{
+      runId: string;
+      agent: string;
+      cost: string;
+      steps: string;
+      maxStatus: string;
+    }>(
+      db,
+      `SELECT TraceId AS runId,
+              any(ServiceName) AS agent,
+              sum(EstimatedCost) AS cost,
+              count() AS steps,
+              max(StatusCode) AS maxStatus
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND AccountIdHash = {account:String}
+         AND ${ACCOUNT_SPAN_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY TraceId
+       ORDER BY cost DESC
+       LIMIT ${MAX_ACCOUNT_TOP_RUNS}`,
+      params,
+    );
+
+    return {
+      accountIdHash,
+      unattributed: accountIdHash === UNATTRIBUTED_ACCOUNT,
+      byLayer,
+      directCostMicroUsd: totalDirect(byLayer),
+      distinctUsers: parseInt(t.users, 10) || 0,
+      spanCount: parseInt(t.spans, 10) || 0,
+      topFeatures: featureRows.map((r) => ({
+        feature: r.feature,
+        directCostMicroUsd: micro(r.cost),
+        spanCount: parseInt(r.spans, 10) || 0,
+      })),
+      trend: [...byDay.values()],
+      topRuns: runRows.map((r) => ({
+        runId: r.runId,
+        agent: r.agent || "untagged",
+        accountCostMicroUsd: micro(r.cost),
+        steps: parseInt(r.steps, 10) || 0,
+        outcome: parseInt(r.maxStatus, 10) === 2 ? ("failed" as const) : ("success" as const),
+      })),
+    };
+  }
 }
 
 // --- Hidden-cost alerts (CTO-122) ---------------------------------------------------------------
@@ -669,6 +1040,122 @@ export async function queryAttributionDiagnostics(): Promise<AttributionDiagnost
   };
 }
 
+// --- Account stitching (CTO-184) ----------------------------------------------------------------
+
+/**
+ * Normalises `identity_graph` edges into (person, account) pairs.
+ *
+ * `account_id` is the sixth `IdentityAType` / `IdentityBType` value (CTO-184) and either side of an
+ * edge may carry it, so we pick whichever side is the account and take the other as the person.
+ * The `!=` on the two booleans is an XOR: it keeps edges where EXACTLY ONE side is an account.
+ * Account-to-account edges say nothing about a person and person-to-person edges are the ordinary
+ * identity graph, so both are excluded rather than half-interpreted.
+ */
+const ACCOUNT_PAIRS_CTE = `
+  WITH pairs AS (
+    SELECT
+      if(IdentityAType = 'account_id', IdentityB, IdentityA) AS person_hash,
+      if(IdentityAType = 'account_id', IdentityA, IdentityB) AS account_hash
+    FROM identity_graph
+    WHERE TenantId = {tenant:String}
+      AND ((IdentityAType = 'account_id') != (IdentityBType = 'account_id'))
+  )`;
+
+/**
+ * Account-dimension coverage plus the multi-account conflicts that block attribution (CTO-184).
+ *
+ * Two things a consumer needs and cannot get anywhere else:
+ *
+ * 1. **Direct vs stitched.** A directly-tagged account was stamped on the span at emit time
+ *    (`otel_spans.AccountIdHash`, CTO-180) and is exactly as trustworthy as the span. A stitched
+ *    account was inferred from an `account_id` edge a CRM or CDP connector asserted, and is only
+ *    as trustworthy as that connector. They are counted separately so the UI can say which it is
+ *    showing rather than blending two very different confidences into one number.
+ *
+ * 2. **Conflicts.** One user belongs to one account. Where a user is observed against more than
+ *    one, we attribute NOTHING for them: no split, no duplication, no first-seen. Duplicating a
+ *    user's spend across accounts inflates the tenant total, per-account figures then stop summing
+ *    to what /cost reports, and the per-customer surface loses its reconciliation guarantee. The
+ *    query returns the conflicting users so the refusal is visible instead of silent, along with
+ *    the spend actually held back by it, so a tenant can weigh fixing their CRM.
+ *
+ * `withheldMicroUsd` counts only spans with an EMPTY `AccountIdHash`. A conflicted user's directly
+ * tagged spans are unaffected: they carry their own account and never needed stitching, so
+ * counting them here would overstate the damage.
+ */
+export async function queryAccountStitching(): Promise<AccountStitching | null> {
+  return tryLive(async (db, tenant) => {
+    const coverage = await rows<{ stitched_accounts: string; stitched_users: string }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT uniqExact(account_hash) AS stitched_accounts,
+              uniqExact(person_hash)  AS stitched_users
+       FROM pairs`,
+      tenant,
+    );
+
+    const direct = await rows<{ direct_accounts: string }>(
+      db,
+      `SELECT uniqExact(AccountIdHash) AS direct_accounts
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND AccountIdHash != ''`,
+      tenant,
+    );
+
+    const conflicting = await rows<{ person_hash: string; accounts: string[] }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT person_hash, arraySort(groupUniqArray(account_hash)) AS accounts
+       FROM pairs
+       GROUP BY person_hash
+       HAVING length(accounts) > 1
+       ORDER BY person_hash
+       LIMIT 100`,
+      tenant,
+    );
+
+    // Nothing ambiguous: skip the cost query entirely rather than run an `IN ()` over no users.
+    const users = conflicting.map((r) => r.person_hash.replace(/\0+$/, ""));
+    const costByUser = new Map<string, { cost: string; spans: string }>();
+    if (users.length > 0) {
+      const costs = await rowsP<{ user_hash: string; cost: string; spans: string }>(
+        db,
+        `SELECT UserIdHash AS user_hash, sum(EstimatedCost) AS cost, count() AS spans
+         FROM otel_spans
+         WHERE TenantId = {tenant:String}
+           AND Timestamp >= now() - INTERVAL 30 DAY
+           AND AccountIdHash = ''
+           AND UserIdHash IN {users:Array(String)}
+         GROUP BY user_hash`,
+        { tenant, users },
+      );
+      for (const c of costs) {
+        costByUser.set(c.user_hash.replace(/\0+$/, ""), { cost: c.cost, spans: c.spans });
+      }
+    }
+
+    const conflicts: AccountStitchConflict[] = conflicting.map((r) => {
+      const user = r.person_hash.replace(/\0+$/, "");
+      const c = costByUser.get(user);
+      return {
+        userIdHash: user,
+        accounts: r.accounts.map((a) => a.replace(/\0+$/, "")),
+        withheldMicroUsd: micro(c?.cost),
+        spans30d: parseInt(c?.spans ?? "0", 10) || 0,
+      };
+    });
+
+    return {
+      directAccounts: parseInt(direct[0]?.direct_accounts ?? "0", 10) || 0,
+      stitchedAccounts: parseInt(coverage[0]?.stitched_accounts ?? "0", 10) || 0,
+      stitchedUsers: parseInt(coverage[0]?.stitched_users ?? "0", 10) || 0,
+      conflicts,
+    };
+  });
+}
+
 // --- Data Quality (dedicated report) ------------------------------------------------------------
 
 export async function queryDataQualityReport(): Promise<DataQualityReport | null> {
@@ -781,6 +1268,11 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       };
     });
 
+    // CTO-184: account coverage + multi-account conflicts. This runs inside the same tryLive as
+    // the rest of the report, so if `identity_graph` is missing the whole report falls back to
+    // mock rather than half-rendering, the same failure posture every other section has.
+    const accountStitching = await queryAccountStitching();
+
     return {
       overall: {
         attributionRate: totalEvents > 0 ? attributed / totalEvents : 1,
@@ -793,6 +1285,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       contextDrops,
       calibration,
       sampling,
+      accountStitching: accountStitching ?? undefined,
     };
   });
 }
@@ -1433,6 +1926,33 @@ export async function queryAttribution(
 
     if (perProvider.length === 0) return emptyReport(filters);
     return { filters, perProvider, totals, isMock: false };
+  });
+}
+
+// --- Revenue per account (CTO-196) --------------------------------------------------------------
+
+/**
+ * Net revenue per account over the same 30 day window the cost queries use.
+ *
+ * The SQL and the null-vs-zero rule live in lib/accountRevenue.ts, which documents both; this is
+ * only the round trip. Two properties worth restating here because they are easy to break:
+ *
+ * - The tenant's E1 revenue policy decides what counts, so uploaded revenue and connector revenue
+ *   go through one filter. A gateway outage falls back to the default policy rather than blanking
+ *   the figure, same as queryAttribution.
+ * - The grouping key is the `AccountIdHash` already on the row. Revenue is never re-keyed from a
+ *   user here: E2's AccountLinker owns the one user, one account rule and lands ambiguous revenue
+ *   unattributed with an AccountConflict finding, and the unattributed bucket is reported rather
+ *   than dropped.
+ *
+ * Returns null on any ClickHouse error, so a caller falls back rather than rendering a zero.
+ */
+export async function queryAccountRevenue(): Promise<AccountRevenueReport | null> {
+  return tryLive(async (db, tenant) => {
+    const policy = await queryRevenuePolicy();
+    const { sql, params } = accountRevenueSql(policy);
+    const rows = await rowsP<AccountRevenueSqlRow>(db, sql, { tenant, ...params });
+    return accountRevenueReport(rows);
   });
 }
 

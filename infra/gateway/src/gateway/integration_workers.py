@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Protocol
 
+from tally.account_identity import AccountLinker
 from tally.hmac_keys import HmacKeyRegistry
 from tally.wire import BusinessEvent, IdentityLink
 
@@ -176,6 +177,7 @@ class IngestWorker:
         store: ClickHouseStore,
         integrations: TenantIntegrationStore,
         registry: HmacKeyRegistry,
+        account_linker: AccountLinker | None = None,
     ) -> None:
         self._secrets = secrets
         self._resolver = resolver
@@ -183,6 +185,11 @@ class IngestWorker:
         self._store = store
         self._integrations = integrations
         self._registry = registry
+        # CTO-195: shared user→account map, so a connector can fill in an account for a revenue
+        # event that names a person but no company. Optional and defaulted so every existing
+        # construction keeps working; a worker with its own linker simply learns nothing from the
+        # others, which costs an honest blank rather than a wrong account.
+        self._account_linker = account_linker if account_linker is not None else AccountLinker()
 
     def run_cycle(self, tenant_id: str) -> CycleResult:
         """Run one ingest cycle for one tenant. Never raises — every failure is recorded, not thrown.

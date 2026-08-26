@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from tally.identity import (
     KEY_ROTATION_SOURCE,
+    PERSON_IDENTITY_TYPES,
     AliasEvent,
     IdentifyEvent,
     IdentityEdge,
@@ -154,3 +155,122 @@ def test_late_alias_relinks_anonymous_to_authenticated() -> None:
     g.ingest_identify(T, IdentifyEvent(user_id="u_alice", anonymous_id="anon_1", observed_at=NOW))
     assert g.resolve_identity(T, "anon_1") == {"anon_1", "u_alice"}
     assert g.resolve_identity(T, "u_alice") == {"u_alice", "anon_1"}
+
+
+# --- account_id in the identity graph (CTO-184) --------------------------------------------------
+#
+# One user belongs to one account. Multi-account users are explicitly NOT supported: where a person
+# resolves to more than one account the pipeline attributes nothing and raises a data-quality
+# finding, because splitting or duplicating the cost would inflate the tenant total and break
+# reconciliation against /cost.
+
+
+def _account_edge(user: str, account: str, when: datetime = NOW) -> IdentityEdge:
+    return IdentityEdge(
+        user, IdentityType.USER_ID, account, IdentityType.ACCOUNT_ID, when, source="crm"
+    )
+
+
+def test_account_id_is_a_distinct_identity_type() -> None:
+    assert IdentityType.ACCOUNT_ID.value == "account_id"
+    assert IdentityType.ACCOUNT_ID not in PERSON_IDENTITY_TYPES
+
+
+def test_single_account_resolves() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    res = g.resolve_account(T, "u_alice")
+    assert res.account_hash == "acct_widgets"
+    assert res.attributable is True
+    assert res.conflict is False
+
+
+def test_unstitched_user_resolves_to_nothing_without_conflict() -> None:
+    g = _g()
+    res = g.resolve_account(T, "u_alice")
+    assert res.account_hash is None
+    assert res.candidates == ()
+    # Not stitched yet is a normal state, NOT a data-quality finding.
+    assert res.conflict is False
+    assert res.attributable is False
+
+
+def test_account_resolves_transitively_through_person_identities() -> None:
+    g = _g()
+    # The CRM asserts the account against the user; the SDK knows the anonymous id is that user.
+    g.ingest_identify(T, IdentifyEvent(user_id="u_alice", anonymous_id="anon_1", observed_at=NOW))
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    assert g.resolve_account(T, "anon_1").account_hash == "acct_widgets"
+
+
+def test_multi_account_user_attributes_nothing() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    g.add_edge(T, _account_edge("u_alice", "acct_gadgets"))
+    res = g.resolve_account(T, "u_alice")
+    # Not split, not duplicated, not first-seen. Nothing.
+    assert res.account_hash is None
+    assert res.attributable is False
+    assert res.conflict is True
+    assert res.candidates == ("acct_gadgets", "acct_widgets")
+
+
+def test_multi_account_conflict_is_reported_as_a_finding() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    g.add_edge(T, _account_edge("u_alice", "acct_gadgets"))
+    g.add_edge(T, _account_edge("u_bob", "acct_widgets"))
+    findings = g.account_conflicts(T)
+    # Visible, not silently swallowed: exactly the one ambiguous user, with both candidates.
+    assert [f.user_hash for f in findings] == ["u_alice"]
+    assert findings[0].candidates == ("acct_gadgets", "acct_widgets")
+
+
+def test_no_conflict_when_every_user_has_one_account() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    g.add_edge(T, _account_edge("u_bob", "acct_gadgets"))
+    assert g.account_conflicts(T) == []
+
+
+def test_account_conflicts_do_not_leak_across_tenants() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    g.add_edge("t-other", _account_edge("u_alice", "acct_gadgets"))
+    # Same user hash in two tenants is two different people; neither is ambiguous.
+    assert g.account_conflicts(T) == []
+    assert g.resolve_account(T, "u_alice").account_hash == "acct_widgets"
+    assert g.resolve_account("t-other", "u_alice").account_hash == "acct_gadgets"
+
+
+def test_colleagues_are_not_fused_into_one_person() -> None:
+    # The hazard that makes account_id different from every other identity type: an account is a
+    # container, not a person. If resolution walked THROUGH the account node, Alice and Bob would
+    # come back as the same identity and Bob's trace could be attributed to Alice's conversion.
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    g.add_edge(T, _account_edge("u_bob", "acct_widgets"))
+    assert g.resolve_identity(T, "u_alice", max_depth=3) == {"u_alice"}
+
+
+def test_account_edges_are_excluded_from_person_identity_sets() -> None:
+    # The account hash must not end up in the set the stitcher uses to query last-touch, or every
+    # span belonging to any colleague would match.
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets"))
+    assert g.resolve_identity(T, "u_alice") == {"u_alice"}
+
+
+def test_account_edge_observed_after_as_of_is_ignored() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets", NOW + timedelta(days=1)))
+    # Honest under uncertainty: an edge we had not learned yet cannot retroactively attribute.
+    assert g.resolve_account(T, "u_alice", as_of=NOW).account_hash is None
+
+
+def test_as_of_can_resolve_a_conflict_that_only_appears_later() -> None:
+    g = _g()
+    g.add_edge(T, _account_edge("u_alice", "acct_widgets", NOW - timedelta(days=1)))
+    g.add_edge(T, _account_edge("u_alice", "acct_gadgets", NOW + timedelta(days=1)))
+    assert g.resolve_account(T, "u_alice", as_of=NOW).account_hash == "acct_widgets"
+    assert g.resolve_account(T, "u_alice").conflict is True

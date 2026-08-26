@@ -35,32 +35,37 @@ const (
 // plus the deployment label; nothing else. Durations are serialized as integer nanoseconds and
 // timestamps as Unix nanoseconds so the format is language-neutral and stable.
 type wireRecord struct {
-	Deployment  Deployment `json:"deployment"`
-	TenantKey   string     `json:"tenant_key"`
-	FeatureTag  string     `json:"feature_tag"`
-	Method      string     `json:"method"`
-	Path        string     `json:"path"`
-	StatusCode  int        `json:"status_code"`
-	ReqBytes    int64      `json:"req_bytes"`
-	RespBytes   int64      `json:"resp_bytes"`
-	DurationNs  int64      `json:"duration_ns"`
-	StartedAtNs int64      `json:"started_at_ns"`
-	Failed      bool       `json:"failed"`
+	Deployment Deployment `json:"deployment"`
+	TenantKey  string     `json:"tenant_key"`
+	FeatureTag string     `json:"feature_tag"`
+	// AccountIdHash mirrors the gen_ai.account_id_hash span attribute so a proxied request lands in
+	// the same ClickHouse AccountIdHash column a Python-SDK span does (CTO-182). Empty means
+	// unattributed.
+	AccountIdHash string `json:"account_id_hash"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	StatusCode    int    `json:"status_code"`
+	ReqBytes      int64  `json:"req_bytes"`
+	RespBytes     int64  `json:"resp_bytes"`
+	DurationNs    int64  `json:"duration_ns"`
+	StartedAtNs   int64  `json:"started_at_ns"`
+	Failed        bool   `json:"failed"`
 }
 
 func toWire(dep Deployment, rec proxy.TraceRecord) wireRecord {
 	return wireRecord{
-		Deployment:  dep,
-		TenantKey:   rec.TenantKey,
-		FeatureTag:  rec.FeatureTag,
-		Method:      rec.Method,
-		Path:        rec.Path,
-		StatusCode:  rec.StatusCode,
-		ReqBytes:    rec.ReqBytes,
-		RespBytes:   rec.RespBytes,
-		DurationNs:  rec.Duration.Nanoseconds(),
-		StartedAtNs: rec.StartedAt.UnixNano(),
-		Failed:      rec.Failed,
+		Deployment:    dep,
+		TenantKey:     rec.TenantKey,
+		FeatureTag:    rec.FeatureTag,
+		AccountIdHash: rec.AccountIdHash,
+		Method:        rec.Method,
+		Path:          rec.Path,
+		StatusCode:    rec.StatusCode,
+		ReqBytes:      rec.ReqBytes,
+		RespBytes:     rec.RespBytes,
+		DurationNs:    rec.Duration.Nanoseconds(),
+		StartedAtNs:   rec.StartedAt.UnixNano(),
+		Failed:        rec.Failed,
 	}
 }
 

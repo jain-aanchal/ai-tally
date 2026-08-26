@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Protocol, runtime_checkable
 
+from tally.account_identity import hubspot_account_id, stripe_account_id
 from tally.identity import AliasEvent, IdentifyEvent, IdentityType
 from tally.schema import DEFAULT_CURRENCY, usd_to_micro
 
@@ -90,7 +91,14 @@ class BusinessEvent:
     user_id: str | None = None
     anonymous_id: str | None = None
     properties: Mapping[str, object] = field(default_factory=dict)
+    #: The tenant's own paying customer, as the provider stated it (CTO-195). Populated *in
+    #: addition to* ``user_id``, never instead of it: Stripe and HubSpot have always put an
+    #: account-shaped id in ``user_id`` and existing tenants may be attributing on it, so this
+    #: field is additive and the caller picks the one it means. Raw here, hashed downstream via
+    #: :func:`tally.account_identity.hash_account_id`.
     account_id: str | None = None
+    #: Which ValueType the caller meant (CTO-199). Lets a generic revenue poster say 'mrr' or
+    #: 'refund' rather than having every event guessed as a plain monetary conversion.
     value_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -120,8 +128,8 @@ class BusinessEvent:
             "currency": self.currency,
             "user_id": self.user_id,
             "anonymous_id": self.anonymous_id,
-            "properties": dict(self.properties),
             "account_id": self.account_id,
+            "properties": dict(self.properties),
             "value_type": self.value_type,
         }
 
@@ -300,8 +308,12 @@ class StripeConnector:
     """Stripe ``Event`` webhooks (e.g. ``invoice.paid``, ``charge.succeeded``).
 
     Amounts arrive in integer **cents**. The event ``id`` is the idempotency
-    key; ``created`` (epoch seconds) is the occurred_at. The customer id becomes
-    an external user identity so revenue can be attributed.
+    key; ``created`` (epoch seconds) is the occurred_at.
+
+    The customer id populates **both** ``user_id`` and ``account_id`` (CTO-195).
+    A Stripe Customer is the tenant's account in B2B SaaS, so it belongs in
+    ``account_id``; it stays on ``user_id`` as well because that is where it has
+    always landed and tenants attributing on it must not silently lose that.
     """
 
     source = "stripe"
@@ -330,7 +342,10 @@ class StripeConnector:
 
         amount_field = self._REVENUE_TYPES.get(event_type)
         value = _revenue_micro_from_cents(obj.get(amount_field)) if amount_field else 0
+        # user_id keeps exactly the value it has always had, garbage-in cases included, so no
+        # existing per-user attribution shifts under a tenant. account_id is the additive fix.
         customer = _as_str(obj.get("customer"))
+        account_id = stripe_account_id(obj)
         currency = _as_str(obj.get("currency"))
 
         return ConnectorResult(
@@ -344,6 +359,7 @@ class StripeConnector:
                     value_micro_usd=value,
                     currency=(currency or DEFAULT_CURRENCY).upper(),
                     user_id=customer,
+                    account_id=account_id,
                     properties={"stripe_object": _as_str(obj.get("object"))},
                 ),
             ),
@@ -359,6 +375,10 @@ class HubSpotConnector:
     ``eventId`` is the idempotency key; ``occurredAt`` is epoch milliseconds.
     A deal ``amount`` (USD) becomes the value; the object id becomes an external
     user identity.
+
+    ``account_id`` (CTO-195) prefers an associated **company** id and falls back
+    to the deal ``objectId``, because a company is the account and a deal is only
+    one contract with it. As with Stripe, ``user_id`` is left exactly as it was.
     """
 
     source = "hubspot"
@@ -387,6 +407,7 @@ class HubSpotConnector:
                     occurred_at=occurred_at,
                     value_micro_usd=value,
                     user_id=object_id,
+                    account_id=hubspot_account_id(payload),
                     properties=dict(props),
                 ),
             ),

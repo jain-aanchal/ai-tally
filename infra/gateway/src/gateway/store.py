@@ -95,6 +95,8 @@ class ClickHouseStore:
                 e.business_event_id,
                 e.event_name,
                 e.user_id_hash[:64],
+                # CTO-195: the account the revenue belongs to. '' when the provider named none,
+                # which the attribution surfaces read as unattributed rather than as a customer.
                 e.account_id_hash[:64],
                 _ts(e.occurred_at_ns),
                 now,

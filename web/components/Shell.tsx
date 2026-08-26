@@ -10,6 +10,7 @@ const NAV: { label: string; href: string }[] = [
   { label: "Compare", href: "/compare" },
   { label: "Attribution", href: "/attribution" },
   { label: "Unit Economics", href: "/unit-economics" },
+  { label: "Cost per Customer", href: "/cost-per-customer" },
   { label: "Connectors", href: "/connectors" },
   { label: "Guardrails", href: "/guardrails" },
   // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):

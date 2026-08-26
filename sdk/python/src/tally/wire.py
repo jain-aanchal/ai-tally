@@ -57,10 +57,10 @@ class BusinessEvent:
     value_currency: str = "USD"
     value_type: str = "monetary"
     source: str = "sdk"
-    # Hashed account the value belongs to: the tenant's own paying customer (CTO-180). HMAC-SHA256
-    # hex under the per-tenant key, exactly like user_id_hash, never a raw id and never a name.
-    # Empty means the writer did not know the account, which reads back as the unattributed bucket
-    # rather than as a customer.
+    # The tenant's own paying customer, HMAC'd under the per-tenant key (CTO-180 / CTO-195).
+    # Defaults to '', the honest unattributed bucket, so every existing producer keeps
+    # compiling and every event that predates account routing reads back as "no account" rather
+    # than as a customer named "unknown". Additive: user_id_hash is untouched.
     account_id_hash: str = ""
 
 

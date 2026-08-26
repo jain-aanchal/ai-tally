@@ -202,6 +202,38 @@ def test_stripe_charge_succeeded_uses_amount():
     assert res.business_events[0].value_micro_usd == 999 * 10_000
 
 
+def test_stripe_populates_account_id_alongside_user_id():
+    """CTO-195: the Stripe Customer is the account, and user_id keeps the value it always had."""
+    c = StripeConnector()
+    res = c.parse(
+        "t1",
+        {
+            "id": "evt_4",
+            "type": "invoice.paid",
+            "created": 1_777_000_000,
+            "data": {"object": {"amount_paid": 2500, "currency": "usd", "customer": "cus_1"}},
+        },
+    )
+    ev = res.business_events[0]
+    assert ev.account_id == "cus_1"
+    assert ev.user_id == "cus_1"  # unchanged: existing per-user attribution must not shift
+    assert ev.as_dict()["account_id"] == "cus_1"
+
+
+def test_stripe_without_a_customer_has_no_account():
+    c = StripeConnector()
+    res = c.parse(
+        "t1",
+        {
+            "id": "evt_5",
+            "type": "charge.succeeded",
+            "created": 1_777_000_000,
+            "data": {"object": {"amount": 999, "currency": "usd"}},
+        },
+    )
+    assert res.business_events[0].account_id is None  # honest blank, never a guess
+
+
 def test_stripe_junk_is_empty():
     c = StripeConnector()
     assert c.parse("t1", {}).is_empty
@@ -226,6 +258,37 @@ def test_hubspot_deal_amount():
     assert ev.value_micro_usd == 1_200_500_000
     assert ev.user_id == "deal_1"
     assert ev.occurred_at.tzinfo is UTC
+
+
+def test_hubspot_account_id_prefers_the_company_over_the_deal():
+    """CTO-195: contract revenue belongs to a company; one company can win several deals."""
+    c = HubSpotConnector()
+    res = c.parse(
+        "t1",
+        {
+            "eventId": "h2",
+            "occurredAt": 1_777_000_000_000,
+            "objectId": "deal_1",
+            "properties": {"amount": "1200.50", "associatedcompanyid": "co_9"},
+        },
+    )
+    ev = res.business_events[0]
+    assert ev.account_id == "co_9"
+    assert ev.user_id == "deal_1"  # unchanged
+
+
+def test_hubspot_account_id_falls_back_to_the_deal_object_id():
+    c = HubSpotConnector()
+    res = c.parse(
+        "t1",
+        {
+            "eventId": "h3",
+            "occurredAt": 1_777_000_000_000,
+            "objectId": "deal_1",
+            "properties": {"amount": "10"},
+        },
+    )
+    assert res.business_events[0].account_id == "deal_1"
 
 
 def test_hubspot_junk_is_empty():
