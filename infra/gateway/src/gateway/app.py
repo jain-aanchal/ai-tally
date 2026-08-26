@@ -168,6 +168,41 @@ from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway")
 
+# Guards _configure_logging so a re-created app (e.g. the test suite spinning up many TestClients in
+# one process) attaches the root handler exactly once and never stacks duplicates. See CTO-218.
+_logging_configured = False
+
+
+def _configure_logging(level_name: str) -> None:
+    """Install one root stderr handler so gateway INFO lines are actually visible (CTO-218).
+
+    The gateway is started with ``uvicorn gateway.app:app`` (see the Dockerfile CMD). uvicorn
+    configures its own ``uvicorn*`` loggers but leaves the ROOT logger without a handler, so Python's
+    lastResort handler applied and only WARNING and above reached stderr. Every gateway ``logger.info``
+    (the ``tally.gateway*`` namespace: startup line, ingest buffer enablement, scheduler per-tick
+    summary) was therefore silently discarded in a compose deployment.
+
+    We attach a single handler to the root logger at the configured level. uvicorn's own loggers set
+    ``propagate=False``, so their records are handled by uvicorn's handlers and never reach this one,
+    which is why gateway lines appear exactly once and uvicorn's own lines are not doubled. Idempotent
+    so it is safe to call at the very start of every ``lifespan``.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    level = logging.getLevelName((level_name or "INFO").upper())
+    # getLevelName returns the "Level <n>" string for an unknown name; fall back to INFO then.
+    if not isinstance(level, int):
+        level = logging.INFO
+    handler = logging.StreamHandler()  # defaults to stderr, matching uvicorn's own default handler
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(level)
+    _logging_configured = True
+
 
 def _build_replay_blob_store(settings) -> ReplayBlobStore:
     """Select the replay blob-store backend from settings (CTO-152).
@@ -205,6 +240,9 @@ def _build_replay_blob_store(settings) -> ReplayBlobStore:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    # Configure logging first so the startup INFO line below (and every other gateway logger.info)
+    # is captured rather than dropped by uvicorn's WARNING-only root (CTO-218).
+    _configure_logging(settings.log_level)
     app.state.settings = settings
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
