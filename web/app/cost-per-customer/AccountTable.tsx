@@ -11,11 +11,8 @@ import { useMemo, useState, useTransition } from "react";
 
 import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money } from "@/components/HonestValue";
-import {
-  type AccountCostRow,
-  costPerUser,
-  shortenAccountHash,
-} from "@/lib/accounts";
+import { type AccountCostRow, costPerUser } from "@/lib/accounts";
+import { AccountCell } from "./AccountIdentity";
 import { lookupAccountAction } from "./actions";
 
 interface SearchState {
@@ -215,58 +212,5 @@ export function AccountTable({
         empty={`No spans carried an account id in the last ${windowDays} days.`}
       />
     </div>
-  );
-}
-
-/**
- * The Account cell: label where the tenant set one, shortened hash otherwise, full hash on hover
- * and on copy.
- *
- * The full hash is what every other surface takes (the label API, a support conversation), so it
- * has to be retrievable from the row. The short form is for width only.
- */
-function AccountCell({
-  accountIdHash,
-  label,
-  labelsUnavailable,
-}: {
-  accountIdHash: string;
-  label: string | undefined;
-  labelsUnavailable: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(accountIdHash);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be refused (insecure origin, denied permission). The hash is already
-      // selectable in the title attribute, so there is nothing to recover and nothing to shout at
-      // the user about.
-      setCopied(false);
-    }
-  };
-
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span title={accountIdHash} className={label ? "font-medium" : "font-mono text-xs"}>
-        {label ?? shortenAccountHash(accountIdHash)}
-      </span>
-      {!label && !labelsUnavailable ? (
-        <span className="text-[11px] text-muted" title="no label set for this account">
-          unlabelled
-        </span>
-      ) : null}
-      <button
-        type="button"
-        onClick={copy}
-        title={`Copy the full account hash: ${accountIdHash}`}
-        className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-white"
-      >
-        {copied ? "Copied" : "Copy hash"}
-      </button>
-    </span>
   );
 }

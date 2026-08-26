@@ -93,11 +93,38 @@ export interface AccountTrendPoint {
   directCostMicroUsd: MicroUSD;
 }
 
+/** Heaviest runs are capped for the same reason as features: a shortlist, not an audit trail. */
+export const MAX_ACCOUNT_TOP_RUNS = 8;
+
+/**
+ * One agent run, costed at THIS account's spans only (CTO-190, plan D4).
+ *
+ * A trace can carry spans for more than one account: a batch job that serves several customers in
+ * one run is a normal shape, and so is a run where only some steps were tagged. So the figure here
+ * is the account's share of the run, not the run's total, and it will be smaller than the number
+ * the same run shows on /agents whenever the run is shared. Reporting the run total on a
+ * per-account page would double-count the shared part across every account it touched.
+ */
+export interface AccountRunCost {
+  /** Trace id. Links to the existing /agents/runs/[runId] drill-down, which shows the WHOLE run. */
+  runId: string;
+  /** ServiceName, or `'untagged'` where the run carries none. Matches /agents. */
+  agent: string;
+  /** Cost of this account's spans in the run. See the note above: not the run's total. */
+  accountCostMicroUsd: MicroUSD;
+  /** Spans in the run attributed to this account, again not the run's total step count. */
+  steps: number;
+  /** Only success/failed are inferable from OTel StatusCode; `abandoned` is not tracked. */
+  outcome: "success" | "failed";
+}
+
 export interface AccountDetail extends AccountCostRow {
   /** Heaviest features for this account, capped at {@link MAX_ACCOUNT_TOP_FEATURES}. */
   topFeatures: AccountFeatureCost[];
   /** One point per calendar day across the window, oldest first, gaps filled with zero. */
   trend: AccountTrendPoint[];
+  /** Heaviest runs for this account, capped at {@link MAX_ACCOUNT_TOP_RUNS}. */
+  topRuns: AccountRunCost[];
 }
 
 // --- Presentation helpers for the /cost-per-customer tab (CTO-188, plan D2) ----------------------
@@ -200,4 +227,57 @@ export function formatShare(share: number): string {
 /** Direct spend that IS attributed to an account: the total less the unattributed bucket. */
 export function attributedSpend(costs: AccountCosts): MicroUSD {
   return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
+}
+
+// --- Presentation helpers for the account detail view (CTO-190, plan D4) -------------------------
+
+/** Characters in a stored account hash: HMAC-SHA256 rendered hex. */
+export const ACCOUNT_HASH_CHARS = 64;
+
+/**
+ * Whether a URL segment is a well-formed account hash.
+ *
+ * The detail route's parameter is user-editable, so it is checked for shape before it reaches a
+ * query. This is a shape test and nothing more: a well-formed hash that matches no rows is a
+ * perfectly ordinary answer (an account with no spend in the window), and the page says so rather
+ * than treating it as an error. Only a segment that could never have been a hash gets the
+ * "that is not an account id" treatment.
+ */
+export function isAccountHash(segment: string): boolean {
+  return new RegExp(`^[0-9a-f]{${ACCOUNT_HASH_CHARS}}$`).test(segment);
+}
+
+/**
+ * What the Account column and the detail header both print for an account.
+ *
+ * One function so the two surfaces cannot drift: a reader who clicks "Acme Corp" in the table must
+ * land on a page headed "Acme Corp", and a reader who clicks a shortened hash must land on the same
+ * shortened hash. `undefined` label (no label set, or labels unavailable) falls back to the short
+ * form; the full hash stays reachable through the copy control on both surfaces.
+ */
+export function accountDisplayName(accountIdHash: string, label: string | undefined): string {
+  return label ?? shortenAccountHash(accountIdHash);
+}
+
+/**
+ * Share of an account's direct spend sitting in one layer, or `null` when it has no direct spend.
+ *
+ * `null` rather than 0 for the same reason {@link unattributedShare} returns it: "0% of spend is
+ * LLM" is a claim about a distribution that does not exist. The caller renders a blank.
+ */
+export function layerShare(row: AccountCostRow, layer: DirectLayer): number | null {
+  if (row.directCostMicroUsd <= 0) return null;
+  return row.byLayer[layer] / row.directCostMicroUsd;
+}
+
+/**
+ * The trend's own total, for the chart to state beside the account total it is drawn under.
+ *
+ * These two are computed from different reads (a per-day group and a per-layer group), so they are
+ * two chances to disagree, and the day-list-from-the-wrong-clock bug drops a day from the chart
+ * while leaving it in the total. Exposing the chart's sum makes the disagreement visible instead of
+ * silent, and the detail page asserts on it.
+ */
+export function trendTotal(trend: readonly AccountTrendPoint[]): MicroUSD {
+  return trend.reduce((sum, p) => sum + p.directCostMicroUsd, 0);
 }
