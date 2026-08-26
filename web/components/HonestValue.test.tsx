@@ -85,6 +85,17 @@ describe("Pct (CTO-178)", () => {
     expect(container.textContent).toBe("0%");
   });
 
+  it("drops the trailing sign when unit is false, for the low end of a range", () => {
+    const { container } = render(<Pct value={0.099} unit={false} />);
+    expect(container.textContent).toBe("9.9");
+  });
+
+  it("keeps the same rounding whether or not the sign is printed", () => {
+    const bare = render(<Pct value={0.12345} unit={false} />).container.textContent;
+    const signed = render(<Pct value={0.12345} />).container.textContent;
+    expect(`${bare}%`).toBe(signed);
+  });
+
   it("renders an explained blank for null", () => {
     const { container } = render(<Pct value={null} reason="needs ≥50 spans in 7d" />);
     expect(container.textContent).toContain(BLANK);
