@@ -72,6 +72,36 @@ def test_attribution_carries_key_version(attribution):
     assert attribution.count("UserIdHashKeyVersion") >= 2
 
 
+def test_identity_graph_carries_account_id(attribution):
+    # CTO-184: a CRM/CDP connector stitches users to accounts through this enum.
+    assert attribution.count("'account_id'=6") >= 2  # IdentityAType and IdentityBType
+
+
+def test_identity_type_enum_ordinals_are_never_renumbered(attribution):
+    # An Enum8 is stored on disk as its ordinal, so reusing or renumbering a value silently
+    # reinterprets every row already written. These five are frozen forever; new values append.
+    frozen = {
+        "'user_id'": 1,
+        "'anonymous_id'": 2,
+        "'session_id'": 3,
+        "'email'": 4,
+        "'external_id'": 5,
+    }
+    for name, ordinal in frozen.items():
+        assert f"{name}={ordinal}" in attribution
+        # And no other ordinal is ever attached to that name.
+        for other in range(1, 10):
+            if other != ordinal:
+                assert f"{name}={other}" not in attribution
+
+
+def test_identity_graph_enum_widening_has_a_migration_path(attribution):
+    # initdb only fires on a fresh volume, so an existing deployment needs an explicit ALTER
+    # (replayed idempotently by `make ch-migrate`). Enum widening is MODIFY, not ADD COLUMN.
+    assert "MODIFY COLUMN IdentityAType" in attribution
+    assert "MODIFY COLUMN IdentityBType" in attribution
+
+
 def test_unattributed_is_modeled(attribution):
     assert "unattributed_events" in attribution
     assert "no_trace_in_window" in attribution  # reasons enumerated, not silent drop

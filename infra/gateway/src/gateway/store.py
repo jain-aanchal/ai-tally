@@ -67,6 +67,24 @@ class ClickHouseStore:
         )
         return result.result_rows[0][0] > 0
 
+    def business_event_exists(self, tenant_id: str, business_event_id: str) -> bool:
+        """Return True if this tenant already has a business event with this id.
+
+        The durable half of the generic revenue API's idempotency (CTO-199). ``business_events`` is
+        a ``ReplacingMergeTree`` ordered by ``(TenantId, BusinessEventId)``, so a re-posted event
+        collapses onto the original *eventually*, but the attribution revenue sum reads the table
+        without ``FINAL``, so between the second insert and the next merge the money would be
+        counted twice. Probing first is what makes a retry safe now rather than at merge time.
+
+        Cheap: the id is the table's own sort key, so this is a primary-index lookup.
+        """
+        result = self.client.query(
+            "SELECT count() FROM business_events "
+            "WHERE TenantId = %(t)s AND BusinessEventId = %(b)s",
+            parameters={"t": tenant_id, "b": business_event_id},
+        )
+        return result.result_rows[0][0] > 0
+
     def insert_business_events(self, tenant_id: str, events: list[BusinessEvent]) -> int:
         if not events:
             return 0
@@ -77,8 +95,8 @@ class ClickHouseStore:
                 e.business_event_id,
                 e.event_name,
                 e.user_id_hash[:64],
-                # CTO-180 added the column; CTO-198's CSV upload is the first producer to fill it.
-                # Every other producer leaves it '' rather than guessing an account.
+                # CTO-195: the account the revenue belongs to. '' when the provider named none,
+                # which the attribution surfaces read as unattributed rather than as a customer.
                 e.account_id_hash[:64],
                 _ts(e.occurred_at_ns),
                 now,

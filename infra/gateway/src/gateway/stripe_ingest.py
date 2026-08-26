@@ -21,6 +21,13 @@ hashes on otel_spans. We hash the lowercased email (Stripe stores it case-preser
 case-insensitive in practice). Missing-email events get an empty UserIdHash and surface in the
 attribution view as unattributed revenue, which is honest.
 
+The Stripe **customer id** is a different thing and lands in a different column (CTO-195). A
+Stripe Customer is the tenant's account in B2B SaaS: it owns the subscription and every invoice
+raised against it. Until now this route read ``customer`` off the payload and threw it away, so
+revenue could never be grouped by the customer that paid it. It is now hashed under the same
+per-tenant key and written to ``AccountIdHash``. ``UserIdHash`` keeps taking the email exactly as
+before: the account is an additional column, not a reinterpretation of an existing one.
+
 Webhook secret handling
 -----------------------
 The raw secret is kept out of logs by going through ``stripe.Webhook.construct_event`` directly —
@@ -36,6 +43,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from tally.account_identity import hash_account_id, stripe_account_id
 from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway.stripe")
@@ -67,7 +75,9 @@ class StripeEventMapped:
 
     ``value_amount_micro`` is in micro-USD (Stripe ships cents → ×10_000). Refunds are negative,
     churn is ``0``. ``customer_email`` is intentionally retained on this object so the caller can
-    HMAC it under the tenant's key — the email never reaches storage.
+    HMAC it under the tenant's key, and the email never reaches storage. ``stripe_customer_id`` is
+    retained for the same reason and for the same treatment: it is the account (CTO-195), and it
+    is hashed by :func:`hash_stripe_customer` before it goes anywhere near a row.
     """
 
     event_name: str
@@ -124,32 +134,32 @@ def map_stripe_event(event: dict[str, Any]) -> StripeEventMapped | None:
         occurred_at_ns = _time.time_ns()
 
     name = _EVENT_NAME[event_type]
+    # CTO-195: the Stripe Customer is the account. Read once for every event type (all four carry
+    # ``customer``), and via the shared helper so an expanded ``customer`` object unwraps to its id
+    # instead of being stringified into a dict literal.
+    customer_id = stripe_account_id(obj)
     currency = (
         str(_get(obj, "currency") or _get(obj, "currency_code") or "usd").upper()
     )
 
     if event_type == "checkout.session.completed":
         value = _amount_to_micro_usd(obj.get("amount_total"))
-        customer_id = obj.get("customer")
         email = (
             _get(obj, "customer_details", "email")
             or _get(obj, "customer_email")
         )
     elif event_type == "invoice.paid":
         value = _amount_to_micro_usd(obj.get("amount_paid"))
-        customer_id = obj.get("customer")
         email = obj.get("customer_email")
     elif event_type == "charge.refunded":
         # Refund: negative micro-USD so revenue sums net out correctly.
         value = -_amount_to_micro_usd(obj.get("amount_refunded"))
-        customer_id = obj.get("customer")
         email = (
             _get(obj, "billing_details", "email")
             or _get(obj, "receipt_email")
         )
     else:  # customer.subscription.deleted
         value = 0
-        customer_id = obj.get("customer")
         # Subscription objects don't carry email — the tenant connects via customer_id only.
         email = None
 
@@ -157,7 +167,7 @@ def map_stripe_event(event: dict[str, Any]) -> StripeEventMapped | None:
         event_name=name,
         value_amount_micro=value,
         stripe_event_id=event_id,
-        stripe_customer_id=str(customer_id) if isinstance(customer_id, str) else None,
+        stripe_customer_id=customer_id,
         customer_email=str(email) if isinstance(email, str) and email else None,
         occurred_at_ns=occurred_at_ns,
         currency=currency,
@@ -182,6 +192,27 @@ def hash_customer_email(
         # Empty tenant id — caller should have caught this; treat as un-hashable.
         return None
     stamped = registry.hash(tenant_id, email.strip().lower())
+    return stamped.value, stamped.key_version
+
+
+def hash_stripe_customer(
+    registry: HmacKeyRegistry,
+    tenant_id: str,
+    customer_id: str | None,
+) -> tuple[str, str] | None:
+    """Return ``(account_id_hash, key_version)`` for a Stripe customer id, or ``None`` (CTO-195).
+
+    Case is preserved, unlike the email path: ``cus_PaYiNgCusT`` is a case-sensitive opaque id and
+    lowercasing it would produce a hash that joins to nothing. Goes through the same per-tenant
+    versioned key as every other identifier, so an account hash rotates the way a user hash does.
+    """
+    try:
+        stamped = hash_account_id(registry, tenant_id, customer_id)
+    except ValueError:
+        # Empty tenant id. The caller should have caught this; treat as un-hashable.
+        return None
+    if stamped is None:
+        return None
     return stamped.value, stamped.key_version
 
 

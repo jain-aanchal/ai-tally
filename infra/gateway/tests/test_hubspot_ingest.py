@@ -12,6 +12,8 @@ from _worker_fakes import (
 )
 
 from gateway.hubspot_ingest import HubSpotWorker, map_deal_stage_event
+from gateway.integration_workers import build_hasher
+from tally.account_identity import AccountLinker
 from tally.hmac_keys import HmacKeyRegistry
 
 T = "t-acme"
@@ -43,6 +45,8 @@ def test_closed_won_maps_to_conversion_with_amount_micro_usd() -> None:
     assert ev.business_event_id == "evt-9"
     assert ev.user_id_hash == "h_buyer@example.com"  # email lowercased before hashing
     assert ev.source == "hubspot"
+    # CTO-195: no company association on this payload, so the deal id is the fallback account.
+    assert ev.account_id_hash == "h_123"
 
 
 def test_non_closed_won_stage_change_is_ignored() -> None:
@@ -75,6 +79,103 @@ def test_missing_email_yields_empty_user_hash() -> None:
     )
     assert ev is not None
     assert ev.user_id_hash == ""  # honest unattributed
+
+
+# --- account identity (CTO-195) -----------------------------------------------------------------
+
+
+def test_associated_company_becomes_the_account() -> None:
+    """A company is the account. A deal is one contract with it, so the company wins."""
+    ev = map_deal_stage_event(
+        {
+            "eventId": "evt-10",
+            "propertyName": "dealstage",
+            "propertyValue": "closedwon",
+            "objectId": 123,
+            "properties": {"amount": 5000, "associatedcompanyid": 4242, "email": "b@e.com"},
+        },
+        _identity,
+    )
+    assert ev is not None
+    assert ev.account_id_hash == "h_4242"
+    assert ev.user_id_hash == "h_b@e.com"  # unchanged: this adds a column, not a reinterpretation
+
+
+def test_account_is_hashed_never_raw() -> None:
+    """Uses the real per-tenant HMAC path, not the fake hasher: no raw company id reaches a row."""
+    hasher = build_hasher(HmacKeyRegistry(), T)
+    ev = map_deal_stage_event(
+        {
+            "eventId": "evt-11",
+            "propertyName": "dealstage",
+            "propertyValue": "closedwon",
+            "properties": {"amount": 1, "associatedcompanyid": "co_9"},
+        },
+        hasher,
+    )
+    assert ev is not None
+    assert "co_9" not in ev.account_id_hash
+    assert len(ev.account_id_hash) == 64
+
+
+def test_no_identifiers_at_all_yields_an_empty_account() -> None:
+    ev = map_deal_stage_event(
+        {
+            "eventId": "evt-12",
+            "propertyName": "dealstage",
+            "propertyValue": "closedwon",
+            "properties": {"amount": 1},
+        },
+        _identity,
+    )
+    assert ev is not None
+    assert ev.account_id_hash == ""  # honest unattributed, never a guess
+
+
+def test_linker_infers_the_company_for_a_deal_that_names_only_a_contact() -> None:
+    linker = AccountLinker()
+    linker.observe(T, "h_buyer@example.com", "h_4242", source="hubspot")
+    ev = map_deal_stage_event(
+        {
+            "eventId": "evt-13",
+            "propertyName": "dealstage",
+            "propertyValue": "closedwon",
+            "properties": {"amount": 1, "email": "buyer@example.com"},
+        },
+        _identity,
+        linker=linker,
+        tenant_id=T,
+    )
+    assert ev is not None
+    assert ev.account_id_hash == "h_4242"
+
+
+def test_a_contact_seen_under_two_companies_attributes_nothing() -> None:
+    """docs/cost-per-customer-plan.md: one user, one account. Do not guess between two."""
+    linker = AccountLinker()
+    common = {"propertyName": "dealstage", "propertyValue": "closedwon"}
+
+    first = map_deal_stage_event(
+        {**common, "eventId": "a", "properties": {"amount": 1, "associatedcompanyid": "co_1",
+                                                  "email": "buyer@example.com"}},
+        _identity, linker=linker, tenant_id=T,
+    )
+    second = map_deal_stage_event(
+        {**common, "eventId": "b", "properties": {"amount": 1, "associatedcompanyid": "co_2",
+                                                  "email": "buyer@example.com"}},
+        _identity, linker=linker, tenant_id=T,
+    )
+    assert first is not None and second is not None
+    # Both deals keep the company their own payload stated, which is not a guess.
+    assert (first.account_id_hash, second.account_id_hash) == ("h_co_1", "h_co_2")
+    # But the contact is now ambiguous, so nothing is inferred for them again.
+    assert len(linker.conflicts(T)) == 1
+    orphan = map_deal_stage_event(
+        {**common, "eventId": "c", "properties": {"amount": 1, "email": "buyer@example.com"}},
+        _identity, linker=linker, tenant_id=T,
+    )
+    assert orphan is not None
+    assert orphan.account_id_hash == ""
 
 
 def test_falls_back_to_deterministic_id_without_event_id() -> None:

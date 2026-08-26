@@ -22,6 +22,15 @@ first boot — `otel_spans` and the rollup MVs into ClickHouse, the control-plan
 > populated database. Postgres has no equivalent yet, which is why migrations 0011, 0012, 0015 and
 > 0016 need applying by hand on an existing volume.
 
+> **A new materialized view needs a backfill too.** `make ch-migrate` creates the table and the MV,
+> but a ClickHouse MV is an INSERT trigger, not a view over history: it only sees rows written after
+> it exists. On a database that already holds spans, a freshly created rollup starts empty and then
+> begins mid-history, which reads as "this customer appeared last Tuesday" on the dashboard. Run the
+> explicit `INSERT INTO <rollup> SELECT ... FROM otel_spans` documented at the bottom of the rollup's
+> own DDL file (see [`../db/clickhouse/account_rollups.sql`](../db/clickhouse/account_rollups.sql)),
+> bounded by a timestamp cutoff at or before MV creation. Without that bound the MV and the backfill
+> both count the overlap and SummingMergeTree adds them together, silently inflating cost.
+
 > The Go edge proxy (transparent OpenAI passthrough) lives in [`edge-proxy/`](./edge-proxy) and is
 > intentionally **not** wired into this Docker stack — the SDK ingestion path covers end-to-end flow
 > without it, and the proxy is a standalone, stateless binary you run wherever the customer's

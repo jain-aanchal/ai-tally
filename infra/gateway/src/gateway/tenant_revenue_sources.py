@@ -145,6 +145,19 @@ class TenantRevenueSourceStore:
             row = cur.fetchone()
             return _row_to_config(row) if row else None
 
+    def get_for_caller(self, tenant_id: str) -> RevenueSourceConfig | None:
+        """:meth:`get`, but accepting a tenant NAME as well as a ``tenants.id`` UUID.
+
+        ``tenant_revenue_source_config.tenant_id`` is a UUID, while ingest callers and the local
+        dev setup identify a tenant by name (``local-dev``). Handing a name straight to a UUID
+        column trips ``InvalidTextRepresentation`` deep in the driver and surfaces as an opaque
+        503, so the name is resolved on the same cursor first (CTO-199).
+        """
+        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            cur.execute(_SELECT, (resolve_tenant_uuid(cur, tenant_id),))
+            row = cur.fetchone()
+            return _row_to_config(row) if row else None
+
     def upsert(
         self,
         tenant_id: str,

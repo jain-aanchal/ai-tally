@@ -38,8 +38,9 @@ services:
       # spans table must exist before the rollup MVs that target it.
       - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
       - ../db/clickhouse/rollups.sql:/docker-entrypoint-initdb.d/02_rollups.sql:ro
-      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/03_last_touch_index.sql:ro
-      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/04_attribution.sql:ro
+      - ../db/clickhouse/account_rollups.sql:/docker-entrypoint-initdb.d/03_account_rollups.sql:ro
+      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/04_last_touch_index.sql:ro
+      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/05_attribution.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
@@ -74,11 +75,12 @@ services:
       - ../db/postgres/0014_tenant_feature_value_events.sql:/docker-entrypoint-initdb.d/0014_tenant_feature_value_events.sql:ro
       - ../db/postgres/0015_tenant_compute_config_gcp.sql:/docker-entrypoint-initdb.d/0015_tenant_compute_config_gcp.sql:ro
       - ../db/postgres/0016_tenant_vercel_config.sql:/docker-entrypoint-initdb.d/0016_tenant_vercel_config.sql:ro
-      # Revenue: which sources count (CTO-194) and the uploaded-snapshot manifest (CTO-198). Both
-      # were written after this mount list last grew, and initdb only fires on a first boot against
-      # an empty volume, so an already-running stack needs them applied by hand (`make psql`).
+      # Revenue: which sources count (CTO-194) and the uploaded-snapshot manifest (CTO-198), plus
+      # the account labels table (CTO-186). initdb only runs when the data directory is empty, so
+      # on an already-running local stack these have to be applied by hand (`make psql`).
       - ../db/postgres/0022_tenant_revenue_sources.sql:/docker-entrypoint-initdb.d/0022_tenant_revenue_sources.sql:ro
-      - ../db/postgres/0023_tenant_revenue_uploads.sql:/docker-entrypoint-initdb.d/0023_tenant_revenue_uploads.sql:ro
+      - ../db/postgres/0023_tenant_account_labels.sql:/docker-entrypoint-initdb.d/0023_tenant_account_labels.sql:ro
+      - ../db/postgres/0024_tenant_revenue_uploads.sql:/docker-entrypoint-initdb.d/0024_tenant_revenue_uploads.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s
