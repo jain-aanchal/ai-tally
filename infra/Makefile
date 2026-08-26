@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo ch-migrate aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -20,6 +20,25 @@ down: ## Stop the stack (keep data volumes)
 
 nuke: ## Stop and wipe all data volumes (DDL re-applies on next up)
 	$(COMPOSE) down -v
+
+# Canonical ClickHouse DDL, in the same dependency order compose mounts it into initdb.
+CH_DDL := ../db/clickhouse/otel_spans.sql ../db/clickhouse/rollups.sql \
+          ../db/clickhouse/last_touch_index.sql ../db/clickhouse/attribution.sql
+
+ch-migrate: ## Apply db/clickhouse DDL to a RUNNING stack (initdb only fires on a fresh volume)
+	@# The /docker-entrypoint-initdb.d mounts in docker-compose.yml run ONLY on a first boot
+	@# against an empty volume. Anyone whose stack is already up therefore never sees a new
+	@# column added to those files, which is how the Postgres side of this repo ended up with
+	@# migrations 0011/0012/0015/0016 that had silently never been applied. This target closes
+	@# that gap for ClickHouse: every statement in db/clickhouse is CREATE ... IF NOT EXISTS or
+	@# ALTER ... ADD COLUMN IF NOT EXISTS, so replaying the whole set is idempotent, cheap
+	@# (metadata-only for additive columns) and safe to run against a populated database.
+	@for f in $(CH_DDL); do \
+	  echo "  applying $$f"; \
+	  $(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	    --multiquery < $$f || exit 1; \
+	done
+	@echo "ClickHouse DDL applied."
 
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway

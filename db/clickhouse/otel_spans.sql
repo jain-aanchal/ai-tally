@@ -26,6 +26,29 @@ CREATE TABLE IF NOT EXISTS otel_spans
     SessionId              String                   CODEC(ZSTD(1)),
     UserIdHash             FixedString(64)          CODEC(ZSTD(1)),  -- HMAC-SHA256 hex
     UserIdHashKeyVersion   LowCardinality(String),                  -- HMAC rotation (CTO-74)
+
+    -- Account dimension (CTO-180). The tenant's own paying customer: the company, workspace or
+    -- team that the end user belongs to. It sits between TenantId (the ai-tally customer) and
+    -- UserIdHash (an individual end user), which is a gap nothing filled before. Cost per USER
+    -- already works because UserIdHash is on every span; cost per CUSTOMER needs this grouping.
+    --
+    -- Same type and same treatment as UserIdHash: HMAC-SHA256 hex under the per-tenant key, so
+    -- an account hash cannot be reversed and cannot be joined across tenants. Raw account ids
+    -- never reach this table. AccountIdHashKeyVersion mirrors UserIdHashKeyVersion so an account
+    -- survives a key rotation the same way a user does (CTO-74).
+    --
+    -- DEFAULT '' is load-bearing. Every span written before this column existed, and every span
+    -- from a tenant that has not instrumented account_id, reads back as ''. That is the
+    -- UNATTRIBUTED bucket and callers must render it as such: it is not a customer named
+    -- "unknown", and it must never be ranked alongside real accounts.
+    --
+    -- There is deliberately NO account label / display name column here. A label is mutable
+    -- metadata: stamping it on every span wastes storage and creates a "which label wins"
+    -- question the moment an account is renamed. It would also put customer names in the
+    -- telemetry store, which is precisely what hashing the id exists to prevent. Labels live in
+    -- the Postgres control plane, keyed on this hash and joined at render time.
+    AccountIdHash          FixedString(64) DEFAULT ''  CODEC(ZSTD(1)),  -- HMAC-SHA256 hex
+    AccountIdHashKeyVersion LowCardinality(String),                     -- HMAC rotation (CTO-74)
     IdempotencyKey         String                   CODEC(ZSTD(1)),
 
     -- GenAI core (gen_ai.* semconv)
@@ -112,3 +135,19 @@ ALTER TABLE otel_spans
 ALTER TABLE otel_spans
     ADD COLUMN IF NOT EXISTS SamplingStratum LowCardinality(String) DEFAULT 'unsampled',
     ADD COLUMN IF NOT EXISTS SamplingRate    Float32                DEFAULT 1.0 CODEC(ZSTD(1));
+
+-- CTO-180 additive migration. Same idempotent pattern as CTO-118/CTO-119: `ADD COLUMN IF NOT
+-- EXISTS` plus a DEFAULT makes this metadata-only, so it applies to an already-populated table
+-- without rewriting a single part and without blocking ingest. There is no backfill step because
+-- there is nothing to backfill from: no span ever carried an account id, so historical rows stay
+-- '' and are reported as unattributed rather than guessed at.
+--
+-- APPLYING THIS TO AN EXISTING DEPLOYMENT. The compose initdb directory that mounts this file
+-- runs ONLY on a first boot against an empty volume, so a stack that is already up will never
+-- see the statement below on its own. Replay the canonical DDL with `make ch-migrate` from
+-- infra/ (every statement in db/clickhouse is IF NOT EXISTS, so replaying is safe and repeatable).
+-- This is not a hypothetical: the Postgres side of this repo has already shipped migrations
+-- (0011, 0012, 0015, 0016) that silently never reached an existing volume for exactly this reason.
+ALTER TABLE otel_spans
+    ADD COLUMN IF NOT EXISTS AccountIdHash           FixedString(64) DEFAULT '' CODEC(ZSTD(1)),
+    ADD COLUMN IF NOT EXISTS AccountIdHashKeyVersion LowCardinality(String);
