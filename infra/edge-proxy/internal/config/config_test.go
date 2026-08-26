@@ -203,3 +203,28 @@ func TestProviderSelection(t *testing.T) {
 		t.Error("expected error for unknown provider")
 	}
 }
+
+// TestAccountIdHashHeaderDefault: the account control header (CTO-182) defaults to the X-Tally-*
+// name documented in the README, matching the existing feature-tag convention.
+func TestAccountIdHashHeaderDefault(t *testing.T) {
+	cfg, err := FromEnv(envMap(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AccountIdHashHeader != DefaultAccountIdHashHeader {
+		t.Errorf("AccountIdHashHeader = %q, want %q", cfg.AccountIdHashHeader, DefaultAccountIdHashHeader)
+	}
+	if DefaultAccountIdHashHeader != "X-Tally-Account-Id-Hash" {
+		t.Errorf("default header name changed to %q; update the README", DefaultAccountIdHashHeader)
+	}
+}
+
+func TestAccountIdHashHeaderOverride(t *testing.T) {
+	cfg, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_ACCOUNT_ID_HASH_HEADER": "X-Acct"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AccountIdHashHeader != "X-Acct" {
+		t.Errorf("AccountIdHashHeader = %q", cfg.AccountIdHashHeader)
+	}
+}
