@@ -26,6 +26,8 @@ import {
 import { formatUSD, type SpendByLayer } from "@/lib/types";
 import { useLivePoll } from "@/lib/useLivePoll";
 
+import { BudgetVsActualCard, type BudgetPayload } from "./BudgetVsActualCard";
+
 export interface CostPayload {
   series: CostSeries;
   featureRows: FeatureCostRow[];
@@ -40,10 +42,15 @@ export function CostLive({
   endpoint,
   initialData,
   enabledLayers,
+  budget,
 }: {
   endpoint: string;
   initialData: CostPayload;
   enabledLayers: readonly Layer[];
+  // Not part of the polled payload (CTO-209): a budget changes about monthly and the settled
+  // window advances once a day, so re-reading both every 5 seconds would be pure waste. See the
+  // comment at the top of app/api/cost/budget/route.ts.
+  budget: BudgetPayload;
 }) {
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
@@ -80,6 +87,11 @@ export function CostLive({
         <StackedBarChart series={costSeries} />
         <Legend />
       </Card>
+
+      {/* Directly under the 30-day headline on purpose (CTO-209): this card's figure is smaller
+          than that total, and the two only reconcile once you have read the coverage line saying
+          which days it counted. Putting them far apart is how the page starts looking broken. */}
+      <BudgetVsActualCard payload={budget} />
 
       {hiddenCostAlerts.map((a) => (
         <div
