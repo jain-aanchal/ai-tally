@@ -54,15 +54,26 @@ export function Money({
  * A percentage. `value` is a fraction (0.42 renders "42.0%"), matching how rates arrive from the
  * API everywhere in this app. `digits` because the existing surfaces disagree on precision:
  * attribution rates round to whole percent, error rates want two decimals.
+ *
+ * `unit` exists for ranges. A confidence band reads "9.9–10.3%", printing the sign once at the end
+ * rather than on both ends, so the low bound needs the same rounding as everything else but not the
+ * trailing "%". Without this the only options are re-implementing the formatting at the call site
+ * or changing how the band reads, and the band's format is deliberate.
  */
 export function Pct({
   value,
   digits = 1,
+  unit = true,
   reason,
   className,
-}: NullableProps<"value", number> & { digits?: number }) {
+}: NullableProps<"value", number> & { digits?: number; unit?: boolean }) {
   if (value === null || Number.isNaN(value)) {
     return <Blank reason={reason ?? "not enough samples to report a rate"} className={className} />;
   }
-  return <span className={className}>{(value * 100).toFixed(digits)}%</span>;
+  return (
+    <span className={className}>
+      {(value * 100).toFixed(digits)}
+      {unit ? "%" : ""}
+    </span>
+  );
 }
