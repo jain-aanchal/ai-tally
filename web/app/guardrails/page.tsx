@@ -6,6 +6,7 @@
 // idempotent change_id to the gateway; the SDK picks the change up on its next config-refresh window.
 
 import { Card } from "@/components/Card";
+import { PageHeader } from "@/components/PageHeader";
 import { apiGet } from "@/lib/api";
 import {
   type GuardrailRule,
@@ -19,41 +20,43 @@ interface GuardrailsPayload {
   configRefreshSeconds: number;
 }
 
+// A count stat rendered in the kit's tile shell (CTO-225). These are integer counts, not money, so
+// they intentionally do not go through SummaryTile/<Money>; there is no honest-blank case for a
+// count of rules the page already holds in memory.
+function CountTile({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div className="flex flex-col gap-1 rounded-xl border border-edge bg-panel p-4">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <span className={`text-2xl font-semibold tabular-nums ${accent ? "text-accent" : ""}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export default async function GuardrailsPage() {
   const { rules, configRefreshSeconds } = await apiGet<GuardrailsPayload>("/api/guardrails");
   const summary = summarize(rules);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Guardrails</h1>
-        <p className="mt-1 text-sm text-muted">
-          Per-tenant cost / step caps. Rules start in observe-only and graduate to enforcement with
-          confidence. Mode changes take effect on the SDK within the {configRefreshSeconds}s
-          config-refresh window.
-        </p>
-      </div>
+      <PageHeader
+        title="Guardrails"
+        subtitle={
+          <>
+            Per-tenant cost / step caps. Rules start in observe-only and graduate to enforcement
+            with confidence. Mode changes take effect on the SDK within the {configRefreshSeconds}s
+            config-refresh window.
+          </>
+        }
+      />
 
-      <Card title="Summary">
-        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div>
-            <dt className="text-xs uppercase tracking-wide text-muted">Rules</dt>
-            <dd className="mt-0.5 text-2xl font-semibold">{summary.total}</dd>
-          </div>
-          <div>
-            <dt className="text-xs uppercase tracking-wide text-muted">Enforcing</dt>
-            <dd className="mt-0.5 text-2xl font-semibold">{summary.enforcing}</dd>
-          </div>
-          <div>
-            <dt className="text-xs uppercase tracking-wide text-muted">Observing</dt>
-            <dd className="mt-0.5 text-2xl font-semibold">{summary.observing}</dd>
-          </div>
-          <div>
-            <dt className="text-xs uppercase tracking-wide text-muted">Ready to enforce</dt>
-            <dd className="mt-0.5 text-2xl font-semibold text-accent">{summary.readyToGraduate}</dd>
-          </div>
-        </dl>
-      </Card>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <CountTile label="Rules" value={summary.total} />
+        <CountTile label="Enforcing" value={summary.enforcing} />
+        <CountTile label="Observing" value={summary.observing} />
+        <CountTile label="Ready to enforce" value={summary.readyToGraduate} accent />
+      </div>
 
       <Card title="Rules">
         <div className="overflow-x-auto">
