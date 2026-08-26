@@ -99,3 +99,105 @@ export interface AccountDetail extends AccountCostRow {
   /** One point per calendar day across the window, oldest first, gaps filled with zero. */
   trend: AccountTrendPoint[];
 }
+
+// --- Presentation helpers for the /cost-per-customer tab (CTO-188, plan D2) ----------------------
+//
+// Pure functions, no I/O, so the honesty rules the page depends on are unit-testable rather than
+// buried in JSX. Every one of them exists to stop the tab printing a number it cannot stand behind.
+
+/**
+ * Spans an account needs in the window before a per-user figure is printed.
+ *
+ * Follows the `/compare` precedent ("needs ≥50 spans in 7d", and MIN_SPANS_FOR_LATENCY_ERROR in
+ * clickhouse.ts). Cost per user is a ratio of two small numbers on a quiet account: one expensive
+ * retry against a single user reads as an eye-watering per-seat cost, and a reader cannot tell that
+ * apart from a real one. Below the floor the cell is blank with the reason attached.
+ */
+export const MIN_SPANS_FOR_COST_PER_USER = 50;
+
+/** A value the tab either has, or does not have and can say why. `micro` and `reason` are exclusive. */
+export interface HonestMicro {
+  micro: MicroUSD | null;
+  reason: string | null;
+}
+
+/**
+ * Direct cost divided by distinct users, or a blank carrying its reason.
+ *
+ * Two separate blanks, deliberately not collapsed into one: too few spans to trust the ratio, and
+ * no users to divide by at all. Those are different facts about the account, and a reader chasing
+ * an empty cell wants the one that applies.
+ *
+ * `distinctUsers` is a HyperLogLog approximation (see {@link AccountCostRow}), which is fine as a
+ * divisor for one account's row and is why this figure is never summed into a headline.
+ */
+export function costPerUser(row: AccountCostRow): HonestMicro {
+  if (row.distinctUsers <= 0) {
+    return {
+      micro: null,
+      reason: "no distinct users recorded for this account, so there is nothing to divide by",
+    };
+  }
+  if (row.spanCount < MIN_SPANS_FOR_COST_PER_USER) {
+    return {
+      micro: null,
+      reason: `needs ≥${MIN_SPANS_FOR_COST_PER_USER} spans in the window; this account has ${row.spanCount.toLocaleString()}`,
+    };
+  }
+  return { micro: Math.round(row.directCostMicroUsd / row.distinctUsers), reason: null };
+}
+
+/** Leading hex characters shown when an account carries no label. */
+export const SHORT_HASH_CHARS = 12;
+
+/**
+ * The shortened hash shown in the Account column when no label exists.
+ *
+ * Truncated for width only. The full hash stays available on hover and through the copy control,
+ * because the short form is not an identifier: it is not what the lookup endpoint returns and it is
+ * not what a label write accepts.
+ */
+export function shortenAccountHash(accountIdHash: string): string {
+  if (accountIdHash.length <= SHORT_HASH_CHARS) return accountIdHash;
+  return `${accountIdHash.slice(0, SHORT_HASH_CHARS)}…`;
+}
+
+/**
+ * Share of direct spend carrying no account, as a fraction, or `null` when the tenant recorded no
+ * direct spend at all in the window.
+ *
+ * `null` rather than 0: with nothing to attribute, "0% unattributed" is a claim of perfect coverage
+ * and the exact opposite of what is true. This is the page's honesty valve, so it fails to a blank
+ * rather than to a flattering number.
+ */
+export function unattributedShare(costs: AccountCosts): number | null {
+  if (costs.totalDirectMicroUsd <= 0) return null;
+  return costs.unattributed.directCostMicroUsd / costs.totalDirectMicroUsd;
+}
+
+/** Decimal places the unattributed share is printed to. */
+export const SHARE_DIGITS = 1;
+
+/**
+ * The unattributed share as text, with the rounding boundaries called out.
+ *
+ * A share of 0.99999 rounds to "100.0%", and printing that beside a table of three real accounts is
+ * a small lie in both directions: it says nothing is attributed while something plainly is. The
+ * same trap sits at the other end, where a genuine sliver rounds to "0.0%" and reads as perfect
+ * coverage. So the two boundaries print as ">99.9%" and "<0.1%", and only an exact 1 or 0 gets the
+ * round number. This is the page's headline honesty figure; it is the last place to let a rounding
+ * rule overstate the answer.
+ */
+export function formatShare(share: number): string {
+  if (share >= 1) return "100.0%";
+  if (share <= 0) return "0.0%";
+  const rounded = (share * 100).toFixed(SHARE_DIGITS);
+  if (Number(rounded) >= 100) return ">99.9%";
+  if (Number(rounded) <= 0) return "<0.1%";
+  return `${rounded}%`;
+}
+
+/** Direct spend that IS attributed to an account: the total less the unattributed bucket. */
+export function attributedSpend(costs: AccountCosts): MicroUSD {
+  return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
+}
