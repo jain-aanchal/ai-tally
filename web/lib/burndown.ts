@@ -18,10 +18,11 @@
 //  2. THE TWO CLOCKS. Every date here comes from ClickHouse: `periodStart` and `windowEnd` are read
 //     off the series, `asOf` is the series' own `settledThrough`, and the period end is calendar
 //     arithmetic on `periodStart`. There is no `new Date()` anywhere in this module and none in the
-//     chart. `queryCostSeries` still builds its axis from the Node clock (CTO-203) and the failure
-//     mode is silent: the oldest day drops off the chart while still counting in the total printed
-//     beside it. `chartReconciles` below exists so that if this section ever acquires the same bug
-//     it says so on screen instead of quietly disagreeing with the card above it.
+//     chart. `queryCostSeries` used to build its axis from the Node clock, and the failure mode was
+//     silent: the oldest day dropped off the chart while still counting in the total printed beside
+//     it (CTO-203, now fixed by sourcing its day list from ClickHouse too). `chartReconciles` below
+//     exists so that if this section ever acquires the same bug it says so on screen instead of
+//     quietly disagreeing with the card above it.
 //
 //  3. TRIMMING THE PRE-ONBOARDING ZEROS, which is what makes the minimum-history guard fire at all.
 //     `querySettledCostSeries` gives every calendar day in its 30-day window a slot, and a day with
