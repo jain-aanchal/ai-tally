@@ -152,6 +152,24 @@ class HmacKeyRegistry:
         key = self._provider.material(tenant_id, key_version)
         return StampedHash(value=_hmac_hex(user_id, key), key_version=key_version)
 
+    def hash_account(self, tenant_id: str, account_id: str) -> StampedHash:
+        """Hash an *account* id (the tenant's own customer) under the tenant's active key.
+
+        Deliberately the same key and the same digest as :meth:`hash` rather than a separate
+        account key (CTO-181). Two reasons. First, the guarantee we owe an account id is exactly
+        the one we owe a user id: not reversible, not joinable across tenants, and stamped with a
+        version so Option B rotation carries it forward. Second, the revenue connectors already
+        hash what is really an account id (a Stripe customer, a HubSpot company) through this
+        path into ``UserIdHash``; keeping one key means routing those into ``AccountIdHash``
+        later is a column change, not a re-hash of history.
+
+        The consequence is that the same string tagged as both a user and an account produces the
+        same digest within a tenant. That is a correct identity statement, not a collision.
+        """
+        if not account_id:
+            raise ValueError("account_id must be non-empty")
+        return self.hash(tenant_id, account_id)
+
     def _require_provisioned(self, tenant_id: str) -> None:
         if tenant_id not in self._active:
             raise KeyError(f"tenant {tenant_id!r} has no provisioned HMAC key set")

@@ -54,8 +54,13 @@ _STR_KEYS = frozenset(
     {
         GenAI.SYSTEM, GenAI.REQUEST_MODEL, GenAI.RESPONSE_MODEL, GenAI.OPERATION_NAME,
         GenAI.COST_CURRENCY, GenAI.FEATURE_TAG, GenAI.SESSION_ID, GenAI.USER_ID_HASH,
+        GenAI.ACCOUNT_ID_HASH,
     }
 )
+
+# Identifier keys that must arrive already HMAC-hashed. A raw account id is as much a raw
+# identifier as a raw user id, so the account hash gets the same guard (CTO-182).
+_HASHED_ID_KEYS = frozenset({GenAI.USER_ID_HASH, GenAI.ACCOUNT_ID_HASH})
 
 DEFAULT_MAX_SPAN_BYTES = 64 * 1024
 
@@ -80,15 +85,15 @@ def _iter_str_values(span: dict[str, object]) -> Iterable[tuple[str, str]]:
             yield str(k), v
 
 
-def _looks_unhashed(user_id_hash: str) -> bool:
+def _looks_unhashed(value: str) -> bool:
     """A real HMAC-SHA256 hex is 64 lowercase hex chars. Reject obvious raw ids / e-mails.
 
     Heuristic, deliberately conservative to avoid false positives: only flag when the value clearly
     isn't a hash — contains '@', or contains non-hex characters (a raw username/id would).
     """
-    if "@" in user_id_hash:
+    if "@" in value:
         return True
-    s = user_id_hash.strip().lower()
+    s = value.strip().lower()
     if not s:
         return False
     is_hexish = all(c in "0123456789abcdef" for c in s) and len(s) >= 16
@@ -148,9 +153,9 @@ class SpanValidator:
             if str(key).lower() in _FORBIDDEN_PII_KEYS:
                 return f"forbidden raw-PII key present: {key!r}"
         for key, value in _iter_str_values(span):
-            if key == GenAI.USER_ID_HASH:
+            if key in _HASHED_ID_KEYS:
                 if _looks_unhashed(value):
-                    return "gen_ai.user_id_hash is not a hash (raw identifier?)"
+                    return f"{key} is not a hash (raw identifier?)"
                 continue
             if _EMAIL_RE.search(value):
                 return f"raw e-mail detected in {key!r}"

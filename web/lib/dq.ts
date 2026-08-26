@@ -36,6 +36,50 @@ export interface SampleByStratum {
   spans: number;
 }
 
+/**
+ * One user observed against more than one account (CTO-184).
+ *
+ * One user belongs to one account; multi-account users are explicitly not supported. When a user
+ * is stitched to two accounts the pipeline attributes NOTHING for them: it does not split the
+ * cost, does not duplicate it, and does not pick first-seen. Duplicating would inflate the tenant
+ * total so per-account spend would stop summing to what /cost reports, which is the one thing
+ * that would make the whole per-customer surface untrustworthy.
+ *
+ * Withholding is the safe behaviour but it is not a silent one, which is what this type is for:
+ * the fix lives in the tenant's CRM and nobody can make it if nobody can see the conflict.
+ */
+export interface AccountStitchConflict {
+  /** The ambiguous user's hash. Truncated for display; never a raw id. */
+  userIdHash: string;
+  /** Every distinct account hash observed for this user, sorted. Always length >= 2. */
+  accounts: string[];
+  /** Spend held back over the last 30d because of this ambiguity. */
+  withheldMicroUsd: number;
+  /** Spans behind that figure. */
+  spans30d: number;
+}
+
+/**
+ * Account-dimension coverage and its confidence (CTO-184).
+ *
+ * `directAccounts` and `stitchedAccounts` are the two ways an account can become known, and a
+ * consumer tells them apart by which one a hash appears in: a directly-tagged account was stamped
+ * on the span itself at emit time (`otel_spans.AccountIdHash != ''`, CTO-180) and is as certain as
+ * the span; a stitched account was inferred from an `account_id` edge asserted by a CRM or CDP
+ * connector in `identity_graph` and is only as good as that connector's data. The UI renders the
+ * second with lower confidence.
+ */
+export interface AccountStitching {
+  /** Accounts stamped directly on spans over the window. */
+  directAccounts: number;
+  /** Accounts known only from identity-graph `account_id` edges. */
+  stitchedAccounts: number;
+  /** Users carrying at least one `account_id` edge. */
+  stitchedUsers: number;
+  /** Users the stitcher refuses to attribute, because they resolve to more than one account. */
+  conflicts: AccountStitchConflict[];
+}
+
 export interface DataQualityReport {
   overall: {
     attributionRate: number;
@@ -47,6 +91,31 @@ export interface DataQualityReport {
   contextDrops: ContextDropsByService[];
   calibration: CalibrationDay[];
   sampling: SampleByStratum[];
+  /**
+   * CTO-184. Optional so a cached or older payload still type-checks; the page treats an absent
+   * value the same as "no account dimension instrumented yet", which is the honest reading.
+   */
+  accountStitching?: AccountStitching;
+}
+
+/**
+ * Total spend withheld from per-account attribution because of multi-account users (CTO-184).
+ * Pure so the page and the tests agree on one definition of "how much this is costing us".
+ */
+export function withheldByConflicts(conflicts: AccountStitchConflict[]): number {
+  return conflicts.reduce((sum, c) => sum + c.withheldMicroUsd, 0);
+}
+
+/**
+ * Health of the account-stitching signal. Any conflict at all is a `bad`: it is not a threshold
+ * question, it is a tenant CRM asserting two contradictory facts about the same person, and the
+ * consequence is that we report nothing for them. Zero conflicts with stitching in use is `good`;
+ * zero conflicts with nothing stitched is also `good`, because nothing is wrong, there is just
+ * nothing there.
+ */
+export function classifyAccountStitching(s: AccountStitching | undefined): Health {
+  if (!s || s.conflicts.length === 0) return "good";
+  return "bad";
 }
 
 export function classify(metric: "attribution" | "drops" | "calibration", v: number): Health {
@@ -90,4 +159,19 @@ export const dq: DataQualityReport = {
     { stratum: "mid", rate: 0.5, ciHalfWidthPct: 0.04, spans: 1840 },
     { stratum: "body", rate: 0.1, ciHalfWidthPct: 0.18, spans: 12_600 },
   ],
+  // CTO-184. The mock deliberately carries one conflict, because the empty case renders a
+  // reassuring green row and the interesting case is the one a reviewer needs to be able to see.
+  accountStitching: {
+    directAccounts: 18,
+    stitchedAccounts: 42,
+    stitchedUsers: 1_340,
+    conflicts: [
+      {
+        userIdHash: "9f2c41ab7d0e5583",
+        accounts: ["3b7e0c19aa41d2f8", "c04d19e6b7a35510"],
+        withheldMicroUsd: 4_820_000,
+        spans30d: 312,
+      },
+    ],
+  },
 };

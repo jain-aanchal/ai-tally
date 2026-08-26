@@ -38,8 +38,9 @@ services:
       # spans table must exist before the rollup MVs that target it.
       - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
       - ../db/clickhouse/rollups.sql:/docker-entrypoint-initdb.d/02_rollups.sql:ro
-      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/03_last_touch_index.sql:ro
-      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/04_attribution.sql:ro
+      - ../db/clickhouse/account_rollups.sql:/docker-entrypoint-initdb.d/03_account_rollups.sql:ro
+      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/04_last_touch_index.sql:ro
+      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/05_attribution.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
@@ -74,6 +75,10 @@ services:
       - ../db/postgres/0014_tenant_feature_value_events.sql:/docker-entrypoint-initdb.d/0014_tenant_feature_value_events.sql:ro
       - ../db/postgres/0015_tenant_compute_config_gcp.sql:/docker-entrypoint-initdb.d/0015_tenant_compute_config_gcp.sql:ro
       - ../db/postgres/0016_tenant_vercel_config.sql:/docker-entrypoint-initdb.d/0016_tenant_vercel_config.sql:ro
+      # Mounted here so a FRESH volume gets the table on initdb. An EXISTING volume does not:
+      # /docker-entrypoint-initdb.d only runs when the data directory is empty, so on a running
+      # local stack this file has to be applied by hand with psql (CTO-186).
+      - ../db/postgres/0023_tenant_account_labels.sql:/docker-entrypoint-initdb.d/0023_tenant_account_labels.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s
