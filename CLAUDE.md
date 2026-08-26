@@ -10,12 +10,12 @@ Cost-and-value observability for AI products. It meters what an AI feature costs
 
 Four codebases plus infra and schema:
 
-- `sdk/python/` — the Python SDK (`tally.*`): span emission, per-tenant HMAC user/account hashing, pricing catalog, guardrail engine, the pure in-memory attribution stitcher, CDP/revenue connectors. `uv`, `ruff`, `pytest`.
-- `infra/gateway/` — the FastAPI ingest gateway: `/v1/batches` ingest, the control plane (`/v1/tenant/*`), cloud cost connectors, the scheduler that runs per-tenant jobs, third-party ingest workers, reconciliation, BigQuery/Athena export. `uv`, `ruff`, `pytest`.
-- `infra/edge-proxy/` — the Go edge proxy: language-agnostic metering in the request path. `go build`, `go test`, `gofmt`.
-- `web/` — the Next.js 15 dashboard (App Router). Reads ClickHouse directly for telemetry and calls the gateway for control-plane writes. `npm run typecheck | lint | test` (vitest).
-- `db/postgres/` — numbered control-plane migrations (`0001_...` upward). `db/clickhouse/` — telemetry table DDL.
-- `infra/docker-compose.yml` — ClickHouse, Postgres, Redpanda, MinIO, gateway. `infra/Makefile` drives it.
+- `sdk/python/`: the Python SDK (`tally.*`): span emission, per-tenant HMAC user/account hashing, pricing catalog, guardrail engine, the pure in-memory attribution stitcher, CDP/revenue connectors. `uv`, `ruff`, `pytest`.
+- `infra/gateway/`: the FastAPI ingest gateway: `/v1/batches` ingest, the control plane (`/v1/tenant/*`), cloud cost connectors, the scheduler that runs per-tenant jobs, third-party ingest workers, reconciliation, BigQuery/Athena export. `uv`, `ruff`, `pytest`.
+- `infra/edge-proxy/`: the Go edge proxy: language-agnostic metering in the request path. `go build`, `go test`, `gofmt`.
+- `web/`: the Next.js 15 dashboard (App Router). Reads ClickHouse directly for telemetry and calls the gateway for control-plane writes. `npm run typecheck | lint | test` (vitest).
+- `db/postgres/`: numbered control-plane migrations (`0001_...` upward). `db/clickhouse/`: telemetry table DDL.
+- `infra/docker-compose.yml`: ClickHouse, Postgres, Redpanda, MinIO, gateway. `infra/Makefile` drives it.
 
 ## Running it
 
