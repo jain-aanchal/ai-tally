@@ -32,6 +32,7 @@ import type {
   AccountTrendPoint,
   DirectLayer,
   DirectSpendByLayer,
+  ExcludedInfraCost,
 } from "./accounts";
 import {
   DIRECT_LAYERS,
@@ -427,6 +428,48 @@ export async function queryAccountCosts(): Promise<AccountCosts | null> {
       // reconcile with /cost's direct spend for the same window.
       totalDirectMicroUsd:
         accounts.reduce((s, a) => s + a.directCostMicroUsd, 0) + unattributed.directCostMicroUsd,
+    };
+  });
+}
+
+/**
+ * Compute and egress for the window, the exact complement of what {@link queryAccountCosts} counts.
+ *
+ * This is the other half of the tenant's bill, and the per-customer tab cannot attribute it: these
+ * rows land from the cloud billing connectors as tenant-level daily totals with no account on them.
+ * The page states the figure so a reader knows how much of their spend the table below leaves out
+ * (CTO-189). Read from the same rollup, over the same window, under the negation of DIRECT_ONLY,
+ * so direct plus excluded is the tenant total for the window with nothing double counted and
+ * nothing dropped.
+ *
+ * Returns `null` (via tryLive) when ClickHouse is unreachable; the caller must not read that as
+ * zero excluded cost, which would be the most flattering possible reading of a failed query.
+ */
+export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null> {
+  return tryLive(async (db, tenant) => {
+    // Grouped by layer rather than summed flat so the two figures stay separable: compute and
+    // egress have very different fixes, and a later drill-down needs them apart. LAYER_CASE is
+    // reused rather than reading GenAiOperation directly so the operation-to-layer mapping keeps
+    // living in exactly one place.
+    const out = await rows<{ layer: string; cost: string }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND NOT (${DIRECT_ONLY})
+       GROUP BY layer`,
+      tenant,
+    );
+    let computeMicroUsd = 0;
+    let egressMicroUsd = 0;
+    for (const r of out) {
+      if (r.layer === "compute") computeMicroUsd = micro(r.cost);
+      else if (r.layer === "egress") egressMicroUsd = micro(r.cost);
+    }
+    return {
+      windowDays: ACCOUNT_WINDOW_DAYS,
+      computeMicroUsd,
+      egressMicroUsd,
+      totalMicroUsd: computeMicroUsd + egressMicroUsd,
     };
   });
 }
