@@ -13,8 +13,11 @@ const NAV: { label: string; href: string }[] = [
   { label: "Cost per Customer", href: "/cost-per-customer" },
   { label: "Connectors", href: "/connectors" },
   { label: "Guardrails", href: "/guardrails" },
+  // Budgets are real, tenant-declared configuration backed by the gateway control plane
+  // (CTO-208, F4), so they are linked directly rather than hidden behind /settings.
+  { label: "Budgets", href: "/settings/budgets" },
   // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
-  //   - /settings        — empty shell, no real settings wired
+  //   - /settings        — guardrail config only, nothing else wired
   //   - /estimate        — mock fixtures (re-add when CTO-128 lands)
   //   - /data-quality    — placeholder rows (re-add when DQ follow-ups land)
 ];
