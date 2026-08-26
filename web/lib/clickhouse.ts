@@ -47,6 +47,12 @@ import {
   queryRevenuePolicy,
   revenueSourceFilter,
 } from "./revenueSources";
+import {
+  accountRevenueReport,
+  accountRevenueSql,
+  type AccountRevenueReport,
+  type AccountRevenueSqlRow,
+} from "./accountRevenue";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -1433,6 +1439,33 @@ export async function queryAttribution(
 
     if (perProvider.length === 0) return emptyReport(filters);
     return { filters, perProvider, totals, isMock: false };
+  });
+}
+
+// --- Revenue per account (CTO-196) --------------------------------------------------------------
+
+/**
+ * Net revenue per account over the same 30 day window the cost queries use.
+ *
+ * The SQL and the null-vs-zero rule live in lib/accountRevenue.ts, which documents both; this is
+ * only the round trip. Two properties worth restating here because they are easy to break:
+ *
+ * - The tenant's E1 revenue policy decides what counts, so uploaded revenue and connector revenue
+ *   go through one filter. A gateway outage falls back to the default policy rather than blanking
+ *   the figure, same as queryAttribution.
+ * - The grouping key is the `AccountIdHash` already on the row. Revenue is never re-keyed from a
+ *   user here: E2's AccountLinker owns the one user, one account rule and lands ambiguous revenue
+ *   unattributed with an AccountConflict finding, and the unattributed bucket is reported rather
+ *   than dropped.
+ *
+ * Returns null on any ClickHouse error, so a caller falls back rather than rendering a zero.
+ */
+export async function queryAccountRevenue(): Promise<AccountRevenueReport | null> {
+  return tryLive(async (db, tenant) => {
+    const policy = await queryRevenuePolicy();
+    const { sql, params } = accountRevenueSql(policy);
+    const rows = await rowsP<AccountRevenueSqlRow>(db, sql, { tenant, ...params });
+    return accountRevenueReport(rows);
   });
 }
 
