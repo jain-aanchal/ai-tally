@@ -133,6 +133,24 @@ class Settings(BaseSettings):
     # Max rows pulled from ClickHouse per (tenant, table) export pass.
     athena_export_batch_limit: int = 10_000
 
+    # Scheduler (CTO-213). Periodic per-tenant job execution, started from the FastAPI lifespan the
+    # same way the ingest buffer is. OFF by default like every other background feature here, so an
+    # upgrade changes nothing: with the flag off no task is created and behaviour is identical to
+    # today. CTO-213 registers no jobs at all (the cost connectors are CTO-215, the ingest workers
+    # CTO-216), so even enabling it ticks over an empty registry until one of those lands.
+    #
+    # NOT yet safe on more than one replica: advisory locking is phase 2 of
+    # docs/scheduler-scope.md, so two enabled gateways would run every job twice. Enable on one.
+    scheduler_enabled: bool = False
+    # How often the loop wakes to ask "is anything due". This is NOT a job's cadence — cadence is
+    # per job and is measured against recorded run history, so this only bounds how late a due job
+    # can be picked up. Minutes, because the finest useful cadence in this product is minutes.
+    scheduler_tick_interval_s: float = 300.0
+    # Backoff after repeated failure, so a permanently broken job is not retried every tick forever.
+    # The first failure is not delayed at all; the second waits base, and it doubles to the cap.
+    scheduler_backoff_base_s: float = 300.0
+    scheduler_backoff_cap_s: float = 6 * 3600.0
+
 
 _settings: Settings | None = None
 
