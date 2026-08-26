@@ -92,6 +92,9 @@ services:
       # Scheduler run history (CTO-213). The tick loop answers "is this job due for this
       # tenant" from this table rather than from a sleeping coroutine, so it survives restarts.
       - ../db/postgres/0027_scheduler_runs.sql:/docker-entrypoint-initdb.d/0027_scheduler_runs.sql:ro
+      # Incremental ingest cursors (CTO-219). Without these every Segment / HubSpot / Pendo cycle
+      # re-pulls the provider's whole window, 96 times a day per tenant per connector.
+      - ../db/postgres/0028_tenant_ingest_cursors.sql:/docker-entrypoint-initdb.d/0028_tenant_ingest_cursors.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s

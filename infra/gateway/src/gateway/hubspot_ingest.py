@@ -37,6 +37,7 @@ from tally.wire import BusinessEvent
 
 from gateway.integration_workers import (
     IngestOutcome,
+    IngestWindow,
     IngestWorker,
     as_event_list,
     build_hasher,
@@ -137,12 +138,23 @@ class HubSpotWorker(IngestWorker):
     connector_id = "hubspot"
 
     def _ingest(
-        self, tenant_id: str, secret: IntegrationSecret, token: str
+        self, tenant_id: str, secret: IntegrationSecret, token: str, window: IngestWindow
     ) -> IngestOutcome:
         base = str(secret.config.get("base_url") or DEFAULT_HUBSPOT_BASE).rstrip("/")
         url = base + HUBSPOT_EVENTS_PATH
         headers = {"Authorization": f"Bearer {token}"}
-        payload = self._http.get_json(url, headers=headers)
+        # CTO-219: incremental. HubSpot timestamps are epoch milliseconds throughout (the mapper
+        # already reads occurredAt that way), so the window goes out in the same units. Like the
+        # endpoint path above the exact parameter spelling is a deployment detail; what this ticket
+        # pins down is that a cycle asks for a bounded window, not the provider's default payload.
+        payload = self._http.get_json(
+            url,
+            headers=headers,
+            params={
+                "occurredAfter": str(window.since_ms()),
+                "occurredBefore": str(window.until_ms()),
+            },
+        )
 
         hasher = build_hasher(self._registry, tenant_id)
         linker = self._account_linker

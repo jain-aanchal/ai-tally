@@ -8,10 +8,16 @@ the outcome via :meth:`TenantIntegrationStore.record_run`.
 This module holds what all three share:
 
 * :class:`HttpClient` — the injectable transport Protocol (one ``get_json`` method).
-* :class:`IngestWorker` — the base that owns credential resolution, the ClickHouse writes' error
-  boundary, and the ``record_run`` bookkeeping (with PII-scrubbed errors and honest
-  success / partial / failed / skipped status), so each connector only describes its own fetch +
-  mapping in :meth:`IngestWorker._ingest`.
+* :class:`IngestWorker`, the base that owns credential resolution, the incremental window, the
+  ClickHouse writes' error boundary, and the ``record_run`` bookkeeping (with PII-scrubbed errors
+  and honest success / partial / failed / skipped status), so each connector only describes its own
+  fetch + mapping in :meth:`IngestWorker._ingest`.
+* :data:`CONNECTOR_TIMEOUT_S`, the per-provider HTTP timeout. One global default cannot be right
+  for both Segment (answers in milliseconds) and Pendo (documents a five-minute query timeout);
+  CTO-219 replaced it with a number per provider.
+* :class:`IngestWindow`, the ``[since, until]`` range one cycle asks for, derived from the
+  per-tenant watermark in :mod:`gateway.ingest_cursors` (CTO-219). Before that every cycle re-pulled
+  the provider's whole default window, 96 times a day per tenant per connector.
 
 Invariants enforced here (not left to each connector): no raw message bodies are ever persisted
 (only counts / mapped events / values), credentials are held only transiently as a resolved token,
@@ -25,7 +31,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -35,6 +41,12 @@ from tally.account_identity import AccountLinker
 from tally.hmac_keys import HmacKeyRegistry
 from tally.wire import BusinessEvent, IdentityLink
 
+from gateway.ingest_cursors import (
+    INITIAL_LOOKBACK_S,
+    CursorStore,
+    NullCursorStore,
+    next_cursor,
+)
 from gateway.store import ClickHouseStore
 from gateway.tenant_integration_secrets import (
     IntegrationSecret,
@@ -77,10 +89,22 @@ class UrllibHttpClient:
     an honest ``failed`` run. The status line, not the body, goes into the exception: a third-party
     error body is exactly where a customer email turns up, and while ``scrub_error_message`` would
     catch it on the way to storage, not putting it in the string is the cheaper guarantee.
+
+    ``timeout_s`` has NO default (CTO-219). It used to default to 30 seconds for all three
+    providers, which is a number that cannot be right for all three: see
+    :data:`CONNECTOR_TIMEOUT_S`. Making it required means a caller has to say which provider's
+    budget it is spending.
     """
 
-    def __init__(self, *, timeout_s: float = 30.0) -> None:
+    def __init__(self, *, timeout_s: float) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
         self._timeout_s = float(timeout_s)
+
+    @property
+    def timeout_s(self) -> float:
+        """The socket timeout this client enforces, in seconds. Read-only; set at construction."""
+        return self._timeout_s
 
     def get_json(
         self,
@@ -103,6 +127,91 @@ class UrllibHttpClient:
         if not payload:
             return None
         return json.loads(payload.decode("utf-8"))
+
+
+# --- per-integration HTTP timeouts (CTO-219) ------------------------------------------------------
+#
+# One global 30-second default used to serve all three providers, and it directly contradicted the
+# cadence argument in gateway.worker_jobs: that comment justifies Pendo's 30-minute cadence partly by
+# noting Pendo's aggregation API has a DOCUMENTED FIVE-MINUTE query timeout and returns responses up
+# to 4GB. A 30-second client timeout means every Pendo tenant whose aggregation takes longer than 30
+# seconds fails on every single cycle, records `failed`, and is pushed into the scheduler's
+# exponential backoff until it is retrying at the 6-hour cap. The integration is then effectively
+# dead for exactly the tenants with enough data to be slow, which is to say the ones it matters for.
+#
+# The fix is NOT to raise the global number. A 5-minute timeout on Segment would hold a worker thread
+# on a hung connection for five minutes, and the scheduler runs every job body through
+# `asyncio.to_thread` in the gateway's own process, so those threads are not free. Each provider gets
+# the budget its own documented behaviour justifies:
+#
+#   segment   20s. Segment's Public API is a paged event read with per-minute rate limits, i.e. it is
+#             built to answer fast. Anything slower than 20s is a stuck connection, not a slow query,
+#             and the next cycle is 15 minutes away.
+#   hubspot   30s. Unchanged, and the one provider the old global default actually suited. HubSpot
+#             publishes burst limits in requests per 10 seconds, so it too is built to answer fast;
+#             30s leaves room for a large page without holding a thread pointlessly.
+#   pendo    330s. Pendo's own documented query timeout is 300s, so a client timeout at or below that
+#             makes US the thing that fails rather than Pendo, and we cannot tell a slow query from a
+#             broken one. 330s is that documented ceiling plus 30s of transfer slack for a large
+#             response body. It is affordable only because Pendo's cadence is 30 minutes: one thread
+#             held for at most 5.5 minutes out of every 30 per tenant.
+CONNECTOR_TIMEOUT_S: dict[str, float] = {
+    "segment": 20.0,
+    "hubspot": 30.0,
+    "pendo": 330.0,
+}
+
+#: Used for a connector with no entry above. Deliberately tight rather than generous: a provider
+#: nobody has sized yet should hold a worker thread for as little as possible.
+DEFAULT_CONNECTOR_TIMEOUT_S = 30.0
+
+
+def timeout_for(connector_id: str) -> float:
+    """This connector's HTTP timeout in seconds. See :data:`CONNECTOR_TIMEOUT_S`."""
+    return CONNECTOR_TIMEOUT_S.get(connector_id, DEFAULT_CONNECTOR_TIMEOUT_S)
+
+
+def build_http_client(connector_id: str) -> UrllibHttpClient:
+    """A production HTTP client sized for one connector.
+
+    One client PER connector, not one shared client, because the timeout is the thing that differs
+    and it is a property of the transport. Sharing one would put every provider back on a single
+    number, which is the bug.
+    """
+    return UrllibHttpClient(timeout_s=timeout_for(connector_id))
+
+
+@dataclass(frozen=True, slots=True)
+class IngestWindow:
+    """The half-open-ish time range one cycle asks the provider for: ``[since, until]``.
+
+    Handed to :meth:`IngestWorker._ingest` so each connector can translate it into whatever its own
+    API calls those parameters. ``is_first_run`` is carried explicitly rather than inferred from the
+    width, so a connector (or a test, or a log line) can tell "this tenant has never run" from "this
+    tenant was down for a week", which look identical from the timestamps alone.
+    """
+
+    since: datetime
+    until: datetime
+    is_first_run: bool = False
+
+    @property
+    def span_seconds(self) -> float:
+        return (self.until - self.since).total_seconds()
+
+    def since_ms(self) -> int:
+        """``since`` as epoch milliseconds, for the providers whose APIs take ms (HubSpot, Pendo)."""
+        return int(self.since.timestamp() * 1000)
+
+    def until_ms(self) -> int:
+        return int(self.until.timestamp() * 1000)
+
+    def since_iso(self) -> str:
+        """``since`` as an ISO-8601 UTC instant, for the providers whose APIs take one (Segment)."""
+        return self.since.astimezone(timezone.utc).isoformat()
+
+    def until_iso(self) -> str:
+        return self.until.astimezone(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +333,7 @@ class IngestWorker:
         integrations: TenantIntegrationStore,
         registry: HmacKeyRegistry,
         account_linker: AccountLinker | None = None,
+        cursors: CursorStore | None = None,
     ) -> None:
         self._secrets = secrets
         self._resolver = resolver
@@ -231,6 +341,11 @@ class IngestWorker:
         self._store = store
         self._integrations = integrations
         self._registry = registry
+        # CTO-219: the incremental watermark. Optional and defaulted so every existing construction
+        # (and every mapper unit test) keeps working; a worker without one re-pulls the initial
+        # window every cycle, which is the pre-CTO-219 behaviour. The production wiring in
+        # gateway.worker_jobs always passes a real IngestCursorStore.
+        self._cursors: CursorStore = cursors if cursors is not None else NullCursorStore()
         # CTO-195: shared user→account map, so a connector can fill in an account for a revenue
         # event that names a person but no company. Optional and defaulted so every existing
         # construction keeps working; a worker with its own linker simply learns nothing from the
@@ -242,6 +357,12 @@ class IngestWorker:
 
         Skips silently (no ``record_run``) when the tenant hasn't connected this integration, since
         an absent row is the honest "not connected" state the dashboard already renders.
+
+        INCREMENTAL since CTO-219. The cycle asks the provider only for ``[cursor, now]`` and then
+        advances the cursor, so a 15-minute cadence stops re-pulling the provider's whole window 96
+        times a day. See :mod:`gateway.ingest_cursors` for the window, the per-connector overlap and
+        an accurate account of what re-pulling actually cost (write amplification and a transient
+        pre-merge double count, NOT corruption: re-insertion is idempotent by design).
         """
         secret = self._secrets.get(tenant_id, self.connector_id)
         if secret is None or not secret.is_active:
@@ -252,16 +373,69 @@ class IngestWorker:
         except Exception as exc:  # noqa: BLE001 — any resolver failure is an honest 'failed' cycle
             return self._finish(tenant_id, "failed", 0, f"credential resolution failed: {exc}")
 
+        window = self._window(tenant_id)
         try:
-            outcome = self._ingest(tenant_id, secret, token)
+            outcome = self._ingest(tenant_id, secret, token, window)
         except Exception as exc:  # noqa: BLE001 — a fetch / insert failure is a 'failed' cycle
+            # NO cursor advance on a failed cycle. The window has not been handled, so the next
+            # cycle must ask for it again; advancing here would silently drop every event in it.
             return self._finish(tenant_id, "failed", 0, str(exc))
 
         status: RunStatus = "partial" if outcome.partial else "success"
+        self._advance_cursor(tenant_id, window)
         return self._finish(tenant_id, status, outcome.event_count, outcome.error_message)
 
+    def _window(self, tenant_id: str) -> IngestWindow:
+        """The time range this cycle asks the provider for.
+
+        A cursor read that FAILS is not a failed cycle: it falls back to the initial window, which
+        re-pulls more than necessary and is idempotent, rather than skipping data or aborting. The
+        control plane being briefly unreachable should cost bandwidth, not events.
+        """
+        until = datetime.now(tz=timezone.utc)
+        cursor: datetime | None = None
+        try:
+            cursor = self._cursors.get(tenant_id, self.connector_id)
+        except Exception:  # noqa: BLE001 - see docstring: degrade to a wider window, never skip
+            logger.exception(
+                "cursor read failed for tenant %s connector %s; using the initial window",
+                tenant_id,
+                self.connector_id,
+            )
+        if cursor is None:
+            return IngestWindow(
+                since=until - timedelta(seconds=INITIAL_LOOKBACK_S),
+                until=until,
+                is_first_run=True,
+            )
+        # A cursor from the future (clock skew, or a replica that ran ahead) would produce an
+        # inverted window that some providers answer with an error and others with everything.
+        # Clamp it to an empty-but-valid window instead.
+        return IngestWindow(since=min(cursor, until), until=until)
+
+    def _advance_cursor(self, tenant_id: str, window: IngestWindow) -> None:
+        """Move the watermark to the end of the handled window, less this connector's overlap.
+
+        Called on ``success`` AND on ``partial``. A partial cycle is one where some records failed
+        to MAP, which is deterministic: the same bytes will fail the same way next cycle, so holding
+        the cursor back would re-pull them forever and never make progress. The failure itself is
+        not lost: ``record_run`` has the ``partial`` status and the reason.
+
+        Best-effort, like ``record_run``: a control-plane blip must not turn a cycle that already
+        wrote its data into a failure. The cost of a dropped advance is one repeated window, which
+        is idempotent.
+        """
+        try:
+            self._cursors.advance(
+                tenant_id, self.connector_id, next_cursor(self.connector_id, window.until)
+            )
+        except Exception:  # noqa: BLE001 - best-effort: a dropped advance costs a repeat, not data
+            logger.exception(
+                "cursor advance failed for tenant %s connector %s", tenant_id, self.connector_id
+            )
+
     def _ingest(
-        self, tenant_id: str, secret: IntegrationSecret, token: str
+        self, tenant_id: str, secret: IntegrationSecret, token: str, window: IngestWindow
     ) -> IngestOutcome:  # pragma: no cover - abstract
         raise NotImplementedError
 

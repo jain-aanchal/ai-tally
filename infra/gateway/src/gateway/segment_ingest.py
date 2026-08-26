@@ -24,6 +24,7 @@ from tally.wire import BusinessEvent, IdentityLink
 
 from gateway.integration_workers import (
     IngestOutcome,
+    IngestWindow,
     IngestWorker,
     as_event_list,
     build_hasher,
@@ -112,12 +113,19 @@ class SegmentWorker(IngestWorker):
     connector_id = "segment"
 
     def _ingest(
-        self, tenant_id: str, secret: IntegrationSecret, token: str
+        self, tenant_id: str, secret: IntegrationSecret, token: str, window: IngestWindow
     ) -> IngestOutcome:
         base = str(secret.config.get("base_url") or DEFAULT_SEGMENT_BASE).rstrip("/")
         url = base + SEGMENT_EVENTS_PATH
         headers = {"Authorization": f"Bearer {token}"}
-        payload = self._http.get_json(url, headers=headers)
+        # CTO-219: incremental. Segment's Public API takes ISO-8601 instants; like the endpoint path
+        # above, the exact parameter spelling is a deployment detail, and what this ticket pins down
+        # is that a cycle asks for a bounded window instead of the provider's default payload.
+        payload = self._http.get_json(
+            url,
+            headers=headers,
+            params={"start": window.since_iso(), "end": window.until_iso()},
+        )
 
         hasher = build_hasher(self._registry, tenant_id)
         events: list[BusinessEvent] = []

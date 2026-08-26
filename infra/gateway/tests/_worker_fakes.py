@@ -6,6 +6,7 @@ worker logic (mapping, record_run bookkeeping, honest failure handling) is exerc
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from gateway.tenant_integration_secrets import IntegrationSecret
@@ -107,6 +108,30 @@ class FakeIntegrations:
             total_events_24h=event_count,
             total_events_7d=event_count,
         )
+
+
+class FakeCursorStore:
+    """In-memory ``CursorStore`` (CTO-219). Same monotonic-advance contract as the real one."""
+
+    def __init__(self, initial: dict[tuple[str, str], datetime] | None = None) -> None:
+        self.cursors: dict[tuple[str, str], datetime] = dict(initial or {})
+        self.advances: list[tuple[str, str, datetime]] = []
+        self.raise_on_get = False
+        self.raise_on_advance = False
+
+    def get(self, tenant_id: str, connector_id: str) -> datetime | None:
+        if self.raise_on_get:
+            raise RuntimeError("postgres unavailable")
+        return self.cursors.get((tenant_id, connector_id))
+
+    def advance(self, tenant_id: str, connector_id: str, cursor_at: datetime) -> datetime:
+        if self.raise_on_advance:
+            raise RuntimeError("postgres unavailable")
+        self.advances.append((tenant_id, connector_id, cursor_at))
+        key = (tenant_id, connector_id)
+        existing = self.cursors.get(key)
+        self.cursors[key] = cursor_at if existing is None else max(existing, cursor_at)
+        return self.cursors[key]
 
 
 def make_secret(connector_id: str, *, ref: str = "ref-1", **config: Any) -> IntegrationSecret:
