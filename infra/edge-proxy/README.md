@@ -47,6 +47,8 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_LISTEN` | `:8088` | bind address |
 | `EDGE_PROXY_UPSTREAM` | `https://api.openai.com` | provider origin |
 | `EDGE_PROXY_TENANT_HEADER` | `X-Tenant-Key` | control header carrying the tenant id (stripped before upstream) |
+| `EDGE_PROXY_FEATURE_TAG_HEADER` | `X-Tally-Feature-Tag` | optional control header carrying a per-request feature/agent tag (stripped before upstream) |
+| `EDGE_PROXY_ACCOUNT_ID_HASH_HEADER` | `X-Tally-Account-Id-Hash` | optional control header carrying the **already-hashed** account id (stripped before upstream), see below |
 | `EDGE_PROXY_REQUIRE_TENANT` | `false` | reject requests missing the tenant header with `400` |
 | `EDGE_PROXY_UPSTREAM_TIMEOUT` | `10m` | per-request bound (generous: completions stream for minutes) |
 | `EDGE_PROXY_MODE` | `passthrough` | `passthrough` (app sends the provider key) or `broker` (provider key stays in KMS — see below) |
@@ -56,6 +58,33 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_TELEMETRY_URL` | — | collector endpoint for metadata-only `TraceRecord`s; empty disables shipping |
 
 `/healthz` is the one path the proxy owns (liveness); everything else is forwarded.
+
+## Account attribution (CTO-182)
+
+Cost per *customer* needs a dimension between the ai-tally tenant and the individual end user: the
+tenant's own paying customer (company, workspace, or team). The Python SDK supplies it via
+`with_account(...)`, which emits the `gen_ai.account_id_hash` span attribute. Non-Python callers get
+the same dimension through the proxy by sending one control header:
+
+```
+X-Tally-Account-Id-Hash: <64-char HMAC-SHA256 hex of the account id>
+```
+
+Rules, all deliberate:
+
+- **The value must already be hashed.** The proxy holds no HMAC key and will not hash for you. Send
+  a raw account id and you have put a customer identifier into telemetry, which is exactly what the
+  hash exists to prevent. Compute it the same way the SDK does
+  (`HmacKeyRegistry.hash_account`) so proxied and SDK traffic land on the same hash.
+- **It is optional and never rejected.** A request without the header ingests cleanly and lands in
+  the *unattributed* bucket (empty string), which is not a customer named "unknown" and must never
+  be ranked alongside real accounts.
+- **It is stripped before the request leaves for the provider**, exactly like `X-Tenant-Key` and
+  `X-Tally-Feature-Tag`. Upstream never sees ai-tally internals.
+- **It reaches storage as `otel_spans.AccountIdHash`**, the same column the SDK path writes.
+
+There is deliberately no account *label* / display-name header here. Labels are mutable metadata
+and belong in the Postgres control plane keyed on the hash (CTO-186), not in the span store.
 
 ## Self-host & BYO-deployment (CTO-43)
 

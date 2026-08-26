@@ -21,6 +21,8 @@ _PROMOTED_GENAI = frozenset(
         GenAI.SESSION_ID,
         GenAI.USER_ID_HASH,
         GenAI.USER_ID_HASH_KEY_VERSION,
+        GenAI.ACCOUNT_ID_HASH,
+        GenAI.ACCOUNT_ID_HASH_KEY_VERSION,
         GenAI.IDEMPOTENCY_KEY,
         GenAI.SYSTEM,
         GenAI.REQUEST_MODEL,
@@ -43,6 +45,33 @@ _PROMOTED_GENAI = frozenset(
         GenAI.SAMPLING_RATE,
     }
 )
+
+# Wire-only gen_ai.* keys: accepted on ingest, deliberately NOT written to ClickHouse: neither as
+# a typed column nor as a SpanAttributes entry. They are listed here so the long-tail loop below
+# drops them explicitly rather than letting them fall through into the map by accident.
+#
+# gen_ai.account_label (CTO-181) is the only member today. An account label is mutable,
+# human-readable customer metadata: stamping it on every span would put customer names in the
+# telemetry store, which is exactly what hashing the account id exists to prevent (see the comment
+# on otel_spans.AccountIdHash in db/clickhouse/otel_spans.sql). Labels belong in the Postgres
+# control plane, keyed on the account hash and joined at render time.
+#
+# SEAM FOR CTO-186 (B7): the label store does not exist yet. When it lands, the upsert hangs off
+# :func:`wire_only_account_label` below. The value is already parsed out of the span here, so B7
+# adds a store call at the ingest site and nothing in this module has to change.
+_WIRE_ONLY_GENAI = frozenset({GenAI.ACCOUNT_LABEL})
+
+
+def wire_only_account_label(span: dict[str, object]) -> str | None:
+    """Return the wire-only ``gen_ai.account_label`` for this span, or None when absent.
+
+    This is the seam CTO-186 (B7) hangs the Postgres label-store upsert on. Today nothing calls it
+    on the write path: the label is accepted, validated, and dropped. It is never persisted to
+    ClickHouse and never appears in a row tuple or in ``SpanAttributes``.
+    """
+    v = span.get(GenAI.ACCOUNT_LABEL)
+    return v if isinstance(v, str) and v else None
+
 
 # Hard PII guard (CTO-118): any incoming attribute whose key tail-segment matches one of
 # these is dropped on the floor. The contract is "counts only, never bodies"; if a caller
@@ -94,6 +123,9 @@ COLUMNS: tuple[str, ...] = (
     "SessionId",
     "UserIdHash",
     "UserIdHashKeyVersion",
+    # Account dimension (CTO-180/182). Placed to mirror the DDL, immediately after the user hash.
+    "AccountIdHash",
+    "AccountIdHashKeyVersion",
     "IdempotencyKey",
     "GenAiSystem",
     "GenAiRequestModel",
@@ -178,6 +210,9 @@ def span_to_row(
     for k, v in span.items():
         if k in _PROMOTED_GENAI or k in _STRUCTURAL or v is None:
             continue
+        # Wire-only keys (gen_ai.account_label) never reach ClickHouse, not even via the map.
+        if k in _WIRE_ONLY_GENAI:
+            continue
         if _is_body_key(str(k)):
             continue
         extra[str(k)] = str(v)
@@ -196,6 +231,10 @@ def span_to_row(
         _s(span.get(GenAI.SESSION_ID)),
         _fixed64(span.get(GenAI.USER_ID_HASH)),
         _s(span.get(GenAI.USER_ID_HASH_KEY_VERSION)),
+        # CTO-182: an absent account hash writes '' (the UNATTRIBUTED bucket the DDL documents),
+        # never a null and never a placeholder like 'unknown' that could rank as a real account.
+        _fixed64(span.get(GenAI.ACCOUNT_ID_HASH)),
+        _s(span.get(GenAI.ACCOUNT_ID_HASH_KEY_VERSION)),
         _s(span.get(GenAI.IDEMPOTENCY_KEY)),
         _s(span.get(GenAI.SYSTEM)),
         _s(span.get(GenAI.REQUEST_MODEL)),

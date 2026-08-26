@@ -31,8 +31,9 @@ export interface ProviderAttribution {
   conversionRate: number;
   conversionRateLo: number;
   conversionRateHi: number;
-  // Revenue per distinct user, from Stripe business_events (CTO-110). Null when no
-  // revenue events exist yet for the tenant — we surface "—" rather than fabricate.
+  // Revenue per distinct user, from the money-typed business_events of the tenant's configured
+  // revenue sources (CTO-110, CTO-194 — no longer Stripe-only). Null when no revenue events exist
+  // yet for the tenant — we surface "—" rather than fabricate.
   valuePerUserMicroUsd: MicroUSD | null;
   // Margin per distinct user = value/user − cost/user. Null when value/user is null.
   marginPerUserMicroUsd: MicroUSD | null;

@@ -67,6 +67,18 @@ type Config struct {
 	// segment traffic by feature (CTO-104). Unlike the tenant key, the feature tag is purely
 	// informational — missing/empty is fine and never rejected.
 	FeatureTagHeader string
+	// AccountIdHashHeader names an optional control header carrying the HMAC-SHA256 hex of the
+	// caller's own paying customer / account id (default X-Tally-Account-Id-Hash). It exists so
+	// non-Python callers get the same cost-per-customer dimension the Python SDK's with_account()
+	// provides (CTO-182). Like TenantHeader and FeatureTagHeader it is stripped before the request
+	// leaves for the upstream provider, and like the feature tag it is purely informational:
+	// missing/empty is fine and never rejected, landing in the unattributed bucket downstream.
+	//
+	// The value must ALREADY be hashed by the caller. The proxy never sees, and must never be sent,
+	// a raw account id: the whole point of the hash is that a customer identifier cannot be
+	// reversed or joined across tenants. The proxy does not hash on the caller's behalf because it
+	// does not hold the tenant's HMAC key.
+	AccountIdHashHeader string
 	// RequireTenant rejects requests missing TenantHeader with 400 when true.
 	RequireTenant bool
 	// UpstreamTimeout bounds a single forwarded request end-to-end (0 = no timeout, for streaming).
@@ -102,6 +114,9 @@ const (
 	DefaultGeminiUpstream   = "https://generativelanguage.googleapis.com"
 	DefaultTenantHeader     = "X-Tenant-Key"
 	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"
+	// DefaultAccountIdHashHeader carries the pre-hashed account id (CTO-182). Named to match the
+	// existing X-Tally-* control-header convention and the gen_ai.account_id_hash wire attribute.
+	DefaultAccountIdHashHeader = "X-Tally-Account-Id-Hash"
 	// DefaultUpstreamTimeout is generous because LLM completions are slow and may stream for
 	// minutes; the proxy must not be the thing that cuts a long generation short.
 	DefaultUpstreamTimeout = 10 * time.Minute
@@ -118,10 +133,12 @@ func FromEnv(lookup Env) (Config, error) {
 		ListenAddr:       firstNonEmpty(lookup("EDGE_PROXY_LISTEN"), DefaultListenAddr),
 		TenantHeader:     firstNonEmpty(lookup("EDGE_PROXY_TENANT_HEADER"), DefaultTenantHeader),
 		FeatureTagHeader: firstNonEmpty(lookup("EDGE_PROXY_FEATURE_TAG_HEADER"), DefaultFeatureTagHeader),
-		UpstreamTimeout:  DefaultUpstreamTimeout,
-		Mode:             ModePassthrough,
-		BrokerTTL:        DefaultBrokerTTL,
-		TelemetryURL:     lookup("EDGE_PROXY_TELEMETRY_URL"),
+		AccountIdHashHeader: firstNonEmpty(
+			lookup("EDGE_PROXY_ACCOUNT_ID_HASH_HEADER"), DefaultAccountIdHashHeader),
+		UpstreamTimeout: DefaultUpstreamTimeout,
+		Mode:            ModePassthrough,
+		BrokerTTL:       DefaultBrokerTTL,
+		TelemetryURL:    lookup("EDGE_PROXY_TELEMETRY_URL"),
 	}
 
 	// Provider is orthogonal to upstream selection but changes the default upstream: a gemini proxy
