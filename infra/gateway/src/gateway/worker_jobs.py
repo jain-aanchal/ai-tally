@@ -41,6 +41,24 @@ when"):
 * ``failed``   -> raise, so the scheduler records ``failed`` and applies its backoff.
 
 Cadences are per job and defended below, at the constants.
+
+CTO-219 REVIEW FIXES. Three things this module wires up were wrong in ways the cadences above hid:
+
+* The HTTP timeout was one global 30 seconds, which contradicted the Pendo cadence argument below in
+  its own terms (that argument leans on Pendo's documented 5-minute aggregation). Timeouts are now
+  per connector, sized to what each provider actually does. See
+  :data:`gateway.integration_workers.CONNECTOR_TIMEOUT_S`.
+* Ingest had no cursor, so each cycle re-pulled the provider's whole default payload. It does not
+  any more: see :mod:`gateway.ingest_cursors`. Be accurate about what that cost, because the first
+  write-up was not: re-insertion was already idempotent (``BusinessEventId`` is the provider's stable
+  id and ``business_events`` is a ``ReplacingMergeTree`` ordered on it), so the costs were write
+  amplification and a transient pre-merge double count on the reads that lack ``FINAL``, not
+  corruption.
+* The reconciler's ClickHouse scan was bounded only in rows RETURNED, so its ASOF join read an
+  uncapped 14 days of ``otel_spans`` every hour and blew up on the biggest tenants. See
+  :class:`gateway.reconciliation.ClickHouseLateArrivalSource`.
+
+None of that changes what is said above about /features, which stays blocked on CTO-200.
 """
 
 from __future__ import annotations
@@ -52,7 +70,8 @@ from tally.hmac_keys import HmacKeyRegistry
 
 from gateway.config import Settings
 from gateway.hubspot_ingest import HubSpotWorker
-from gateway.integration_workers import HttpClient, IngestWorker, UrllibHttpClient
+from gateway.ingest_cursors import CursorStore, IngestCursorStore
+from gateway.integration_workers import HttpClient, IngestWorker, build_http_client
 from gateway.pendo_ingest import PendoWorker
 from gateway.reconciliation import (
     ClickHouseLateArrivalSource,
@@ -98,6 +117,13 @@ INGEST_INTERVAL_S = 15 * 60.0
 #: (documented 5-minute query timeout, responses up to 4GB), so a Pendo cycle costs the provider
 #: materially more than a Segment or HubSpot pull. 30 minutes still keeps the dashboard inside a
 #: window a human would call current, and can be tightened later if a real published limit appears.
+#:
+#: The HTTP TIMEOUT has to agree with that argument, and until CTO-219 it did not: one global
+#: 30-second default meant a Pendo aggregation that took the 5 minutes Pendo itself documents was
+#: cut off by us on every cycle, recorded `failed`, and pushed into the scheduler's backoff until it
+#: was retrying at the 6-hour cap. Timeouts are per connector now
+#: (:data:`gateway.integration_workers.CONNECTOR_TIMEOUT_S`), and Pendo's 330s budget is affordable
+#: precisely BECAUSE of this cadence: at most 5.5 minutes of a worker thread out of every 30.
 PENDO_INGEST_INTERVAL_S = 30 * 60.0
 
 #: The reconciler: hourly. It hits our own ClickHouse rather than anyone else's API, so third-party
@@ -200,6 +226,7 @@ def register_worker_jobs(
     http: HttpClient | None = None,
     integrations: TenantIntegrationStore | None = None,
     reconciliation_store: ReconciliationStore | None = None,
+    cursors: CursorStore | None = None,
 ) -> tuple[Job, ...]:
     """Register the three ingest jobs and the reconciler on ``registry``. Returns what it added.
 
@@ -216,8 +243,8 @@ def register_worker_jobs(
     """
     ch_secrets = secrets if secrets is not None else TenantIntegrationSecretStore(settings)
     ch_resolver = resolver if resolver is not None else EnvSecretResolver()
-    ch_http = http if http is not None else UrllibHttpClient()
     ch_integrations = integrations if integrations is not None else TenantIntegrationStore(settings)
+    ch_cursors = cursors if cursors is not None else IngestCursorStore(settings)
     recon_store = (
         reconciliation_store if reconciliation_store is not None else ReconciliationStore(settings)
     )
@@ -225,16 +252,29 @@ def register_worker_jobs(
     common = {
         "secrets": ch_secrets,
         "resolver": ch_resolver,
-        "http": ch_http,
         "store": store,
         "integrations": ch_integrations,
         "registry": hmac_registry,
         "account_linker": account_linker,
+        # CTO-219: the incremental watermark, so a 15-minute cadence stops re-pulling the
+        # provider's whole window 96 times a day. See gateway.ingest_cursors.
+        "cursors": ch_cursors,
     }
+
+    def _http_for(connector_id: str) -> HttpClient:
+        """This connector's transport. An injected ``http`` overrides all three (tests do this).
+
+        CTO-219: otherwise ONE CLIENT PER CONNECTOR, because the socket timeout differs per provider
+        and is a property of the transport. A single shared client would put Segment, HubSpot and
+        Pendo back on one number, and there is no one number that is right: see
+        :data:`gateway.integration_workers.CONNECTOR_TIMEOUT_S` and the Pendo cadence note above.
+        """
+        return http if http is not None else build_http_client(connector_id)
+
     workers: tuple[tuple[IngestWorker, float], ...] = (
-        (SegmentWorker(**common), INGEST_INTERVAL_S),  # type: ignore[arg-type]
-        (HubSpotWorker(**common), INGEST_INTERVAL_S),  # type: ignore[arg-type]
-        (PendoWorker(**common), PENDO_INGEST_INTERVAL_S),  # type: ignore[arg-type]
+        (SegmentWorker(http=_http_for("segment"), **common), INGEST_INTERVAL_S),  # type: ignore[arg-type]
+        (HubSpotWorker(http=_http_for("hubspot"), **common), INGEST_INTERVAL_S),  # type: ignore[arg-type]
+        (PendoWorker(http=_http_for("pendo"), **common), PENDO_INGEST_INTERVAL_S),  # type: ignore[arg-type]
     )
 
     added: list[Job] = []

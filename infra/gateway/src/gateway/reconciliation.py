@@ -208,6 +208,27 @@ class ReconciliationStore:
 DEFAULT_LOOKBACK_DAYS = 7
 DEFAULT_EVENT_CAP = 50_000
 
+# Slack on the span side of the join, in days (CTO-219). An event at the very start of the event
+# window still has to be able to find the span that preceded it, so the span window opens EARLIER
+# than the oldest event in the pass. One day is the smallest slack that is still far wider than
+# LATE_THRESHOLD_SECONDS, and otel_spans is PARTITION BY toDate(Timestamp), so a whole number of
+# days is also exactly the granularity at which part pruning happens.
+DEFAULT_SPAN_SLACK_DAYS = 1
+
+# Hard server-side ceilings on one pass (CTO-219). These are ClickHouse query settings, not Python
+# ones: they are what makes a runaway pass FAIL rather than consume the ClickHouse server, and a
+# failure here is recorded as a `failed` run with zeroed metrics, so the /features card reads
+# "ran, but errored" and never a wrong lateness figure.
+#
+# max_rows_to_read with read_overflow_mode='throw' is the load-bearing one. It bounds rows SCANNED,
+# which is the thing the old `LIMIT 50000` did NOT do: a LIMIT caps rows RETURNED, and the ASOF join
+# materialises its right-hand side in full before any limit applies. 50 million rows is roughly two
+# orders of magnitude more than a correctly-pruned pass should touch, so tripping it means the
+# pruning is broken rather than that the tenant is merely large.
+DEFAULT_MAX_ROWS_TO_READ = 50_000_000
+DEFAULT_MAX_MEMORY_BYTES = 2 * 1024**3  # 2 GiB
+DEFAULT_MAX_EXECUTION_S = 120
+
 
 class _ClickHouseEventSource(Protocol):
     """Minimal surface the orchestrator needs from a ClickHouse client.
@@ -240,11 +261,38 @@ class ClickHouseLateArrivalSource:
     preceding row per key. INNER, so an event with no preceding span for that user contributes
     nothing rather than a fabricated lag of zero — an event we cannot pair is not an event that
     arrived on time.
+
+    BOUNDING THE SCAN (CTO-219). The first cut of this query capped the EVENT side with
+    ``LIMIT 50000`` and left the span side as a flat "the last 14 days of otel_spans for this
+    tenant". That is not a bound. A ``LIMIT`` caps rows RETURNED; an ASOF join materialises its
+    right-hand side before any limit on the result can apply, so the span side was read in full
+    every hour. On a high-volume tenant that is ``MEMORY_LIMIT_EXCEEDED`` every single hour, which
+    means the diagnostics card never updates for exactly the tenants it matters most for. Three
+    things fix it, in order of how much they buy:
+
+    1. **The span window is derived from the events, not from the clock.** The span side is
+       restricted to ``[min(event OccurredAt) - slack, max(event OccurredAt)]``, read from the
+       already-capped event set via scalar subqueries. ClickHouse evaluates a scalar subquery first
+       and substitutes the constant, so these become literal bounds on ``Timestamp`` and prune parts
+       (``otel_spans`` is ``PARTITION BY toDate(Timestamp)``). This is what actually collapses the
+       scan: a busy tenant hits the 50k event cap inside a few minutes of wall clock, so the span
+       side goes from fourteen days of parts to one or two. A quiet tenant's events genuinely span
+       the whole window and it reads the whole window, which is correct and is also cheap.
+    2. **The fixed lookback is kept as a floor, not as the bound.** ``Timestamp >= subtractDays(...)``
+       stays, so if the derived bound is ever wrong the query is still no worse than it was.
+    3. **Server-side ceilings** (see :data:`DEFAULT_MAX_ROWS_TO_READ` and friends) so a pass that
+       escapes both bounds fails fast and honestly instead of taking ClickHouse, and with it the
+       gateway, down. ``run_reconciliation`` turns that raise into a ``failed`` run with zeroed
+       metrics: the card goes stale-but-labelled, and never shows a wrong lateness figure.
+
+    NOT SAMPLED, deliberately. ``SAMPLE`` on the span side would be the cheapest bound of all and it
+    would silently corrupt the answer: dropping spans makes the ASOF join match an EARLIER span than
+    the true nearest one, so every sampled pass would over-report lateness. A bound that changes the
+    number is not a bound on this query, it is a different query.
     """
 
     _SQL = """
-        SELECT e.OccurredAt, s.Timestamp
-        FROM (
+        WITH capped_events AS (
             SELECT UserIdHash, OccurredAt
             FROM business_events
             WHERE TenantId = {tenant:String}
@@ -252,13 +300,18 @@ class ClickHouseLateArrivalSource:
               AND OccurredAt >= subtractDays(now64(9), {days:UInt32})
             ORDER BY OccurredAt DESC
             LIMIT {cap:UInt32}
-        ) AS e
+        )
+        SELECT e.OccurredAt, s.Timestamp
+        FROM capped_events AS e
         ASOF INNER JOIN (
             SELECT UserIdHash, Timestamp
             FROM otel_spans
             WHERE TenantId = {tenant:String}
               AND UserIdHash != ''
               AND Timestamp >= subtractDays(now64(9), {span_days:UInt32})
+              AND Timestamp >= subtractDays(
+                      (SELECT min(OccurredAt) FROM capped_events), {span_slack_days:UInt32})
+              AND Timestamp <= (SELECT max(OccurredAt) FROM capped_events)
         ) AS s
         ON e.UserIdHash = s.UserIdHash AND e.OccurredAt >= s.Timestamp
     """
@@ -269,27 +322,56 @@ class ClickHouseLateArrivalSource:
         *,
         lookback_days: int = DEFAULT_LOOKBACK_DAYS,
         event_cap: int = DEFAULT_EVENT_CAP,
+        span_slack_days: int = DEFAULT_SPAN_SLACK_DAYS,
+        max_rows_to_read: int = DEFAULT_MAX_ROWS_TO_READ,
+        max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES,
+        max_execution_s: int = DEFAULT_MAX_EXECUTION_S,
     ) -> None:
         if lookback_days <= 0 or event_cap <= 0:
             raise ValueError("lookback_days and event_cap must be positive")
+        if span_slack_days <= 0:
+            raise ValueError("span_slack_days must be positive")
+        if max_rows_to_read <= 0 or max_memory_bytes <= 0 or max_execution_s <= 0:
+            raise ValueError("query ceilings must be positive")
         self._store = store
         self._lookback_days = int(lookback_days)
         self._event_cap = int(event_cap)
+        self._span_slack_days = int(span_slack_days)
+        self._settings: dict[str, object] = {
+            # Rows SCANNED, not rows returned. See DEFAULT_MAX_ROWS_TO_READ.
+            "max_rows_to_read": int(max_rows_to_read),
+            "read_overflow_mode": "throw",
+            "max_memory_usage": int(max_memory_bytes),
+            # A pass that is still running after this is not going to produce a number anyone
+            # wants; the next cadence window is an hour away and will try again.
+            "max_execution_time": int(max_execution_s),
+            "timeout_overflow_mode": "throw",
+        }
+
+    @property
+    def query_settings(self) -> dict[str, object]:
+        """The ClickHouse-side ceilings this source enforces. Exposed so tests can assert on them."""
+        return dict(self._settings)
 
     def fetch_event_span_pairs(self, tenant_id: str) -> Sequence[tuple[datetime, datetime]]:
-        """One tenant-scoped round trip. Raises on a CH failure, which records a ``failed`` run."""
+        """One tenant-scoped round trip. Raises on a CH failure, which records a ``failed`` run.
+
+        ``throw`` on both overflow modes is the point: an exception here becomes a ``failed`` run,
+        which is the honest outcome. The alternative modes (``break``) would return a partial result
+        that looks exactly like a complete one, and the card would show a confidently wrong number.
+        """
         result = self._store.client.query(  # type: ignore[attr-defined]
             self._SQL,
             parameters={
                 "tenant": tenant_id,
                 "days": self._lookback_days,
-                # Spans are searched over a wider window than events, so an event at the very start
-                # of the event window can still find the span that preceded it. Without the slack
-                # the oldest events in every pass would look unmatched purely because of where the
-                # window boundary happened to fall.
-                "span_days": self._lookback_days * 2,
+                # The floor under the derived span bound, not the bound itself. See the class
+                # docstring: without a derived bound this alone read the whole window every hour.
+                "span_days": self._lookback_days + self._span_slack_days,
+                "span_slack_days": self._span_slack_days,
                 "cap": self._event_cap,
             },
+            settings=self._settings,
         )
         return [(_as_utc(row[0]), _as_utc(row[1])) for row in result.result_rows]
 
@@ -316,8 +398,11 @@ def run_reconciliation(
     scan raises (recorded with zeroed metrics so the dashboard shows "ran, but errored" rather than
     silently going stale), else ``"ok"``.
 
-    The CH query itself is intentionally simple — per-tenant scheduling and a smarter matched-span
-    join are out of scope (CTO-139); the value here is the pure compute + the run log.
+    A smarter matched-span join (real attribution) is out of scope and belongs to the stitcher
+    runner, CTO-200. What IS in scope, since CTO-219, is that the scan the source performs is
+    bounded: a pass that cannot compute a number records ``failed`` and writes zeroed metrics, so
+    the /features card goes stale-but-labelled rather than showing a lateness figure nobody
+    measured.
     """
     started_at = datetime.now(tz=timezone.utc)
     status: RunStatus = "ok"

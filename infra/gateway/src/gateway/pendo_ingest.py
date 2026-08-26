@@ -20,6 +20,7 @@ from tally.wire import BusinessEvent
 
 from gateway.integration_workers import (
     IngestOutcome,
+    IngestWindow,
     IngestWorker,
     as_event_list,
     build_hasher,
@@ -74,12 +75,24 @@ class PendoWorker(IngestWorker):
     connector_id = "pendo"
 
     def _ingest(
-        self, tenant_id: str, secret: IntegrationSecret, token: str
+        self, tenant_id: str, secret: IntegrationSecret, token: str, window: IngestWindow
     ) -> IngestOutcome:
         base = str(secret.config.get("base_url") or DEFAULT_PENDO_BASE).rstrip("/")
         url = base + PENDO_FEATURE_PATH
         headers = {"x-pendo-integration-key": token}
-        payload = self._http.get_json(url, headers=headers)
+        # CTO-219: incremental. Pendo's aggregation takes epoch-millisecond bounds, matching the
+        # `firstTime` the mapper reads back. The window is deliberately overlapped on its trailing
+        # edge (gateway.ingest_cursors sizes Pendo's overlap above Pendo's own documented ~5-minute
+        # aggregation latency), so a first-use Pendo had not aggregated when we asked is picked up
+        # next cycle rather than missed forever.
+        payload = self._http.get_json(
+            url,
+            headers=headers,
+            params={
+                "firstTimeAfter": str(window.since_ms()),
+                "firstTimeBefore": str(window.until_ms()),
+            },
+        )
 
         hasher = build_hasher(self._registry, tenant_id)
         events: list[BusinessEvent] = []
