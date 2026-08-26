@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS business_events
     BusinessEventId   String,
     EventName         LowCardinality(String),
     UserIdHash        FixedString(64),
+    -- Account dimension (CTO-180). Mirrors otel_spans.AccountIdHash: the tenant's own paying
+    -- customer, HMAC-SHA256 hex under the per-tenant key, never the raw id and never a name.
+    -- Value events need it for the same reason spans do. Revenue arrives per ACCOUNT (a
+    -- subscription, a contract), so margin per customer is only answerable if both sides of the
+    -- join carry the account. DEFAULT '' means every event written before this column existed
+    -- reads back as unattributed, which is a fact about our instrumentation and not a customer.
+    AccountIdHash     FixedString(64) DEFAULT '',
     OccurredAt        DateTime64(9),
     IngestedAt        DateTime64(9),
     ValueAmountMicro  Nullable(Int64),
@@ -74,3 +81,13 @@ CREATE TABLE IF NOT EXISTS unattributed_events
 )
 ENGINE = ReplacingMergeTree(LastCheckedAt)
 ORDER BY (TenantId, BusinessEventId);
+
+-- CTO-180 additive migration for business_events. Idempotent `ADD COLUMN IF NOT EXISTS` with a
+-- DEFAULT, so it is metadata-only against an existing populated table and needs no backfill:
+-- nothing ever emitted an account id, so historical events stay unattributed rather than guessed.
+--
+-- As with otel_spans, an existing deployment will NOT pick this up on its own. The compose initdb
+-- directory that mounts this file runs only on a first boot against an empty volume. Replay the
+-- canonical DDL with `make ch-migrate` from infra/ to apply it to a stack that is already running.
+ALTER TABLE business_events
+    ADD COLUMN IF NOT EXISTS AccountIdHash FixedString(64) DEFAULT '';
