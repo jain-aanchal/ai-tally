@@ -240,3 +240,40 @@ export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts):
   if (all <= 0) return null;
   return excluded.totalMicroUsd / all;
 }
+
+// --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
+
+/**
+ * Above this share, the unattributed bucket is the story rather than a footnote.
+ *
+ * Lives here rather than in page.tsx because the state machine below is the thing worth testing,
+ * and a threshold the test cannot see is a threshold the test cannot pin.
+ */
+export const MAJORITY_UNATTRIBUTED = 0.5;
+
+/**
+ * The three honest readings of a successful query.
+ *
+ *   - `onboarding`: not one span in the window carried an account, so there is no breakdown to
+ *     show and the reader has almost certainly never seen this page. Explain the page, then say
+ *     how to switch it on.
+ *   - `partial`: some accounts exist but most spend still has none, so the ranking is real and
+ *     incomplete at the same time. Show it, and say what it is missing.
+ *   - `attributed`: most spend carries an account. The table speaks for itself.
+ *
+ * A failed query is deliberately NOT a state here. "ClickHouse is unreachable" is a different fact
+ * from "you have not instrumented this yet", and answering an outage with an onboarding pitch would
+ * blame the reader for our own broken dependency. page.tsx branches on `costs === null` first, and
+ * this function is only ever reached with data in hand.
+ */
+export type AccountsView = "onboarding" | "partial" | "attributed";
+
+export function accountsView(costs: AccountCosts): AccountsView {
+  // Keyed on "are there any accounts", not on "is spend zero". A tenant can have real accounts and
+  // no spend in the window, which is a quiet week rather than an uninstrumented one, and telling it
+  // to go install the SDK it already installed would be wrong.
+  if (costs.accounts.length === 0) return "onboarding";
+  const share = unattributedShare(costs);
+  if (share !== null && share >= MAJORITY_UNATTRIBUTED) return "partial";
+  return "attributed";
+}
