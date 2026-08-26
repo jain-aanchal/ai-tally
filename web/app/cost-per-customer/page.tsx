@@ -42,16 +42,22 @@ import {
   type ExcludedInfraCost,
 } from "@/lib/accounts";
 import { queryAccountLabels } from "@/lib/accountLabels";
-import { queryAccountCosts, queryExcludedInfraCost } from "@/lib/clickhouse";
+import { type AccountRevenueReport } from "@/lib/accountRevenue";
+import {
+  queryAccountCosts,
+  queryAccountRevenue,
+  queryExcludedInfraCost,
+} from "@/lib/clickhouse";
 import { AccountTable } from "./AccountTable";
 import { HowToTagDetails, OnboardingEmptyState } from "./Onboarding";
 
 export const dynamic = "force-dynamic";
 
 export default async function CostPerCustomerPage() {
-  const [costs, labels, excluded] = await Promise.all([
+  const [costs, labels, revenue, excluded] = await Promise.all([
     queryAccountCosts(),
     queryAccountLabels(),
+    queryAccountRevenue(),
     queryExcludedInfraCost(),
   ]);
 
@@ -75,7 +81,7 @@ export default async function CostPerCustomerPage() {
       {costs === null ? (
         <Unreachable />
       ) : (
-        <Report costs={costs} labels={labels} excluded={excluded} />
+        <Report costs={costs} labels={labels} revenue={revenue} excluded={excluded} />
       )}
     </div>
   );
@@ -84,15 +90,24 @@ export default async function CostPerCustomerPage() {
 function Report({
   costs,
   labels,
+  revenue,
   excluded,
 }: {
   costs: AccountCosts;
   labels: Map<string, string> | null;
+  /** `null` when the revenue read failed: a different statement from "no revenue is wired". */
+  revenue: AccountRevenueReport | null;
   excluded: ExcludedInfraCost | null;
 }) {
   const share = unattributedShare(costs);
   const attributed = attributedSpend(costs);
   const view = accountsView(costs);
+  // Hash to net revenue, straight from the report. Accounts the report has no row for are simply
+  // absent, which the table reads as unknown; an account present with `revenueMicroUsd: null` says
+  // the same thing, and an account with `0` says something different and keeps its zero.
+  const revenueByAccount = Object.fromEntries(
+    (revenue?.accounts ?? []).map((a) => [a.accountIdHash, a.revenueMicroUsd]),
+  );
 
   return (
     <div className="space-y-6">
@@ -129,11 +144,13 @@ function Report({
       {view === "onboarding" ? (
         <OnboardingEmptyState windowDays={costs.windowDays} />
       ) : (
-        <Card title="Accounts by direct cost">
+        <Card title="Accounts by gross margin">
           <AccountTable
             rows={costs.accounts}
             labels={labels ? Object.fromEntries(labels) : {}}
             labelsUnavailable={labels === null}
+            revenue={revenueByAccount}
+            revenueUnavailable={revenue === null}
             windowDays={costs.windowDays}
           />
           {labels === null ? (

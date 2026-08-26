@@ -11,7 +11,12 @@ import { useMemo, useState, useTransition } from "react";
 
 import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money } from "@/components/HonestValue";
-import { type AccountCostRow, costPerUser } from "@/lib/accounts";
+import {
+  type AccountCostRow,
+  type AccountMargin,
+  accountMargin,
+  costPerUser,
+} from "@/lib/accounts";
 import { AccountCell } from "./AccountIdentity";
 import { lookupAccountAction } from "./actions";
 
@@ -28,6 +33,8 @@ export function AccountTable({
   rows,
   labels,
   labelsUnavailable,
+  revenue,
+  revenueUnavailable,
   windowDays,
 }: {
   rows: readonly AccountCostRow[];
@@ -38,6 +45,16 @@ export function AccountTable({
   labels: Record<string, string>;
   /** True when the gateway could not be reached, so an unlabelled row is not proof of no label. */
   labelsUnavailable: boolean;
+  /**
+   * Hash to net revenue in micro-USD, for accounts that have one (CTO-197, plan E4).
+   *
+   * A missing key and an explicit `null` mean the same thing and both render blank: we have not
+   * been told this account's revenue. A `0` is a measurement (a charge fully netted by a refund)
+   * and prints as $0.00. Nothing here may treat the two alike.
+   */
+  revenue: Record<string, number | null>;
+  /** True when the revenue read failed, so a blank is not proof that no revenue source is wired. */
+  revenueUnavailable: boolean;
   windowDays: number;
 }) {
   const [query, setQuery] = useState("");
@@ -87,6 +104,15 @@ export function AccountTable({
     });
   };
 
+  // One place that pairs a row with its revenue, so the render path and the sort path can never
+  // disagree about what an account earns. `revenue[hash]` is `undefined` for an account the revenue
+  // query returned no row for, which means exactly what an explicit `null` means: unknown.
+  const margin = useMemo(
+    () => (r: AccountCostRow) =>
+      accountMargin(r, revenue[r.accountIdHash] ?? null, revenueUnavailable),
+    [revenue, revenueUnavailable],
+  );
+
   const columns = useMemo<Column<AccountCostRow>[]>(
     () => [
       {
@@ -123,6 +149,31 @@ export function AccountTable({
         sortValue: (r) => r.directCostMicroUsd,
       },
       {
+        key: "revenue",
+        header: "Revenue",
+        align: "right",
+        render: (r) => {
+          const { revenueMicroUsd, reason } = margin(r);
+          // `0` is a real measurement and prints as $0.00; `null` is an absence and prints blank.
+          // Money's own null path would blur that, so the branch is explicit here.
+          return revenueMicroUsd === null ? (
+            <Blank reason={reason ?? "revenue unknown for this account"} />
+          ) : (
+            <Money micro={revenueMicroUsd} />
+          );
+        },
+        sortValue: (r) => margin(r).revenueMicroUsd,
+      },
+      {
+        key: "margin",
+        header: "Gross margin",
+        align: "right",
+        render: (r) => <MarginCell row={r} margin={margin(r)} />,
+        // Unknown revenue means unknown margin, and `null` sorts last in both directions, so an
+        // account we know nothing about never ranks as the most OR the least profitable customer.
+        sortValue: (r) => margin(r).marginMicroUsd,
+      },
+      {
         key: "costPerUser",
         header: "Cost per user",
         align: "right",
@@ -139,7 +190,7 @@ export function AccountTable({
         sortValue: (r) => costPerUser(r).micro,
       },
     ],
-    [labels, labelsUnavailable],
+    [labels, labelsUnavailable, margin],
   );
 
   return (
@@ -202,7 +253,10 @@ export function AccountTable({
         columns={columns}
         rows={visibleRows}
         rowKey={(r) => r.accountIdHash}
-        initialSort={{ key: "cost", direction: "desc" }}
+        // Ranked by profitability, most profitable first, which is the question this tab exists to
+        // answer. Sorting ascending puts the customers losing money at the top; accounts with
+        // unknown revenue stay at the bottom either way rather than posing as the answer.
+        initialSort={{ key: "margin", direction: "desc" }}
         // A row the search found is filtered to on its own, so the highlight is belt and braces for
         // the case where a tenant later labels two hashes of the same account and both rows show.
         rowClassName={(r) => (matchedSet.has(r.accountIdHash) ? "bg-accent/5" : "")}
@@ -212,6 +266,58 @@ export function AccountTable({
         // that renders the table without that branch.
         empty={`No spans carried an account id in the last ${windowDays} days.`}
       />
+
+      {/* The margin column's own caveat, kept next to the column rather than only at the top of the
+          page, because the header scrolls away and this is the number that gets screenshotted. The
+          excluded-cost banner (CTO-189) has since landed above this table with the real dollar
+          figure, so this line points at it rather than restating the size of the gap in different
+          words. What it does not delegate is the ▲ mark: that flags a per-row reason, which no
+          tenant-wide banner can carry. */}
+      <p className="max-w-prose text-xs text-warn">
+        Gross margin is revenue minus <em>direct</em> cost only. Compute and egress carry no account
+        on the span, so they sit outside every row here and each margin is overstated by whatever
+        share of that customer&apos;s cost falls in those layers; the excluded-cost note above this
+        table sizes that gap in real money for this tenant. Rows marked ▲ carry a further reason not
+        to read them at face value; hover the mark to see it. Ranking by this column tells you the
+        order to look in, not what a customer actually earns you.
+      </p>
     </div>
   );
 }
+
+/**
+ * The Gross margin cell: revenue minus direct cost, with the reasons it cannot be taken at face
+ * value attached to the number itself.
+ *
+ * The caveat marker is not decoration. Every margin in v1 is overstated because compute and egress
+ * are excluded from the cost side, and on a lightly-instrumented account it is overstated by so
+ * much that the figure is really just revenue. The page header says this too, but the header
+ * scrolls away and this is the cell someone screenshots into a pricing discussion.
+ */
+function MarginCell({ row, margin }: { row: AccountCostRow; margin: AccountMargin }) {
+  if (margin.marginMicroUsd === null) {
+    return <Blank reason={margin.reason ?? "margin unknown for this account"} />;
+  }
+  const negative = margin.marginMicroUsd < 0;
+  return (
+    <span className="inline-flex items-center justify-end gap-1">
+      <Money
+        micro={margin.marginMicroUsd}
+        className={negative ? "text-warn" : undefined}
+      />
+      {margin.caveats.length > 0 ? (
+        <span
+          title={margin.caveats.join("\n\n")}
+          className="cursor-help text-[11px] text-warn"
+          data-testid={`margin-caveat-${row.accountIdHash}`}
+        >
+          <span aria-hidden>▲</span>
+          <span className="sr-only">
+            Read with care: {margin.caveats.join(" ")}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
