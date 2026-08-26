@@ -152,6 +152,18 @@ class Settings(BaseSettings):
     # The first failure is not delayed at all; the second waits base, and it doubles to the cap.
     scheduler_backoff_base_s: float = 300.0
     scheduler_backoff_cap_s: float = 6 * 3600.0
+    # CTO-219. How long shutdown WAITS for an in-flight tick before proceeding without it. It bounds
+    # the wait, not the job: a job runs on a worker thread that cannot be cancelled, so past this
+    # point the thread is left to die with the process and its run is not recorded (the next tick
+    # sees the pair as still due). Without a bound, one connector talking to a slow billing API held
+    # the whole deploy open, and with it the ingest buffer's flush. Long enough that a healthy tick
+    # finishes normally, short enough that a rolling deploy never waits on one tenant.
+    scheduler_shutdown_timeout_s: float = 30.0
+    # CTO-219. Idle Postgres sessions the scheduler keeps warm for its state reads, run inserts and
+    # tenant listing, which previously opened one connection per (job, tenant) per tick. Advisory
+    # locks are NOT pooled: each held lock keeps its own dedicated session, because the session is
+    # what makes the lock die with the process. See gateway/scheduler.py.
+    scheduler_db_pool_max_idle: int = 4
 
 
 _settings: Settings | None = None
