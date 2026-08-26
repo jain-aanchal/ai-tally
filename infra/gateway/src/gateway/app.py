@@ -103,6 +103,11 @@ from gateway.tenant_guardrails import (
 )
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
+from gateway.tenant_revenue_sources import (
+    RevenueSourceConfigError,
+    RevenueSourceConfigInput,
+    TenantRevenueSourceStore,
+)
 from gateway.tenant_stripe import TenantStripeStore
 from gateway.tenant_unit_economics import (
     TenantUnitEconomicsStore,
@@ -179,6 +184,10 @@ async def lifespan(app: FastAPI):
     # Per-tenant LTV/CAC band thresholds (CTO-126): overrides the hardcoded B2B-SaaS defaults the
     # dashboard's ltvCacBand/paybackBand classifiers use. A tenant with no row keeps the defaults.
     app.state.tenant_unit_economics = TenantUnitEconomicsStore(settings)
+    # Per-tenant revenue source config (CTO-194): which business_events.Source values count as
+    # revenue on /attribution. A tenant with no row counts every source and discriminates on
+    # ValueType, which is what replaced the old hardcoded Source='stripe' filter.
+    app.state.tenant_revenue_sources = TenantRevenueSourceStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -1320,6 +1329,61 @@ async def upsert_tenant_unit_economics_config(
     return JSONResponse(
         {"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200
     )
+
+
+@app.get("/v1/tenant/revenue-sources/config")
+def get_tenant_revenue_source_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Revenue source config for the caller's tenant (CTO-194).
+
+    Returns ``config: null`` when the tenant has no row — the web reader then applies the defaults
+    (every source counts; ValueType monetary + mrr are revenue; refunds net off). Same per-tenant
+    auth as the unit-economics route.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantRevenueSourceStore = app.state.tenant_revenue_sources
+    config = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "config": config.as_dict() if config else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/revenue-sources/config")
+async def upsert_tenant_revenue_source_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert the tenant's revenue source config. Idempotent on ``change_id`` (CTO-194).
+
+    Body: ``{revenue_sources: string[] | null, include_mrr?: bool, change_id, updated_by?}``.
+    ``revenue_sources: null`` means every source counts. An empty array is rejected (422) because
+    "nothing is revenue" silently blanks the dashboard and is never what a caller means.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    change_id = body.get("change_id")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    try:
+        config_input = RevenueSourceConfigInput.from_json(body)
+        config = app.state.tenant_revenue_sources.upsert(
+            tenant_id,
+            config_input,
+            change_id=change_id,
+            actor=body.get("updated_by"),
+        )
+    except RevenueSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200)
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:
