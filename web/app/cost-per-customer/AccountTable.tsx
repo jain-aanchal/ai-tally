@@ -12,13 +12,26 @@ import { useMemo, useState, useTransition } from "react";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money } from "@/components/HonestValue";
 import {
+  ALLOCATION_RULE_DESCRIPTIONS,
+  ALLOCATION_RULE_LABELS,
   type AccountCostRow,
   type AccountMargin,
+  type AllocatedAccountRow,
   accountMargin,
   costPerUser,
 } from "@/lib/accounts";
+import type { AllocationRule } from "@/lib/allocation";
 import { AccountCell } from "./AccountIdentity";
 import { lookupAccountAction } from "./actions";
+
+/**
+ * A row that may or may not have been through allocation.
+ *
+ * Optional rather than two table components: the only difference between the allocated and
+ * unallocated renders is two extra columns, and `allocatedRule` is what says which one this is.
+ * The fields are present exactly when that prop is non-null.
+ */
+export type TableRow = AccountCostRow & Partial<Omit<AllocatedAccountRow, keyof AccountCostRow>>;
 
 interface SearchState {
   /** Hashes the searched id could have been emitted under. Empty until a search succeeds. */
@@ -36,8 +49,9 @@ export function AccountTable({
   revenue,
   revenueUnavailable,
   windowDays,
+  allocationRule = null,
 }: {
-  rows: readonly AccountCostRow[];
+  rows: readonly TableRow[];
   /**
    * Hash to label. A plain record rather than a Map because this crosses the serialization
    * boundary from a server component.
@@ -56,6 +70,14 @@ export function AccountTable({
   /** True when the revenue read failed, so a blank is not proof that no revenue source is wired. */
   revenueUnavailable: boolean;
   windowDays: number;
+  /**
+   * The rule that produced the allocated figures, or `null` when nothing was allocated.
+   *
+   * Non-null adds the Allocated and Total columns AND names the rule in their headers. The two go
+   * together on purpose: an allocated column with no rule attached to it is an estimate presented
+   * as a measurement, which is the failure this whole ticket exists to avoid.
+   */
+  allocationRule?: AllocationRule | null;
 }) {
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState<SearchState | null>(null);
@@ -113,7 +135,7 @@ export function AccountTable({
     [revenue, revenueUnavailable],
   );
 
-  const columns = useMemo<Column<AccountCostRow>[]>(
+  const columns = useMemo<Column<TableRow>[]>(
     () => [
       {
         key: "account",
@@ -143,11 +165,62 @@ export function AccountTable({
       },
       {
         key: "cost",
-        header: "Direct cost",
+        header: (
+          <span title="LLM, tools, vector and embeddings spend recorded against this account. Measured, not estimated.">
+            Direct cost
+          </span>
+        ),
         align: "right",
         render: (r) => <Money micro={r.directCostMicroUsd} />,
         sortValue: (r) => r.directCostMicroUsd,
       },
+      // Allocated and Total only exist when a rule was actually applied, and they carry that rule
+      // in their headers. An estimate has to travel with the assumption that produced it: a column
+      // reading "Allocated" beside a measured one, with no rule named, is exactly how an estimate
+      // gets read as a measurement.
+      ...(allocationRule
+        ? ([
+            {
+              key: "allocated",
+              header: (
+                <span
+                  title={`Estimated, not measured. ${ALLOCATION_RULE_DESCRIPTIONS[allocationRule]}.`}
+                  className="underline decoration-dotted decoration-muted/60 underline-offset-4"
+                >
+                  Allocated ({ALLOCATION_RULE_LABELS[allocationRule]})
+                </span>
+              ),
+              align: "right",
+              render: (r) =>
+                r.allocatedMicroUsd === undefined ? (
+                  <Blank reason="no allocated share was computed for this row" />
+                ) : (
+                  <span className="text-muted" title="Estimated share of compute and egress">
+                    <Money micro={r.allocatedMicroUsd} />
+                  </span>
+                ),
+              sortValue: (r) => r.allocatedMicroUsd ?? null,
+            },
+            {
+              key: "total",
+              header: (
+                <span title="Direct plus allocated. Part measured, part estimated.">
+                  Total cost
+                </span>
+              ),
+              align: "right",
+              render: (r) =>
+                r.totalMicroUsd === undefined ? (
+                  <Blank reason="no total was computed for this row" />
+                ) : (
+                  <span className="font-medium">
+                    <Money micro={r.totalMicroUsd} />
+                  </span>
+                ),
+              sortValue: (r) => r.totalMicroUsd ?? null,
+            },
+          ] satisfies Column<TableRow>[])
+        : []),
       {
         key: "revenue",
         header: "Revenue",
@@ -175,7 +248,12 @@ export function AccountTable({
       },
       {
         key: "costPerUser",
-        header: "Cost per user",
+        // Named "Direct" once an Allocated column sits beside it, because this ratio divides
+        // direct cost only. Left as costPerUser's own definition rather than switched to total:
+        // dividing an estimate by an approximate user count would compound two uncertainties into
+        // a figure with a false air of precision, and the honest per-seat number is the measured
+        // one.
+        header: allocationRule ? "Direct cost per user" : "Cost per user",
         align: "right",
         render: (r) => {
           const { micro, reason } = costPerUser(r);
@@ -190,7 +268,7 @@ export function AccountTable({
         sortValue: (r) => costPerUser(r).micro,
       },
     ],
-    [labels, labelsUnavailable, margin],
+    [labels, labelsUnavailable, allocationRule, margin],
   );
 
   return (
@@ -254,8 +332,11 @@ export function AccountTable({
         rows={visibleRows}
         rowKey={(r) => r.accountIdHash}
         // Ranked by profitability, most profitable first, which is the question this tab exists to
-        // answer. Sorting ascending puts the customers losing money at the top; accounts with
-        // unknown revenue stay at the bottom either way rather than posing as the answer.
+        // answer (CTO-197). Sorting ascending puts the customers losing money at the top; accounts
+        // with unknown revenue stay at the bottom either way rather than posing as the answer. The
+        // cost columns are still ranked on demand, and Total is the one to rank on where shared
+        // cost was allocated, because direct cost alone no longer orders the customers by what they
+        // cost.
         initialSort={{ key: "margin", direction: "desc" }}
         // A row the search found is filtered to on its own, so the highlight is belt and braces for
         // the case where a tenant later labels two hashes of the same account and both rows show.
@@ -268,18 +349,21 @@ export function AccountTable({
       />
 
       {/* The margin column's own caveat, kept next to the column rather than only at the top of the
-          page, because the header scrolls away and this is the number that gets screenshotted. The
-          excluded-cost banner (CTO-189) has since landed above this table with the real dollar
-          figure, so this line points at it rather than restating the size of the gap in different
-          words. What it does not delegate is the ▲ mark: that flags a per-row reason, which no
-          tenant-wide banner can carry. */}
+          page, because the header scrolls away and this is the number that gets screenshotted. It
+          used to point at CTO-189's excluded-cost banner for the size of the gap; CTO-193 removed
+          that banner, because compute and egress are no longer excluded, they are allocated. So the
+          statement this line has to make changed with it: not "half the cost base is missing" but
+          "the infrastructure part of the cost base is an estimate, and the margin does not subtract
+          it at all". What it still does not delegate is the ▲ mark: that flags a per-row reason,
+          which no tenant-wide sentence can carry. */}
       <p className="max-w-prose text-xs text-warn">
-        Gross margin is revenue minus <em>direct</em> cost only. Compute and egress carry no account
-        on the span, so they sit outside every row here and each margin is overstated by whatever
-        share of that customer&apos;s cost falls in those layers; the excluded-cost note above this
-        table sizes that gap in real money for this tenant. Rows marked ▲ carry a further reason not
-        to read them at face value; hover the mark to see it. Ranking by this column tells you the
-        order to look in, not what a customer actually earns you.
+        Gross margin is revenue minus <em>direct</em> cost only.{" "}
+        {allocationRule
+          ? "Compute and egress carry no account on the span, so each account's share of them is estimated by the allocation rule named above rather than measured, and that estimate is not subtracted here: it sits in the Allocated and Total columns beside this one. Every margin is therefore overstated by whatever share of that customer's cost those layers hold."
+          : "Compute and egress carry no account on the span, and nothing could be allocated for this window, so they sit outside every row here and each margin is overstated by whatever share of that customer's cost falls in those layers."}{" "}
+        Rows marked ▲ carry a further reason not to read them at face value; hover the mark to see
+        it. Ranking by this column tells you the order to look in, not what a customer actually
+        earns you.
       </p>
     </div>
   );

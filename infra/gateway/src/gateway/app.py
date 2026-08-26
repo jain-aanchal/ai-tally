@@ -107,6 +107,15 @@ from gateway.tenant_account_labels import (
     normalize_account_id_hash,
     normalize_label,
 )
+from gateway.tenant_allocation import (
+    ALLOCATION_RULES,
+    DEFAULT_ALLOCATION_RULE,
+    AllocationConfigError,
+    TenantAllocationStore,
+    TenantNotFound as AllocationTenantNotFound,
+    normalize_rule,
+    normalize_updated_by,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
@@ -233,6 +242,10 @@ async def lifespan(app: FastAPI):
     # so ClickHouse never holds a customer name: the label is mutable metadata and stamping it on
     # every span would both waste storage and defeat the point of AccountIdHash.
     app.state.tenant_account_labels = TenantAccountLabelStore(settings)
+    # Per-tenant shared-cost allocation rule (CTO-193). Decides how compute and egress are split
+    # across accounts on /cost-per-customer, which is roughly half of every figure on that page.
+    # A tenant with no row gets pro_rata_direct and the page says the rule is the default.
+    app.state.tenant_allocation = TenantAllocationStore(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -1334,6 +1347,97 @@ async def delete_tenant_account_label(
         "removed": removed > 0,
         "rows_removed": removed,
     })
+
+
+@app.get("/v1/tenant/allocation-config")
+def get_tenant_allocation_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """The shared-cost allocation rule in force for the caller's tenant (CTO-193).
+
+    The response ALWAYS names a usable rule, and separately says whether anyone chose it:
+
+    * ``allocation_rule``: what /cost-per-customer must apply. Never null.
+    * ``configured``: false when the tenant has no row, i.e. the rule above is the default.
+    * ``config``: the stored row, or null. Carries ``updated_at`` / ``updated_by``.
+    * ``available_rules``: every rule this deployment can apply, so a config surface does not
+      have to hardcode the list and drift from the CHECK constraint.
+
+    Splitting "which rule applies" from "did someone pick it" is the whole point of the shape. The
+    page names the rule beside the column it produced, and "pro rata, the default" and "pro rata,
+    chosen by finance in March" are different claims to put in front of a reader.
+
+    A tenant with no ``tenants`` row is 404, not a silent default: that is a misrouted request, and
+    inventing an allocation rule for a tenant we do not know is not a recovery.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantAllocationStore = app.state.tenant_allocation
+    try:
+        config = store.get(tenant_id)
+    except AllocationTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "allocation_rule": config.allocation_rule if config else DEFAULT_ALLOCATION_RULE,
+            "configured": config is not None,
+            "default_rule": DEFAULT_ALLOCATION_RULE,
+            "available_rules": list(ALLOCATION_RULES),
+            "config": config.as_dict() if config else None,
+        },
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/allocation-config")
+async def upsert_tenant_allocation_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Set the tenant's shared-cost allocation rule. Idempotent on ``change_id`` (CTO-193).
+
+    Body: ``{"allocation_rule": "pro_rata_direct" | "even_split", "change_id": "<uuid>",
+    "updated_by": "finance@acme.test"?}``.
+
+    An unknown rule is a 422 rather than a fallback to the default. Storing one rule and applying
+    another would leave the page naming a rule that did not produce its numbers, which is exactly
+    the invisible assumption this config exists to remove.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    change_id = body.get("change_id")
+    if not isinstance(change_id, str) or not change_id.strip():
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+
+    store: TenantAllocationStore = app.state.tenant_allocation
+    try:
+        rule = normalize_rule(body.get("allocation_rule"))
+        updated_by = normalize_updated_by(body.get("updated_by"))
+        config = store.upsert(
+            tenant_id, rule, change_id=change_id.strip(), updated_by=updated_by
+        )
+    except AllocationTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AllocationConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "allocation_rule": config.allocation_rule,
+            "configured": True,
+            "default_rule": DEFAULT_ALLOCATION_RULE,
+            "available_rules": list(ALLOCATION_RULES),
+            "config": config.as_dict(),
+        },
+        status_code=200,
+    )
 
 
 @app.post("/v1/stripe/webhook")

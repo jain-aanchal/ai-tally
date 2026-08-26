@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type AccountCostRow, emptyAccountRow } from "@/lib/accounts";
-import { AccountTable } from "./AccountTable";
+import { AccountTable, type TableRow } from "./AccountTable";
 
 // The search box calls a server action. Mocked here so the test covers the matching rule (which is
 // where the interesting bug lives) rather than the transport.
@@ -188,5 +188,72 @@ describe("AccountTable", () => {
     // most nor the least profitable customer, because it is not a measurement at all.
     expect(names()[0]).toMatch(/Loss Maker/);
     expect(names()[2]).toMatch(/Unknown/);
+  });
+});
+
+describe("AccountTable allocated columns (CTO-193)", () => {
+  function allocatedRow(hash: string): TableRow {
+    return { ...row(hash), allocatedMicroUsd: 3_000_000, totalMicroUsd: 5_000_000 };
+  }
+
+  it("shows direct, allocated and total separately, with the rule named", () => {
+    // The core honesty requirement of the ticket. An allocated number folded into one total, or
+    // shown without the rule that produced it, is an estimate wearing a measurement's clothes.
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="pro_rata_direct"
+      />,
+    );
+    expect(screen.getByText("Direct cost")).toBeTruthy();
+    expect(screen.getByText(/Allocated \(pro rata on direct spend\)/)).toBeTruthy();
+    expect(screen.getByText("Total cost")).toBeTruthy();
+    expect(screen.getByText("$2.00")).toBeTruthy(); // direct, measured
+    expect(screen.getByText("$3.00")).toBeTruthy(); // allocated, estimated
+    expect(screen.getByText("$5.00")).toBeTruthy(); // total
+  });
+
+  it("names the rule that actually applied, including a fallback", () => {
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="even_split"
+      />,
+    );
+    expect(screen.getByText(/Allocated \(even split across accounts\)/)).toBeTruthy();
+  });
+
+  it("shows no allocated column at all when nothing was allocated", () => {
+    // Rather than an empty or zero column, which would read as "this account causes no
+    // infrastructure cost" when the truth is that the figure could not be computed.
+    renderTable([row(UNLABELLED)]);
+    expect(screen.queryByText(/Allocated/)).toBeNull();
+    expect(screen.queryByText("Total cost")).toBeNull();
+    expect(screen.getByText("Cost per user")).toBeTruthy();
+  });
+
+  it("labels the per-user ratio as direct once an allocated column sits beside it", () => {
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="pro_rata_direct"
+      />,
+    );
+    expect(screen.getByText("Direct cost per user")).toBeTruthy();
   });
 });

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ACCOUNT_HASH_CHARS,
+  ALLOCATION_RULE_DESCRIPTIONS,
+  ALLOCATION_RULE_LABELS,
   MAJORITY_UNATTRIBUTED,
   MARGIN_EXCLUDES_INFRA,
   MIN_SPANS_FOR_COST_PER_USER,
@@ -14,6 +16,8 @@ import {
   accountMargin,
   type ExcludedInfraCost,
   accountsView,
+  allocateAccountCosts,
+  allocatedRowsTotal,
   attributedSpend,
   costPerUser,
   emptyAccountRow,
@@ -25,6 +29,7 @@ import {
   trendTotal,
   unattributedShare,
 } from "./accounts";
+import { ALLOCATION_RULES, type AllocationRule } from "./allocation";
 
 function row(over: Partial<AccountCostRow> = {}): AccountCostRow {
   return {
@@ -330,6 +335,162 @@ describe("excludedShare (CTO-189)", () => {
       costs({ totalDirectMicroUsd: 100 }),
     );
     expect(formatShare(share!)).toBe(">99.9%");
+  });
+});
+
+describe("allocateAccountCosts (CTO-193)", () => {
+  function shared(total: number): ExcludedInfraCost {
+    return {
+      windowDays: 30,
+      computeMicroUsd: total,
+      egressMicroUsd: 0,
+      totalMicroUsd: total,
+    };
+  }
+
+  /** Three tagged accounts plus a bucket, with the totals wired up the way the query returns them. */
+  function tenant(directs: number[], bucketDirect: number): AccountCosts {
+    const accounts = directs.map((d, i) => ({
+      ...emptyAccountRow(String(i).repeat(64), false),
+      directCostMicroUsd: d,
+    }));
+    const unattributed = {
+      ...emptyAccountRow("", true),
+      directCostMicroUsd: bucketDirect,
+    };
+    return {
+      windowDays: 30,
+      accounts,
+      unattributed,
+      totalDirectMicroUsd: directs.reduce((s, d) => s + d, 0) + bucketDirect,
+    };
+  }
+
+  // --- THE ACCEPTANCE TEST ----------------------------------------------------------------------
+
+  /**
+   * Direct plus allocated across every row equals the tenant total, exactly.
+   *
+   * This is the claim the page prints and the one the whole feature rests on: if these rows do not
+   * add up to what /cost reports, the tab contradicts the Cost tab and loses trust the first time
+   * someone sums a column. C1 guarantees the arithmetic; this asserts the WIRING does not break it,
+   * which is the only way it can break.
+   */
+  function expectReconciles(costs: AccountCosts, excludedTotal: number, rule: AllocationRule) {
+    const out = allocateAccountCosts(costs, shared(excludedTotal), rule)!;
+    expect(out).not.toBeNull();
+    expect(allocatedRowsTotal(out)).toBe(out.tenantTotalMicroUsd);
+    expect(out.tenantTotalMicroUsd).toBe(costs.totalDirectMicroUsd + excludedTotal);
+    expect(out.allocatedTotalMicroUsd).toBe(excludedTotal);
+    expect(out.directTotalMicroUsd).toBe(costs.totalDirectMicroUsd);
+    for (const r of [...out.accounts, out.unattributed]) {
+      expect(r.totalMicroUsd).toBe(r.directCostMicroUsd + r.allocatedMicroUsd);
+    }
+    return out;
+  }
+
+  it("reconciles on the live tenant's shape: three tiny accounts, a huge untagged bucket", () => {
+    // The real numbers, in micro-USD: direct $48,716.15 of which the bucket is all but $5.31, and
+    // $42,062.91 of compute and egress to allocate.
+    const costs = tenant([3_120_000, 1_450_000, 740_000], 48_710_840_000);
+    const out = expectReconciles(costs, 42_062_910_000, "pro_rata_direct");
+    expect(out.tenantTotalMicroUsd).toBe(90_779_060_000);
+    // Not an absurd per-account figure: each tagged account carries a share proportional to a
+    // handful of dollars of direct spend, not a third of a $42k infrastructure bill.
+    for (const a of out.accounts) {
+      expect(a.allocatedMicroUsd).toBeLessThan(5_000_000);
+    }
+    // The bucket carries essentially the whole infrastructure bill, because it caused it.
+    expect(out.unattributed.allocatedMicroUsd / out.allocatedTotalMicroUsd).toBeGreaterThan(0.999);
+  });
+
+  it("reconciles under an even split too, bucket included", () => {
+    const costs = tenant([3_120_000, 1_450_000, 740_000], 48_710_840_000);
+    const out = expectReconciles(costs, 42_062_910_000, "even_split");
+    // Four participants, so the bucket takes a quarter rather than its usage share. That is the
+    // rule doing what it says; the point of the assertion is that the bucket still participates.
+    expect(out.unattributed.allocatedMicroUsd).toBe(10_515_727_500);
+  });
+
+  it("reconciles on a total that does not divide evenly", () => {
+    // Rounding across many small accounts is one of the two named ways to break reconciliation.
+    expectReconciles(tenant([1, 1, 1], 1), 10, "pro_rata_direct");
+    expectReconciles(tenant([7, 11, 13], 17), 1_000_003, "pro_rata_direct");
+  });
+
+  // --- the unattributed-bucket decision ---------------------------------------------------------
+
+  it("gives the untagged bucket the infrastructure it caused, not the tagged accounts", () => {
+    const costs = tenant([1_000_000], 99_000_000);
+    const out = allocateAccountCosts(costs, shared(100_000_000), "pro_rata_direct")!;
+    expect(out.accounts[0].allocatedMicroUsd).toBe(1_000_000);
+    expect(out.unattributed.allocatedMicroUsd).toBe(99_000_000);
+  });
+
+  it("does not let a newly tagged account change what the others cost", () => {
+    // The property that rules out excluding the bucket. If the bucket sat out, tagging one more
+    // account would redistribute the entire infrastructure bill and halve the existing accounts'
+    // cost, so a customer's cost would depend on how many OTHER customers were instrumented.
+    const before = allocateAccountCosts(
+      tenant([1_000_000], 9_000_000),
+      shared(10_000_000),
+      "pro_rata_direct",
+    )!;
+    const after = allocateAccountCosts(
+      tenant([1_000_000, 2_000_000], 7_000_000),
+      shared(10_000_000),
+      "pro_rata_direct",
+    )!;
+    const firstBefore = before.accounts[0].allocatedMicroUsd;
+    const firstAfter = after.accounts.find((a) => a.directCostMicroUsd === 1_000_000)!;
+    expect(firstAfter.allocatedMicroUsd).toBe(firstBefore);
+  });
+
+  it("keeps the bucket flagged as unattributed so nothing can rank it as a customer", () => {
+    const out = allocateAccountCosts(tenant([1_000_000], 1_000_000), shared(10), "even_split")!;
+    expect(out.unattributed.unattributed).toBe(true);
+    expect(out.accounts.every((a) => !a.unattributed)).toBe(true);
+    expect(out.accounts.map((a) => a.accountIdHash)).not.toContain("");
+  });
+
+  // --- presentation contracts -------------------------------------------------------------------
+
+  it("ranks accounts by TOTAL cost, not direct", () => {
+    // Under an even split the cheaper account by direct spend can be the more expensive customer
+    // once infrastructure is counted. A table headed by a Total column must be sorted by it.
+    const costs = tenant([3_000_000, 2_000_000], 0);
+    costs.accounts[1].spanCount = 10; // irrelevant to cost, present to keep the rows distinct
+    const out = allocateAccountCosts(costs, shared(0), "even_split")!;
+    expect(out.accounts[0].totalMicroUsd).toBeGreaterThanOrEqual(out.accounts[1].totalMicroUsd);
+  });
+
+  it("reports the fallback rule when pro rata has no denominator", () => {
+    // Every participant at zero direct spend. Reporting "pro rata" here would name an arithmetic
+    // that never ran, so the page names the rule that actually applied.
+    const out = allocateAccountCosts(tenant([0, 0], 0), shared(1_000_000), "pro_rata_direct")!;
+    expect(out.rule).toBe("pro_rata_direct");
+    expect(out.effectiveRule).toBe("even_split");
+    expect(allocatedRowsTotal(out)).toBe(out.tenantTotalMicroUsd);
+  });
+
+  it("returns null when the shared total could not be read, never a silent zero", () => {
+    // A zero allocation would print direct cost as though it were total cost on every row, which
+    // is the understatement CTO-189's banner existed to flag, with no banner left to flag it.
+    expect(allocateAccountCosts(tenant([1_000_000], 0), null, "pro_rata_direct")).toBeNull();
+  });
+
+  it("allocates nothing when the window holds no infrastructure spend", () => {
+    const out = allocateAccountCosts(tenant([1_000_000], 0), shared(0), "pro_rata_direct")!;
+    expect(out.allocatedTotalMicroUsd).toBe(0);
+    expect(out.tenantTotalMicroUsd).toBe(1_000_000);
+    expect(allocatedRowsTotal(out)).toBe(1_000_000);
+  });
+
+  it("names every rule it can apply, so no column header can be blank", () => {
+    for (const rule of ALLOCATION_RULES) {
+      expect(ALLOCATION_RULE_LABELS[rule]).toBeTruthy();
+      expect(ALLOCATION_RULE_DESCRIPTIONS[rule]).toBeTruthy();
+    }
   });
 });
 

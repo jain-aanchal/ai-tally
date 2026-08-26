@@ -7,6 +7,11 @@
 // plausible-looking fake account list would be the single most misleading thing this page could
 // show. The empty state (D5) is the answer to no data, not invented data.
 
+import {
+  allocateShared,
+  type AllocationResult,
+  type AllocationRule,
+} from "./allocation";
 import type { MicroUSD, SpendByLayer } from "./types";
 
 /**
@@ -432,6 +437,154 @@ export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts):
   if (all <= 0) return null;
   return excluded.totalMicroUsd / all;
 }
+
+// --- Allocated infrastructure cost (CTO-193, plan C2) --------------------------------------------
+//
+// This is where the excluded half of the bill stops being excluded. CTO-189 could only state the
+// SIZE of what the table left out; with an allocation rule in force (CTO-192 for the arithmetic,
+// C2 for the per-tenant rule) compute and egress can be attributed, and the table carries direct,
+// allocated and total per account instead of a banner apologising for the gap.
+//
+// THE DECISION THIS SECTION ENCODES, and the most consequential one in the ticket: THE
+// UNATTRIBUTED BUCKET PARTICIPATES IN ALLOCATION, as a first-class participant alongside the real
+// accounts.
+//
+// It is a synthetic row, not a customer, so treating it as one deserves a defence. The defence is
+// that every alternative is worse in the case that actually occurs. Shared infrastructure is caused
+// by ALL traffic, and untagged traffic is traffic: on the current tenant it is over 99.99 percent
+// of direct spend, so it is causing essentially all of the compute bill. Leaving the bucket out
+// would divide the whole shared total across only the accounts that happen to be tagged, and hand
+// three accounts with a few dollars of direct spend roughly fourteen thousand dollars of compute
+// each. That figure is not merely unhelpful, it is false, and it is worst exactly when a tenant is
+// earliest in rolling out `account_id` and least equipped to spot it. It also has a property no
+// cost report may have: instrumenting one more account would halve every existing account's cost.
+//
+// With the bucket participating, the same tenant reads honestly. The unattributed row carries
+// almost all of the shared cost, the tagged accounts carry a share proportional to what they
+// actually used, and the page can say plainly that most infrastructure cost belongs to traffic that
+// carries no account yet. The remedy that reading suggests, tag more spans, is the true one.
+//
+// The bucket keeps `unattributed: true` throughout, so no surface can rank it as a customer, and
+// the page labels its share as belonging to untagged traffic rather than to anybody.
+
+/** One table row once shared cost has been allocated. `total = direct + allocated`. */
+export interface AllocatedAccountRow extends AccountCostRow {
+  /** Estimated share of tenant-level compute and egress. NOT measured. */
+  allocatedMicroUsd: MicroUSD;
+  /** `directCostMicroUsd + allocatedMicroUsd`. Part measured, part estimated. */
+  totalMicroUsd: MicroUSD;
+}
+
+export interface AllocatedAccountCosts {
+  windowDays: number;
+  /** The rule asked for. */
+  rule: AllocationRule;
+  /**
+   * The rule actually applied. Differs from {@link AllocatedAccountCosts.rule} when pro rata had no
+   * denominator and the engine fell back to an even split. The page names this one, because it is
+   * the one that produced the numbers.
+   */
+  effectiveRule: AllocationRule;
+  /** Real accounts, ranked by TOTAL cost, most expensive first. */
+  accounts: AllocatedAccountRow[];
+  /** The unattributed bucket with its allocated share. Never ranked among the accounts. */
+  unattributed: AllocatedAccountRow;
+  /** Compute plus egress for the window: the pot that was shared out. */
+  sharedMicroUsd: MicroUSD;
+  directTotalMicroUsd: MicroUSD;
+  allocatedTotalMicroUsd: MicroUSD;
+  /** `direct + shared`. What the rows must add up to, and what `/cost` reports for the window. */
+  tenantTotalMicroUsd: MicroUSD;
+}
+
+/**
+ * Allocate the window's compute and egress across every account plus the unattributed bucket.
+ *
+ * Returns `null` when the excluded total could not be read. That is not a zero: allocating nothing
+ * would print a total equal to direct cost for every account, quietly restoring the understated
+ * figures CTO-189 existed to flag with no banner left to warn about them. The caller renders the
+ * unreadable case explicitly instead.
+ *
+ * RECONCILIATION, the acceptance test of this ticket:
+ *
+ *     sum(accounts.total) + unattributed.total === tenantTotalMicroUsd === direct + compute + egress
+ *
+ * exactly, in integer micro-USD, which is the same total `/cost` reports for the same window. The
+ * guarantee itself comes from `allocateShared`. The job here is to feed it EVERY row holding direct
+ * spend (which is why the unattributed bucket has to go in) and to add nothing to its output.
+ */
+export function allocateAccountCosts(
+  costs: AccountCosts,
+  excluded: ExcludedInfraCost | null,
+  rule: AllocationRule,
+): AllocatedAccountCosts | null {
+  if (excluded === null) return null;
+
+  // The bucket goes in last, so a remainder tie between it and a real account breaks toward the
+  // account: the engine breaks ties by input order. The stake is one micro-USD, so this is
+  // cosmetic, and it is ordered deliberately anyway because "why did the synthetic row get the
+  // spare unit" is a question someone eventually asks of a reconciliation report.
+  const participants = [...costs.accounts, costs.unattributed];
+  const result: AllocationResult = allocateShared(
+    participants.map((row) => ({
+      accountId: row.accountIdHash,
+      directMicroUsd: row.directCostMicroUsd,
+    })),
+    excluded.totalMicroUsd,
+    rule,
+  );
+
+  const allocatedRows: AllocatedAccountRow[] = participants.map((row, i) => ({
+    ...row,
+    allocatedMicroUsd: result.accounts[i].allocatedMicroUsd,
+    totalMicroUsd: result.accounts[i].totalMicroUsd,
+  }));
+  const unattributed = allocatedRows[allocatedRows.length - 1];
+  const accounts = allocatedRows.slice(0, -1);
+  // Ranked on TOTAL, not direct. With roughly half the bill allocated, the most expensive customer
+  // by direct spend is not necessarily the most expensive customer.
+  accounts.sort((a, b) => b.totalMicroUsd - a.totalMicroUsd);
+
+  return {
+    windowDays: costs.windowDays,
+    rule: result.rule,
+    effectiveRule: result.effectiveRule,
+    accounts,
+    unattributed,
+    sharedMicroUsd: excluded.totalMicroUsd,
+    directTotalMicroUsd: result.directTotalMicroUsd,
+    allocatedTotalMicroUsd: result.allocatedTotalMicroUsd,
+    tenantTotalMicroUsd: result.tenantTotalMicroUsd,
+  };
+}
+
+/**
+ * The sum the reconciliation line prints: every row's total, bucket included.
+ *
+ * Summed from the rendered rows rather than read back off `tenantTotalMicroUsd`, so the check is a
+ * real check. Reading the claimed total out of the same object would assert nothing about the
+ * numbers actually on screen.
+ */
+export function allocatedRowsTotal(allocated: AllocatedAccountCosts): MicroUSD {
+  return (
+    allocated.accounts.reduce((sum, r) => sum + r.totalMicroUsd, 0) +
+    allocated.unattributed.totalMicroUsd
+  );
+}
+
+/** Short display name for a rule. Shown wherever an allocated figure is. */
+export const ALLOCATION_RULE_LABELS: Record<AllocationRule, string> = {
+  pro_rata_direct: "pro rata on direct spend",
+  even_split: "even split across accounts",
+};
+
+/** One sentence saying what the rule did, for the reader who wants to check the arithmetic. */
+export const ALLOCATION_RULE_DESCRIPTIONS: Record<AllocationRule, string> = {
+  pro_rata_direct:
+    "each account carries a share of compute and egress in proportion to its own direct spend, so an account with twice the model bill carries twice the infrastructure",
+  even_split:
+    "compute and egress are divided equally across every account and the untagged bucket, regardless of how much each one used",
+};
 
 // --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
 
