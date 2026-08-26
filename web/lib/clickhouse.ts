@@ -37,6 +37,7 @@ import type {
 import {
   DIRECT_LAYERS,
   MAX_ACCOUNT_TOP_FEATURES,
+  MAX_ACCOUNT_TOP_RUNS,
   UNATTRIBUTED_ACCOUNT,
   emptyAccountRow,
   totalDirect,
@@ -351,6 +352,12 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
 const ACCOUNT_WINDOW_DAYS = 30;
 const ACCOUNT_WINDOW = "Day >= toDate(now()) - INTERVAL 29 DAY";
 
+// The same window expressed against otel_spans, whose time column is a Timestamp rather than a Day.
+// Deliberately the SAME calendar-aligned boundary rather than `now() - INTERVAL 30 DAY`: the run
+// list on the detail view sits under the account total, and a rolling boundary would let a run
+// appear that the total above it does not count.
+const ACCOUNT_SPAN_WINDOW = "Timestamp >= toDate(now()) - INTERVAL 29 DAY";
+
 /** The four directly attributable layers, expressed as an operation filter. See DIRECT_LAYERS. */
 const DIRECT_ONLY = "GenAiOperation NOT IN ('compute', 'egress')";
 
@@ -498,7 +505,44 @@ export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null
  * as a real row with zeroes, which is a different and true statement.
  */
 export async function queryAccountDetail(accountIdHash: string): Promise<AccountDetail | null> {
-  return tryLive(async (db, tenant) => {
+  return tryLive((db, tenant) => accountDetail(db, tenant, accountIdHash));
+}
+
+/**
+ * What the detail view actually knows about an account (CTO-190, plan D4).
+ *
+ * {@link queryAccountDetail} collapses two very different facts into one `null`: "ClickHouse is
+ * down" and "this tenant has never emitted a span for this account". A page that renders them the
+ * same way tells a reader "no spend recorded for this account" while the store is unreachable,
+ * which is the page confidently asserting something it cannot know. The three states are kept
+ * apart here so the view can say which one it is looking at.
+ */
+export type AccountDetailResult =
+  | { state: "ok"; detail: AccountDetail }
+  /** Reachable, and it holds no rollup row for this account in the window. */
+  | { state: "unknown" }
+  /** ClickHouse could not be read at all, so nothing is known either way. */
+  | { state: "unreachable" };
+
+export async function queryAccountDetailResult(
+  accountIdHash: string,
+): Promise<AccountDetailResult> {
+  // Boxed so the two nulls stay distinguishable: tryLive's own null (query threw) is the outer one,
+  // and the query's null (no such account) is the inner one. Without the box they are the same
+  // value and the caller has to guess.
+  const boxed = await tryLive(async (db, tenant) => ({
+    detail: await accountDetail(db, tenant, accountIdHash),
+  }));
+  if (boxed === null) return { state: "unreachable" };
+  return boxed.detail === null ? { state: "unknown" } : { state: "ok", detail: boxed.detail };
+}
+
+async function accountDetail(
+  db: ClickHouseClient,
+  tenant: string,
+  accountIdHash: string,
+): Promise<AccountDetail | null> {
+  {
     const params = { tenant, account: accountIdHash };
     // Comparing FixedString(64) to a String parameter works in both directions: ClickHouse pads the
     // literal, so `''` matches the unattributed bucket and a 64-char hex hash matches exactly.
@@ -572,6 +616,37 @@ export async function queryAccountDetail(accountIdHash: string): Promise<Account
       if (point) point.directCostMicroUsd = micro(r.cost);
     }
 
+    // Heaviest runs. This is the ONE read here that cannot come from daily_account_rollup: the
+    // rollup is grouped to (account, day, feature, operation) and has no trace id in it at all, so
+    // run-grain has to come from otel_spans. That is a wider scan than the rollup reads above, but
+    // it is bounded by the same tenant + account + 30 day predicate and returns at most
+    // MAX_ACCOUNT_TOP_RUNS rows.
+    //
+    // Grouping is over THIS ACCOUNT'S SPANS only, not over whole traces that happen to touch the
+    // account. A trace serving several customers would otherwise report its full cost against each
+    // of them, so the same money would appear on several customers' pages. See AccountRunCost.
+    const runRows = await rowsP<{
+      runId: string;
+      agent: string;
+      cost: string;
+      steps: string;
+      maxStatus: string;
+    }>(
+      db,
+      `SELECT TraceId AS runId,
+              any(ServiceName) AS agent,
+              sum(EstimatedCost) AS cost,
+              count() AS steps,
+              max(StatusCode) AS maxStatus
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND AccountIdHash = {account:String}
+         AND ${ACCOUNT_SPAN_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY TraceId
+       ORDER BY cost DESC
+       LIMIT ${MAX_ACCOUNT_TOP_RUNS}`,
+      params,
+    );
+
     return {
       accountIdHash,
       unattributed: accountIdHash === UNATTRIBUTED_ACCOUNT,
@@ -585,8 +660,15 @@ export async function queryAccountDetail(accountIdHash: string): Promise<Account
         spanCount: parseInt(r.spans, 10) || 0,
       })),
       trend: [...byDay.values()],
+      topRuns: runRows.map((r) => ({
+        runId: r.runId,
+        agent: r.agent || "untagged",
+        accountCostMicroUsd: micro(r.cost),
+        steps: parseInt(r.steps, 10) || 0,
+        outcome: parseInt(r.maxStatus, 10) === 2 ? ("failed" as const) : ("success" as const),
+      })),
     };
-  });
+  }
 }
 
 // --- Hidden-cost alerts (CTO-122) ---------------------------------------------------------------

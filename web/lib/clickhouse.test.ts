@@ -474,7 +474,13 @@ describe("queryExcludedInfraCost: what the per-account table leaves out (CTO-189
 describe("queryAccountDetail (CTO-187)", () => {
   const WINDOW_START = "2026-07-28";
 
-  function respondDetail(opts: { seen: string; spans: string; users: string; trend?: RowShape[] }) {
+  function respondDetail(opts: {
+    seen: string;
+    spans: string;
+    users: string;
+    trend?: RowShape[];
+    runs?: RowShape[];
+  }) {
     respondRows([
       { seen: opts.seen, spans: opts.spans, users: opts.users, windowStart: WINDOW_START },
     ]);
@@ -484,6 +490,11 @@ describe("queryAccountDetail (CTO-187)", () => {
     ]);
     respondRows([{ feature: "research_agent", cost: "9", spans: "80" }]);
     respondRows(opts.trend ?? [{ day: "2026-08-01", cost: "12.75" }]);
+    respondRows(
+      opts.runs ?? [
+        { runId: "trace-1", agent: "aider", cost: "8", steps: "40", maxStatus: "0" },
+      ],
+    );
   }
 
   it("returns null for an account the tenant has never seen", async () => {
@@ -544,6 +555,117 @@ describe("queryAccountDetail (CTO-187)", () => {
     const featureSql = (queryMock.mock.calls[2][0] as { query: string }).query;
     expect(featureSql).toContain("LIMIT 5");
     expect(featureSql).toContain("FeatureTag != ''");
+  });
+});
+
+describe("queryAccountDetail heaviest runs (CTO-190)", () => {
+  const WINDOW_START = "2026-07-28";
+
+  function respondDetail(runs?: RowShape[]) {
+    respondRows([{ seen: "12", spans: "100", users: "7", windowStart: WINDOW_START }]);
+    respondRows([{ layer: "llm", cost: "10.5" }]);
+    respondRows([]);
+    respondRows([]);
+    respondRows(
+      runs ?? [
+        { runId: "trace-1", agent: "aider", cost: "8", steps: "40", maxStatus: "0" },
+        { runId: "trace-2", agent: "", cost: "3", steps: "9", maxStatus: "2" },
+      ],
+    );
+  }
+
+  /** The runs read is the 5th and last query the detail path issues. */
+  function runSql(): string {
+    return (queryMock.mock.calls[4][0] as { query: string }).query;
+  }
+
+  it("returns the account's share of each run, ranked, capped, with the outcome", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail();
+    const out = await queryAccountDetail(ACCT_A);
+    expect(out!.topRuns).toEqual([
+      {
+        runId: "trace-1",
+        agent: "aider",
+        accountCostMicroUsd: 8_000_000,
+        steps: 40,
+        outcome: "success",
+      },
+      {
+        // An untagged ServiceName reads as "untagged" rather than as an empty agent name, which is
+        // what /agents does for the same row.
+        runId: "trace-2",
+        agent: "untagged",
+        accountCostMicroUsd: 3_000_000,
+        steps: 9,
+        outcome: "failed",
+      },
+    ]);
+    expect(runSql()).toContain("LIMIT 8");
+  });
+
+  it("groups this account's spans, never whole traces that merely touch the account", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail();
+    await queryAccountDetail(ACCT_A);
+    const sql = runSql();
+    // The account predicate has to sit in the WHERE, not in a HAVING or a subquery that widens
+    // back out to the trace: a run serving several customers would otherwise report its full cost
+    // against every one of them and the same money would land on several bills.
+    expect(sql).toContain("AccountIdHash = {account:String}");
+    expect(sql).toContain("GROUP BY TraceId");
+  });
+
+  it("uses the same calendar-aligned window as the totals it sits under", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail();
+    await queryAccountDetail(ACCT_A);
+    // A rolling `now() - INTERVAL 30 DAY` here would let a run appear in the list that the account
+    // total above it does not count.
+    expect(runSql()).toContain("Timestamp >= toDate(now()) - INTERVAL 29 DAY");
+    expect(runSql()).not.toContain("now() - INTERVAL 30 DAY");
+    expect(runSql()).toContain("GenAiOperation NOT IN ('compute', 'egress')");
+  });
+
+  it("reads run grain from otel_spans, which is the only table carrying a trace id", async () => {
+    const { queryAccountDetail } = await freshSut();
+    respondDetail();
+    await queryAccountDetail(ACCT_A);
+    expect(runSql()).toContain("otel_spans");
+    // Every other read on this path stays on the rollup.
+    for (const i of [0, 1, 2, 3]) {
+      expect((queryMock.mock.calls[i][0] as { query: string }).query).toContain(
+        "daily_account_rollup",
+      );
+    }
+  });
+});
+
+describe("queryAccountDetailResult (CTO-190)", () => {
+  const WINDOW_START = "2026-07-28";
+
+  it("separates an unknown account from an unreachable store", async () => {
+    const { queryAccountDetailResult } = await freshSut();
+    // Reachable, no rollup rows: an account we have never seen. Not an error, and not a 404.
+    respondRows([{ seen: "0", spans: "0", users: "0", windowStart: WINDOW_START }]);
+    expect(await queryAccountDetailResult(ACCT_A)).toEqual({ state: "unknown" });
+
+    // The store itself refusing. queryAccountDetail collapses this into the same null as the case
+    // above, which would have the page say "no spend recorded" about an account it cannot read.
+    queryMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    expect(await queryAccountDetailResult(ACCT_A)).toEqual({ state: "unreachable" });
+  });
+
+  it("returns the detail when there is one", async () => {
+    const { queryAccountDetailResult } = await freshSut();
+    respondRows([{ seen: "12", spans: "100", users: "7", windowStart: WINDOW_START }]);
+    respondRows([{ layer: "llm", cost: "10.5" }]);
+    respondRows([]);
+    respondRows([]);
+    respondRows([]);
+    const result = await queryAccountDetailResult(ACCT_A);
+    expect(result.state).toBe("ok");
+    expect(result.state === "ok" && result.detail.accountIdHash).toBe(ACCT_A);
   });
 });
 

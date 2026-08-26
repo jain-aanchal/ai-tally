@@ -2,11 +2,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACCOUNT_HASH_CHARS,
   MAJORITY_UNATTRIBUTED,
   MIN_SPANS_FOR_COST_PER_USER,
   SHORT_HASH_CHARS,
   type AccountCostRow,
   type AccountCosts,
+  accountDisplayName,
   type ExcludedInfraCost,
   accountsView,
   attributedSpend,
@@ -14,7 +16,10 @@ import {
   emptyAccountRow,
   excludedShare,
   formatShare,
+  isAccountHash,
+  layerShare,
   shortenAccountHash,
+  trendTotal,
   unattributedShare,
 } from "./accounts";
 
@@ -131,6 +136,89 @@ describe("attributedSpend", () => {
     });
     expect(attributedSpend(c)).toBe(500_000);
     expect(attributedSpend(c)).toBe(accounts.reduce((s, a) => s + a.directCostMicroUsd, 0));
+  });
+});
+
+// --- Account detail view (CTO-190, plan D4) -----------------------------------------------------
+
+describe("isAccountHash", () => {
+  it("accepts a stored 64-character lowercase hex hash", () => {
+    expect(isAccountHash("a".repeat(ACCOUNT_HASH_CHARS))).toBe(true);
+    expect(isAccountHash("0123456789abcdef".repeat(4))).toBe(true);
+  });
+
+  it("rejects anything that could never have been a hash", () => {
+    // The shortened display form in particular: it is a truncation for width and is not an id, so
+    // a route built from it must not reach a query and must not read as a real account.
+    expect(isAccountHash(shortenAccountHash("a".repeat(ACCOUNT_HASH_CHARS)))).toBe(false);
+    expect(isAccountHash("")).toBe(false);
+    expect(isAccountHash("a".repeat(63))).toBe(false);
+    expect(isAccountHash("a".repeat(65))).toBe(false);
+    expect(isAccountHash("g".repeat(ACCOUNT_HASH_CHARS))).toBe(false);
+    // Uppercase is not what the gateway emits, so accepting it would let one account reach the
+    // page under two addresses, only one of which matches a row.
+    expect(isAccountHash("A".repeat(ACCOUNT_HASH_CHARS))).toBe(false);
+  });
+
+  it("is not fooled by a hash with something appended", () => {
+    expect(isAccountHash(`${"a".repeat(ACCOUNT_HASH_CHARS)}/../cost`)).toBe(false);
+    expect(isAccountHash(`${"a".repeat(ACCOUNT_HASH_CHARS)}\n`)).toBe(false);
+  });
+});
+
+describe("accountDisplayName", () => {
+  const HASH = "b".repeat(ACCOUNT_HASH_CHARS);
+
+  it("prefers the label and falls back to the shortened hash", () => {
+    // The rule the table and the detail header share: clicking "Acme Corp" has to land on a page
+    // headed "Acme Corp", and clicking a shortened hash on the same shortened hash.
+    expect(accountDisplayName(HASH, "Acme Corp")).toBe("Acme Corp");
+    expect(accountDisplayName(HASH, undefined)).toBe(shortenAccountHash(HASH));
+  });
+});
+
+describe("layerShare", () => {
+  it("divides a layer by the account's own direct total", () => {
+    const r = row({
+      byLayer: { llm: 750_000, tools: 250_000, vector: 0, embeddings: 0 },
+      directCostMicroUsd: 1_000_000,
+    });
+    expect(layerShare(r, "llm")).toBe(0.75);
+    expect(layerShare(r, "tools")).toBe(0.25);
+    expect(layerShare(r, "vector")).toBe(0);
+  });
+
+  it("returns null rather than 0 when the account has no direct spend", () => {
+    // "0% of spend is LLM" describes a distribution that does not exist. The page renders a blank.
+    expect(layerShare(row({ directCostMicroUsd: 0 }), "llm")).toBeNull();
+  });
+});
+
+describe("trendTotal", () => {
+  it("sums the charted days", () => {
+    expect(
+      trendTotal([
+        { date: "2026-08-01", directCostMicroUsd: 1_000_000 },
+        { date: "2026-08-02", directCostMicroUsd: 0 },
+        { date: "2026-08-03", directCostMicroUsd: 250_000 },
+      ]),
+    ).toBe(1_250_000);
+  });
+
+  it("is zero for an empty trend", () => {
+    expect(trendTotal([])).toBe(0);
+  });
+
+  it("catches a day dropped from the chart but still counted in the total", () => {
+    // The two-clocks bug: a day list built from the Node clock is shifted against the SQL window,
+    // so the oldest day has no slot and falls out of the chart while still counting toward the
+    // account's total. The disagreement is invisible on screen unless something states it.
+    const full = [
+      { date: "2026-07-28", directCostMicroUsd: 500_000 },
+      { date: "2026-07-29", directCostMicroUsd: 500_000 },
+    ];
+    expect(trendTotal(full)).toBe(1_000_000);
+    expect(trendTotal(full.slice(1))).not.toBe(trendTotal(full));
   });
 });
 
