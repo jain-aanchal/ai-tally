@@ -37,6 +37,11 @@ from tally.wire import (
     uuid7,
 )
 
+from gateway.account_lookup import (
+    AccountLookupError,
+    hash_account_id,
+    normalize_account_id,
+)
 from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
 from gateway.config import get_settings
@@ -95,9 +100,17 @@ from gateway.connectors.config_admin import (
     ConfigError,
     CostConnectorAdmin,
 )
+from gateway.tenant_account_labels import (
+    AccountLabelError,
+    TenantAccountLabelStore,
+    TenantNotFound as AccountLabelTenantNotFound,
+    normalize_account_id_hash,
+    normalize_label,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
+from gateway.tenant_identity import TenantIdentityResolver
 from gateway.tenant_guardrails import (
     ALLOWED_KINDS as GUARDRAIL_KINDS,
     ALLOWED_STATES as GUARDRAIL_STATES,
@@ -205,6 +218,14 @@ async def lifespan(app: FastAPI):
     # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
     # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
     app.state.hmac_registry = HmacKeyRegistry()
+    # Tenant name <-> tenants.id UUID (CTO-185). Both spellings reach the gateway and each derives
+    # a different HMAC key, so /v1/tenant/account-lookup hashes under every spelling rather than
+    # guessing one and returning a hash that silently matches nothing.
+    app.state.tenant_identity = TenantIdentityResolver(settings)
+    # Optional human-readable account names (CTO-186). Kept in Postgres and joined at render time
+    # so ClickHouse never holds a customer name: the label is mutable metadata and stamping it on
+    # every span would both waste storage and defeat the point of AccountIdHash.
+    app.state.tenant_account_labels = TenantAccountLabelStore(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -1070,6 +1091,242 @@ def get_tenant_reconciliation_status(
         {"tenant_id": tenant_id, "run": run.as_dict() if run is not None else None},
         status_code=200,
     )
+
+
+@app.post("/v1/tenant/account-lookup")
+async def lookup_account_id(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Plaintext account id -> ``AccountIdHash``, for the cost-per-customer search box (CTO-185).
+
+    WHY. The cost-per-customer tab groups spend by ``AccountIdHash`` (CTO-180), and an account
+    label is optional per tenant by design, so an unlabelled account renders as a 64-character
+    hex string. There is no reverse map from hash to id and there deliberately never will be, so
+    without this endpoint an operator who knows their customer as ``acme-corp`` cannot locate that
+    row at all and the tab is a list of opaque strings. This is the forward direction, computed on
+    demand, which is the only direction a one-way hash has.
+
+    Body: ``{"account_id": "acme-corp"}``. Response carries ``account_id_hash`` (the best match)
+    plus every candidate in ``hashes``.
+
+    Two properties this endpoint exists to hold:
+
+    * **Parity with the emitting path.** The digest comes from the SDK's own
+      :class:`tally.hmac_keys.HmacKeyRegistry` under the tenant's active key version, the same
+      derivation ``hash_customer_email`` and ``build_hasher`` already use. A hash computed any
+      other way would be well-formed and match nothing.
+
+    * **The plaintext is transient.** It is used for one HMAC call and then dropped. It is never
+      written to a row, never logged, and never quoted back in an error: every rejection message
+      in :mod:`gateway.account_lookup` describes the problem without echoing the value. That is
+      also why this is a POST with a body rather than a GET with a query string, which would put
+      a customer identifier into access logs.
+
+    An account id nobody has ever emitted is NOT an error. It returns 200 with a perfectly valid
+    hash that simply matches no rows, and the tab renders "no spend recorded for this account".
+    Answering 404 here would leak the difference between an account this tenant has and one it
+    does not, and would also make a genuine typo indistinguishable from a genuinely idle customer.
+
+    ``hashes`` holds one entry per spelling of the tenant identifier (see
+    :mod:`gateway.tenant_identity`): the tenant name and the ``tenants.id`` UUID derive different
+    HMAC keys, so callers should match spans against the whole set rather than assume a spelling.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately no `{exc}` interpolation, unlike the neighbouring endpoints: a decoder
+        # message can quote the offending bytes, and those bytes are the account id.
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    try:
+        account_id = normalize_account_id(body.get("account_id"))
+    except AccountLookupError as exc:
+        # Safe by construction: AccountLookupError messages never contain the submitted value.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    resolver: TenantIdentityResolver = app.state.tenant_identity
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    hashes = hash_account_id(registry, resolver.key_forms(tenant_id), account_id)
+    if not hashes:
+        raise HTTPException(status_code=422, detail="tenant id must be non-empty")
+    # No log line here, at any level. The only interesting thing to report would be what was
+    # looked up, and that is precisely the thing that must not be recorded.
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "account_id_hash": hashes[0].account_id_hash,
+            "key_version": hashes[0].key_version,
+            "hashes": [h.as_dict() for h in hashes],
+        },
+        status_code=200,
+    )
+
+
+def _account_label_body(body: object) -> dict:
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    return body
+
+
+def _resolve_label_target_hashes(body: dict, tenant_id: str) -> list[str]:
+    """Which ``AccountIdHash`` values a label write or delete applies to.
+
+    Two ways to name the account, and the second one is the whole reason this helper exists:
+
+    * ``account_id_hash`` addresses exactly one digest. Use this when the caller already holds a
+      hash, typically straight out of a row on the tab. One hash in, one row touched.
+
+    * ``account_id`` is the plaintext, and it expands to EVERY digest the tenant could have emitted
+      under. For HMAC the tenant identifier is key material (see :mod:`gateway.tenant_identity`),
+      so ``local-dev`` and its UUID derive two unrelated key spaces and therefore two different
+      hashes for the same account. Writing under only one of them would label the account for spans
+      ingested through one door and leave the other door showing raw hex, which reads as a rename
+      that half applied. So we reuse the exact set ``/v1/tenant/account-lookup`` returns and write
+      under all of it.
+
+    The plaintext is treated the way B6 treats it: used to compute digests and then dropped. It is
+    never stored (only hashes reach the table), never logged, and never echoed in an error.
+    """
+    supplied_hash = body.get("account_id_hash")
+    supplied_id = body.get("account_id")
+    if (supplied_hash is None) == (supplied_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="exactly one of account_id_hash or account_id required",
+        )
+    if supplied_hash is not None:
+        try:
+            return [normalize_account_id_hash(supplied_hash)]
+        except AccountLabelError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        account_id = normalize_account_id(supplied_id)
+    except AccountLookupError as exc:
+        # Safe by construction: these messages never contain the submitted value.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    resolver: TenantIdentityResolver = app.state.tenant_identity
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    hashes = hash_account_id(registry, resolver.key_forms(tenant_id), account_id)
+    if not hashes:
+        raise HTTPException(status_code=422, detail="tenant id must be non-empty")
+    return [h.account_id_hash for h in hashes]
+
+
+@app.get("/v1/tenant/account-labels")
+def list_tenant_account_labels(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Every account label this tenant has set (CTO-186).
+
+    The cost-per-customer tab fetches this once and joins it in memory against a page of account
+    rows. An account with no entry here is not missing data: labels are optional per account by
+    design, and the tab falls back to a shortened hash. A tenant that wants no customer names in
+    our system sets none and everything still works.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantAccountLabelStore = app.state.tenant_account_labels
+    try:
+        labels = store.list(tenant_id)
+    except AccountLabelTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "labels": [label.as_dict() for label in labels],
+    })
+
+
+@app.post("/v1/tenant/account-labels")
+async def upsert_tenant_account_label(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Set or rename an account's label (CTO-186).
+
+    Body: ``{"label": "Acme Corp", "account_id_hash": "..."}`` or
+    ``{"label": "Acme Corp", "account_id": "acme-corp"}``. Exactly one of the two identifiers.
+
+    Setting and renaming are the same call: the write is an upsert on
+    ``(tenant_id, account_id_hash)``, so the caller never has to know whether a label already
+    exists and two concurrent writers cannot produce two rows for one account. There is no
+    ``change_id`` idempotency token here, unlike the feature-value-event control plane, because a
+    label is last-write-wins by nature: replaying the same body is already a no-op beyond
+    ``updated_at``.
+
+    The label is written to Postgres and joined at render time. It is never stamped onto a span,
+    so ClickHouse never holds a customer name. See ``db/postgres/0023_tenant_account_labels.sql``.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        raw = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        # No `{exc}` interpolation: a decoder message can quote the offending bytes, and those
+        # bytes may be an account id or a customer name.
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    body = _account_label_body(raw)
+    try:
+        label = normalize_label(body.get("label"))
+    except AccountLabelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    hashes = _resolve_label_target_hashes(body, tenant_id)
+
+    store: TenantAccountLabelStore = app.state.tenant_account_labels
+    try:
+        rows = store.upsert_many(tenant_id, hashes, label=label)
+    except AccountLabelTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AccountLabelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "label": rows[0].as_dict(),
+        "labels": [row.as_dict() for row in rows],
+    })
+
+
+@app.delete("/v1/tenant/account-labels")
+async def delete_tenant_account_label(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Remove an account's label, reverting it to its hash on the tab (CTO-186).
+
+    Body: ``{"account_id_hash": "..."}`` or ``{"account_id": "acme-corp"}``.
+
+    This really deletes the row. It is the escape hatch for a tenant who decides they want no
+    customer names in our system, so a tombstone or an audit snapshot would keep the name on disk
+    after they asked us to forget it and make the escape hatch a fiction.
+
+    Deleting an already-unlabelled account returns 200 with ``removed: false`` rather than 404. The
+    end state the caller asked for is the end state they get, and a double-click is not an error.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        raw = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    body = _account_label_body(raw)
+    hashes = _resolve_label_target_hashes(body, tenant_id)
+
+    store: TenantAccountLabelStore = app.state.tenant_account_labels
+    try:
+        removed = store.delete_many(tenant_id, hashes)
+    except AccountLabelTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AccountLabelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({
+        "tenant_id": tenant_id,
+        "account_id_hashes": hashes,
+        "removed": removed > 0,
+        "rows_removed": removed,
+    })
 
 
 @app.post("/v1/stripe/webhook")

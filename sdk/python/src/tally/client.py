@@ -20,6 +20,7 @@ from typing import Protocol
 from tally.context import current_context, note_context_drop
 from tally.egress import BatchProcessor
 from tally.guardrails import GuardrailConfig, GuardrailEngine, GuardrailState, Verdict
+from tally.hmac_keys import HmacKeyRegistry
 from tally.pricing import (
     PriceCatalog,
     PriceType,
@@ -45,6 +46,9 @@ _warned_tool_pairs: set[tuple[str, str]] = set()
 _warned_embedding_pairs: set[tuple[str, str]] = set()
 # Vector (provider, operation) pairs we've already warned about (CTO-142).
 _warned_vector_pairs: set[tuple[str, str]] = set()
+# Tenants we've already warned about for an unhashable account id (CTO-181). ``None`` covers the
+# no-tenant case. One WARN per tenant, not one per span.
+_warned_account_tenants: set[str | None] = set()
 
 
 class Exporter(Protocol):
@@ -92,7 +96,10 @@ class TallyClient:
             precedence over ``exporter`` when both are set.
         catalog: price catalog for server-agnostic cost estimation.
         sampler / billing_meter / guardrails: spine components (sensible defaults).
-        tenant_id: for per-tenant price overrides.
+        tenant_id: for per-tenant price overrides and for the per-tenant HMAC key.
+        hmac_registry: key registry used to hash account ids (CTO-181). Required together with
+            ``tenant_id`` for the account dimension to be emitted; without both, account tagging
+            degrades to a one-time WARN and the span is emitted unattributed rather than dropped.
     """
 
     def __init__(
@@ -108,6 +115,7 @@ class TallyClient:
         guardrails: GuardrailEngine | None = None,
         observability: SelfObservability | None = None,
         tenant_id: str | None = None,
+        hmac_registry: HmacKeyRegistry | None = None,
     ) -> None:
         self.obs = observability or SelfObservability()
         self._api_key = api_key
@@ -119,6 +127,7 @@ class TallyClient:
         self.billing = billing_meter or BillingMeter()
         self.guardrails = guardrails or GuardrailEngine()
         self.tenant_id = tenant_id
+        self.hmac_registry = hmac_registry
 
     @property
     def observability(self) -> SelfObservability:
@@ -152,6 +161,8 @@ class TallyClient:
         usage: Usage,
         signals: TraceSignals | None = None,
         at: date | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
     ) -> LlmCallResult:
         """Record an LLM call end-to-end. Never raises.
 
@@ -169,6 +180,12 @@ class TallyClient:
           4. build a conformant span,
           5. make the sampling decision; emit the span only if kept,
           6. return a :class:`LlmCallResult` for the caller.
+
+        ``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the
+        account set by :func:`~tally.context.with_account` for the surrounding scope applies;
+        pass it to override that for this one call. It is hashed with the tenant's HMAC key and
+        never travels raw. ``account_label`` is optional, wire-only, and only carried when a
+        hash was produced.
         """
 
         @safe(self.obs, where="TallyClient.record_llm_call", fallback=None)
@@ -194,6 +211,8 @@ class TallyClient:
                 trace_id or "no-trace", signals, feature_tag=ctx.feature_tag
             )
 
+            acct_hash, acct_version, acct_label = self._resolve_account(account_id, account_label)
+
             fields = SpanFields(
                 system=provider,
                 request_model=model,
@@ -210,6 +229,9 @@ class TallyClient:
                 # can compute per-stratum CIs without re-classifying after the fact.
                 sampling_stratum=decision.stratum.value,
                 sampling_rate=decision.sample_rate,
+                account_id_hash=acct_hash,
+                account_id_hash_key_version=acct_version,
+                account_label=acct_label,
             )
             attrs = build_span_attributes(fields)
             # NB: sample_rate travels at the batch level (wire Sampling, §12.2), not as a span
@@ -241,6 +263,8 @@ class TallyClient:
         output_tokens: int | None = None,
         latency_ms: int | None = None,
         call_id: str | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
     ) -> None:
         """Record a tool call so the span lands in the gateway's ``tools`` cost-layer bucket.
 
@@ -253,6 +277,12 @@ class TallyClient:
 
         ``latency_ms`` is accepted for API symmetry with future span timing but is not yet emitted
         as a schema attribute (no latency key exists in the conformant set).
+
+        ``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the
+        account set by :func:`~tally.context.with_account` for the surrounding scope applies;
+        pass it to override that for this one call. It is hashed with the tenant's HMAC key and
+        never travels raw. ``account_label`` is optional, wire-only, and only carried when a
+        hash was produced.
         """
 
         @safe(self.obs, where="TallyClient.record_tool_call")
@@ -286,6 +316,7 @@ class TallyClient:
                             tool,
                         )
 
+            acct_hash, acct_version, acct_label = self._resolve_account(account_id, account_label)
             fields = SpanFields(
                 system=provider,
                 operation="tool",
@@ -297,6 +328,9 @@ class TallyClient:
                 output_tokens=output_tokens,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
+                account_id_hash=acct_hash,
+                account_id_hash_key_version=acct_version,
+                account_label=acct_label,
             )
             self._emit(build_span_attributes(fields))
 
@@ -310,12 +344,20 @@ class TallyClient:
         model: str,
         input_tokens: int,
         at: date | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
     ) -> EmbeddingCallResult:
         """Record an embedding call so the span lands in the gateway's ``embeddings`` bucket.
 
         Bucketing is keyed off ``gen_ai.operation.name == 'embeddings'``. Cost is estimated from
         the catalog (input-side only). Unknown provider/model → cost stays None/0 with a one-time
         WARN. Never raises.
+
+        ``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the
+        account set by :func:`~tally.context.with_account` for the surrounding scope applies;
+        pass it to override that for this one call. It is hashed with the tenant's HMAC key and
+        never travels raw. ``account_label`` is optional, wire-only, and only carried when a
+        hash was produced.
         """
 
         @safe(self.obs, where="TallyClient.record_embedding_call", fallback=None)
@@ -350,6 +392,7 @@ class TallyClient:
                             model,
                         )
 
+            acct_hash, acct_version, acct_label = self._resolve_account(account_id, account_label)
             fields = SpanFields(
                 system=provider,
                 request_model=model,
@@ -359,6 +402,9 @@ class TallyClient:
                 price_catalog_version=catalog_version,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
+                account_id_hash=acct_hash,
+                account_id_hash_key_version=acct_version,
+                account_label=acct_label,
             )
             attrs = build_span_attributes(fields)
             self._emit(attrs)
@@ -384,6 +430,8 @@ class TallyClient:
         cost_micro_usd: int | None = None,
         record_count: int | None = None,
         latency_ms: int | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
     ) -> None:
         """Record a vector-DB call so the span lands in the gateway's ``vector`` cost-layer bucket.
 
@@ -397,6 +445,12 @@ class TallyClient:
 
         ``record_count`` and ``latency_ms`` are accepted for API symmetry with future span fields
         but are not yet emitted as schema attributes (no conformant key exists for them).
+
+        ``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the
+        account set by :func:`~tally.context.with_account` for the surrounding scope applies;
+        pass it to override that for this one call. It is hashed with the tenant's HMAC key and
+        never travels raw. ``account_label`` is optional, wire-only, and only carried when a
+        hash was produced.
         """
 
         @safe(self.obs, where="TallyClient.record_vector_call")
@@ -430,6 +484,7 @@ class TallyClient:
                             operation,
                         )
 
+            acct_hash, acct_version, acct_label = self._resolve_account(account_id, account_label)
             fields = SpanFields(
                 system=provider,
                 operation="vector",
@@ -438,6 +493,9 @@ class TallyClient:
                 price_catalog_version=catalog_version,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
+                account_id_hash=acct_hash,
+                account_id_hash_key_version=acct_version,
+                account_label=acct_label,
             )
             self._emit(build_span_attributes(fields))
 
@@ -449,6 +507,55 @@ class TallyClient:
         GRACEFUL/HARD_STOP modes — that propagation is intentional (the agent framework catches it
         and degrades). Not wrapped in the safety boundary."""
         return self.guardrails.evaluate(state, config)
+
+    # --- account dimension (CTO-181) -------------------------------------------------------
+    def _resolve_account(
+        self,
+        account_id: str | None,
+        account_label: str | None,
+    ) -> tuple[str | None, str | None, str | None]:
+        """Resolve ``(hash, key_version, label)`` for a call. Never raises.
+
+        Precedence is per-call override, then the context set by
+        :func:`~tally.context.with_account`. That ordering is the whole point of the API shape:
+        a web app resolves the customer once per request and every span inside inherits it, while
+        one call that genuinely belongs to a different account says so inline.
+
+        The raw id is HMAC'd here, at the last possible moment, and discarded. If we cannot hash
+        it (no tenant, no registry, or the tenant has no provisioned key) we emit the span with no
+        account rather than dropping it or, worse, putting the raw id on the wire. An
+        unattributed span is honest; a raw customer id is a leak.
+        """
+        ctx = current_context()
+        raw = account_id if account_id is not None else ctx.account_id
+        label = account_label if account_label is not None else ctx.account_label
+        if not raw:
+            return None, None, None
+
+        if self.hmac_registry is None or not self.tenant_id:
+            self._warn_account_once(
+                "account_id supplied but no %s configured; span emitted unattributed",
+                "hmac_registry" if self.hmac_registry is None else "tenant_id",
+            )
+            return None, None, None
+
+        try:
+            stamped = self.hmac_registry.hash_account(self.tenant_id, raw)
+        except (KeyError, ValueError) as exc:
+            self._warn_account_once(
+                "could not hash account_id (%s); span emitted unattributed", exc
+            )
+            return None, None, None
+
+        # The label only means anything alongside a hash, since it is keyed on one in the
+        # gateway's label store, so it never travels alone.
+        return stamped.value, stamped.key_version, (label or None)
+
+    def _warn_account_once(self, msg: str, *args: object) -> None:
+        if self.tenant_id in _warned_account_tenants:
+            return
+        _warned_account_tenants.add(self.tenant_id)
+        _log.warning(msg, *args)
 
     def _emit(self, attributes: dict[str, object]) -> None:
         if self._processor is not None:

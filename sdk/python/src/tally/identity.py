@@ -31,6 +31,27 @@ class IdentityType(str, Enum):
     SESSION_ID = "session_id"
     EMAIL = "email"
     EXTERNAL_ID = "external_id"
+    #: The tenant's own paying customer (CTO-184), hashed like every other identity here.
+    #:
+    #: Unlike the five above, an account is NOT a person. It is a container that many people
+    #: belong to, which is why it is deliberately excluded from person-identity traversal in
+    #: :meth:`IdentityGraph.resolve_identity` and has its own resolver,
+    #: :meth:`IdentityGraph.resolve_account`. Values mirror the ClickHouse
+    #: ``identity_graph.IdentityAType`` enum in ``db/clickhouse/attribution.sql``.
+    ACCOUNT_ID = "account_id"
+
+
+#: Identity types that denote a *person*. Traversal in :meth:`IdentityGraph.resolve_identity` is
+#: confined to these, because the whole point of that walk is "which hashes are the same human".
+PERSON_IDENTITY_TYPES = frozenset(
+    {
+        IdentityType.USER_ID,
+        IdentityType.ANONYMOUS_ID,
+        IdentityType.SESSION_ID,
+        IdentityType.EMAIL,
+        IdentityType.EXTERNAL_ID,
+    }
+)
 
 
 # Source tag for a synthetic edge linking the same identity across HMAC key versions (CTO-74).
@@ -49,6 +70,37 @@ class IdentityEdge:
     source: str = "sdk"
     confidence: float = 1.0
     key_version: str = "v1"
+
+
+@dataclass(frozen=True, slots=True)
+class AccountResolution:
+    """The outcome of asking "which account does this person belong to?" (CTO-184).
+
+    Three states, and the caller must handle all three distinctly:
+
+    * ``account_hash`` set                 -> exactly one account. Attribute to it, as *stitched*.
+    * ``account_hash is None``, 0 candidates -> nobody has stitched this person yet. Normal.
+    * ``account_hash is None``, 2+ candidates -> ``conflict``. Attribute NOTHING and raise a
+      data-quality finding. Never split, duplicate, or pick first-seen.
+
+    ``account_hash`` is deliberately ``None`` rather than an empty string in both no-attribution
+    cases, so a caller cannot accidentally write it into a column whose empty value already means
+    "unattributed" and lose the distinction between "not stitched" and "refused to guess".
+    """
+
+    user_hash: str
+    account_hash: str | None
+    candidates: tuple[str, ...] = ()
+
+    @property
+    def conflict(self) -> bool:
+        """True when this person was observed against more than one account."""
+        return len(self.candidates) > 1
+
+    @property
+    def attributable(self) -> bool:
+        """True only when exactly one account resolved."""
+        return self.account_hash is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +240,13 @@ class IdentityGraph:
         Edges with ``observed_at > as_of`` are ignored so a historical attribution never "leaks" an
         identity link learned after the fact. Bounded depth + the visited-set make cycles and
         runaway fan-out safe.
+
+        Account edges (:attr:`IdentityType.ACCOUNT_ID`, CTO-184) are skipped entirely. An account is
+        a container, not a person: two colleagues share one account hash, so walking through an
+        account node would fuse them into a single identity and let one person's trace be
+        attributed to the other person's conversion. That is a silent mis-attribution of exactly
+        the kind this codebase refuses to make, so accounts are neither traversed nor returned
+        here. Use :meth:`resolve_account` for the account question.
         """
         seen: set[str] = {start}
         frontier: list[tuple[str, int]] = [(start, 0)]
@@ -200,9 +259,106 @@ class IdentityGraph:
                     continue
                 if neighbour in seen:
                     continue
+                if self._neighbour_type(node, neighbour, edge) not in PERSON_IDENTITY_TYPES:
+                    continue
                 seen.add(neighbour)
                 frontier.append((neighbour, depth + 1))
         return seen
+
+    @staticmethod
+    def _neighbour_type(node: str, neighbour: str, edge: IdentityEdge) -> IdentityType:
+        """The type of ``neighbour`` on ``edge``, given we arrived from ``node``.
+
+        Edges are stored once and read from both ends, so which of ``edge.a_type`` / ``edge.b_type``
+        describes the neighbour depends on the direction of travel.
+        """
+        if edge.a == node and edge.b == neighbour:
+            return edge.b_type
+        if edge.b == node and edge.a == neighbour:
+            return edge.a_type
+        # Self-edge or a malformed edge: fall back to the side that matches the neighbour's value.
+        return edge.b_type if edge.b == neighbour else edge.a_type
+
+    def resolve_account(
+        self,
+        tenant_id: str,
+        start: str,
+        *,
+        max_depth: int = 2,
+        as_of: datetime | None = None,
+    ) -> AccountResolution:
+        """Resolve the account a person belongs to, or refuse to (CTO-184).
+
+        This is the stitching path for tenants who cannot stamp an ``account_id`` on every span: a
+        CRM or CDP connector asserts ``user_id <-> account_id`` edges and the account is inferred
+        from the user instead of stated at emit time.
+
+        **One user belongs to one account. Multi-account users are not supported.** If this person
+        is observed against more than one account, the result carries ``account_hash=None`` and
+        ``conflict=True``, and the caller must attribute NOTHING for them. Not a split, not a
+        duplicate, not first-seen. Duplicating a user's cost across two accounts inflates the
+        tenant total, so per-account spend would stop summing to what ``/cost`` reports and the
+        whole per-customer surface would become untrustworthy. See the "Constraints decided"
+        section of ``docs/cost-per-customer-plan.md``.
+
+        Resolution is transitive across *person* identities (so an account asserted against a
+        user's email or external id still resolves from their anonymous id) but only ever one hop
+        from a person to an account. Accounts are never traversed through, so a colleague's account
+        edge can never reach this person.
+        """
+        person_identities = self.resolve_identity(
+            tenant_id, start, max_depth=max_depth, as_of=as_of
+        )
+        accounts: set[str] = set()
+        for node in person_identities:
+            for neighbour, edge in self._adj.get((tenant_id, node), set()):
+                if as_of is not None and edge.observed_at > as_of:
+                    continue
+                if self._neighbour_type(node, neighbour, edge) is IdentityType.ACCOUNT_ID:
+                    accounts.add(neighbour)
+        ordered = tuple(sorted(accounts))
+        # Exactly one account resolves. Zero means "not stitched yet", which is a different and
+        # entirely normal state from "conflicting", and both are reported as no attribution.
+        return AccountResolution(
+            user_hash=start,
+            account_hash=ordered[0] if len(ordered) == 1 else None,
+            candidates=ordered,
+        )
+
+    def account_conflicts(
+        self,
+        tenant_id: str,
+        *,
+        max_depth: int = 2,
+        as_of: datetime | None = None,
+    ) -> list[AccountResolution]:
+        """Every person in this tenant's graph who resolves to more than one account.
+
+        The data-quality feed for the constraint above: the multi-account case has to be *visible*
+        rather than silently swallowed, because the fix lives in the tenant's CRM and nobody can
+        make it if nobody can see it. Sorted by user hash so the output is stable to diff.
+        """
+        people: set[str] = set()
+        for (tid, node), neighbours in self._adj.items():
+            if tid != tenant_id:
+                continue
+            for _neighbour, edge in neighbours:
+                # The node's OWN type, not the neighbour's: a user whose only edge is to an
+                # account is still a person and still has to be checked.
+                own = edge.a_type if edge.a == node else edge.b_type
+                if own in PERSON_IDENTITY_TYPES:
+                    people.add(node)
+                    break
+        out = [
+            res
+            for person in sorted(people)
+            if (
+                res := self.resolve_account(
+                    tenant_id, person, max_depth=max_depth, as_of=as_of
+                )
+            ).conflict
+        ]
+        return out
 
     # Back-compat alias: the stitcher (CTO-69) and its tests call ``resolve``.
     resolve = resolve_identity

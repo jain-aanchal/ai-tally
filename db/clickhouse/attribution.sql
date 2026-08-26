@@ -3,13 +3,23 @@
 -- identity bridging (CTO-74). Defined pre-data — adding columns later is a backfill incident.
 
 -- identity_graph: transitive identity edges (anonymous <-> user <-> session, across key versions).
+--
+-- 'account_id' (CTO-184) is the sixth identity type. It is the stitching path for the account
+-- dimension CTO-180 added to otel_spans / business_events: a tenant who cannot stamp an
+-- `account_id` on every span can instead let a CRM or CDP connector assert `user_id <-> account_id`
+-- here, and the account is inferred from the user at attribution time.
+--
+-- APPEND ONLY, NEVER RENUMBER. ClickHouse stores an Enum8 as its integer, not its name, so
+-- changing 'email'=4 to anything else would silently reinterpret every row already on disk as a
+-- different identity type. New values therefore take the next free ordinal (6) and existing
+-- ordinals 1-5 are frozen forever. The same rule applies to whatever comes after this.
 CREATE TABLE IF NOT EXISTS identity_graph
 (
     TenantId              LowCardinality(String),
     IdentityA             FixedString(64),
-    IdentityAType         Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5),
+    IdentityAType         Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5,'account_id'=6),
     IdentityB             FixedString(64),
-    IdentityBType         Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5),
+    IdentityBType         Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5,'account_id'=6),
     UserIdHashKeyVersion  LowCardinality(String),
     Confidence            Float32,
     ObservedAt            DateTime64(9),
@@ -91,3 +101,26 @@ ORDER BY (TenantId, BusinessEventId);
 -- canonical DDL with `make ch-migrate` from infra/ to apply it to a stack that is already running.
 ALTER TABLE business_events
     ADD COLUMN IF NOT EXISTS AccountIdHash FixedString(64) DEFAULT '';
+
+-- CTO-184 additive migration for identity_graph. Widening an Enum8 is NOT an ADD COLUMN, so the
+-- IF NOT EXISTS trick above does not apply; the idempotent form is MODIFY COLUMN to the full
+-- target type. Restating a type ClickHouse already has is a no-op that costs one metadata write,
+-- which is what makes replaying this file through `make ch-migrate` safe and repeatable.
+--
+-- This is metadata-only and does NOT rewrite parts, for one specific reason: every pre-existing
+-- name keeps its pre-existing ordinal. An Enum8 column is stored on disk as the Int8 ordinal, and
+-- the name is only a display mapping held in the table metadata. Appending 'account_id'=6 leaves
+-- every byte already written meaning exactly what it meant before. Renumbering, or reusing an
+-- ordinal for a different name, would instead silently reinterpret stored rows with no error and
+-- no way to tell after the fact, so it is not something a later migration may do either.
+--
+-- As with CTO-180, an existing deployment will NOT pick this up on its own: the compose initdb
+-- directory that mounts this file runs only on a first boot against an empty volume. Replay the
+-- canonical DDL with `make ch-migrate` from infra/ to apply it to a stack that is already running.
+ALTER TABLE identity_graph
+    MODIFY COLUMN IdentityAType
+        Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5,'account_id'=6);
+
+ALTER TABLE identity_graph
+    MODIFY COLUMN IdentityBType
+        Enum8('user_id'=1,'anonymous_id'=2,'session_id'=3,'email'=4,'external_id'=5,'account_id'=6);
