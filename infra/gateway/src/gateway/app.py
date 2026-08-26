@@ -116,6 +116,15 @@ from gateway.tenant_allocation import (
     normalize_rule,
     normalize_updated_by,
 )
+from gateway.tenant_budgets import (
+    BUDGET_PERIODS,
+    BUDGET_SCOPE_KINDS,
+    BudgetError,
+    BudgetOverlapError,
+    TenantBudgetStore,
+    TenantNotFound as BudgetTenantNotFound,
+    normalize_budget_id,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
@@ -260,6 +269,10 @@ async def lifespan(app: FastAPI):
     # across accounts on /cost-per-customer, which is roughly half of every figure on that page.
     # A tenant with no row gets pro_rata_direct and the page says the rule is the default.
     app.state.tenant_allocation = TenantAllocationStore(settings)
+    # What the tenant intends to SPEND on AI (CTO-205). The first thing in this system to record a
+    # customer's intent rather than our own metering, and every "versus budget" number in the
+    # forecasting epic reads from it. No row is the normal state and means "no budget set".
+    app.state.tenant_budgets = TenantBudgetStore(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -1450,6 +1463,152 @@ async def upsert_tenant_allocation_config(
             "available_rules": list(ALLOCATION_RULES),
             "config": config.as_dict(),
         },
+        status_code=200,
+    )
+
+
+@app.get("/v1/tenant/budgets")
+def list_tenant_budgets(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Every budget this tenant has set (CTO-205, F1).
+
+    The response separates "what is stored" from "is anything stored":
+
+    * ``budgets``: the rows, each with ``amount_micro`` as integer micro-USD. Never dollars.
+    * ``configured``: false when the tenant has no budget at all. THIS IS THE NORMAL STATE and
+      every tenant on this system is in it today. It is not an error and it is not a budget of
+      zero: downstream must render "no budget set" and omit the variance rather than reporting the
+      tenant as infinitely over. A stored ``amount_micro`` of 0 is a different, deliberate claim.
+    * ``available_periods`` / ``available_scope_kinds``: what this deployment can store, so a
+      settings UI does not hardcode the lists and drift from the CHECK constraints.
+
+    An unknown tenant is 404 rather than an empty list. A misrouted request is not a tenant who has
+    set no budgets, and answering "no budget set" for a tenant we do not know would hide the bug.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantBudgetStore = app.state.tenant_budgets
+    try:
+        budgets = store.list(tenant_id)
+    except BudgetTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "budgets": [b.as_dict() for b in budgets],
+            "configured": bool(budgets),
+            "available_periods": list(BUDGET_PERIODS),
+            "available_scope_kinds": list(BUDGET_SCOPE_KINDS),
+        },
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/budgets")
+async def upsert_tenant_budget(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Create or edit one budget (CTO-205, F1).
+
+    Body: ``{"budget_id": "research-agent-2026", "period": "month", "amount_micro": 30000000000,
+    "scope_kind": "feature", "scope_value": "research-agent", "starts_on": "2026-01-01",
+    "ends_on": null}``.
+
+    Creating and editing are the same call, an upsert on ``(tenant_id, budget_id)``. There is no
+    ``change_id`` idempotency token here, unlike the allocation-config control plane, because there
+    is no audit log to append to and the write is last-write-wins by nature: replaying the same
+    body is already a no-op beyond ``updated_at``.
+
+    ``amount_micro`` is an INTEGER of micro-USD and a float is a 422, not a rounding. $30,000 is
+    ``30000000000``. Every cost figure this budget will be compared against is already an integer
+    of micro-USD, and admitting dollars-as-float at the boundary is how the two stop reconciling.
+
+    **Overlap is a 409.** A budget that covers the same scope and period over an overlapping date
+    range as an existing one is refused, and the response names the budget it collided with in
+    ``conflicting_budget_id``. The alternative, resolving the ambiguity at read time, has no
+    principled tie-break and would have to be reimplemented identically in the projection, the
+    burn-down and the future breach alerts. See ``db/postgres/0026_tenant_budgets.sql``. To replace
+    a budget, either POST the same ``budget_id`` (which edits in place) or close the old one by
+    setting its ``ends_on`` first.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+
+    store: TenantBudgetStore = app.state.tenant_budgets
+    try:
+        budget = store.upsert(
+            tenant_id,
+            budget_id=body.get("budget_id"),
+            period=body.get("period"),
+            amount_micro=body.get("amount_micro"),
+            scope_kind=body.get("scope_kind"),
+            scope_value=body.get("scope_value", ""),
+            starts_on=body.get("starts_on"),
+            ends_on=body.get("ends_on"),
+        )
+    except BudgetTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BudgetOverlapError as exc:
+        # 409 rather than 422: the body is well-formed, it conflicts with state. The distinction
+        # matters to a UI, which should offer to edit the colliding budget rather than re-validate
+        # the form the user just filled in correctly.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "conflicting_budget_id": exc.conflicting_budget_id,
+            },
+        ) from exc
+    except BudgetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "budget": budget.as_dict()}, status_code=200)
+
+
+@app.delete("/v1/tenant/budgets")
+async def delete_tenant_budget(
+    request: Request,
+    budget_id: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Withdraw one budget, returning that scope to "no budget set" (CTO-205, F1).
+
+    Takes ``budget_id`` as a query parameter or in a JSON body, because DELETE-with-a-body is
+    awkward from several HTTP clients and this endpoint addresses a single named row.
+
+    A real DELETE. A budget is the tenant's own statement of intent, so withdrawing it must not
+    leave a row behind still claiming they intend it.
+
+    Deleting an absent budget returns 200 with ``removed: false`` rather than 404, same as the
+    account-labels control plane: the end state the caller asked for is the end state they get, and
+    a double-click is not an error.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    if budget_id is None:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - an absent body is normal when the query param was used
+            body = None
+        if isinstance(body, dict):
+            budget_id = body.get("budget_id")
+    store: TenantBudgetStore = app.state.tenant_budgets
+    try:
+        target = normalize_budget_id(budget_id)
+        removed = store.delete(tenant_id, target)
+    except BudgetTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BudgetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "budget_id": target, "removed": removed},
         status_code=200,
     )
 
