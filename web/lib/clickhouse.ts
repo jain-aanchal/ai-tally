@@ -32,6 +32,7 @@ import type {
   AccountTrendPoint,
   DirectLayer,
   DirectSpendByLayer,
+  ExcludedInfraCost,
 } from "./accounts";
 import {
   DIRECT_LAYERS,
@@ -43,6 +44,8 @@ import {
   zeroDirectLayers,
 } from "./accounts";
 import type {
+  AccountStitchConflict,
+  AccountStitching,
   AttributionByFeature,
   CalibrationDay,
   ContextDropsByService,
@@ -58,6 +61,18 @@ import {
   emptyReport,
 } from "./attribution";
 import type { GuardrailMode, GuardrailRule, GuardrailScopeKind } from "./guardrails";
+import {
+  REFUND_VALUE_TYPE,
+  positiveValueTypes,
+  queryRevenuePolicy,
+  revenueSourceFilter,
+} from "./revenueSources";
+import {
+  accountRevenueReport,
+  accountRevenueSql,
+  type AccountRevenueReport,
+  type AccountRevenueSqlRow,
+} from "./accountRevenue";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -434,6 +449,48 @@ export async function queryAccountCosts(): Promise<AccountCosts | null> {
       // reconcile with /cost's direct spend for the same window.
       totalDirectMicroUsd:
         accounts.reduce((s, a) => s + a.directCostMicroUsd, 0) + unattributed.directCostMicroUsd,
+    };
+  });
+}
+
+/**
+ * Compute and egress for the window, the exact complement of what {@link queryAccountCosts} counts.
+ *
+ * This is the other half of the tenant's bill, and the per-customer tab cannot attribute it: these
+ * rows land from the cloud billing connectors as tenant-level daily totals with no account on them.
+ * The page states the figure so a reader knows how much of their spend the table below leaves out
+ * (CTO-189). Read from the same rollup, over the same window, under the negation of DIRECT_ONLY,
+ * so direct plus excluded is the tenant total for the window with nothing double counted and
+ * nothing dropped.
+ *
+ * Returns `null` (via tryLive) when ClickHouse is unreachable; the caller must not read that as
+ * zero excluded cost, which would be the most flattering possible reading of a failed query.
+ */
+export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null> {
+  return tryLive(async (db, tenant) => {
+    // Grouped by layer rather than summed flat so the two figures stay separable: compute and
+    // egress have very different fixes, and a later drill-down needs them apart. LAYER_CASE is
+    // reused rather than reading GenAiOperation directly so the operation-to-layer mapping keeps
+    // living in exactly one place.
+    const out = await rows<{ layer: string; cost: string }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND NOT (${DIRECT_ONLY})
+       GROUP BY layer`,
+      tenant,
+    );
+    let computeMicroUsd = 0;
+    let egressMicroUsd = 0;
+    for (const r of out) {
+      if (r.layer === "compute") computeMicroUsd = micro(r.cost);
+      else if (r.layer === "egress") egressMicroUsd = micro(r.cost);
+    }
+    return {
+      windowDays: ACCOUNT_WINDOW_DAYS,
+      computeMicroUsd,
+      egressMicroUsd,
+      totalMicroUsd: computeMicroUsd + egressMicroUsd,
     };
   });
 }
@@ -983,6 +1040,122 @@ export async function queryAttributionDiagnostics(): Promise<AttributionDiagnost
   };
 }
 
+// --- Account stitching (CTO-184) ----------------------------------------------------------------
+
+/**
+ * Normalises `identity_graph` edges into (person, account) pairs.
+ *
+ * `account_id` is the sixth `IdentityAType` / `IdentityBType` value (CTO-184) and either side of an
+ * edge may carry it, so we pick whichever side is the account and take the other as the person.
+ * The `!=` on the two booleans is an XOR: it keeps edges where EXACTLY ONE side is an account.
+ * Account-to-account edges say nothing about a person and person-to-person edges are the ordinary
+ * identity graph, so both are excluded rather than half-interpreted.
+ */
+const ACCOUNT_PAIRS_CTE = `
+  WITH pairs AS (
+    SELECT
+      if(IdentityAType = 'account_id', IdentityB, IdentityA) AS person_hash,
+      if(IdentityAType = 'account_id', IdentityA, IdentityB) AS account_hash
+    FROM identity_graph
+    WHERE TenantId = {tenant:String}
+      AND ((IdentityAType = 'account_id') != (IdentityBType = 'account_id'))
+  )`;
+
+/**
+ * Account-dimension coverage plus the multi-account conflicts that block attribution (CTO-184).
+ *
+ * Two things a consumer needs and cannot get anywhere else:
+ *
+ * 1. **Direct vs stitched.** A directly-tagged account was stamped on the span at emit time
+ *    (`otel_spans.AccountIdHash`, CTO-180) and is exactly as trustworthy as the span. A stitched
+ *    account was inferred from an `account_id` edge a CRM or CDP connector asserted, and is only
+ *    as trustworthy as that connector. They are counted separately so the UI can say which it is
+ *    showing rather than blending two very different confidences into one number.
+ *
+ * 2. **Conflicts.** One user belongs to one account. Where a user is observed against more than
+ *    one, we attribute NOTHING for them: no split, no duplication, no first-seen. Duplicating a
+ *    user's spend across accounts inflates the tenant total, per-account figures then stop summing
+ *    to what /cost reports, and the per-customer surface loses its reconciliation guarantee. The
+ *    query returns the conflicting users so the refusal is visible instead of silent, along with
+ *    the spend actually held back by it, so a tenant can weigh fixing their CRM.
+ *
+ * `withheldMicroUsd` counts only spans with an EMPTY `AccountIdHash`. A conflicted user's directly
+ * tagged spans are unaffected: they carry their own account and never needed stitching, so
+ * counting them here would overstate the damage.
+ */
+export async function queryAccountStitching(): Promise<AccountStitching | null> {
+  return tryLive(async (db, tenant) => {
+    const coverage = await rows<{ stitched_accounts: string; stitched_users: string }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT uniqExact(account_hash) AS stitched_accounts,
+              uniqExact(person_hash)  AS stitched_users
+       FROM pairs`,
+      tenant,
+    );
+
+    const direct = await rows<{ direct_accounts: string }>(
+      db,
+      `SELECT uniqExact(AccountIdHash) AS direct_accounts
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND AccountIdHash != ''`,
+      tenant,
+    );
+
+    const conflicting = await rows<{ person_hash: string; accounts: string[] }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT person_hash, arraySort(groupUniqArray(account_hash)) AS accounts
+       FROM pairs
+       GROUP BY person_hash
+       HAVING length(accounts) > 1
+       ORDER BY person_hash
+       LIMIT 100`,
+      tenant,
+    );
+
+    // Nothing ambiguous: skip the cost query entirely rather than run an `IN ()` over no users.
+    const users = conflicting.map((r) => r.person_hash.replace(/\0+$/, ""));
+    const costByUser = new Map<string, { cost: string; spans: string }>();
+    if (users.length > 0) {
+      const costs = await rowsP<{ user_hash: string; cost: string; spans: string }>(
+        db,
+        `SELECT UserIdHash AS user_hash, sum(EstimatedCost) AS cost, count() AS spans
+         FROM otel_spans
+         WHERE TenantId = {tenant:String}
+           AND Timestamp >= now() - INTERVAL 30 DAY
+           AND AccountIdHash = ''
+           AND UserIdHash IN {users:Array(String)}
+         GROUP BY user_hash`,
+        { tenant, users },
+      );
+      for (const c of costs) {
+        costByUser.set(c.user_hash.replace(/\0+$/, ""), { cost: c.cost, spans: c.spans });
+      }
+    }
+
+    const conflicts: AccountStitchConflict[] = conflicting.map((r) => {
+      const user = r.person_hash.replace(/\0+$/, "");
+      const c = costByUser.get(user);
+      return {
+        userIdHash: user,
+        accounts: r.accounts.map((a) => a.replace(/\0+$/, "")),
+        withheldMicroUsd: micro(c?.cost),
+        spans30d: parseInt(c?.spans ?? "0", 10) || 0,
+      };
+    });
+
+    return {
+      directAccounts: parseInt(direct[0]?.direct_accounts ?? "0", 10) || 0,
+      stitchedAccounts: parseInt(coverage[0]?.stitched_accounts ?? "0", 10) || 0,
+      stitchedUsers: parseInt(coverage[0]?.stitched_users ?? "0", 10) || 0,
+      conflicts,
+    };
+  });
+}
+
 // --- Data Quality (dedicated report) ------------------------------------------------------------
 
 export async function queryDataQualityReport(): Promise<DataQualityReport | null> {
@@ -1095,6 +1268,11 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       };
     });
 
+    // CTO-184: account coverage + multi-account conflicts. This runs inside the same tryLive as
+    // the rest of the report, so if `identity_graph` is missing the whole report falls back to
+    // mock rather than half-rendering, the same failure posture every other section has.
+    const accountStitching = await queryAccountStitching();
+
     return {
       overall: {
         attributionRate: totalEvents > 0 ? attributed / totalEvents : 1,
@@ -1107,6 +1285,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       contextDrops,
       calibration,
       sampling,
+      accountStitching: accountStitching ?? undefined,
     };
   });
 }
@@ -1600,6 +1779,11 @@ export async function queryAttribution(
   filters: AttributionFilters,
 ): Promise<AttributionReport | null> {
   return tryLive(async (db, tenant) => {
+    // CTO-194: which sources/value types count as revenue for this tenant. Resolved from the
+    // control plane, and falls back to the defaults (all sources, monetary + mrr, refunds net off)
+    // when the tenant has no row or the gateway is unreachable — it never throws, so a gateway
+    // outage degrades to the default policy rather than blanking the whole attribution report.
+    const policy = await queryRevenuePolicy();
     const outcomeName = filters.outcome ?? "conversion";
     const tagSql = filters.tag ? `AND s.FeatureTag = {tag:String}` : "";
     // CTO-106: prefer the typed GenAiSystem column (the real shape post-CTO-106),
@@ -1659,10 +1843,24 @@ export async function queryAttribution(
       convByProvider.set(r.provider, parseInt(r.conversions, 10) || 0);
     }
 
-    // Revenue per provider (CTO-110): sum (conversion + subscription_renewal) − |refund|, and
-    // count distinct paying users. Joined on UserIdHash the same way as conversion counts. The
-    // sum is in USD decimal (ClickHouse Decimal arithmetic on Int64 micro), we then convert to
-    // integer micro-USD at the boundary like everywhere else.
+    // Revenue per provider (CTO-110, reworked in CTO-194).
+    //
+    // This used to require `b.Source = 'stripe'` and key off EventName. Both were wrong: `Source`
+    // is an unconstrained LowCardinality(String) chosen by whichever connector ingested the row, so
+    // any tenant on a non-Stripe biller had 100% of its revenue silently dropped, and EventName is
+    // equally freeform. `ValueType` is the real discriminator — a ClickHouse enum of
+    // ('monetary'=1,'count'=2,'mrr'=3,'refund'=4) — so we sum the money-typed events and subtract
+    // refunds, which net off rather than being ignored. Source is now only ever a per-tenant
+    // NARROWING, and absent config means every source counts (see lib/revenueSources.ts).
+    //
+    // `users` counts only users who actually carry a revenue-typed event; a user whose only event
+    // is a 'count' engagement signal must not dilute value/user into a fabricated number.
+    //
+    // ValueAmountMicro is Nullable(Int64), so `sumIf` over a group with no matching row yields NULL
+    // rather than 0 and the NULL then swallows the whole subtraction. The `ifNull(..., 0)` inside
+    // each sumIf is what keeps a tenant with zero refunds from reporting NULL revenue.
+    const positiveTypes = positiveValueTypes(policy);
+    const sourceFilter = revenueSourceFilter(policy, "b");
     const revenueRows = await rowsP<{
       provider: string;
       revenue: string;
@@ -1671,19 +1869,30 @@ export async function queryAttribution(
       db,
       `SELECT
          ${providerExpr} AS provider,
-         (sumIf(b.ValueAmountMicro, b.EventName IN ('conversion', 'subscription_renewal'))
-            - sumIf(abs(b.ValueAmountMicro), b.EventName = 'refund')) / 1000000 AS revenue,
-         uniqExact(b.UserIdHash) AS users
+         (sumIf(ifNull(b.ValueAmountMicro, 0), b.ValueType IN {positiveTypes:Array(String)})
+            - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String}))
+           / 1000000 AS revenue,
+         uniqExactIf(
+           b.UserIdHash,
+           b.ValueType IN {positiveTypes:Array(String)} OR b.ValueType = {refundType:String}
+         ) AS users
        FROM business_events b
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
-         AND b.Source = 'stripe'
          AND b.OccurredAt >= now() - INTERVAL 30 DAY
          AND b.UserIdHash != ''
+         ${sourceFilter.sql}
          ${tagSql}
          ${providerSql}
        GROUP BY provider`,
-      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+      {
+        tenant,
+        tag: filters.tag ?? "",
+        provider: filters.provider ?? "",
+        positiveTypes,
+        refundType: REFUND_VALUE_TYPE,
+        ...sourceFilter.params,
+      },
     );
     const revenueByProvider = new Map<
       string,
@@ -1717,6 +1926,33 @@ export async function queryAttribution(
 
     if (perProvider.length === 0) return emptyReport(filters);
     return { filters, perProvider, totals, isMock: false };
+  });
+}
+
+// --- Revenue per account (CTO-196) --------------------------------------------------------------
+
+/**
+ * Net revenue per account over the same 30 day window the cost queries use.
+ *
+ * The SQL and the null-vs-zero rule live in lib/accountRevenue.ts, which documents both; this is
+ * only the round trip. Two properties worth restating here because they are easy to break:
+ *
+ * - The tenant's E1 revenue policy decides what counts, so uploaded revenue and connector revenue
+ *   go through one filter. A gateway outage falls back to the default policy rather than blanking
+ *   the figure, same as queryAttribution.
+ * - The grouping key is the `AccountIdHash` already on the row. Revenue is never re-keyed from a
+ *   user here: E2's AccountLinker owns the one user, one account rule and lands ambiguous revenue
+ *   unattributed with an AccountConflict finding, and the unattributed bucket is reported rather
+ *   than dropped.
+ *
+ * Returns null on any ClickHouse error, so a caller falls back rather than rendering a zero.
+ */
+export async function queryAccountRevenue(): Promise<AccountRevenueReport | null> {
+  return tryLive(async (db, tenant) => {
+    const policy = await queryRevenuePolicy();
+    const { sql, params } = accountRevenueSql(policy);
+    const rows = await rowsP<AccountRevenueSqlRow>(db, sql, { tenant, ...params });
+    return accountRevenueReport(rows);
   });
 }
 

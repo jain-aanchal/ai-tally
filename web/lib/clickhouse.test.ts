@@ -407,6 +407,70 @@ describe("queryAccountCosts — SQL contract (CTO-187)", () => {
   });
 });
 
+describe("queryExcludedInfraCost: what the per-account table leaves out (CTO-189)", () => {
+  async function sqlOf(): Promise<string> {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([]);
+    await queryExcludedInfraCost();
+    return (queryMock.mock.calls[0][0] as { query: string }).query;
+  }
+
+  it("sums compute and egress separately and totals them", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([
+      { layer: "compute", cost: "40.5" },
+      { layer: "egress", cost: "6.5" },
+    ]);
+    const out = await queryExcludedInfraCost();
+    expect(out).toEqual({
+      windowDays: 30,
+      computeMicroUsd: 40_500_000,
+      egressMicroUsd: 6_500_000,
+      totalMicroUsd: 47_000_000,
+    });
+  });
+
+  it("reports a real zero when the tenant has no infrastructure spend", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([]);
+    const out = await queryExcludedInfraCost();
+    expect(out!.totalMicroUsd).toBe(0);
+  });
+
+  it("returns null when ClickHouse is unreachable, so the page cannot read failure as zero", async () => {
+    const { queryExcludedInfraCost } = await freshSut();
+    queryMock.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    expect(await queryExcludedInfraCost()).toBeNull();
+  });
+
+  it("ignores a direct layer that somehow reaches it rather than folding it into the excluded total", async () => {
+    // Belt and braces against the SQL filter regressing: an llm row here would otherwise inflate
+    // the banner and understate the coverage of the table beneath it.
+    const { queryExcludedInfraCost } = await freshSut();
+    respondRows([
+      { layer: "llm", cost: "100.0" },
+      { layer: "compute", cost: "1.0" },
+    ]);
+    const out = await queryExcludedInfraCost();
+    expect(out!.totalMicroUsd).toBe(1_000_000);
+  });
+
+  it("reads exactly the complement of the direct-cost filter, so the two sum to the tenant total", async () => {
+    expect(await sqlOf()).toContain("NOT (GenAiOperation NOT IN ('compute', 'egress'))");
+  });
+
+  it("uses the same rollup and the same calendar-aligned window as the table", async () => {
+    const q = await sqlOf();
+    expect(q).toContain("FROM daily_account_rollup");
+    expect(q).toContain("Day >= toDate(now()) - INTERVAL 29 DAY");
+    expect(q).not.toContain("otel_spans");
+  });
+
+  it("is scoped to one tenant", async () => {
+    expect(await sqlOf()).toContain("TenantId = {tenant:String}");
+  });
+});
+
 describe("queryAccountDetail (CTO-187)", () => {
   const WINDOW_START = "2026-07-28";
 
@@ -602,5 +666,86 @@ describe("queryAccountDetailResult (CTO-190)", () => {
     const result = await queryAccountDetailResult(ACCT_A);
     expect(result.state).toBe("ok");
     expect(result.state === "ok" && result.detail.accountIdHash).toBe(ACCT_A);
+  });
+});
+
+// CTO-184: account stitching + the multi-account refusal.
+//
+// Same shape as the tests above: we stub @clickhouse/client and exercise the adapter that turns
+// rows into the typed result. The queries fire in a fixed order (coverage, direct accounts,
+// conflicting users, then, only when there are any, their withheld cost) so the stubs queue in
+// that order.
+describe("queryAccountStitching (CTO-184)", () => {
+  it("counts direct and stitched accounts separately so the UI can show confidence", async () => {
+    const { queryAccountStitching } = await freshSut();
+    respondRows([{ stitched_accounts: "42", stitched_users: "1340" }]);
+    respondRows([{ direct_accounts: "18" }]);
+    respondRows([]); // no conflicts
+    const out = await queryAccountStitching();
+    expect(out).toEqual({
+      directAccounts: 18,
+      stitchedAccounts: 42,
+      stitchedUsers: 1340,
+      conflicts: [],
+    });
+  });
+
+  it("skips the cost query entirely when nothing is ambiguous", async () => {
+    const { queryAccountStitching } = await freshSut();
+    respondRows([{ stitched_accounts: "3", stitched_users: "9" }]);
+    respondRows([{ direct_accounts: "0" }]);
+    respondRows([]);
+    await queryAccountStitching();
+    expect(queryMock).toHaveBeenCalledTimes(3); // no fourth query over an empty user list
+  });
+
+  it("surfaces a multi-account user as a finding, with both accounts and the withheld spend", async () => {
+    const { queryAccountStitching } = await freshSut();
+    respondRows([{ stitched_accounts: "5", stitched_users: "80" }]);
+    respondRows([{ direct_accounts: "2" }]);
+    respondRows([{ person_hash: "u_alice", accounts: ["acct_gadgets", "acct_widgets"] }]);
+    respondRows([{ user_hash: "u_alice", cost: "4.82", spans: "312" }]);
+    const out = await queryAccountStitching();
+    // Nothing is attributed for this user; the conflict is reported instead of guessed at.
+    expect(out!.conflicts).toEqual([
+      {
+        userIdHash: "u_alice",
+        accounts: ["acct_gadgets", "acct_widgets"],
+        withheldMicroUsd: 4_820_000,
+        spans30d: 312,
+      },
+    ]);
+  });
+
+  it("reports a conflict even when the user has no spend to withhold", async () => {
+    const { queryAccountStitching } = await freshSut();
+    respondRows([{ stitched_accounts: "5", stitched_users: "80" }]);
+    respondRows([{ direct_accounts: "2" }]);
+    respondRows([{ person_hash: "u_bob", accounts: ["acct_a", "acct_b"] }]);
+    respondRows([]); // no spans matched, but the ambiguity is still a finding
+    const out = await queryAccountStitching();
+    expect(out!.conflicts).toHaveLength(1);
+    expect(out!.conflicts[0].withheldMicroUsd).toBe(0);
+    expect(out!.conflicts[0].spans30d).toBe(0);
+  });
+
+  it("trims FixedString NUL padding off hashes so they still join", async () => {
+    // A FixedString(64) read back shorter than 64 bytes comes over NUL-padded.
+    const PAD = "\u0000\u0000";
+    const { queryAccountStitching } = await freshSut();
+    respondRows([{ stitched_accounts: "1", stitched_users: "1" }]);
+    respondRows([{ direct_accounts: "0" }]);
+    respondRows([{ person_hash: `u_pad${PAD}`, accounts: [`acct_a${PAD}`, "acct_b"] }]);
+    respondRows([{ user_hash: `u_pad${PAD}`, cost: "1.00", spans: "1" }]);
+    const out = await queryAccountStitching();
+    expect(out!.conflicts[0].userIdHash).toBe("u_pad");
+    expect(out!.conflicts[0].accounts).toEqual(["acct_a", "acct_b"]);
+    expect(out!.conflicts[0].withheldMicroUsd).toBe(1_000_000);
+  });
+
+  it("returns null when ClickHouse is unreachable, so the route falls back to mock", async () => {
+    const { queryAccountStitching } = await freshSut();
+    queryMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    expect(await queryAccountStitching()).toBeNull();
   });
 });

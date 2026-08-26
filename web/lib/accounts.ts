@@ -281,3 +281,79 @@ export function layerShare(row: AccountCostRow, layer: DirectLayer): number | nu
 export function trendTotal(trend: readonly AccountTrendPoint[]): MicroUSD {
   return trend.reduce((sum, p) => sum + p.directCostMicroUsd, 0);
 }
+
+// --- Excluded infrastructure cost (CTO-189, plan D3) ---------------------------------------------
+
+/**
+ * Compute and egress over the same window the per-account table covers.
+ *
+ * These are the two layers {@link DIRECT_LAYERS} deliberately leaves out. They arrive from the
+ * cloud billing connectors as tenant-level daily totals that carry no account, so the tab cannot
+ * split them per customer without an allocation rule, and that rule is workstream C (CTO-192/193).
+ * Carrying the figure here is what lets the page state the SIZE of what it omits rather than a
+ * vague "some costs are excluded": on current data the omission is roughly half of all spend, and
+ * an account figure that quietly understates true cost by half is the exact failure this product
+ * exists to fix.
+ */
+export interface ExcludedInfraCost {
+  /** Calendar days covered. Must match {@link AccountCosts.windowDays} or the share is meaningless. */
+  windowDays: number;
+  computeMicroUsd: MicroUSD;
+  egressMicroUsd: MicroUSD;
+  /** `compute + egress`, summed from the same rounded parts so it cannot contradict them. */
+  totalMicroUsd: MicroUSD;
+}
+
+/**
+ * Excluded spend as a share of ALL spend in the window, or `null` when there is nothing to divide.
+ *
+ * The denominator is direct plus excluded, i.e. the tenant's whole bill for the window, because the
+ * sentence this feeds ("excludes $X, N% of spend") is only meaningful against the total. Dividing
+ * by direct spend alone would print a share above 100 percent the moment infrastructure outweighs
+ * the model bill, which on a compute-heavy tenant it does.
+ *
+ * Both inputs are read over the same window from the same rollup under complementary filters, so
+ * they add to the tenant total exactly and this share reconciles with /cost.
+ */
+export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts): number | null {
+  const all = costs.totalDirectMicroUsd + excluded.totalMicroUsd;
+  if (all <= 0) return null;
+  return excluded.totalMicroUsd / all;
+}
+
+// --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
+
+/**
+ * Above this share, the unattributed bucket is the story rather than a footnote.
+ *
+ * Lives here rather than in page.tsx because the state machine below is the thing worth testing,
+ * and a threshold the test cannot see is a threshold the test cannot pin.
+ */
+export const MAJORITY_UNATTRIBUTED = 0.5;
+
+/**
+ * The three honest readings of a successful query.
+ *
+ *   - `onboarding`: not one span in the window carried an account, so there is no breakdown to
+ *     show and the reader has almost certainly never seen this page. Explain the page, then say
+ *     how to switch it on.
+ *   - `partial`: some accounts exist but most spend still has none, so the ranking is real and
+ *     incomplete at the same time. Show it, and say what it is missing.
+ *   - `attributed`: most spend carries an account. The table speaks for itself.
+ *
+ * A failed query is deliberately NOT a state here. "ClickHouse is unreachable" is a different fact
+ * from "you have not instrumented this yet", and answering an outage with an onboarding pitch would
+ * blame the reader for our own broken dependency. page.tsx branches on `costs === null` first, and
+ * this function is only ever reached with data in hand.
+ */
+export type AccountsView = "onboarding" | "partial" | "attributed";
+
+export function accountsView(costs: AccountCosts): AccountsView {
+  // Keyed on "are there any accounts", not on "is spend zero". A tenant can have real accounts and
+  // no spend in the window, which is a quiet week rather than an uninstrumented one, and telling it
+  // to go install the SDK it already installed would be wrong.
+  if (costs.accounts.length === 0) return "onboarding";
+  const share = unattributedShare(costs);
+  if (share !== null && share >= MAJORITY_UNATTRIBUTED) return "partial";
+  return "attributed";
+}

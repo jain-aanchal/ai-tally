@@ -3,14 +3,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   ACCOUNT_HASH_CHARS,
+  MAJORITY_UNATTRIBUTED,
   MIN_SPANS_FOR_COST_PER_USER,
   SHORT_HASH_CHARS,
   type AccountCostRow,
   type AccountCosts,
   accountDisplayName,
+  type ExcludedInfraCost,
+  accountsView,
   attributedSpend,
   costPerUser,
   emptyAccountRow,
+  excludedShare,
   formatShare,
   isAccountHash,
   layerShare,
@@ -215,5 +219,128 @@ describe("trendTotal", () => {
     ];
     expect(trendTotal(full)).toBe(1_000_000);
     expect(trendTotal(full.slice(1))).not.toBe(trendTotal(full));
+  });
+});
+
+describe("excludedShare (CTO-189)", () => {
+  function excluded(over: Partial<ExcludedInfraCost> = {}): ExcludedInfraCost {
+    const compute = over.computeMicroUsd ?? 0;
+    const egress = over.egressMicroUsd ?? 0;
+    return {
+      windowDays: 30,
+      computeMicroUsd: compute,
+      egressMicroUsd: egress,
+      totalMicroUsd: compute + egress,
+      ...over,
+    };
+  }
+
+  it("is excluded over ALL spend, so it reads as a share of the whole bill", () => {
+    // The plan's worked example: direct 53, excluded 47, banner says 47 percent.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 40_000_000, egressMicroUsd: 7_000_000 }),
+      costs({ totalDirectMicroUsd: 53_000_000 }),
+    );
+    expect(share).toBeCloseTo(0.47);
+  });
+
+  it("never exceeds 100 percent when infrastructure outweighs the model bill", () => {
+    // Dividing by direct spend alone would print 400%. The denominator is the total for a reason.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 4_000_000 }),
+      costs({ totalDirectMicroUsd: 1_000_000 }),
+    );
+    expect(share).toBeCloseTo(0.8);
+    expect(share!).toBeLessThanOrEqual(1);
+  });
+
+  it("is the whole bill when a tenant's only spend is compute and egress", () => {
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 2_000_000 }),
+      costs({ totalDirectMicroUsd: 0 }),
+    );
+    expect(share).toBe(1);
+  });
+
+  it("is null when the window holds no spend at all, never a flattering zero", () => {
+    expect(excludedShare(excluded(), costs({ totalDirectMicroUsd: 0 }))).toBeNull();
+  });
+
+  it("hands formatShare a value it will not round to a flat 100%", () => {
+    // A sliver of direct spend against a mountain of compute. "100.0%" would say the table below
+    // covers nothing, while it plainly covers something. Same trap D2 hit on the unattributed share.
+    const share = excludedShare(
+      excluded({ computeMicroUsd: 100_000_000 }),
+      costs({ totalDirectMicroUsd: 100 }),
+    );
+    expect(formatShare(share!)).toBe(">99.9%");
+  });
+});
+
+describe("accountsView", () => {
+  // The state machine behind the empty states (CTO-191, plan D5). Each branch produces different
+  // copy, and picking the wrong one is how a page tells a tenant with data that it has none, or
+  // tells a tenant that already instrumented the SDK to go install it.
+
+  it("is onboarding when not one span in the window carried an account", () => {
+    expect(
+      accountsView(
+        costs({
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 9_000_000 },
+          totalDirectMicroUsd: 9_000_000,
+        }),
+      ),
+    ).toBe("onboarding");
+  });
+
+  it("is onboarding when the tenant recorded no direct spend at all", () => {
+    // Nothing to attribute and nothing to explain away: still a first-run reader, still needs the
+    // explainer rather than an empty table.
+    expect(accountsView(costs())).toBe("onboarding");
+  });
+
+  it("is partial once real accounts exist but most spend still has none", () => {
+    expect(
+      accountsView(
+        costs({
+          accounts: [row({ directCostMicroUsd: 1_000_000 })],
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 9_000_000 },
+          totalDirectMicroUsd: 10_000_000,
+        }),
+      ),
+    ).toBe("partial");
+  });
+
+  it("treats the threshold itself as partial, so a coin-flip split gets the honest copy", () => {
+    const half = 5_000_000;
+    const view = accountsView(
+      costs({
+        accounts: [row({ directCostMicroUsd: half })],
+        unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: half },
+        totalDirectMicroUsd: half * 2,
+      }),
+    );
+    expect(MAJORITY_UNATTRIBUTED).toBe(0.5);
+    expect(view).toBe("partial");
+  });
+
+  it("is attributed when most spend carries an account", () => {
+    expect(
+      accountsView(
+        costs({
+          accounts: [row({ directCostMicroUsd: 9_000_000 })],
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 1_000_000 },
+          totalDirectMicroUsd: 10_000_000,
+        }),
+      ),
+    ).toBe("attributed");
+  });
+
+  it("does not send a fully instrumented but quiet tenant back to onboarding", () => {
+    // Accounts exist with zero spend in the window: a quiet week, not an uninstrumented tenant.
+    // Telling this reader to install the SDK they already installed would be plainly wrong.
+    expect(
+      accountsView(costs({ accounts: [row({ directCostMicroUsd: 0, spanCount: 0 })] })),
+    ).toBe("attributed");
   });
 });

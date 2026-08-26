@@ -376,6 +376,63 @@ func TestFeatureTagHeaderAbsent(t *testing.T) {
 	}
 }
 
+// TestAccountIdHashHeaderRecordedAndStripped is CTO-182's structural guarantee: a pre-hashed
+// account id arriving on X-Tally-Account-Id-Hash is captured on the TraceRecord and stripped from
+// the upstream-bound request, mirroring the tenant- and feature-tag-header contracts. This is what
+// lets a non-Python caller attribute cost per customer without the SDK.
+func TestAccountIdHashHeaderRecordedAndStripped(t *testing.T) {
+	const hash = "3f2a8c1d4e5b6079aabbccddeeff00112233445566778899aabbccddeeff0011"
+	var sawAccountHeader bool
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawAccountHeader = r.Header["X-Tally-Account-Id-Hash"]
+		w.WriteHeader(http.StatusOK)
+	})
+	front, sink := newTestProxy(t, false, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Tenant-Key", "tk_live_acme")
+	req.Header.Set("X-Tally-Account-Id-Hash", hash)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if sawAccountHeader {
+		t.Error("X-Tally-Account-Id-Hash leaked to upstream")
+	}
+	sink.waitFor(t, 1)
+	if got := sink.last().AccountIdHash; got != hash {
+		t.Errorf("AccountIdHash = %q, want %q", got, hash)
+	}
+}
+
+// TestAccountIdHashHeaderAbsent: omitting the header leaves AccountIdHash empty and the request
+// still succeeds. Attribution is opt-in; an unattributed request is a normal request, and the
+// empty string is the unattributed bucket rather than a placeholder account.
+func TestAccountIdHashHeaderAbsent(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	front, sink := newTestProxy(t, false, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Tenant-Key", "tk_live_acme")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	sink.waitFor(t, 1)
+	if got := sink.last().AccountIdHash; got != "" {
+		t.Errorf("AccountIdHash = %q, want empty", got)
+	}
+}
+
 // TestTraceRecordCarriesNoBodyContent is a structural guard: the telemetry type must not gain a
 // field that could hold prompt/completion/key content. If someone adds a `Body string`, this fails.
 func TestTraceRecordCarriesNoBodyContent(t *testing.T) {

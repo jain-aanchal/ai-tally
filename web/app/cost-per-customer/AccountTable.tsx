@@ -206,9 +206,10 @@ export function AccountTable({
         // A row the search found is filtered to on its own, so the highlight is belt and braces for
         // the case where a tenant later labels two hashes of the same account and both rows show.
         rowClassName={(r) => (matchedSet.has(r.accountIdHash) ? "bg-accent/5" : "")}
-        // Deliberately plain. The onboarding empty state that explains what this page is for and
-        // how to switch it on is CTO-191, stacked on this ticket; a half-built version here would
-        // be the thing that ticket then has to unpick.
+        // Deliberately plain, and unreachable from the page as it stands: with no rows at all the
+        // page renders the CTO-191 onboarding explainer in place of this table, and a search that
+        // matches nothing does not filter. This stays as the honest fallback for any future caller
+        // that renders the table without that branch.
         empty={`No spans carried an account id in the last ${windowDays} days.`}
       />
     </div>

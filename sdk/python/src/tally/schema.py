@@ -42,6 +42,19 @@ class GenAI:
     SESSION_ID = "gen_ai.session_id"
     USER_ID_HASH = "gen_ai.user_id_hash"  # HMAC-SHA256 hex
     USER_ID_HASH_KEY_VERSION = "gen_ai.user_id_hash_key_version"
+
+    # Account dimension (CTO-181 / B2 of the cost-per-customer plan). The tenant's own customer,
+    # sitting between TenantId (the ai-tally customer) and UserIdHash (one end user). Hashed
+    # exactly like a user id: HMAC-SHA256 hex under the per-tenant key, with the key version
+    # travelling alongside so a rotation (CTO-74) does not orphan history. The raw account id
+    # never leaves the process.
+    ACCOUNT_ID_HASH = "gen_ai.account_id_hash"  # HMAC-SHA256 hex
+    ACCOUNT_ID_HASH_KEY_VERSION = "gen_ai.account_id_hash_key_version"
+    # Optional human-readable label for the account. WIRE-ONLY: the gateway upserts it into the
+    # Postgres label store (CTO-186) keyed on the account hash and does NOT write it to the span
+    # row. Labels are mutable metadata and a customer name has no business in the telemetry
+    # store, which is the whole reason the id is hashed. Emitted only when an account hash is.
+    ACCOUNT_LABEL = "gen_ai.account_label"
     IDEMPOTENCY_KEY = "gen_ai.idempotency_key"
 
     AGENT_RUN_ID = "gen_ai.agent.run_id"
@@ -104,6 +117,9 @@ _STR_KEYS = frozenset(
         GenAI.SESSION_ID,
         GenAI.USER_ID_HASH,
         GenAI.USER_ID_HASH_KEY_VERSION,
+        GenAI.ACCOUNT_ID_HASH,
+        GenAI.ACCOUNT_ID_HASH_KEY_VERSION,
+        GenAI.ACCOUNT_LABEL,
         GenAI.IDEMPOTENCY_KEY,
         GenAI.AGENT_RUN_ID,
         GenAI.TOOL_NAME,
@@ -150,6 +166,9 @@ class SpanFields:
     session_id: str | None = None
     user_id_hash: str | None = None
     user_id_hash_key_version: str | None = None
+    account_id_hash: str | None = None
+    account_id_hash_key_version: str | None = None
+    account_label: str | None = None
     idempotency_key: str | None = None
     agent_run_id: str | None = None
     agent_step_index: int | None = None
@@ -177,6 +196,9 @@ _FIELD_TO_KEY = {
     "session_id": GenAI.SESSION_ID,
     "user_id_hash": GenAI.USER_ID_HASH,
     "user_id_hash_key_version": GenAI.USER_ID_HASH_KEY_VERSION,
+    "account_id_hash": GenAI.ACCOUNT_ID_HASH,
+    "account_id_hash_key_version": GenAI.ACCOUNT_ID_HASH_KEY_VERSION,
+    "account_label": GenAI.ACCOUNT_LABEL,
     "idempotency_key": GenAI.IDEMPOTENCY_KEY,
     "agent_run_id": GenAI.AGENT_RUN_ID,
     "agent_step_index": GenAI.AGENT_STEP_INDEX,
