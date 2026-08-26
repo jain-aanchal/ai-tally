@@ -43,6 +43,21 @@
 //     projections need not sum to the tenant projection, so `layersReconcile` is computed and the
 //     card prints the difference rather than hiding it.
 //
+//  5. NAMING THE SLICE (CTO-211, F7). The section now carries the `scope` it was built for, and the
+//     `series` handed in is expected to be `querySettledCostSeries(scope)`'s, not the tenant's.
+//     Everything downstream of that is already per-scope for free, including the two guards that
+//     matter most: the leading-zero trim in note 3 starts history at the first day THIS SCOPE was
+//     seen spending, and the minimum-history floor is then counted in that scope's own days. That is
+//     the point of doing it here rather than filtering a tenant series afterwards. A feature
+//     introduced last week has almost no history on a tenant that has been running for a year, and a
+//     tenant-wide history count would wave it straight past the floor and project a month of spend
+//     for it from a weekday profile of zeros.
+//
+//     The one thing that does NOT generalise is the layer budget column. A `scope_kind='layer'`
+//     budget governs that layer across the WHOLE tenant, so comparing one feature's compute
+//     projection against it would report a feature as over a budget it does not own. Off tenant-wide
+//     the column is suppressed, with `layerBudgetReason` saying why rather than rendering nulls.
+//
 // Money is integer micro-USD. Dates are `YYYY-MM-DD` UTC strings.
 
 import {
@@ -60,6 +75,12 @@ import {
   type ForecastStatus,
   type SpendForecast,
 } from "./forecast";
+import {
+  isTenantScope,
+  scopeLabel,
+  TENANT_SCOPE,
+  type ForecastScope,
+} from "./spendScopes";
 import type { MicroUSD } from "./types";
 
 /**
@@ -119,6 +140,12 @@ export interface LayerProjection {
 }
 
 export interface BurndownSection {
+  /**
+   * The slice of spend every figure below describes (CTO-211). Tenant-wide unless the caller asked
+   * for something narrower, and echoed so a card can never label a feature's projection as the
+   * tenant's.
+   */
+  scope: ForecastScope;
   /** Every date here is ClickHouse's, never the Node clock's. See note 2 at the top of this file. */
   period: {
     /** First day of the calendar month, from the series. */
@@ -143,6 +170,11 @@ export interface BurndownSection {
   window: ForecastInputWindow;
   /** Every layer, ordered by projected spend descending (settled spend when nothing projected). */
   layers: LayerProjection[];
+  /**
+   * Why the layer-budget columns are not shown, or null when they are. Non-null exactly off
+   * tenant-wide scope: see note 5. A reason rather than a boolean so the card prints a sentence.
+   */
+  layerBudgetReason: string | null;
   /** Sum of the layer projections, or null when no layer projected. */
   layerSumMicroUsd: MicroUSD | null;
   /**
@@ -182,10 +214,16 @@ function ratio(part: number, whole: number): number | null {
  * The caller handles ClickHouse being unreachable (`series === null`) before getting here: there is
  * no honest projection from no data, and inventing one next to a real budget is the single worst
  * thing this surface could do.
+ *
+ * `scope` (CTO-211) names the slice `series` was read for. It selects the budget and words the
+ * blanks; it does NOT filter anything, because filtering a tenant series after the fact would keep
+ * tenant-wide history days and defeat the per-scope minimum-history guard. Pass
+ * `querySettledCostSeries(scope)`'s own result.
  */
 export function burndownSection(
   series: SettledSeriesLike,
   budgets: readonly TenantBudget[],
+  scope: ForecastScope = TENANT_SCOPE,
 ): BurndownSection {
   const periodStart = series.periodStart;
   const periodEnd = endOfMonth(periodStart);
@@ -197,8 +235,11 @@ export function burndownSection(
   const asOf = series.settledThrough;
   const asOfForEngine = asOf ?? today;
 
-  // Note 3: history starts where the tenant does. Any observed spend counts, settled or not, so a
-  // still-unsettled first day does not push the start of history a day later than it really is.
+  // Note 3: history starts where the SCOPE does. `series` is already sliced, so "the first day
+  // anything was seen" is the first day this feature/model/layer was seen, which is exactly the
+  // question the per-scope history guard needs answered (note 5). Any observed spend counts,
+  // settled or not, so a still-unsettled first day does not push the start of history a day later
+  // than it really is.
   const firstObservedDay = series.days.find((d) => d.totalMicroUsd !== 0)?.date ?? null;
   const allSettled = series.days.filter((d) => d.settled);
   const settled =
@@ -232,16 +273,23 @@ export function burndownSection(
     firstObservedDay,
   };
 
-  const tenantBudget = selectBudget(budgets, "tenant", "", today);
-  const budget: AppliedBudget | null = tenantBudget
+  const scopeBudget = selectBudget(budgets, scope.kind, scope.value, today);
+  const budget: AppliedBudget | null = scopeBudget
     ? {
-        budgetId: tenantBudget.budget_id,
-        amountMicroUsd: tenantBudget.amount_micro,
-        startsOn: tenantBudget.starts_on,
-        endsOn: tenantBudget.ends_on,
-        coversPeriodToDate: tenantBudget.starts_on <= periodStart,
+        budgetId: scopeBudget.budget_id,
+        amountMicroUsd: scopeBudget.amount_micro,
+        startsOn: scopeBudget.starts_on,
+        endsOn: scopeBudget.ends_on,
+        coversPeriodToDate: scopeBudget.starts_on <= periodStart,
       }
     : null;
+
+  // Off tenant-wide, a `scope_kind='layer'` budget is somebody else's number: it covers that layer
+  // across the whole tenant, not this feature's share of it. Suppressed with a reason (note 5).
+  const layerBudgetReason = isTenantScope(scope)
+    ? null
+    : `layer budgets cover a layer across the whole tenant, not ${scopeLabel(scope)}, so they are ` +
+      "not compared against this slice";
 
   const forecast = forecastSpend({
     // Settled days only, and every settled day in the trailing window, not just this month's: the
@@ -264,7 +312,9 @@ export function burndownSection(
       // reads. The variance is what the split needs.
       budgetMicroUsd: null,
     });
-    const layerBudget = selectBudget(budgets, "layer", layer, today);
+    const layerBudget = layerBudgetReason === null
+      ? selectBudget(budgets, "layer", layer, today)
+      : null;
     const projected = layerForecast.projectedMicroUsd;
     return {
       layer,
@@ -310,17 +360,26 @@ export function burndownSection(
       : null;
 
   return {
+    scope,
     period: { start: periodStart, end: periodEnd, asOf, today },
     forecast,
     budget,
+    // Named per scope, because "no budget is set" is only actionable if the reader knows WHICH
+    // budget is missing. A feature with no budget of its own is a normal state, and it is not
+    // covered by the tenant-wide budget either: that one is compared against tenant-wide spend.
     noBudgetReason: budget
       ? null
-      : "no monthly tenant-wide budget is set, so there is nothing to project against",
+      : isTenantScope(scope)
+        ? "no monthly tenant-wide budget is set, so there is nothing to project against"
+        : `no monthly budget is set for ${scopeLabel(scope)}, so this projection has nothing to ` +
+          "compare against; it is not measured against the tenant-wide budget, which covers all " +
+          "spend rather than this slice",
     varianceMicroUsd,
     variancePct:
       budget && varianceMicroUsd !== null ? ratio(varianceMicroUsd, budget.amountMicroUsd) : null,
     window,
     layers,
+    layerBudgetReason,
     layerSumMicroUsd,
     layersReconcile: projected === null || layerSumMicroUsd === null
       ? true

@@ -11,6 +11,8 @@ import { describe, expect, it } from "vitest";
 import type { SettledSeriesLike, TenantBudget } from "@/lib/budgetVsActual";
 import { burndownSection } from "@/lib/burndown";
 import { LAYERS } from "@/lib/cost";
+import { scopedForecast, type ScopeSection } from "@/lib/scopedForecast";
+import { TENANT_SCOPE, type ForecastScope } from "@/lib/spendScopes";
 import type { SpendByLayer } from "@/lib/types";
 
 import { BurndownCard } from "./BurndownCard";
@@ -38,13 +40,16 @@ type DayRow = {
 };
 
 /** `settledDays` complete days ending yesterday, plus today still accruing. */
-function series(settledDays: number, today = "2026-08-20"): SettledSeriesLike {
-  const perDay = 100 * USD;
+function series(settledDays: number, today = "2026-08-20", perDayUsd = 100): SettledSeriesLike {
+  const perDay = perDayUsd * USD;
   const days: DayRow[] = [];
   for (let i = settledDays; i >= 1; i -= 1) {
     days.push({
       date: addDays(today, -i),
-      byLayer: layers({ llm: 70 * USD, compute: 30 * USD }),
+      byLayer: layers({
+        llm: Math.round(perDay * 0.7),
+        compute: perDay - Math.round(perDay * 0.7),
+      }),
       totalMicroUsd: perDay,
       inPeriod: addDays(today, -i) >= "2026-08-01",
       settled: true,
@@ -54,8 +59,11 @@ function series(settledDays: number, today = "2026-08-20"): SettledSeriesLike {
   }
   days.push({
     date: today,
-    byLayer: layers({ llm: 35 * USD, compute: 15 * USD }),
-    totalMicroUsd: 50 * USD,
+    byLayer: layers({
+      llm: Math.round(perDay * 0.35),
+      compute: Math.round(perDay * 0.5) - Math.round(perDay * 0.35),
+    }),
+    totalMicroUsd: Math.round(perDay * 0.5),
     inPeriod: true,
     settled: false,
     inProgress: true,
@@ -183,5 +191,132 @@ describe("BurndownCard", () => {
     expect(screen.getByText(/No forecast:/).textContent).toContain(
       "ClickHouse is unreachable from the dashboard",
     );
+  });
+});
+
+// CTO-211 (F7). The states that have to be distinguishable on screen when several budgets exist:
+// one on track, one projected to breach, one with too little history of its own, and the two
+// reconciliation registers (spend is a bug when it does not add up, budgets are not).
+describe("BurndownCard, scoped (CTO-211)", () => {
+  function scopedBudget(
+    budgetId: string,
+    amountUsd: number,
+    scopeKind: string,
+    scopeValue: string,
+  ): TenantBudget {
+    return {
+      budget_id: budgetId,
+      period: "month",
+      amount_micro: amountUsd * USD,
+      scope_kind: scopeKind,
+      scope_value: scopeValue,
+      starts_on: "2026-01-01",
+      ends_on: null,
+    };
+  }
+
+  // The tenant spends 100/day; the three features spend 30, 25 and 10, so the scoped spend adds up
+  // to less than the tenant's, which is the only way it is allowed to add up.
+  const budgets = [
+    budget(4_000),
+    scopedBudget("healthy", 2_000, "feature", "research-agent"),
+    // 25/day lands near 775 by month end, over a 700 budget but not over it yet.
+    scopedBudget("tight", 700, "feature", "support-bot"),
+    scopedBudget("new", 900, "feature", "brand-new"),
+  ];
+
+  function scopedPayload(requested: ForecastScope | null) {
+    const sections: ScopeSection[] = [
+      { scope: TENANT_SCOPE, section: burndownSection(series(20), budgets) },
+      {
+        scope: { kind: "feature", value: "research-agent" },
+        section: burndownSection(series(20, "2026-08-20", 30), budgets, {
+          kind: "feature",
+          value: "research-agent",
+        }),
+      },
+      {
+        scope: { kind: "feature", value: "support-bot" },
+        section: burndownSection(series(20, "2026-08-20", 25), budgets, {
+          kind: "feature",
+          value: "support-bot",
+        }),
+      },
+      {
+        // Five settled days of its own: the feature introduced last week on a mature tenant.
+        scope: { kind: "feature", value: "brand-new" },
+        section: burndownSection(series(5, "2026-08-20", 10), budgets, {
+          kind: "feature",
+          value: "brand-new",
+        }),
+      },
+    ];
+    return scopedForecast({ sections, requested, budgets });
+  }
+
+  function renderScoped(requested: ForecastScope | null) {
+    const result = scopedPayload(requested);
+    return render(
+      <BurndownCard
+        payload={{ section: result.section, unavailable: null }}
+        scoped={{ scoped: result, unavailable: null }}
+      />,
+    );
+  }
+
+  it("offers every budgeted scope, defaulting to tenant-wide", () => {
+    const { container } = renderScoped(null);
+    const selector = screen.getByTestId("forecast-scope-selector");
+    expect(selector.textContent).toContain("Whole tenant");
+    expect(selector.textContent).toContain("feature: research-agent");
+    expect(selector.textContent).toContain("feature: brand-new");
+    expect(selector.querySelector('[aria-current="page"]')?.textContent).toContain("Whole tenant");
+    // Tenant-wide is the default, so the section reads exactly as it did before this ticket.
+    expect(container.querySelector('[data-testid="forecast-scope-heading"]')).toBeNull();
+  });
+
+  it("shows on track, projected breach and cannot-say as three different standings", () => {
+    const { container } = renderScoped(null);
+    const table = container.querySelector('[data-testid="forecast-scope-roster"]');
+    expect(table?.textContent).toContain("On track");
+    expect(table?.textContent).toContain("Projected breach");
+    // Not "On track" and not green: refusing to project is not a clean bill of health.
+    expect(table?.textContent).toContain("Cannot say");
+  });
+
+  it("blanks the variance for a scope with too little history, saying which it is", () => {
+    const { container } = renderScoped(null);
+    const table = container.querySelector('[data-testid="forecast-scope-roster"]');
+    const reasons = [...(table?.querySelectorAll("span[title]") ?? [])].map((n) =>
+      n.getAttribute("title"),
+    );
+    expect(reasons.join(" ")).toContain("settled days of its own history");
+    expect(reasons.join(" ")).toContain("no crossing date is claimed either way");
+  });
+
+  it("renders the selected scope's own section and says the card above is tenant-wide", () => {
+    const { container } = renderScoped({ kind: "feature", value: "support-bot" });
+    const heading = container.querySelector('[data-testid="forecast-scope-heading"]');
+    expect(heading?.textContent).toContain("feature: support-bot");
+    expect(heading?.textContent).toContain("month-to-date card above stays tenant-wide");
+  });
+
+  it("renders the per-scope refusal for a feature introduced last week", () => {
+    const { container } = renderScoped({ kind: "feature", value: "brand-new" });
+    const refusal = container.querySelector('[data-testid="burndown-insufficient-history"]');
+    expect(refusal?.textContent).toContain("feature: brand-new has 5 settled days of history");
+    expect(refusal?.textContent).toContain("not a statement that spend is under control");
+    // No cone, per requirement 1, and per scope now.
+    expect(container.querySelector("svg")).toBeNull();
+  });
+
+  it("states over-allocated budgets neutrally and never as a warning", () => {
+    const { container } = renderScoped(null);
+    const alloc = container.querySelector('[data-testid="forecast-budget-allocation"]');
+    // 2000 + 700 + 900 against a 4000 tenant budget is under; the wording is still the neutral one.
+    expect(alloc?.textContent).toContain("budgets need not add up");
+    expect(alloc?.textContent).toContain("The spend below does");
+    // The spend does reconcile here, so no warning is rendered at all.
+    expect(container.textContent).not.toContain("bug on this page");
   });
 });

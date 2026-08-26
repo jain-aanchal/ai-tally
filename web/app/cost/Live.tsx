@@ -44,6 +44,7 @@ export function CostLive({
   initialData,
   enabledLayers,
   budget,
+  tag = null,
 }: {
   endpoint: string;
   initialData: CostPayload;
@@ -52,6 +53,8 @@ export function CostLive({
   // window advances once a day, so re-reading both every 5 seconds would be pure waste. See the
   // comment at the top of app/api/cost/budget/route.ts.
   budget: CostBudgetPayload;
+  /** The active ?tag= breakdown filter, carried so a scope change does not silently drop it. */
+  tag?: string | null;
 }) {
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
@@ -97,7 +100,13 @@ export function CostLive({
       {/* Immediately after the measured card (CTO-210). The order is the argument: what happened,
           then where it lands. Putting the projection first would let a reader take a forecast as a
           fact, and the two cards share a settled window that only makes sense read in that order. */}
-      <BurndownCard payload={budget.forecast} />
+      <BurndownCard
+        payload={budget.forecast}
+        scoped={budget.scoped}
+        scopeHref={(key) =>
+          `/cost?${new URLSearchParams(tag ? { tag, scope: key } : { scope: key }).toString()}`
+        }
+      />
 
       {hiddenCostAlerts.map((a) => (
         <div

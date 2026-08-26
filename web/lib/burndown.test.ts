@@ -326,3 +326,53 @@ describe("burndownSection", () => {
     expect(section.chartReconciles).toBe(true);
   });
 });
+
+// CTO-211 (F7): the same view model built for a slice rather than the whole bill. The series handed
+// in is the SCOPE's own (`querySettledCostSeries(scope)`), so everything above already applies per
+// scope; what is tested here is the three things the scope argument itself changes.
+describe("burndownSection, scoped (CTO-211)", () => {
+  const feature = { kind: "feature" as const, value: "research-agent" };
+
+  it("selects that scope's budget and not the tenant-wide one", () => {
+    const budgets = [
+      budget(1_000),
+      budget(300, { budget_id: "f", scope_kind: "feature", scope_value: "research-agent" }),
+    ];
+    const scoped = burndownSection(series({ settledDays: 20 }), budgets, feature);
+    expect(scoped.scope).toEqual(feature);
+    expect(scoped.budget?.budgetId).toBe("f");
+    expect(scoped.budget?.amountMicroUsd).toBe(300 * USD);
+    // Default is unchanged: still the tenant-wide row, exactly what F6 shipped.
+    expect(burndownSection(series({ settledDays: 20 }), budgets).budget?.budgetId).toBe(
+      "tenant-month",
+    );
+  });
+
+  it("does not fall back to the tenant budget for a scope that has none", () => {
+    // A feature with no budget of its own is a normal state, and it is emphatically not covered by
+    // the tenant-wide budget: that one is compared against tenant-wide spend.
+    const scoped = burndownSection(series({ settledDays: 20 }), [budget(1_000)], feature);
+    expect(scoped.budget).toBeNull();
+    expect(scoped.varianceMicroUsd).toBeNull();
+    expect(scoped.forecast.breach.outcome).toBe("no_budget");
+    expect(scoped.noBudgetReason).toContain("feature: research-agent");
+    expect(scoped.noBudgetReason).toContain("not measured against the tenant-wide budget");
+  });
+
+  it("suppresses layer budgets off tenant-wide scope, with a reason", () => {
+    // A layer budget covers that layer across the WHOLE tenant. Comparing one feature's compute
+    // projection against it would report a feature as over a budget it does not own.
+    const budgets = [
+      budget(1_000),
+      budget(200, { budget_id: "compute", scope_kind: "layer", scope_value: "compute" }),
+    ];
+    const tenant = burndownSection(series({ settledDays: 20 }), budgets);
+    expect(tenant.layerBudgetReason).toBeNull();
+    expect(tenant.layers.find((l) => l.layer === "compute")?.budgetMicroUsd).toBe(200 * USD);
+
+    const scoped = burndownSection(series({ settledDays: 20 }), budgets, feature);
+    expect(scoped.layerBudgetReason).toContain("whole tenant");
+    expect(scoped.layers.every((l) => l.budgetMicroUsd === null)).toBe(true);
+    expect(scoped.layers.every((l) => l.varianceMicroUsd === null)).toBe(true);
+  });
+});
