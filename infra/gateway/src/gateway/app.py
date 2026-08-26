@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from tally.account_identity import AccountLinker
 from tally.enrichment import enrich_cost
@@ -127,6 +127,16 @@ from gateway.tenant_guardrails import (
 )
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
+from gateway.revenue_upload import (
+    UPLOAD_SOURCE,
+    RevenueUploadError,
+    RevenueUploadStore,
+    build_period_snapshots,
+    normalize_period,
+    parse_revenue_csv,
+    period_id_prefix,
+)
+from gateway.tenant_lookup import TenantNotFoundError
 from gateway.tenant_revenue_sources import (
     RevenueSourceConfigError,
     RevenueSourceConfigInput,
@@ -214,6 +224,10 @@ async def lifespan(app: FastAPI):
     # revenue on /attribution. A tenant with no row counts every source and discriminates on
     # ValueType, which is what replaced the old hardcoded Source='stripe' filter.
     app.state.tenant_revenue_sources = TenantRevenueSourceStore(settings)
+    # Uploaded-revenue manifest (CTO-198): one row per (tenant, period) recording WHEN that
+    # period's snapshot was taken. The money itself lives in business_events like every other
+    # revenue source; this is only what lets the dashboard say "as of" and go stale honestly.
+    app.state.revenue_uploads = RevenueUploadStore(settings)
     # Generic revenue API (CTO-199): the SDK's WebhookIngestor, shared between the connector
     # webhooks and POST /v1/revenue/events so one deduplicator covers both. This is only the fast
     # in-process guard; the durable idempotency is the ClickHouse probe in the endpoint, which is
@@ -1743,7 +1757,12 @@ def get_tenant_revenue_source_config(
     """
     tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
     store: TenantRevenueSourceStore = app.state.tenant_revenue_sources
-    config = store.get(tenant_id)
+    try:
+        config = store.get(tenant_id)
+    except TenantNotFoundError as exc:
+        # A caller identifying the tenant by NAME used to reach a UUID column and 500. Now it
+        # resolves, and an unknown name is a plain 404 that says which name failed.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return JSONResponse(
         {"tenant_id": tenant_id, "config": config.as_dict() if config else None},
         status_code=200,
@@ -1782,7 +1801,212 @@ async def upsert_tenant_revenue_source_config(
         )
     except RevenueSourceConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return JSONResponse({"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200)
+
+
+# --------------------------------------------------------------------------------------------
+# CSV revenue upload (CTO-198) — for tenants whose revenue lives in a spreadsheet, not an API.
+# --------------------------------------------------------------------------------------------
+
+# Bound on the request body. A monthly finance export of even 50k accounts is well under a
+# megabyte; this only stops a mistaken paste from becoming a memory incident.
+MAX_REVENUE_CSV_BYTES = 8 * 1024 * 1024
+
+REVENUE_CSV_TEMPLATE = (
+    "account_id,period,amount,currency\n"
+    "acct_1001,2026-08,12500.00,USD\n"
+    "acct_1002,2026-08,4200.50,USD\n"
+)
+
+
+@app.get("/v1/tenant/revenue-uploads/template")
+def get_revenue_upload_template() -> Response:
+    """The exact CSV header the upload expects, with two example rows."""
+    return Response(
+        content=REVENUE_CSV_TEMPLATE,
+        media_type="text/csv",
+        headers={"content-disposition": 'attachment; filename="revenue-template.csv"'},
+    )
+
+
+@app.get("/v1/tenant/revenue-uploads")
+def list_revenue_uploads(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Every uploaded revenue snapshot for the tenant, newest period first (CTO-198).
+
+    The dashboard derives its "as of" date and staleness badge from ``uploaded_at``. An empty list
+    means nothing has ever been uploaded, which the UI renders as an invitation rather than a zero.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: RevenueUploadStore = app.state.revenue_uploads
+    try:
+        rows = store.list(tenant_id)
+    except RevenueUploadError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "source": UPLOAD_SOURCE,
+            "snapshots": [r.as_dict() for r in rows],
+        },
+        status_code=200,
+    )
+
+
+def _revenue_policy_note(tenant_id: str) -> str | None:
+    """Warn when the tenant's CTO-194 revenue-source narrowing would discard what they just sent.
+
+    Silently dropped revenue is the exact bug CTO-194 fixed. A tenant who has narrowed
+    ``revenue_sources`` to their biller and then uploads a spreadsheet would otherwise watch a
+    successful upload change nothing on the dashboard, with no way to find out why.
+    """
+    try:
+        config = app.state.tenant_revenue_sources.get(tenant_id)
+    except Exception:  # noqa: BLE001 — an advisory note must never fail the upload
+        logger.exception("revenue source config lookup failed for tenant %s", tenant_id)
+        return None
+    if config is None or not config.revenue_sources:
+        return None
+    if UPLOAD_SOURCE in config.revenue_sources:
+        return None
+    return (
+        f"Uploaded, but this tenant's revenue sources are narrowed to "
+        f"{', '.join(config.revenue_sources)}. Add '{UPLOAD_SOURCE}' on the revenue source config "
+        f"or these rows will not be counted as revenue."
+    )
+
+
+@app.post("/v1/tenant/revenue-uploads")
+async def upload_revenue_csv(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upload ``account_id, period, amount, currency`` as business events (CTO-198).
+
+    Body: ``{"csv": "...", "filename"?: str, "uploaded_by"?: str}``.
+
+    All-or-nothing: a malformed row rejects the whole file with 422 and a per-line error list.
+    Because an upload REPLACES the periods it covers, accepting the parseable half of a broken file
+    would swap a complete snapshot for an incomplete one and silently delete the revenue of every
+    account whose row failed.
+
+    Idempotent by construction: each period's existing rows are deleted before the insert, and the
+    ``BusinessEventId`` of every row is derived from ``(period, account hash)``. Re-uploading the
+    same file leaves exactly the same rows behind.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    csv_text = body.get("csv")
+    if not isinstance(csv_text, str) or not csv_text.strip():
+        raise HTTPException(status_code=422, detail="csv required (the file contents as a string)")
+    if len(csv_text.encode("utf-8")) > MAX_REVENUE_CSV_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"csv is larger than {MAX_REVENUE_CSV_BYTES // (1024 * 1024)} MiB",
+        )
+    filename = body.get("filename")
+    if filename is not None and not isinstance(filename, str):
+        raise HTTPException(status_code=422, detail="filename must be a string when provided")
+    uploaded_by = body.get("uploaded_by")
+    if uploaded_by is not None and not isinstance(uploaded_by, str):
+        raise HTTPException(status_code=422, detail="uploaded_by must be a string when provided")
+
+    try:
+        parsed = parse_revenue_csv(csv_text)
+    except RevenueUploadError as exc:
+        # The per-line detail is the point of the ticket: a malformed row is rejected with a LINE
+        # NUMBER, never silently skipped.
+        return JSONResponse(exc.as_dict(), status_code=422)
+
+    # Same per-tenant HMAC path the SDK and the Stripe connector use, so an uploaded account lands
+    # in the same hash space as an instrumented one. The plaintext account id is used to compute
+    # the digest and is never persisted or logged.
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    registry.provision(tenant_id)
+    snapshots = build_period_snapshots(
+        parsed, hash_account=lambda account_id: registry.hash(tenant_id, account_id).value
+    )
+
+    store: ClickHouseStore = app.state.store
+    uploads: RevenueUploadStore = app.state.revenue_uploads
+    written: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        prefix = period_id_prefix(snapshot.period)
+        try:
+            store.delete_business_events_by_id_prefix(tenant_id, UPLOAD_SOURCE, prefix)
+            store.insert_business_events(tenant_id, list(snapshot.events))
+        except Exception:  # noqa: BLE001 — never crash the gateway on a CH blip
+            logger.exception("clickhouse write (revenue upload) failed for tenant %s", tenant_id)
+            raise HTTPException(status_code=503, detail="storage unavailable") from None
+        try:
+            row = uploads.record(
+                tenant_id, snapshot, filename=filename, uploaded_by=uploaded_by
+            )
+        except RevenueUploadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception:  # noqa: BLE001
+            # The events landed but the manifest did not, so nothing can say how fresh they are.
+            # Revenue with no honest "as of" is worse than no revenue: roll the period back rather
+            # than leave a number the dashboard would present as current forever.
+            logger.exception("revenue upload manifest write failed for tenant %s", tenant_id)
+            try:
+                store.delete_business_events_by_id_prefix(tenant_id, UPLOAD_SOURCE, prefix)
+            except Exception:  # noqa: BLE001
+                logger.exception("rollback of revenue upload period %s failed", snapshot.period)
+            raise HTTPException(status_code=503, detail="control plane unavailable") from None
+        written.append(row.as_dict())
+
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "source": UPLOAD_SOURCE,
+            "accepted_rows": len(parsed.rows),
+            "snapshots": written,
+            "note": _revenue_policy_note(tenant_id),
+        },
+        status_code=200,
+    )
+
+
+@app.delete("/v1/tenant/revenue-uploads/{period}")
+def delete_revenue_upload(
+    period: str,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Remove one uploaded period, events and manifest row together (CTO-198).
+
+    The escape hatch for a snapshot that turned out to be wrong. Deleting the events without the
+    manifest row (or the other way round) would leave the dashboard claiming a freshness it cannot
+    back, so both go in one call.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    if normalize_period(period) is None:
+        raise HTTPException(status_code=422, detail="period must be a YYYY-MM calendar month")
+    store: ClickHouseStore = app.state.store
+    uploads: RevenueUploadStore = app.state.revenue_uploads
+    try:
+        store.delete_business_events_by_id_prefix(
+            tenant_id, UPLOAD_SOURCE, period_id_prefix(period)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("clickhouse delete (revenue upload) failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=503, detail="storage unavailable") from None
+    try:
+        removed = uploads.delete(tenant_id, period)
+    except RevenueUploadError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "period": period, "removed": removed})
 
 
 # --------------------------------------------------------------------------------------------
@@ -1818,7 +2042,6 @@ async def ingest_revenue_event(
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
-
     ingestor: WebhookIngestor = app.state.revenue_ingestor
     try:
         result = ingestor.ingest_revenue_api(tenant_id, body)

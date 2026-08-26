@@ -99,16 +99,23 @@ export function StaleBadge({
   asOf,
   age,
   stale,
+  verb = "reconciled",
 }: {
   asOf: string;
   age: string;
   stale: boolean;
+  /**
+   * How this surface's data got here. Defaults to "reconciled" for the telemetry surfaces. An
+   * uploaded revenue snapshot (CTO-198) passes "uploaded", because telling a finance user their
+   * spreadsheet was "reconciled 40d ago" names the wrong action to take.
+   */
+  verb?: string;
 }) {
   if (stale) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-warn/50 bg-warn/10 px-2.5 py-1 text-xs font-medium text-warn">
         <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-warn" />
-        Stale — reconciled {age} (as of {asOf})
+        Stale — {verb} {age} (as of {asOf})
       </span>
     );
   }

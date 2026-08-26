@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -43,6 +42,7 @@ from typing import Any
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import TenantNotFoundError, resolve_tenant_uuid
 
 # Dashboard connector ids this module can configure.
 COMPUTE_CONNECTORS = {"aws_cost_explorer": "aws", "gcp_billing": "gcp"}
@@ -164,20 +164,14 @@ class TenantNotFound(ConfigError):
 def _resolve_tenant_uuid(cur: Any, tenant_id: str) -> str:
     """Map the caller's tenant identifier onto ``tenants.id``.
 
-    The config tables key on ``tenants(id)``, a UUID, but the dashboard and the local dev setup
-    identify a tenant by NAME (``local-dev``). Accept either: pass a UUID through untouched,
-    otherwise look the name up. Without this a name-based caller trips
-    ``InvalidTextRepresentation`` deep in the driver, which surfaces as an opaque 503.
+    The rule now lives in :mod:`gateway.tenant_lookup` so every control-plane store shares it;
+    this wrapper only re-types the failure as a :class:`ConfigError` subclass, which is what this
+    module's callers already catch.
     """
     try:
-        return str(uuid.UUID(tenant_id))
-    except (ValueError, AttributeError, TypeError):
-        pass
-    cur.execute("SELECT id FROM tenants WHERE name = %s", (tenant_id,))
-    row = cur.fetchone()
-    if row is None:
-        raise TenantNotFound(f"no tenant named '{tenant_id}'")
-    return str(row[0])
+        return resolve_tenant_uuid(cur, tenant_id)
+    except TenantNotFoundError as exc:
+        raise TenantNotFound(str(exc)) from exc
 
 
 @dataclass(frozen=True, slots=True)
