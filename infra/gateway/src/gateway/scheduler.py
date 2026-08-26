@@ -57,14 +57,23 @@ background task here: ``asyncio.create_task``, ``while not self._stop.is_set()``
 (``settings.scheduler_enabled``, default off, matching ``ingest_buffered`` and the export flags).
 With the flag off, behaviour is byte-identical to today.
 
-Not covered here, by design: multi-replica safety. Two replicas with the flag on would run every job
-twice. Advisory locking (``pg_try_advisory_lock`` keyed on job plus tenant) is phase 2 of the scope
-doc; until it lands, enable the scheduler on exactly one gateway replica.
+Multi-replica safety (CTO-214, S2). Two replicas with the flag on would otherwise run every job
+twice for every tenant, which for the cost connectors means double-counted spend. Each (job, tenant)
+pair is therefore guarded by a Postgres advisory lock (see :func:`advisory_lock_key` for the hash
+and the lock space), and a replica that cannot take the lock leaves that tenant to whoever holds it.
+Advisory locks specifically, rather than a lock table: the lock belongs to the session, so a replica
+that crashes mid-job releases it the moment its connection dies. A lock table would need a lease and
+a reaper to get the same property, and a reaper is one more thing that can silently stop.
+
+A lock-contention skip is NOT a ``skipped`` run and records NO row. See :class:`TickResult` for the
+argument: ``skipped`` settles the cadence window, and settling a window that another replica is at
+this second working on would quietly cost a run.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -166,6 +175,21 @@ class TickResult:
     skipped_by_job: int = 0  # invoked, raised JobSkipped
     failed: int = 0
     not_due: int = 0  # inside the cadence window or serving backoff, so never invoked
+    # Due, but another replica holds the (job, tenant) advisory lock, so this replica did not run it
+    # (CTO-214). Counted here and NOWHERE ELSE: contention writes no ``scheduler_runs`` row, and is
+    # deliberately not a fourth status.
+    #
+    # WHY no row. ``skipped`` means "the job ran and there was nothing to do", and it settles the
+    # cadence window so an unconfigured tenant is not re-asked every tick. Contention is the
+    # opposite situation: the work is happening right now, on another replica, and this replica
+    # must re-ask on the next tick. Recording anything that settles the window would mean a lock
+    # collision silently costs a run, and a daily job would quietly become an every-other-day job
+    # with nothing in the history to show for it. A fourth status would need a migration to the
+    # 0027 CHECK constraint and would put a row in front of every future freshness surface that
+    # means "no work was attempted", which is exactly the sort of thing that gets miscounted. The
+    # honest record of "we tried and someone else had it" is a counter and a log line, not history:
+    # nothing was invoked, so there is no invocation to log.
+    lock_contended: int = 0
 
 
 def backoff_delay_s(
@@ -362,6 +386,150 @@ class PostgresTenantProvider:
             return [str(row[0]) for row in cur.fetchall()]
 
 
+# --- Advisory locking (CTO-214, S2) ------------------------------------------------------------
+
+# Personalisation for the key hash, mixed into the digest so this feature's keys are its own. It is
+# a blake2b ``person``, which is capped at 16 bytes. Changing it changes every key, which would let
+# an old replica and a new one both run the same job during a rolling deploy, so it is a constant.
+_LOCK_KEY_PERSON = b"tally-sched-v1"
+
+
+def advisory_lock_key(job_name: str, tenant_id: str) -> int:
+    """The bigint ``pg_try_advisory_lock`` key for one (job, tenant) pair. Deterministic, stable.
+
+    THE HASH. ``blake2b``, personalised with ``tally-sched-v1``, over the string
+    ``f"{len(job_name)}\\x00{job_name}\\x00{tenant_id}"`` encoded UTF-8, digest truncated to 8
+    bytes and read big-endian as a SIGNED integer, because a Postgres ``bigint`` is signed and an
+    unsigned reading would overflow it for half of all inputs.
+
+    The length prefix is not decoration. Without it, job ``"a"`` with tenant ``"b\\x00c"`` and job
+    ``"a\\x00b"`` with tenant ``"c"`` would hash identically, and two unrelated jobs would
+    serialise against each other for no reason a reader could ever guess.
+
+    THE LOCK SPACE. Postgres has TWO advisory-lock spaces and they do NOT interact: the single
+    ``bigint`` form ``pg_try_advisory_lock(bigint)`` and the two ``int32`` form
+    ``pg_try_advisory_lock(int, int)``. Key ``0`` in the first is a different lock from ``(0, 0)``
+    in the second. This code uses the SINGLE-BIGINT space, exclusively and deliberately: all 64 bits
+    go to the hash, where the two-int form would spend 32 of them on a namespace field that buys
+    nothing here. Anything else in this deployment that wants an advisory lock should take it in the
+    two-int32 space, or go through this function.
+
+    Collisions are possible in principle (64 bits, birthday bound: with ten thousand live (job,
+    tenant) pairs the chance is about 3e-12). The consequence is bounded and safe in the direction
+    that matters: two unrelated pairs would take turns, so one of them waits for the next tick.
+    Never a double run, which is the property this ticket exists to buy.
+    """
+    digest = hashlib.blake2b(
+        f"{len(job_name)}\x00{job_name}\x00{tenant_id}".encode(),
+        digest_size=8,
+        person=_LOCK_KEY_PERSON,
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+class LockHandle(Protocol):
+    """A held lock. :meth:`release` must be safe to call exactly once, and must never raise."""
+
+    def release(self) -> None: ...
+
+
+class LockProvider(Protocol):
+    """Exclusion for one (job, tenant) pair across replicas.
+
+    ``acquire`` returns a handle when this process now holds the pair, or ``None`` when somebody
+    else does. It never blocks waiting for the lock: a replica that waited would just be running the
+    job late and twice in a row, and the whole point of the tick loop is that the next tick asks
+    again anyway.
+    """
+
+    def acquire(self, job_name: str, tenant_id: str) -> LockHandle | None: ...
+
+
+class _NullLock:
+    """The handle used when no provider is configured. Releasing it is a no-op."""
+
+    __slots__ = ()
+
+    def release(self) -> None:
+        return None
+
+
+_NO_LOCK = _NullLock()
+
+
+class PostgresAdvisoryLock:
+    """A held session-scoped advisory lock, owning the connection whose session holds it.
+
+    The connection is the lock. That is the whole reason for advisory locks over a lock table: if
+    this process is SIGKILLed, or the container is evicted, or the network drops, Postgres tears the
+    session down and the lock goes with it. Nothing has to notice the death and clean up, so there
+    is no lease to tune and no reaper to forget to run.
+    """
+
+    __slots__ = ("_conn", "_key")
+
+    def __init__(self, conn: psycopg.Connection, key: int) -> None:
+        self._conn = conn
+        self._key = key
+
+    @property
+    def key(self) -> int:
+        return self._key
+
+    def release(self) -> None:
+        """Unlock and close. Never raises: a caller in a ``finally`` has nothing useful to do here.
+
+        The explicit unlock is politeness for a pooled future; closing the connection is what
+        actually guarantees the release, which is why the close is in the ``finally``.
+        """
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (self._key,))
+        except Exception:  # noqa: BLE001 - closing below releases it regardless
+            logger.debug("scheduler: advisory unlock failed for key=%d; closing session", self._key)
+        finally:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001 - a dead connection is already an unlocked one
+                pass
+
+
+class PostgresAdvisoryLockProvider:
+    """``pg_try_advisory_lock`` keyed on job plus tenant, one dedicated session per held lock.
+
+    Dedicated because the lock is scoped to the SESSION: it has to outlive the statement that took
+    it and stay held for the whole run, and every other Postgres user in this module opens a
+    connection per call and closes it. Borrowing one of those would release the lock the moment the
+    query that took it finished, which is the failure mode that looks like locking works right up
+    until two replicas overlap.
+
+    One extra connection per job invocation is affordable here precisely because these are hourly
+    and daily jobs: a tick that runs nothing opens none at all.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._dsn = settings.postgres_dsn
+
+    def acquire(self, job_name: str, tenant_id: str) -> PostgresAdvisoryLock | None:
+        """Try, once, without waiting. ``None`` means another session holds this pair."""
+        key = advisory_lock_key(job_name, tenant_id)
+        # autocommit: session-level advisory locks are not transactional, and leaving an idle
+        # transaction open for the length of a job would pin the xmin horizon for no reason.
+        conn = psycopg.connect(self._dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+                row = cur.fetchone()
+            acquired = bool(row and row[0])
+        except Exception:
+            conn.close()
+            raise
+        if not acquired:
+            conn.close()
+            return None
+        return PostgresAdvisoryLock(conn, key)
+
+
 class Scheduler:
     """The tick loop: wake, ask every (job, tenant) pair whether it is due, run the due ones.
 
@@ -369,6 +537,11 @@ class Scheduler:
     :class:`~gateway.ingest_buffer.AsyncIngestBuffer` is. :meth:`tick_once` is public and performs
     one full pass, which is what the tests drive; :meth:`start` / :meth:`stop` wrap it in the
     background task.
+
+    ``lock_provider`` (CTO-214) is what makes more than one replica safe. It is optional so the
+    engine stays independent of Postgres for tests, and :func:`build_scheduler` always supplies the
+    real one. With a single replica the outcome is identical either way: there is nobody to contend
+    with, so every acquire succeeds and every pass does exactly what S1 did.
     """
 
     def __init__(
@@ -377,6 +550,7 @@ class Scheduler:
         run_store: RunStore,
         tenant_provider: TenantProvider,
         *,
+        lock_provider: LockProvider | None = None,
         tick_interval_s: float = 300.0,
         backoff_base_s: float = _DEFAULT_BACKOFF_BASE_S,
         backoff_cap_s: float = _DEFAULT_BACKOFF_CAP_S,
@@ -387,6 +561,7 @@ class Scheduler:
         self._registry = registry
         self._store = run_store
         self._tenants = tenant_provider
+        self._locks = lock_provider
         self._tick_interval_s = float(tick_interval_s)
         self._backoff_base_s = float(backoff_base_s)
         self._backoff_cap_s = float(backoff_cap_s)
@@ -437,13 +612,15 @@ class Scheduler:
             started = time.monotonic()
             try:
                 result = await self.tick_once()
-                if result.ran:
+                if result.ran or result.lock_contended:
                     logger.info(
-                        "scheduler tick: ran=%d ok=%d skipped=%d failed=%d (considered=%d)",
+                        "scheduler tick: ran=%d ok=%d skipped=%d failed=%d "
+                        "contended=%d (considered=%d)",
                         result.ran,
                         result.succeeded,
                         result.skipped_by_job,
                         result.failed,
+                        result.lock_contended,
                         result.considered,
                     )
             except Exception:  # noqa: BLE001 - the loop outlives any single tick's failure
@@ -469,36 +646,49 @@ class Scheduler:
         sequential walk keeps the load this puts on Postgres and on those APIs obvious.
         """
         tenants = await asyncio.to_thread(self._tenants)
-        considered = ran = ok = skipped = failed = not_due = 0
+        considered = ran = ok = skipped = failed = not_due = contended = 0
         for job in self._registry.jobs():
             for tenant_id in tenants:
                 if self._stopping:
                     break
                 considered += 1
-                try:
-                    state = await asyncio.to_thread(self._store.get_state, job.name, tenant_id)
-                except Exception:  # noqa: BLE001 - one unreadable row must not end the tick
-                    logger.exception(
-                        "scheduler: reading state for job=%s tenant=%s failed", job.name, tenant_id
-                    )
+                state = await self._read_state(job, tenant_id)
+                if state is None:
                     continue
-                if not is_due(
-                    job,
-                    state,
-                    self._now(),
-                    backoff_base_s=self._backoff_base_s,
-                    backoff_cap_s=self._backoff_cap_s,
-                ):
+                if not self._due(job, state):
                     not_due += 1
                     continue
-                ran += 1
-                status = await self._invoke(job, tenant_id)
-                if status == "success":
-                    ok += 1
-                elif status == "skipped":
-                    skipped += 1
-                else:
-                    failed += 1
+                # Due as far as this replica can tell. Take the lock BEFORE running anything: the
+                # cheap read above is what keeps a tick from opening a lock session per tenant per
+                # tick, and this is what keeps two replicas from both running the job (CTO-214).
+                lock = await self._acquire(job, tenant_id)
+                if lock is None:
+                    contended += 1
+                    continue
+                try:
+                    # Ask again, now that the pair is ours. Between the read above and the acquire,
+                    # the replica that held the lock may have finished the very run we are about to
+                    # repeat, and its row is committed before it releases. Without this second read
+                    # the lock would prevent overlap but not duplication, which for a cost connector
+                    # is the same double-counted spend by a slower route.
+                    fresh = await self._read_state(job, tenant_id)
+                    if fresh is None:
+                        continue
+                    if not self._due(job, fresh):
+                        not_due += 1
+                        continue
+                    ran += 1
+                    status = await self._invoke(job, tenant_id)
+                    if status == "success":
+                        ok += 1
+                    elif status == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
+                finally:
+                    # After :meth:`_invoke`, which means after the row is written. Releasing first
+                    # would open exactly the window the re-read above closes, on every single run.
+                    await self._release(job, tenant_id, lock)
         self._ticks += 1
         return TickResult(
             considered=considered,
@@ -507,7 +697,63 @@ class Scheduler:
             skipped_by_job=skipped,
             failed=failed,
             not_due=not_due,
+            lock_contended=contended,
         )
+
+    async def _read_state(self, job: Job, tenant_id: str) -> JobState | None:
+        """Run history for one pair, or ``None`` if unreadable. One bad row must not end a tick."""
+        try:
+            return await asyncio.to_thread(self._store.get_state, job.name, tenant_id)
+        except Exception:  # noqa: BLE001 - one unreadable row must not end the tick
+            logger.exception(
+                "scheduler: reading state for job=%s tenant=%s failed", job.name, tenant_id
+            )
+            return None
+
+    def _due(self, job: Job, state: JobState) -> bool:
+        return is_due(
+            job,
+            state,
+            self._now(),
+            backoff_base_s=self._backoff_base_s,
+            backoff_cap_s=self._backoff_cap_s,
+        )
+
+    async def _acquire(self, job: Job, tenant_id: str) -> LockHandle | None:
+        """Claim this (job, tenant) pair for this replica, or ``None`` to leave it alone.
+
+        Fails CLOSED. If the lock cannot be taken for any reason, including Postgres refusing the
+        connection, this replica does not run the job: without a held lock there is no way to rule
+        out another replica running it right now, and the cost of not running is one tick's delay
+        while the cost of running anyway is the double-counted spend this ticket exists to prevent.
+        """
+        if self._locks is None:
+            return _NO_LOCK
+        try:
+            return await asyncio.to_thread(self._locks.acquire, job.name, tenant_id)
+        except Exception as exc:  # noqa: BLE001 - an unavailable lock is a skip, not a crash
+            logger.warning(
+                "scheduler: could not take lock for job=%s tenant=%s, leaving it: %s: %s",
+                job.name,
+                tenant_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    async def _release(self, job: Job, tenant_id: str, lock: LockHandle) -> None:
+        """Release on every path out of the run, success and failure alike.
+
+        A release that fails is survivable rather than fatal, which is the advisory-lock property
+        again: the session holding it dies with this process, so the worst case is that one (job,
+        tenant) pair is unavailable to the other replicas until then, not forever.
+        """
+        try:
+            await asyncio.to_thread(lock.release)
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.exception(
+                "scheduler: releasing lock for job=%s tenant=%s failed", job.name, tenant_id
+            )
 
     @property
     def _stopping(self) -> bool:
@@ -559,16 +805,24 @@ def build_scheduler(
     *,
     run_store: RunStore | None = None,
     tenant_provider: TenantProvider | None = None,
+    lock_provider: LockProvider | None = None,
 ) -> Scheduler:
     """Construct the production scheduler from settings. Called from the gateway ``lifespan``.
 
     Registers NO jobs (CTO-213 is the engine; CTO-215 and CTO-216 add the first bodies), so with
     the default registry an enabled scheduler ticks over an empty set and does nothing.
+
+    Advisory locking is always on in this path (CTO-214). It needs no flag of its own: it uses the
+    same Postgres the run history already requires, and a deployment that wanted it off would be
+    asking for the double-counted spend it prevents.
     """
     return Scheduler(
         registry if registry is not None else JobRegistry(),
         run_store if run_store is not None else SchedulerRunStore(settings),
         tenant_provider if tenant_provider is not None else PostgresTenantProvider(settings),
+        lock_provider=(
+            lock_provider if lock_provider is not None else PostgresAdvisoryLockProvider(settings)
+        ),
         tick_interval_s=settings.scheduler_tick_interval_s,
         backoff_base_s=settings.scheduler_backoff_base_s,
         backoff_cap_s=settings.scheduler_backoff_cap_s,
@@ -581,6 +835,10 @@ __all__ = [
     "JobRegistry",
     "JobSkipped",
     "JobState",
+    "LockHandle",
+    "LockProvider",
+    "PostgresAdvisoryLock",
+    "PostgresAdvisoryLockProvider",
     "PostgresTenantProvider",
     "RunStatus",
     "RunStore",
@@ -588,6 +846,7 @@ __all__ = [
     "SchedulerRunStore",
     "TenantProvider",
     "TickResult",
+    "advisory_lock_key",
     "backoff_delay_s",
     "build_scheduler",
     "is_due",

@@ -139,8 +139,10 @@ class Settings(BaseSettings):
     # today. CTO-213 registers no jobs at all (the cost connectors are CTO-215, the ingest workers
     # CTO-216), so even enabling it ticks over an empty registry until one of those lands.
     #
-    # NOT yet safe on more than one replica: advisory locking is phase 2 of
-    # docs/scheduler-scope.md, so two enabled gateways would run every job twice. Enable on one.
+    # Safe on more than one replica since CTO-214: every (job, tenant) pair is guarded by a
+    # Postgres advisory lock, and a replica that cannot take the lock leaves that tenant to the one
+    # that can and re-asks next tick. No flag of its own, because the alternative is the
+    # double-counted spend it exists to prevent. See gateway/scheduler.py.
     scheduler_enabled: bool = False
     # How often the loop wakes to ask "is anything due". This is NOT a job's cadence — cadence is
     # per job and is measured against recorded run history, so this only bounds how late a due job

@@ -46,6 +46,8 @@ Two gateway replicas would otherwise run every job twice, which for cost connect
 
 **Postgres advisory locks** (`pg_try_advisory_lock`) keyed on job plus tenant. A replica that cannot take the lock skips that tenant this tick. No new infrastructure, no leader election, and the lock dies with the connection so a crashed replica does not wedge a job forever.
 
+Shipped in CTO-214. The key is a personalised BLAKE2b digest of the length-prefixed (job, tenant) pair, truncated to a signed 64-bit integer, taken in the single-bigint lock space (which does not intersect the two-int32 space). A contended pair records **no run row at all**: `skipped` settles the cadence window, and a window settled while another replica is mid-run would silently cost that tenant a run.
+
 ## Decision 4: failure isolation
 
 One tenant's failure must never stop another tenant's job, and one job's failure must never stop the tick loop. Every job invocation is wrapped, records `failed` with a scrubbed error, and the loop continues.
