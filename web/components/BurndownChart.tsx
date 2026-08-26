@@ -17,10 +17,10 @@
 //      weighting can check it against the dumbest possible arithmetic without leaving the page.
 //
 // THE X AXIS IS BUILT FROM THE DATES IN `points`, WHICH CAME FROM CLICKHOUSE. There is no
-// `new Date()` in this file and there must never be one. `queryCostSeries` builds its axis from the
-// Node clock (CTO-203) and the failure mode is silence: the oldest day slides off the chart while
-// still counting toward the total printed beside it. Everything plotted here is indexed off the
-// array it was handed.
+// `new Date()` in this file and there must never be one. `queryCostSeries` once built its axis from
+// the Node clock (CTO-203, since fixed) and the failure mode was silence: the oldest day slid off
+// the chart while still counting toward the total printed beside it. Everything plotted here is
+// indexed off the array it was handed.
 //
 // This component renders a cone unconditionally, so the CALLER is responsible for not rendering it
 // at all below the minimum history. `BurndownCard` does that; `points` being empty is the belt to
