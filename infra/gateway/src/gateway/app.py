@@ -59,6 +59,7 @@ from gateway.protocol import (
 from gateway.ratelimit import RateLimiter
 from gateway.reconciliation import ReconciliationStore
 from gateway.scheduler import JobRegistry, build_scheduler
+from gateway.stitcher_job import register_stitcher_job
 from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
@@ -364,12 +365,15 @@ async def lifespan(app: FastAPI):
     #     Cloudflare on /connectors and nothing ever acted on that config. Enabling the scheduler
     #     makes the Compute and Egress columns populate on their own, which CHANGES tenants'
     #     numbers (see docs/scheduler-scope.md).
-    #   * CTO-216, the third-party ingest workers and the reconciler. This does NOT fix /features,
-    #     which stays blocked on the stitcher runner (CTO-200).
+    #   * CTO-216, the third-party ingest workers and the reconciler.
+    #   * CTO-200, the attribution stitcher runner. This is what finally populates
+    #     attribution_records, so /features stops showing honest nulls for value, payback and
+    #     attribution rate for a tenant whose touches and value events actually overlap.
     app.state.scheduler = None
     if settings.scheduler_enabled:
         job_registry = JobRegistry()
         register_cost_connector_job(job_registry, settings)  # CTO-215
+        register_stitcher_job(job_registry, settings)  # CTO-200
         register_worker_jobs(
             job_registry,
             settings,
