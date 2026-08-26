@@ -26,6 +26,8 @@ import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "
 import { LAYERS, type Layer } from "./cost";
 import type { AttributionDiagnostics, FeatureEconomics } from "./features";
 import type {
+  AccountStitchConflict,
+  AccountStitching,
   AttributionByFeature,
   CalibrationDay,
   ContextDropsByService,
@@ -669,6 +671,122 @@ export async function queryAttributionDiagnostics(): Promise<AttributionDiagnost
   };
 }
 
+// --- Account stitching (CTO-184) ----------------------------------------------------------------
+
+/**
+ * Normalises `identity_graph` edges into (person, account) pairs.
+ *
+ * `account_id` is the sixth `IdentityAType` / `IdentityBType` value (CTO-184) and either side of an
+ * edge may carry it, so we pick whichever side is the account and take the other as the person.
+ * The `!=` on the two booleans is an XOR: it keeps edges where EXACTLY ONE side is an account.
+ * Account-to-account edges say nothing about a person and person-to-person edges are the ordinary
+ * identity graph, so both are excluded rather than half-interpreted.
+ */
+const ACCOUNT_PAIRS_CTE = `
+  WITH pairs AS (
+    SELECT
+      if(IdentityAType = 'account_id', IdentityB, IdentityA) AS person_hash,
+      if(IdentityAType = 'account_id', IdentityA, IdentityB) AS account_hash
+    FROM identity_graph
+    WHERE TenantId = {tenant:String}
+      AND ((IdentityAType = 'account_id') != (IdentityBType = 'account_id'))
+  )`;
+
+/**
+ * Account-dimension coverage plus the multi-account conflicts that block attribution (CTO-184).
+ *
+ * Two things a consumer needs and cannot get anywhere else:
+ *
+ * 1. **Direct vs stitched.** A directly-tagged account was stamped on the span at emit time
+ *    (`otel_spans.AccountIdHash`, CTO-180) and is exactly as trustworthy as the span. A stitched
+ *    account was inferred from an `account_id` edge a CRM or CDP connector asserted, and is only
+ *    as trustworthy as that connector. They are counted separately so the UI can say which it is
+ *    showing rather than blending two very different confidences into one number.
+ *
+ * 2. **Conflicts.** One user belongs to one account. Where a user is observed against more than
+ *    one, we attribute NOTHING for them: no split, no duplication, no first-seen. Duplicating a
+ *    user's spend across accounts inflates the tenant total, per-account figures then stop summing
+ *    to what /cost reports, and the per-customer surface loses its reconciliation guarantee. The
+ *    query returns the conflicting users so the refusal is visible instead of silent, along with
+ *    the spend actually held back by it, so a tenant can weigh fixing their CRM.
+ *
+ * `withheldMicroUsd` counts only spans with an EMPTY `AccountIdHash`. A conflicted user's directly
+ * tagged spans are unaffected: they carry their own account and never needed stitching, so
+ * counting them here would overstate the damage.
+ */
+export async function queryAccountStitching(): Promise<AccountStitching | null> {
+  return tryLive(async (db, tenant) => {
+    const coverage = await rows<{ stitched_accounts: string; stitched_users: string }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT uniqExact(account_hash) AS stitched_accounts,
+              uniqExact(person_hash)  AS stitched_users
+       FROM pairs`,
+      tenant,
+    );
+
+    const direct = await rows<{ direct_accounts: string }>(
+      db,
+      `SELECT uniqExact(AccountIdHash) AS direct_accounts
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND AccountIdHash != ''`,
+      tenant,
+    );
+
+    const conflicting = await rows<{ person_hash: string; accounts: string[] }>(
+      db,
+      `${ACCOUNT_PAIRS_CTE}
+       SELECT person_hash, arraySort(groupUniqArray(account_hash)) AS accounts
+       FROM pairs
+       GROUP BY person_hash
+       HAVING length(accounts) > 1
+       ORDER BY person_hash
+       LIMIT 100`,
+      tenant,
+    );
+
+    // Nothing ambiguous: skip the cost query entirely rather than run an `IN ()` over no users.
+    const users = conflicting.map((r) => r.person_hash.replace(/\0+$/, ""));
+    const costByUser = new Map<string, { cost: string; spans: string }>();
+    if (users.length > 0) {
+      const costs = await rowsP<{ user_hash: string; cost: string; spans: string }>(
+        db,
+        `SELECT UserIdHash AS user_hash, sum(EstimatedCost) AS cost, count() AS spans
+         FROM otel_spans
+         WHERE TenantId = {tenant:String}
+           AND Timestamp >= now() - INTERVAL 30 DAY
+           AND AccountIdHash = ''
+           AND UserIdHash IN {users:Array(String)}
+         GROUP BY user_hash`,
+        { tenant, users },
+      );
+      for (const c of costs) {
+        costByUser.set(c.user_hash.replace(/\0+$/, ""), { cost: c.cost, spans: c.spans });
+      }
+    }
+
+    const conflicts: AccountStitchConflict[] = conflicting.map((r) => {
+      const user = r.person_hash.replace(/\0+$/, "");
+      const c = costByUser.get(user);
+      return {
+        userIdHash: user,
+        accounts: r.accounts.map((a) => a.replace(/\0+$/, "")),
+        withheldMicroUsd: micro(c?.cost),
+        spans30d: parseInt(c?.spans ?? "0", 10) || 0,
+      };
+    });
+
+    return {
+      directAccounts: parseInt(direct[0]?.direct_accounts ?? "0", 10) || 0,
+      stitchedAccounts: parseInt(coverage[0]?.stitched_accounts ?? "0", 10) || 0,
+      stitchedUsers: parseInt(coverage[0]?.stitched_users ?? "0", 10) || 0,
+      conflicts,
+    };
+  });
+}
+
 // --- Data Quality (dedicated report) ------------------------------------------------------------
 
 export async function queryDataQualityReport(): Promise<DataQualityReport | null> {
@@ -781,6 +899,11 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       };
     });
 
+    // CTO-184: account coverage + multi-account conflicts. This runs inside the same tryLive as
+    // the rest of the report, so if `identity_graph` is missing the whole report falls back to
+    // mock rather than half-rendering, the same failure posture every other section has.
+    const accountStitching = await queryAccountStitching();
+
     return {
       overall: {
         attributionRate: totalEvents > 0 ? attributed / totalEvents : 1,
@@ -793,6 +916,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       contextDrops,
       calibration,
       sampling,
+      accountStitching: accountStitching ?? undefined,
     };
   });
 }
