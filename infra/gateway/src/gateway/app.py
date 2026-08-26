@@ -316,8 +316,8 @@ async def lifespan(app: FastAPI):
     # sleeping for a day and losing its place on the next redeploy. Disabled → no task at all
     # (None), which is byte-identical to the behaviour before this landed. It registers NO jobs
     # yet: wiring the cost connectors is CTO-215 and the ingest workers CTO-216, so an enabled
-    # scheduler currently ticks over an empty registry. Single-replica only until advisory locking
-    # lands (phase 2 of docs/scheduler-scope.md).
+    # scheduler currently ticks over an empty registry. Safe on multiple replicas as of CTO-214:
+    # per (job, tenant) Postgres advisory locks, so two gateways cannot run the same job at once.
     app.state.scheduler = None
     if settings.scheduler_enabled:
         scheduler = build_scheduler(settings)
