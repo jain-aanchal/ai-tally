@@ -749,3 +749,169 @@ describe("queryAccountStitching (CTO-184)", () => {
     expect(await queryAccountStitching()).toBeNull();
   });
 });
+
+// --- querySettledCostSeries (CTO-207, F3) -------------------------------------------------------
+//
+// The point of this query is which days it REFUSES to hand a forecast. Each test stubs the three
+// reads in order (bounds, money, settlement evidence) and asserts on the settled/unsettled split.
+
+describe("querySettledCostSeries — settled-day rule (CTO-207)", () => {
+  const bounds = (windowStart: string, today: string, periodStart: string, windowDays: number) =>
+    respondRows([{ windowStart, periodStart, today, windowDays }]);
+
+  const landing = (
+    day: string,
+    opts: { compute?: number; egress?: number; reconciled?: number } = {},
+  ) => ({
+    day,
+    compute: String(opts.compute ?? 0),
+    egress: String(opts.egress ?? 0),
+    reconciled: String(opts.reconciled ?? 0),
+  });
+
+  it("withholds the day in progress and any day a connector has not landed", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-01", "2026-08-04", "2026-08-01", 4);
+    respondRows([
+      { day: "2026-08-01", layer: "llm", cost: "10.00" },
+      { day: "2026-08-01", layer: "compute", cost: "8.00" },
+      { day: "2026-08-02", layer: "llm", cost: "10.00" },
+      { day: "2026-08-02", layer: "compute", cost: "8.00" },
+      // 08-03 is the half-reported day: LLM spans are in, the cloud bill is not.
+      { day: "2026-08-03", layer: "llm", cost: "10.00" },
+      { day: "2026-08-04", layer: "llm", cost: "3.00" },
+    ]);
+    respondRows([
+      landing("2026-08-01", { compute: 4 }),
+      landing("2026-08-02", { compute: 4 }),
+      landing("2026-08-03"),
+      landing("2026-08-04"),
+    ]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.rule).toBe("connector-landing");
+    expect(out.connectorLayers).toEqual(["compute"]);
+    // 08-03 has money but no cloud bill; 08-04 is today. Neither may set a run-rate.
+    expect(out.baselineDays).toEqual(["2026-08-01", "2026-08-02"]);
+    expect(out.settledThrough).toBe("2026-08-02");
+    expect(out.days.find((d) => d.date === "2026-08-03")!.awaitingLayers).toEqual(["compute"]);
+    expect(out.days.find((d) => d.date === "2026-08-04")!.inProgress).toBe(true);
+    expect(out.days.find((d) => d.date === "2026-08-04")!.awaitingLayers).toEqual([]);
+  });
+
+  it("keeps the half-reported day out of the baseline total but still reports it as observed", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-01", "2026-08-03", "2026-08-01", 3);
+    respondRows([
+      { day: "2026-08-01", layer: "llm", cost: "10.00" },
+      { day: "2026-08-01", layer: "compute", cost: "10.00" },
+      { day: "2026-08-02", layer: "llm", cost: "10.00" }, // compute missing: half the day's money
+      { day: "2026-08-03", layer: "llm", cost: "1.00" },
+    ]);
+    respondRows([
+      landing("2026-08-01", { compute: 2 }),
+      landing("2026-08-02"),
+      landing("2026-08-03"),
+    ]);
+
+    const out = (await querySettledCostSeries())!;
+    // $20 over 1 settled day, not $31 over 3 days. The inflated divisor is the whole bug: it reads
+    // $10.33/day against a true $20/day and lands the month at half what it will be.
+    expect(out.windowSettled.totalMicroUsd).toBe(20_000_000);
+    expect(out.windowSettled.dayCount).toBe(1);
+    expect(out.windowObserved.totalMicroUsd).toBe(31_000_000);
+    expect(out.windowObserved.dayCount).toBe(3);
+    expect(out.windowSettled.byLayer.compute).toBe(10_000_000);
+  });
+
+  it("waits on nothing but the clock when the tenant has no cloud connector", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-01", "2026-08-03", "2026-08-01", 3);
+    respondRows([{ day: "2026-08-01", layer: "llm", cost: "5.00" }]);
+    respondRows([landing("2026-08-01"), landing("2026-08-02"), landing("2026-08-03")]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.rule).toBe("day-complete");
+    expect(out.connectorLayers).toEqual([]);
+    expect(out.baselineDays).toEqual(["2026-08-01", "2026-08-02"]);
+  });
+
+  it("builds the day list from the ClickHouse window, never from the Node clock (CTO-203)", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    // A window nowhere near "now" in this process: if the list came from the Node clock, none of
+    // these days would have a slot and their money would vanish from the series while still
+    // counting toward the totals printed above it.
+    bounds("2021-03-01", "2021-03-03", "2021-03-01", 3);
+    respondRows([{ day: "2021-03-01", layer: "llm", cost: "2.00" }]);
+    respondRows([landing("2021-03-01"), landing("2021-03-02"), landing("2021-03-03")]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.days.map((d) => d.date)).toEqual(["2021-03-01", "2021-03-02", "2021-03-03"]);
+    expect(out.days[0].weekday).toBe(1); // 2021-03-01 was a Monday
+    expect(out.windowObserved.totalMicroUsd).toBe(2_000_000);
+  });
+
+  it("marks trailing history apart from the period being forecast", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-07-30", "2026-08-02", "2026-08-01", 4);
+    respondRows([
+      { day: "2026-07-31", layer: "llm", cost: "4.00" },
+      { day: "2026-08-01", layer: "llm", cost: "7.00" },
+    ]);
+    respondRows([]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.days.filter((d) => d.inPeriod).map((d) => d.date)).toEqual([
+      "2026-08-01",
+      "2026-08-02",
+    ]);
+    expect(out.periodSettled.totalMicroUsd).toBe(7_000_000); // 08-02 is today, withheld
+    expect(out.windowSettled.totalMicroUsd).toBe(11_000_000);
+  });
+
+  it("reports settledThrough and reconciledThrough as null rather than a stand-in date", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-04", "2026-08-04", "2026-08-01", 1);
+    respondRows([{ day: "2026-08-04", layer: "llm", cost: "9.00" }]);
+    respondRows([landing("2026-08-04", { compute: 1 })]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.baselineDays).toEqual([]);
+    expect(out.settledThrough).toBeNull();
+    expect(out.reconciledThrough).toBeNull();
+  });
+
+  it("carries the reconciliation boundary through so estimates are not read as invoiced", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-01", "2026-08-03", "2026-08-01", 3);
+    respondRows([]);
+    respondRows([
+      landing("2026-08-01", { compute: 1, reconciled: 5 }),
+      landing("2026-08-02", { compute: 1 }),
+      landing("2026-08-03", { compute: 1 }),
+    ]);
+
+    const out = (await querySettledCostSeries())!;
+    expect(out.reconciledThrough).toBe("2026-08-01");
+  });
+
+  it("scopes the money without letting the scope decide whether a day settled", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    bounds("2026-08-01", "2026-08-02", "2026-08-01", 2);
+    // The feature emitted nothing on 08-01. That is a real zero for the feature, not a reason to
+    // call the day unsettled: settlement is judged on the tenant's whole data.
+    respondRows([]);
+    respondRows([landing("2026-08-01", { compute: 3 }), landing("2026-08-02", { compute: 3 })]);
+
+    const out = (await querySettledCostSeries({ kind: "feature", value: "research-agent" }))!;
+    expect(out.scope).toEqual({ kind: "feature", value: "research-agent" });
+    expect(out.baselineDays).toEqual(["2026-08-01"]);
+    expect(out.windowSettled.totalMicroUsd).toBe(0);
+  });
+
+  it("returns null when ClickHouse is unreachable, so no caller reads it as zero spend", async () => {
+    const { querySettledCostSeries } = await freshSut();
+    queryMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    expect(await querySettledCostSeries()).toBeNull();
+  });
+});

@@ -326,6 +326,323 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
   });
 }
 
+// --- Settled daily spend, the forecast baseline (CTO-207, F3) -----------------------------------
+//
+// Cost is NOT complete when a day ends, and a run-rate that pretends otherwise is wrong in the one
+// direction that flatters the customer.
+//
+// Two sources arrive late:
+//   1. Connector-sourced `compute` (CTO-143) and `egress` (CTO-144) land as synthetic daily rows
+//      from a cloud-billing pull, and the cloud bill itself lags by hours. On the demo tenant those
+//      two layers are roughly 46 percent of spend, so a day read at midnight can carry half of what
+//      it will eventually carry, and read again at noon it has roughly doubled.
+//   2. Reconciliation (`reconciliation_runs`) replaces estimated cost with invoiced cost afterwards.
+//
+// Project the month from a window whose last day is half-reported and you systematically
+// UNDERESTIMATE month-end. So the baseline has to exclude days that are not finished yet, and it
+// has to say which days it used: a forecast that cannot state its input window is not auditable.
+//
+// THE SETTLED-DAY RULE (the one this file implements)
+//
+//   A day D is settled when BOTH hold:
+//     (a) D is strictly before today as ClickHouse reports today. Today is still accruing by
+//         definition, whatever its sources have done.
+//     (b) every connector-backed layer this tenant actually uses has landed at least one row for D.
+//         "Actually uses" is measured over the same window: a tenant with no cloud connector waits
+//         on nothing, a tenant with compute only waits on compute.
+//
+// Why landed rows and not `tenant_compute_config.last_run_at` / `queryReconcilerLastRun`: those
+// live in Postgres behind the gateway, one HTTP hop and one more clock away, and they answer
+// "did a run finish?" rather than "did the day D we are about to divide by actually arrive?" A run
+// can finish having written nothing for D. The landed row IS the completion signal for that day,
+// it is per-day rather than per-connector, and it comes back from the same read as the money, so
+// there is no window where the two disagree. `last_run_at` remains the right signal for the
+// connector health card, which is a different question.
+//
+// The fallback the ticket allows (a fixed grace period) is what condition (a) degenerates to when a
+// tenant has no connector layers at all: withhold the day in progress, trust every completed day.
+// A fixed N-hour grace on top of that would be a guess about someone else's billing pipeline; the
+// evidence is right there in the table, so we read it instead of guessing.
+//
+// Known limit, stated rather than papered over: a genuinely idle day with no connector row is
+// indistinguishable from a day the connector has not reached yet, so we withhold it. That errs
+// toward a smaller, truer baseline, which is the honest direction.
+//
+// Window: the calendar-aligned `toDate(now()) - INTERVAL 29 DAY` boundary the cost surfaces share,
+// widened to reach the start of the calendar month so month-to-date is always fully covered (on the
+// 31st a plain 30-day window would clip the 1st). A rolling `now() - INTERVAL 30 DAY` drifts by the
+// second and clips a partial day, which is why nothing here uses one.
+//
+// Clocks: every date in the result — window start, today, the day list, the day count — comes from
+// ClickHouse. None of it is generated from the Node process clock. Those are two clocks in two
+// timezones, and when they straddle midnight the JS-built list is shifted a day against the SQL
+// window, so the oldest day silently has no slot to land in while still counting toward the totals
+// (the bug `queryCostSeries` still has, CTO-203). `queryAccountDetail` does it correctly; so does
+// this.
+
+/** Trailing history for the weekday profile, on the shared calendar-aligned boundary. */
+const SETTLED_TRAILING_DAYS = 30;
+
+/** The layers that arrive from a lagging cloud-billing pull rather than from live SDK spans. */
+const CONNECTOR_LAYERS = ["compute", "egress"] as const;
+type ConnectorLayer = (typeof CONNECTOR_LAYERS)[number];
+
+/**
+ * Optional slice of spend to forecast, matching the budget scopes in CTO-205
+ * (`tenant` / `feature` / `model` / `layer`). Settlement itself is always judged on the tenant's
+ * WHOLE data, never on the slice: whether the cloud bill for Tuesday has landed is a fact about the
+ * pipeline, not about the feature you happen to be looking at, and a slice that emitted nothing on
+ * Tuesday must not read as "Tuesday is unsettled".
+ */
+export type SpendScope =
+  | { kind: "tenant" }
+  | { kind: "feature"; value: string }
+  | { kind: "model"; value: string }
+  | { kind: "layer"; value: Layer };
+
+export interface SettledDayPoint {
+  /** ISO yyyy-mm-dd, from ClickHouse. */
+  date: string;
+  /** 0 = Sunday … 6 = Saturday, UTC. Derived from `date` by arithmetic, not from the Node clock. */
+  weekday: number;
+  byLayer: SpendByLayer;
+  totalMicroUsd: number;
+  /** Inside the calendar month being forecast (i.e. month-to-date), as opposed to trailing history. */
+  inPeriod: boolean;
+  /** Safe to divide by. See the settled-day rule above. */
+  settled: boolean;
+  /** True for the day in progress: it is today per ClickHouse and still accruing. */
+  inProgress: boolean;
+  /** Connector layers with no row for this day yet. Empty when settled or when in progress. */
+  awaitingLayers: ConnectorLayer[];
+}
+
+export interface SettledSpendTotals {
+  dayCount: number;
+  byLayer: SpendByLayer;
+  totalMicroUsd: number;
+}
+
+export interface SettledSpendSeries {
+  scope: SpendScope;
+  /** Oldest day in the window, per ClickHouse. */
+  windowStart: string;
+  /** Today per ClickHouse: the day in progress, and the newest day in `days`. */
+  windowEnd: string;
+  /** First day of the calendar month being forecast. */
+  periodStart: string;
+  /** Every calendar day in the window, oldest → newest, settled and unsettled alike. */
+  days: SettledDayPoint[];
+  /**
+   * Exactly the days a forecast may compute a run-rate from, oldest → newest, so it can print its
+   * own input window. Empty means "no settled history": refuse to project rather than print a
+   * number (honest-under-uncertainty, and the minimum-history guard in the scope doc).
+   */
+  baselineDays: string[];
+  /** Newest settled day, or null when none is — never a fabricated date. */
+  settledThrough: string | null;
+  /** Which connector layers this tenant actually uses, i.e. what settlement waits on. */
+  connectorLayers: ConnectorLayer[];
+  /** `connector-landing` when the rule waited on a connector, `day-complete` when there was none. */
+  rule: "connector-landing" | "day-complete";
+  /** Window totals over settled days only. This is the baseline. */
+  windowSettled: SettledSpendTotals;
+  /** Window totals including unsettled days. Diagnostic: the gap is the late-data exposure. */
+  windowObserved: SettledSpendTotals;
+  /** Month-to-date over settled days only. */
+  periodSettled: SettledSpendTotals;
+  /** Month-to-date including unsettled days, i.e. what a naive run-rate would divide. */
+  periodObserved: SettledSpendTotals;
+  /**
+   * Newest day carrying reconciled (invoiced) cost, or null when the reconciler has never run for
+   * this window. Days after it are still estimates and can move again.
+   */
+  reconciledThrough: string | null;
+}
+
+function emptyTotals(): SettledSpendTotals {
+  return { dayCount: 0, byLayer: zeroLayers(), totalMicroUsd: 0 };
+}
+
+function addDay(into: SettledSpendTotals, point: SettledDayPoint): void {
+  into.dayCount += 1;
+  for (const l of LAYERS) into.byLayer[l] += point.byLayer[l];
+  into.totalMicroUsd += point.totalMicroUsd;
+}
+
+/** SQL predicate + bound value for a scope. The value is always a parameter, never interpolated. */
+function scopeFilter(scope: SpendScope): { clause: string; value: string } {
+  switch (scope.kind) {
+    case "feature":
+      return { clause: "AND FeatureTag = {scope:String}", value: scope.value };
+    // Response model when the provider returned one (it is the model that actually served the
+    // call), request model otherwise. Matches queryCurrentModel's resolution.
+    case "model":
+      return {
+        clause:
+          "AND if(GenAiResponseModel != '', GenAiResponseModel, GenAiRequestModel) = {scope:String}",
+        value: scope.value,
+      };
+    case "layer":
+      return { clause: `AND ${LAYER_CASE} = {scope:String}`, value: scope.value };
+    default:
+      return { clause: "", value: "" };
+  }
+}
+
+/**
+ * Daily spend for the current calendar month plus trailing history, split by cost layer, with every
+ * day marked settled or not and the settled subset named explicitly (CTO-207).
+ *
+ * This is the forecast's input, not the forecast: it deliberately projects nothing. CTO-208 builds
+ * the weekday-weighted projection on top of `baselineDays`, and CTO-209/210 put it on a page.
+ *
+ * Returns `null` (via tryLive) when ClickHouse is unreachable, which the caller must not read as
+ * "no spend".
+ */
+export async function querySettledCostSeries(
+  scope: SpendScope = { kind: "tenant" },
+): Promise<SettledSpendSeries | null> {
+  return tryLive(async (db, tenant) => {
+    // Bounds first, from ClickHouse's clock, and reused as a bound parameter by the reads below so
+    // all three see one window even if the call straddles midnight.
+    const bounds = await rowsP<{
+      windowStart: string;
+      periodStart: string;
+      today: string;
+      windowDays: number;
+    }>(
+      db,
+      // The CTE aliases are deliberately not the output names: reusing `windowStart` for both
+      // makes the SELECT resolve the alias to itself and the query fails to parse.
+      `WITH toDate(now()) AS td,
+            toStartOfMonth(td) AS ps,
+            least(td - INTERVAL ${SETTLED_TRAILING_DAYS - 1} DAY, ps) AS ws
+       SELECT toString(ws) AS windowStart,
+              toString(ps) AS periodStart,
+              toString(td) AS today,
+              toUInt32(dateDiff('day', ws, td) + 1) AS windowDays`,
+      { tenant },
+    );
+    const b = bounds[0];
+    if (!b) return null;
+    const windowDays = Number(b.windowDays) || 0;
+
+    const { clause, value } = scopeFilter(scope);
+    const params = { tenant, windowStart: b.windowStart, scope: value };
+    const inWindow = `TenantId = {tenant:String} AND Timestamp >= toDate({windowStart:String})`;
+
+    // The money, sliced by the caller's scope.
+    const costRows = await rowsP<{ day: string; layer: Layer; cost: string }>(
+      db,
+      `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM otel_spans
+       WHERE ${inWindow} ${clause}
+       GROUP BY day, layer`,
+      params,
+    );
+
+    // The settlement evidence, deliberately UNSCOPED (see SpendScope). One row per day: did each
+    // connector layer land, and did anything reconcile. LAYER_CASE is reused rather than re-derived
+    // so there is only ever one operation→layer mapping in this file.
+    const landingRows = await rowsP<{
+      day: string;
+      compute: string;
+      egress: string;
+      reconciled: string;
+    }>(
+      db,
+      `SELECT toString(toDate(Timestamp)) AS day,
+              countIf(${LAYER_CASE} = 'compute') AS compute,
+              countIf(${LAYER_CASE} = 'egress') AS egress,
+              countIf(CostSource = 'reconciled') AS reconciled
+       FROM otel_spans
+       WHERE ${inWindow}
+       GROUP BY day`,
+      params,
+    );
+
+    const landed = new Map<string, Set<ConnectorLayer>>();
+    const usesConnector = new Set<ConnectorLayer>();
+    let reconciledThrough: string | null = null;
+    for (const r of landingRows) {
+      const present = new Set<ConnectorLayer>();
+      for (const l of CONNECTOR_LAYERS) {
+        if ((parseInt(r[l], 10) || 0) > 0) {
+          present.add(l);
+          usesConnector.add(l);
+        }
+      }
+      landed.set(r.day, present);
+      if ((parseInt(r.reconciled, 10) || 0) > 0 && (!reconciledThrough || r.day > reconciledThrough)) {
+        reconciledThrough = r.day;
+      }
+    }
+    const connectorLayers = CONNECTOR_LAYERS.filter((l) => usesConnector.has(l));
+
+    // Every calendar day gets a slot, built from the window ClickHouse reported. A day with no rows
+    // is a real zero for the scope, not a hole.
+    const byDay = new Map<string, SettledDayPoint>();
+    for (const iso of isoDaysFrom(b.windowStart, windowDays)) {
+      const inProgress = iso === b.today;
+      const present = landed.get(iso) ?? new Set<ConnectorLayer>();
+      const awaiting = inProgress ? [] : connectorLayers.filter((l) => !present.has(l));
+      byDay.set(iso, {
+        date: iso,
+        weekday: new Date(`${iso}T00:00:00Z`).getUTCDay(),
+        byLayer: zeroLayers(),
+        totalMicroUsd: 0,
+        inPeriod: iso >= b.periodStart,
+        settled: !inProgress && awaiting.length === 0,
+        inProgress,
+        awaitingLayers: awaiting,
+      });
+    }
+    for (const r of costRows) {
+      const point = byDay.get(r.day);
+      if (point && (LAYERS as readonly string[]).includes(r.layer)) {
+        const m = micro(r.cost);
+        point.byLayer[r.layer] += m;
+        point.totalMicroUsd += m;
+      }
+    }
+
+    const days = [...byDay.values()];
+    const windowSettled = emptyTotals();
+    const windowObserved = emptyTotals();
+    const periodSettled = emptyTotals();
+    const periodObserved = emptyTotals();
+    const baselineDays: string[] = [];
+    for (const point of days) {
+      addDay(windowObserved, point);
+      if (point.inPeriod) addDay(periodObserved, point);
+      if (!point.settled) continue;
+      baselineDays.push(point.date);
+      addDay(windowSettled, point);
+      if (point.inPeriod) addDay(periodSettled, point);
+    }
+
+    return {
+      scope,
+      windowStart: b.windowStart,
+      windowEnd: b.today,
+      periodStart: b.periodStart,
+      days,
+      baselineDays,
+      // null, not a stand-in date: "nothing has settled yet" is a thing we know, and a fake
+      // boundary would read as a settled day that does not exist.
+      settledThrough: baselineDays.length > 0 ? baselineDays[baselineDays.length - 1] : null,
+      connectorLayers,
+      rule: connectorLayers.length > 0 ? "connector-landing" : "day-complete",
+      windowSettled,
+      windowObserved,
+      periodSettled,
+      periodObserved,
+      reconciledThrough,
+    };
+  });
+}
+
 // --- Per-customer cost (CTO-187, D1) ------------------------------------------------------------
 //
 // These read `daily_account_rollup` (CTO-183), not `otel_spans`. AccountIdHash sits nowhere near the
