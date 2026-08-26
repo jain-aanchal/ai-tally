@@ -11,7 +11,9 @@ from tally.cdp_connectors import (
     BusinessEvent,
     ConnectorRegistry,
     EventDeduplicator,
+    GenericRevenueConnector,
     HubSpotConnector,
+    RevenuePayloadError,
     RudderstackConnector,
     SegmentConnector,
     StripeConnector,
@@ -316,9 +318,9 @@ def test_deduplicator_is_tenant_scoped():
 # --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
-def test_default_registry_has_four_sources():
+def test_default_registry_has_the_webhook_sources_plus_the_revenue_api():
     reg = default_registry()
-    assert reg.sources == ("hubspot", "rudderstack", "segment", "stripe")
+    assert reg.sources == ("hubspot", "revenue-api", "rudderstack", "segment", "stripe")
     assert reg.get("segment") is not None
     assert reg.get("unknown") is None
 
@@ -436,3 +438,110 @@ def test_ingest_stripe_revenue_end_to_end():
     assert r.total_value_micro_usd == 10_000 * 10_000  # $100
     # Stripe re-sends the same event id on retry -> deduped
     assert ing.ingest("stripe", "t1", payload).accepted_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Generic revenue API (CTO-199)
+# --------------------------------------------------------------------------- #
+def _revenue(**overrides):
+    payload = {
+        "event_id": "inv_2026_08_0001",
+        "account_id": "acct_northwind",
+        "amount": "1499.00",
+        "currency": "usd",
+        "occurred_at": "2026-08-25T12:00:00Z",
+        "event_name": "invoice_paid",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_generic_revenue_parses_the_documented_shape():
+    ev = GenericRevenueConnector().parse_strict("t1", _revenue())
+    assert ev.business_event_id == "inv_2026_08_0001"
+    assert ev.account_id == "acct_northwind"
+    assert ev.value_micro_usd == 1_499_000_000
+    assert ev.currency == "USD"  # normalized, never converted
+    assert ev.value_type == "monetary"
+    assert ev.source == "revenue-api"
+    assert ev.occurred_at == datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    assert ev.user_id is None
+
+
+@pytest.mark.parametrize(
+    "overrides, fragment",
+    [
+        ({"event_id": ""}, "event_id"),
+        ({"account_id": None}, "account_id"),
+        ({"event_name": "  "}, "event_name"),
+        ({"occurred_at": "yesterday"}, "occurred_at"),
+        ({"amount": "not-a-number"}, "amount"),
+        ({"amount": None}, "amount"),
+        ({"amount": "-5"}, "non-negative"),
+        ({"currency": "dollars"}, "currency"),
+        ({"value_type": "revenue"}, "value_type"),
+        ({"user_id": 7}, "user_id"),
+        ({"properties": "a=b"}, "properties"),
+        ({"value_type": "count", "amount": "10"}, "count"),
+    ],
+)
+def test_generic_revenue_rejects_bad_payloads_by_field(overrides, fragment):
+    with pytest.raises(RevenuePayloadError) as exc:
+        GenericRevenueConnector().parse_strict("t1", _revenue(**overrides))
+    assert fragment in str(exc.value)
+
+
+def test_generic_revenue_parse_never_raises_for_the_shared_path():
+    # The CDPConnector contract: a bad payload is an empty result, not an exception.
+    assert GenericRevenueConnector().parse("t1", _revenue(amount="junk")).is_empty
+    assert GenericRevenueConnector().parse("t1", ["not", "a", "mapping"]).is_empty
+
+
+def test_generic_revenue_count_event_carries_no_money():
+    ev = GenericRevenueConnector().parse_strict(
+        "t1", _revenue(value_type="count", amount=None, event_name="seat_activated")
+    )
+    assert ev.value_type == "count"
+    assert ev.value_micro_usd == 0
+
+
+def test_generic_revenue_refund_is_a_positive_amount_with_a_refund_type():
+    ev = GenericRevenueConnector().parse_strict(
+        "t1", _revenue(value_type="refund", amount="99.50", event_name="refund")
+    )
+    assert ev.value_type == "refund"
+    assert ev.value_micro_usd == 99_500_000
+
+
+def test_generic_revenue_is_idempotent_on_the_caller_supplied_event_id():
+    ing = WebhookIngestor()
+    first = ing.ingest_revenue_api("t1", _revenue())
+    assert first.accepted_count == 1
+    # Same event_id, retried (and with a different amount; the id is what decides).
+    retry = ing.ingest_revenue_api("t1", _revenue(amount="2000.00"))
+    assert retry.accepted_count == 0
+    assert retry.duplicates == 1
+    # A different tenant with the same id is untouched.
+    assert ing.ingest_revenue_api("t2", _revenue()).accepted_count == 1
+
+
+def test_ingest_revenue_api_raises_on_a_payload_the_caller_must_fix():
+    ing = WebhookIngestor()
+    with pytest.raises(RevenuePayloadError):
+        ing.ingest_revenue_api("t1", _revenue(event_id=None))
+
+
+def test_forget_restores_a_retry_after_a_failed_write():
+    ing = WebhookIngestor()
+    assert ing.ingest_revenue_api("t1", _revenue()).accepted_count == 1
+    # Pretend the durable write failed: the caller retries and must not be told "duplicate".
+    assert ing.forget("t1", "inv_2026_08_0001") is True
+    assert ing.ingest_revenue_api("t1", _revenue()).accepted_count == 1
+    assert ing.forget("t1", "never-seen") is False
+
+
+def test_business_event_rejects_an_unknown_value_type():
+    with pytest.raises(ValueError):
+        BusinessEvent(
+            "id", "t1", "revenue-api", "e", datetime(2026, 5, 1, tzinfo=UTC), value_type="cash"
+        )
