@@ -26,7 +26,8 @@ import {
 import { formatUSD, type SpendByLayer } from "@/lib/types";
 import { useLivePoll } from "@/lib/useLivePoll";
 
-import { BudgetVsActualCard, type BudgetPayload } from "./BudgetVsActualCard";
+import { BudgetVsActualCard } from "./BudgetVsActualCard";
+import { BurndownCard, type CostBudgetPayload } from "./BurndownCard";
 
 export interface CostPayload {
   series: CostSeries;
@@ -47,10 +48,10 @@ export function CostLive({
   endpoint: string;
   initialData: CostPayload;
   enabledLayers: readonly Layer[];
-  // Not part of the polled payload (CTO-209): a budget changes about monthly and the settled
+  // Not part of the polled payload (CTO-209/210): a budget changes about monthly and the settled
   // window advances once a day, so re-reading both every 5 seconds would be pure waste. See the
   // comment at the top of app/api/cost/budget/route.ts.
-  budget: BudgetPayload;
+  budget: CostBudgetPayload;
 }) {
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
@@ -92,6 +93,11 @@ export function CostLive({
           than that total, and the two only reconcile once you have read the coverage line saying
           which days it counted. Putting them far apart is how the page starts looking broken. */}
       <BudgetVsActualCard payload={budget} />
+
+      {/* Immediately after the measured card (CTO-210). The order is the argument: what happened,
+          then where it lands. Putting the projection first would let a reader take a forecast as a
+          fact, and the two cards share a settled window that only makes sense read in that order. */}
+      <BurndownCard payload={budget.forecast} />
 
       {hiddenCostAlerts.map((a) => (
         <div
