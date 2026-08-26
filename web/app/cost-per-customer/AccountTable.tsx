@@ -15,11 +15,13 @@ import {
   ALLOCATION_RULE_DESCRIPTIONS,
   ALLOCATION_RULE_LABELS,
   type AccountCostRow,
+  type AccountMargin,
   type AllocatedAccountRow,
+  accountMargin,
   costPerUser,
-  shortenAccountHash,
 } from "@/lib/accounts";
 import type { AllocationRule } from "@/lib/allocation";
+import { AccountCell } from "./AccountIdentity";
 import { lookupAccountAction } from "./actions";
 
 /**
@@ -44,6 +46,8 @@ export function AccountTable({
   rows,
   labels,
   labelsUnavailable,
+  revenue,
+  revenueUnavailable,
   windowDays,
   allocationRule = null,
 }: {
@@ -55,6 +59,16 @@ export function AccountTable({
   labels: Record<string, string>;
   /** True when the gateway could not be reached, so an unlabelled row is not proof of no label. */
   labelsUnavailable: boolean;
+  /**
+   * Hash to net revenue in micro-USD, for accounts that have one (CTO-197, plan E4).
+   *
+   * A missing key and an explicit `null` mean the same thing and both render blank: we have not
+   * been told this account's revenue. A `0` is a measurement (a charge fully netted by a refund)
+   * and prints as $0.00. Nothing here may treat the two alike.
+   */
+  revenue: Record<string, number | null>;
+  /** True when the revenue read failed, so a blank is not proof that no revenue source is wired. */
+  revenueUnavailable: boolean;
   windowDays: number;
   /**
    * The rule that produced the allocated figures, or `null` when nothing was allocated.
@@ -111,6 +125,15 @@ export function AccountTable({
       });
     });
   };
+
+  // One place that pairs a row with its revenue, so the render path and the sort path can never
+  // disagree about what an account earns. `revenue[hash]` is `undefined` for an account the revenue
+  // query returned no row for, which means exactly what an explicit `null` means: unknown.
+  const margin = useMemo(
+    () => (r: AccountCostRow) =>
+      accountMargin(r, revenue[r.accountIdHash] ?? null, revenueUnavailable),
+    [revenue, revenueUnavailable],
+  );
 
   const columns = useMemo<Column<TableRow>[]>(
     () => [
@@ -199,6 +222,31 @@ export function AccountTable({
           ] satisfies Column<TableRow>[])
         : []),
       {
+        key: "revenue",
+        header: "Revenue",
+        align: "right",
+        render: (r) => {
+          const { revenueMicroUsd, reason } = margin(r);
+          // `0` is a real measurement and prints as $0.00; `null` is an absence and prints blank.
+          // Money's own null path would blur that, so the branch is explicit here.
+          return revenueMicroUsd === null ? (
+            <Blank reason={reason ?? "revenue unknown for this account"} />
+          ) : (
+            <Money micro={revenueMicroUsd} />
+          );
+        },
+        sortValue: (r) => margin(r).revenueMicroUsd,
+      },
+      {
+        key: "margin",
+        header: "Gross margin",
+        align: "right",
+        render: (r) => <MarginCell row={r} margin={margin(r)} />,
+        // Unknown revenue means unknown margin, and `null` sorts last in both directions, so an
+        // account we know nothing about never ranks as the most OR the least profitable customer.
+        sortValue: (r) => margin(r).marginMicroUsd,
+      },
+      {
         key: "costPerUser",
         // Named "Direct" once an Allocated column sits beside it, because this ratio divides
         // direct cost only. Left as costPerUser's own definition rather than switched to total:
@@ -220,7 +268,7 @@ export function AccountTable({
         sortValue: (r) => costPerUser(r).micro,
       },
     ],
-    [labels, labelsUnavailable, allocationRule],
+    [labels, labelsUnavailable, allocationRule, margin],
   );
 
   return (
@@ -283,71 +331,77 @@ export function AccountTable({
         columns={columns}
         rows={visibleRows}
         rowKey={(r) => r.accountIdHash}
-        // Sorted by the most complete figure available: total where shared cost was allocated,
-        // direct where it could not be. Ranking by direct cost beside a Total column would put the
-        // second-most-expensive customer at the top of the list.
-        initialSort={{ key: allocationRule ? "total" : "cost", direction: "desc" }}
+        // Ranked by profitability, most profitable first, which is the question this tab exists to
+        // answer (CTO-197). Sorting ascending puts the customers losing money at the top; accounts
+        // with unknown revenue stay at the bottom either way rather than posing as the answer. The
+        // cost columns are still ranked on demand, and Total is the one to rank on where shared
+        // cost was allocated, because direct cost alone no longer orders the customers by what they
+        // cost.
+        initialSort={{ key: "margin", direction: "desc" }}
         // A row the search found is filtered to on its own, so the highlight is belt and braces for
         // the case where a tenant later labels two hashes of the same account and both rows show.
         rowClassName={(r) => (matchedSet.has(r.accountIdHash) ? "bg-accent/5" : "")}
-        // Deliberately plain. The onboarding empty state that explains what this page is for and
-        // how to switch it on is CTO-191, stacked on this ticket; a half-built version here would
-        // be the thing that ticket then has to unpick.
+        // Deliberately plain, and unreachable from the page as it stands: with no rows at all the
+        // page renders the CTO-191 onboarding explainer in place of this table, and a search that
+        // matches nothing does not filter. This stays as the honest fallback for any future caller
+        // that renders the table without that branch.
         empty={`No spans carried an account id in the last ${windowDays} days.`}
       />
+
+      {/* The margin column's own caveat, kept next to the column rather than only at the top of the
+          page, because the header scrolls away and this is the number that gets screenshotted. It
+          used to point at CTO-189's excluded-cost banner for the size of the gap; CTO-193 removed
+          that banner, because compute and egress are no longer excluded, they are allocated. So the
+          statement this line has to make changed with it: not "half the cost base is missing" but
+          "the infrastructure part of the cost base is an estimate, and the margin does not subtract
+          it at all". What it still does not delegate is the ▲ mark: that flags a per-row reason,
+          which no tenant-wide sentence can carry. */}
+      <p className="max-w-prose text-xs text-warn">
+        Gross margin is revenue minus <em>direct</em> cost only.{" "}
+        {allocationRule
+          ? "Compute and egress carry no account on the span, so each account's share of them is estimated by the allocation rule named above rather than measured, and that estimate is not subtracted here: it sits in the Allocated and Total columns beside this one. Every margin is therefore overstated by whatever share of that customer's cost those layers hold."
+          : "Compute and egress carry no account on the span, and nothing could be allocated for this window, so they sit outside every row here and each margin is overstated by whatever share of that customer's cost falls in those layers."}{" "}
+        Rows marked ▲ carry a further reason not to read them at face value; hover the mark to see
+        it. Ranking by this column tells you the order to look in, not what a customer actually
+        earns you.
+      </p>
     </div>
   );
 }
 
 /**
- * The Account cell: label where the tenant set one, shortened hash otherwise, full hash on hover
- * and on copy.
+ * The Gross margin cell: revenue minus direct cost, with the reasons it cannot be taken at face
+ * value attached to the number itself.
  *
- * The full hash is what every other surface takes (the label API, a support conversation), so it
- * has to be retrievable from the row. The short form is for width only.
+ * The caveat marker is not decoration. Every margin in v1 is overstated because compute and egress
+ * are excluded from the cost side, and on a lightly-instrumented account it is overstated by so
+ * much that the figure is really just revenue. The page header says this too, but the header
+ * scrolls away and this is the cell someone screenshots into a pricing discussion.
  */
-function AccountCell({
-  accountIdHash,
-  label,
-  labelsUnavailable,
-}: {
-  accountIdHash: string;
-  label: string | undefined;
-  labelsUnavailable: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(accountIdHash);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be refused (insecure origin, denied permission). The hash is already
-      // selectable in the title attribute, so there is nothing to recover and nothing to shout at
-      // the user about.
-      setCopied(false);
-    }
-  };
-
+function MarginCell({ row, margin }: { row: AccountCostRow; margin: AccountMargin }) {
+  if (margin.marginMicroUsd === null) {
+    return <Blank reason={margin.reason ?? "margin unknown for this account"} />;
+  }
+  const negative = margin.marginMicroUsd < 0;
   return (
-    <span className="inline-flex items-center gap-2">
-      <span title={accountIdHash} className={label ? "font-medium" : "font-mono text-xs"}>
-        {label ?? shortenAccountHash(accountIdHash)}
-      </span>
-      {!label && !labelsUnavailable ? (
-        <span className="text-[11px] text-muted" title="no label set for this account">
-          unlabelled
+    <span className="inline-flex items-center justify-end gap-1">
+      <Money
+        micro={margin.marginMicroUsd}
+        className={negative ? "text-warn" : undefined}
+      />
+      {margin.caveats.length > 0 ? (
+        <span
+          title={margin.caveats.join("\n\n")}
+          className="cursor-help text-[11px] text-warn"
+          data-testid={`margin-caveat-${row.accountIdHash}`}
+        >
+          <span aria-hidden>▲</span>
+          <span className="sr-only">
+            Read with care: {margin.caveats.join(" ")}
+          </span>
         </span>
       ) : null}
-      <button
-        type="button"
-        onClick={copy}
-        title={`Copy the full account hash: ${accountIdHash}`}
-        className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-white"
-      >
-        {copied ? "Copied" : "Copy hash"}
-      </button>
     </span>
   );
 }
+

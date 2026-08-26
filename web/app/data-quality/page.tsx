@@ -7,12 +7,19 @@ import {
 } from "@/components/DataStateBanner";
 import { apiGet } from "@/lib/api";
 import { asOfLabel, deriveDataState, relativeAge } from "@/lib/dataState";
-import { classify, type DataQualityReport, type Health } from "@/lib/dq";
+import {
+  classify,
+  classifyAccountStitching,
+  withheldByConflicts,
+  type AccountStitching,
+  type DataQualityReport,
+  type Health,
+} from "@/lib/dq";
 import { formatUSD } from "@/lib/types";
 
 export default async function DataQualityPage() {
   const dq = await apiGet<DataQualityReport>("/api/data-quality");
-  const { overall, attribution, contextDrops, calibration, sampling } = dq;
+  const { overall, attribution, contextDrops, calibration, sampling, accountStitching } = dq;
 
   // Latest reconciled calibration day is the freshness boundary; absence ⇒ pre-data.
   const reconciledThrough = calibration.length > 0 ? calibration[calibration.length - 1].date : "1970-01-01";
@@ -119,6 +126,8 @@ export default async function DataQualityPage() {
           </tbody>
         </table>
       </Card>
+
+      <AccountStitchingCard stitching={accountStitching} />
 
       <Card title="Estimate vs. reconciled — last 7 reconciled days">
         <table className="w-full text-sm">
@@ -252,6 +261,118 @@ function KpiCard({
       <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
       <div className={`mt-2 text-3xl font-semibold tabular-nums ${textFor(health)}`}>{value}</div>
       <div className="mt-2 text-xs text-muted">{hint}</div>
+    </div>
+  );
+}
+
+/**
+ * Account stitching, and the users we refuse to attribute (CTO-184).
+ *
+ * Two jobs. First, separate directly-tagged accounts from stitched ones, because they are not
+ * equally trustworthy: a direct account was stamped on the span at emit time, a stitched one was
+ * inferred from a CRM or CDP assertion and is only as good as that connector.
+ *
+ * Second, and the reason this card exists at all: one user belongs to one account. When a user
+ * turns up against two, the pipeline attributes nothing for them rather than splitting the cost,
+ * duplicating it, or picking first-seen, because duplication inflates the tenant total and breaks
+ * reconciliation against /cost. That refusal is correct but it must not be quiet. The fix is in
+ * the tenant's CRM, so the table names the ambiguous users, both candidate accounts, and the
+ * spend being held back, which is the number that tells them whether it is worth fixing.
+ */
+function AccountStitchingCard({ stitching }: { stitching?: AccountStitching }) {
+  // No account dimension instrumented, or an older payload without the field: say so plainly.
+  // Not a warning and not a fabricated zero. Nothing is wrong, there is just nothing there.
+  if (!stitching || (stitching.directAccounts === 0 && stitching.stitchedAccounts === 0)) {
+    return (
+      <Card title="Account stitching">
+        <p className="text-sm text-muted">
+          No account dimension yet. Tag spans with <code className="font-mono">account_id</code>,
+          or connect a CRM or CDP that asserts one, and coverage appears here.
+        </p>
+      </Card>
+    );
+  }
+
+  const { directAccounts, stitchedAccounts, stitchedUsers, conflicts } = stitching;
+  const health = classifyAccountStitching(stitching);
+  const withheld = withheldByConflicts(conflicts);
+
+  return (
+    <Card title="Account stitching">
+      <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-3">
+        <Stat
+          label="Tagged directly"
+          value={directAccounts.toLocaleString()}
+          hint="account_id on the span itself, as certain as the span"
+        />
+        <Stat
+          label="Stitched from identity"
+          value={stitchedAccounts.toLocaleString()}
+          hint={`inferred from CRM/CDP account_id edges across ${stitchedUsers.toLocaleString()} users`}
+        />
+        <Stat
+          label="Users withheld"
+          value={<HealthText h={health}>{conflicts.length.toLocaleString()}</HealthText>}
+          hint="observed against more than one account, so nothing is attributed for them"
+        />
+      </div>
+
+      {conflicts.length > 0 && (
+        <>
+          <p className="mt-5 text-sm text-bad">
+            {conflicts.length.toLocaleString()}{" "}
+            {conflicts.length === 1 ? "user belongs" : "users belong"} to more than one account, so{" "}
+            {formatUSD(withheld)} of their spend is attributed to no account at all. One user
+            belongs to one account: we will not split or duplicate this, because duplicating would
+            inflate your tenant total and stop per-account spend reconciling with Cost. Resolve the
+            duplicate membership in the source system and it attributes on the next pass.
+          </p>
+          <table className="mt-3 w-full text-sm">
+            <thead className="text-xs uppercase text-muted">
+              <tr>
+                <th className="py-1 text-left font-medium">User</th>
+                <th className="py-1 text-left font-medium">Accounts observed</th>
+                <th className="py-1 text-right font-medium">Withheld (30d)</th>
+                <th className="py-1 text-right font-medium">Spans (30d)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {conflicts.map((c) => (
+                <tr key={c.userIdHash} className="border-t border-edge">
+                  <td className="py-2 font-mono text-xs text-gray-300" title={c.userIdHash}>
+                    {c.userIdHash.slice(0, 12)}…
+                  </td>
+                  <td className="py-2 font-mono text-xs text-gray-300" title={c.accounts.join(", ")}>
+                    {c.accounts.map((a) => a.slice(0, 8)).join(" · ")}
+                  </td>
+                  <td className="py-2 text-right tabular-nums">
+                    <HealthText h="bad">{formatUSD(c.withheldMicroUsd)}</HealthText>
+                  </td>
+                  <td className="py-2 text-right tabular-nums">{c.spans30d.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint: string;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="mt-1 text-xs text-muted">{hint}</div>
     </div>
   );
 }

@@ -20,6 +20,14 @@
 //    CTO-189's excluded-cost banner is gone: there is no longer an excluded half to warn about,
 //    and a stale banner beside allocated columns would be worse than no banner at all.
 //
+// 4. EMPTY IS EXPLAINED, NOT SHRUGGED AT (CTO-191). Because nothing emits `account_id` yet, the
+//    common case on release is a tenant with no accounts at all, seeing this tab for the first
+//    time. `accountsView` sorts a successful query into three readings that need different copy:
+//    no accounts (explain the page, then how to switch it on), a partial ranking (show it, and
+//    offer the snippet that finishes it), and a normal one. An unreachable store is deliberately
+//    not one of them, because answering our own outage with an onboarding pitch would blame the
+//    reader for it.
+//
 // Reads the query directly rather than through /api, matching how the page-level gateway reads on
 // /connectors work: there is no client-side refetch here and no second consumer of the payload, so
 // a route handler would only add a hop.
@@ -29,6 +37,7 @@ import { Blank, Money } from "@/components/HonestValue";
 import {
   ALLOCATION_RULE_DESCRIPTIONS,
   ALLOCATION_RULE_LABELS,
+  accountsView,
   allocateAccountCosts,
   allocatedRowsTotal,
   attributedSpend,
@@ -39,19 +48,23 @@ import {
   type ExcludedInfraCost,
 } from "@/lib/accounts";
 import { queryAccountLabels } from "@/lib/accountLabels";
+import { type AccountRevenueReport } from "@/lib/accountRevenue";
 import { queryAllocationRule, type AllocationRuleSetting } from "@/lib/allocationConfig";
-import { queryAccountCosts, queryExcludedInfraCost } from "@/lib/clickhouse";
+import {
+  queryAccountCosts,
+  queryAccountRevenue,
+  queryExcludedInfraCost,
+} from "@/lib/clickhouse";
 import { AccountTable } from "./AccountTable";
+import { HowToTagDetails, OnboardingEmptyState } from "./Onboarding";
 
 export const dynamic = "force-dynamic";
 
-/** Above this share, the unattributed bucket is the story rather than a footnote. */
-const MAJORITY_UNATTRIBUTED = 0.5;
-
 export default async function CostPerCustomerPage() {
-  const [costs, labels, excluded, allocationSetting] = await Promise.all([
+  const [costs, labels, revenue, excluded, allocationSetting] = await Promise.all([
     queryAccountCosts(),
     queryAccountLabels(),
+    queryAccountRevenue(),
     queryExcludedInfraCost(),
     queryAllocationRule(),
   ]);
@@ -78,6 +91,7 @@ export default async function CostPerCustomerPage() {
         <Report
           costs={costs}
           labels={labels}
+          revenue={revenue}
           excluded={excluded}
           allocationSetting={allocationSetting}
         />
@@ -89,11 +103,14 @@ export default async function CostPerCustomerPage() {
 function Report({
   costs,
   labels,
+  revenue,
   excluded,
   allocationSetting,
 }: {
   costs: AccountCosts;
   labels: Map<string, string> | null;
+  /** `null` when the revenue read failed: a different statement from "no revenue is wired". */
+  revenue: AccountRevenueReport | null;
   excluded: ExcludedInfraCost | null;
   allocationSetting: AllocationRuleSetting;
 }) {
@@ -102,6 +119,13 @@ function Report({
   // `null` when the compute and egress total could not be read. Nothing is allocated in that case
   // and the page says so; it does not print direct cost as though it were total cost.
   const allocated = allocateAccountCosts(costs, excluded, allocationSetting.rule);
+  const view = accountsView(costs);
+  // Hash to net revenue, straight from the report. Accounts the report has no row for are simply
+  // absent, which the table reads as unknown; an account present with `revenueMicroUsd: null` says
+  // the same thing, and an account with `0` says something different and keeps its zero.
+  const revenueByAccount = Object.fromEntries(
+    (revenue?.accounts ?? []).map((a) => [a.accountIdHash, a.revenueMicroUsd]),
+  );
 
   return (
     <div className="space-y-6">
@@ -144,30 +168,50 @@ function Report({
         }.`}
       </p>
 
-      {share !== null && share >= MAJORITY_UNATTRIBUTED ? (
+      {view !== "attributed" && share !== null ? (
         <UnattributedNotice costs={costs} share={share} />
       ) : null}
 
       <AllocationNotice allocated={allocated} setting={allocationSetting} costs={costs} />
 
-      <Card title={allocated ? "Accounts by total cost" : "Accounts by direct cost"}>
-        <AccountTable
-          rows={allocated ? allocated.accounts : costs.accounts}
-          labels={labels ? Object.fromEntries(labels) : {}}
-          labelsUnavailable={labels === null}
-          windowDays={costs.windowDays}
-          allocationRule={allocated ? allocated.effectiveRule : null}
-        />
-        {allocated ? <UnattributedRow allocated={allocated} /> : null}
-        {labels === null ? (
-          <p className="mt-3 text-xs text-warn">
-            Account labels could not be read from the gateway, so every account shows as a hash. An
-            unlabelled row here is not proof that no label is set.
-          </p>
-        ) : null}
-      </Card>
+      {/* No accounts at all is not an empty table, it is a reader who has never seen this page.
+          The onboarding state replaces the table entirely (CTO-191); the honest headline figures
+          and the unattributed notice above it still render, so the explainer never stands in for
+          a number the page owes. */}
+      {view === "onboarding" ? (
+        <OnboardingEmptyState windowDays={costs.windowDays} />
+      ) : (
+        <Card title="Accounts by gross margin">
+          <AccountTable
+            rows={allocated ? allocated.accounts : costs.accounts}
+            labels={labels ? Object.fromEntries(labels) : {}}
+            labelsUnavailable={labels === null}
+            revenue={revenueByAccount}
+            revenueUnavailable={revenue === null}
+            windowDays={costs.windowDays}
+            allocationRule={allocated ? allocated.effectiveRule : null}
+          />
+          {allocated ? <UnattributedRow allocated={allocated} /> : null}
+          {labels === null ? (
+            <p className="mt-3 text-xs text-warn">
+              Account labels could not be read from the gateway, so every account shows as a hash.
+              An unlabelled row here is not proof that no label is set.
+            </p>
+          ) : null}
+          {/* Partial instrumentation: the ranking above is real but covers a minority of spend, so
+              the snippet that finishes the job sits one click away rather than repeating the whole
+              onboarding explainer under a table the reader can already see. */}
+          {view === "partial" ? (
+            <div className="mt-4">
+              <HowToTagDetails />
+            </div>
+          ) : null}
+        </Card>
+      )}
 
-      {allocated ? <Reconciliation allocated={allocated} /> : null}
+      {/* The reconciliation line sums the RENDERED rows, so it only prints where rows were
+          rendered. In the onboarding state there is no table to reconcile. */}
+      {allocated && view !== "onboarding" ? <Reconciliation allocated={allocated} /> : null}
     </div>
   );
 }
@@ -177,8 +221,11 @@ function Report({
  *
  * Written to read as a deliberate statement rather than a broken page, because on a tenant that has
  * not instrumented `account_id` this is the normal state and it will be the first thing anyone
- * sees. It names the number, says what the table below it does and does not cover, and stops. The
- * "here is how to switch it on" onboarding state is CTO-191.
+ * sees. It names the number and says what the table below it does and does not cover.
+ *
+ * It stops there on purpose. What follows it differs by state (CTO-191): with no accounts at all
+ * the whole onboarding explainer takes over from the table, and with a partial ranking the snippet
+ * sits in a disclosure under it. Putting the instructions in here as well would show them twice.
  */
 function UnattributedNotice({ costs, share }: { costs: AccountCosts; share: number }) {
   const complete = costs.accounts.length === 0;
@@ -196,8 +243,8 @@ function UnattributedNotice({ costs, share }: { costs: AccountCosts; share: numb
       </div>
       <p className="mt-2 max-w-prose text-sm text-muted">
         {complete
-          ? `Nothing in the last ${costs.windowDays} days is tagged with an account, so there is no per-customer breakdown to rank yet. This is what the page looks like before an account id is emitted, not an error.`
-          : `The accounts below cover the remaining spend only. Ranking them as though they were the whole picture would misstate what each customer costs, so read them as a partial view until more spans carry an account id.`}
+          ? `Nothing in the last ${costs.windowDays} days is tagged with an account, so there is no per-customer breakdown to rank yet. This is what the page looks like before an account id is emitted, not an error. What the page does once one is, and how to emit it, is below.`
+          : `The accounts below cover the remaining spend only. Ranking them as though they were the whole picture would misstate what each customer costs, so read them as a partial view until more spans carry an account id. The snippet under the table tags the rest.`}
       </p>
     </div>
   );

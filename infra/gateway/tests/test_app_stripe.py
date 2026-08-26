@@ -15,6 +15,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from tally.account_identity import AccountLinker, hash_account_id
+from tally.hmac_keys import HmacKeyRegistry
+
 from gateway.app import app
 from gateway.stripe_ingest import make_stripe_signature_header
 from gateway.tenant_stripe import StripeConfig
@@ -70,6 +73,8 @@ def _client(secret: str | None = SECRET) -> Iterator[tuple[TestClient, FakeCHSto
         app.state.tenant_stripe = FakeStripeStore(secret=secret)
         # Reset the in-process dedup set between tests.
         app.state.stripe_event_seen = set()
+        # Reset the in-process user→account map between tests (CTO-195).
+        app.state.account_linker = AccountLinker()
         yield client, ch
 
 
@@ -168,6 +173,110 @@ def test_subscription_deleted_inserts_churn_with_zero_value() -> None:
         assert ev.value_amount_micro == 0
         # No email on subscription objects, so the join key is empty — honest, not fabricated.
         assert ev.user_id_hash == ""
+
+
+# --- account identity (CTO-195) -----------------------------------------------------------------
+
+
+def _expected_account_hash(customer_id: str) -> str:
+    """The hash the route should produce for a Stripe customer id, computed independently."""
+    registry = HmacKeyRegistry()
+    stamped = hash_account_id(registry, TENANT, customer_id)
+    assert stamped is not None
+    return stamped.value
+
+
+def test_stripe_customer_lands_in_account_id_hash() -> None:
+    """The Stripe Customer is the account. It must reach AccountIdHash, not UserIdHash."""
+    with _client() as (client, ch):
+        r = _post(client, _fixture_bytes("checkout_session_completed.json"))
+        assert r.status_code == 200
+        assert r.json()["account_attributed"] is True
+        assert r.json()["account_inferred"] is False
+        ev = ch.events[0][1][0]
+        assert ev.account_id_hash == _expected_account_hash("cus_PaYiNgCusT")
+        assert len(ev.account_id_hash) == 64
+
+
+def test_account_hash_is_not_the_user_hash() -> None:
+    """The whole finding: customer id and end-user email are different identities."""
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("checkout_session_completed.json"))
+        ev = ch.events[0][1][0]
+        assert ev.user_id_hash, "email still populates UserIdHash exactly as before"
+        assert ev.account_id_hash != ev.user_id_hash
+
+
+def test_churn_event_with_no_email_still_gets_an_account() -> None:
+    """A subscription object carries no email but does carry the customer, so the account lands."""
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("subscription_deleted.json"))
+        ev = ch.events[0][1][0]
+        assert ev.user_id_hash == ""  # unchanged, honest unattributed user
+        assert ev.account_id_hash == _expected_account_hash("cus_PaYiNgCusT")
+
+
+def test_refund_carries_the_same_account_as_the_charge() -> None:
+    """Refunds must net off against the account they were charged to, so they need its hash."""
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("charge_refunded.json"))
+        ev = ch.events[0][1][0]
+        assert ev.value_amount_micro < 0
+        assert ev.account_id_hash == _expected_account_hash("cus_PaYiNgCusT")
+
+
+def test_second_account_for_one_user_raises_a_conflict_but_keeps_the_stated_account() -> None:
+    """One user, one account. A stated account is still honoured; the *inference* is withheld.
+
+    The fixtures share ``alice@example.com`` across the checkout and the refund, so pointing the
+    refund at a second customer is exactly the multi-account case the plan rules out.
+    """
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("checkout_session_completed.json"))
+
+        second = json.loads((FIXTURES / "charge_refunded.json").read_text())
+        second["data"]["object"]["customer"] = "cus_SomeoneElse"
+        _post(client, json.dumps(second).encode("utf-8"))
+
+        linker: AccountLinker = app.state.account_linker
+        user_hash = ch.events[0][1][0].user_id_hash
+        assert linker.is_ambiguous(TENANT, user_hash) is True
+        assert linker.account_for(TENANT, user_hash) == ""
+        assert len(linker.conflicts(TENANT)) == 1
+        # Stripe named the customer on each event, so each event keeps its own stated account.
+        assert ch.events[1][1][0].account_id_hash == _expected_account_hash("cus_SomeoneElse")
+
+
+def test_account_is_inferred_when_stripe_names_no_customer() -> None:
+    """No customer on the payload: fall back to the account this user is already known to be in."""
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("checkout_session_completed.json"))
+
+        second = json.loads((FIXTURES / "charge_refunded.json").read_text())
+        second["data"]["object"].pop("customer")
+        second["id"] = "evt_no_customer"
+        r = _post(client, json.dumps(second).encode("utf-8"))
+
+        assert r.json()["account_inferred"] is True
+        assert ch.events[1][1][0].account_id_hash == _expected_account_hash("cus_PaYiNgCusT")
+
+
+def test_nothing_is_inferred_for_an_ambiguous_user() -> None:
+    """After a conflict, an event with no stated customer attributes nothing rather than guessing."""
+    with _client() as (client, ch):
+        _post(client, _fixture_bytes("checkout_session_completed.json"))
+
+        conflicting = json.loads((FIXTURES / "charge_refunded.json").read_text())
+        conflicting["data"]["object"]["customer"] = "cus_SomeoneElse"
+        _post(client, json.dumps(conflicting).encode("utf-8"))
+
+        orphan = json.loads((FIXTURES / "charge_refunded.json").read_text())
+        orphan["data"]["object"].pop("customer")
+        orphan["id"] = "evt_orphan"
+        r = _post(client, json.dumps(orphan).encode("utf-8"))
+
+        assert r.json()["account_attributed"] is False
+        assert ch.events[2][1][0].account_id_hash == ""
 
 
 def test_missing_tenant_returns_422() -> None:

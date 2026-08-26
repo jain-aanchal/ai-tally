@@ -98,11 +98,38 @@ export interface AccountTrendPoint {
   directCostMicroUsd: MicroUSD;
 }
 
+/** Heaviest runs are capped for the same reason as features: a shortlist, not an audit trail. */
+export const MAX_ACCOUNT_TOP_RUNS = 8;
+
+/**
+ * One agent run, costed at THIS account's spans only (CTO-190, plan D4).
+ *
+ * A trace can carry spans for more than one account: a batch job that serves several customers in
+ * one run is a normal shape, and so is a run where only some steps were tagged. So the figure here
+ * is the account's share of the run, not the run's total, and it will be smaller than the number
+ * the same run shows on /agents whenever the run is shared. Reporting the run total on a
+ * per-account page would double-count the shared part across every account it touched.
+ */
+export interface AccountRunCost {
+  /** Trace id. Links to the existing /agents/runs/[runId] drill-down, which shows the WHOLE run. */
+  runId: string;
+  /** ServiceName, or `'untagged'` where the run carries none. Matches /agents. */
+  agent: string;
+  /** Cost of this account's spans in the run. See the note above: not the run's total. */
+  accountCostMicroUsd: MicroUSD;
+  /** Spans in the run attributed to this account, again not the run's total step count. */
+  steps: number;
+  /** Only success/failed are inferable from OTel StatusCode; `abandoned` is not tracked. */
+  outcome: "success" | "failed";
+}
+
 export interface AccountDetail extends AccountCostRow {
   /** Heaviest features for this account, capped at {@link MAX_ACCOUNT_TOP_FEATURES}. */
   topFeatures: AccountFeatureCost[];
   /** One point per calendar day across the window, oldest first, gaps filled with zero. */
   trend: AccountTrendPoint[];
+  /** Heaviest runs for this account, capped at {@link MAX_ACCOUNT_TOP_RUNS}. */
+  topRuns: AccountRunCost[];
 }
 
 // --- Presentation helpers for the /cost-per-customer tab (CTO-188, plan D2) ----------------------
@@ -205,6 +232,171 @@ export function formatShare(share: number): string {
 /** Direct spend that IS attributed to an account: the total less the unattributed bucket. */
 export function attributedSpend(costs: AccountCosts): MicroUSD {
   return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
+}
+
+// --- Revenue and gross margin (CTO-197, plan E4) -------------------------------------------------
+//
+// The column that turns this tab from a cost report into a profitability view, and the one place on
+// the page where a wrong number gets acted on: someone reads "this customer is unprofitable" and
+// goes and reprices them. So both of the ways this figure can mislead are handled here rather than
+// left to the JSX.
+//
+// 1. NULL IS NOT ZERO. `queryAccountRevenue` (lib/accountRevenue.ts) separates them deliberately.
+//    An account whose only events are `count` engagement signals returns null, meaning we were
+//    never told its revenue. A charge fully netted by a refund returns 0, which is a measurement.
+//    Collapsing the two would either invent revenue for a customer we know nothing about, or claim
+//    a paying customer generates none. So margin is null exactly when revenue is null, and 0
+//    revenue produces a real margin of minus the cost.
+//
+// 2. THE MARGIN IS OVERSTATED, ALWAYS, IN V1. Cost here is direct cost only: compute and egress are
+//    excluded (Decision 2 in docs/cost-per-customer-plan.md, roughly 47 percent of spend on the
+//    current tenant). Every margin on this page is therefore too high by whatever share of that
+//    account's real cost sits in those two layers. That caveat travels with the number, on the cell
+//    itself, because a ranking that silently ignores half the cost base is worse than no ranking.
+
+/**
+ * Why every margin on this page reads high. Attached to each printed margin, not only to the page
+ * header, because the header scrolls away and the number is what gets copied into a pricing
+ * conversation.
+ */
+export const MARGIN_EXCLUDES_INFRA =
+  "understated cost: compute and egress are excluded from every account, so this margin is too high by whatever share of this customer's cost sits in those layers";
+
+/**
+ * Ratio of direct cost to revenue below which the margin is arithmetically indistinguishable from
+ * revenue itself.
+ *
+ * One percent. Under it, subtracting cost moves the figure by less than rounding does, so "margin"
+ * is really just "revenue with a cost column that never arrived". That is the exact shape of the
+ * current tenant: real uploaded revenue against near-zero attributed spend, which would otherwise
+ * render as a flawless customer rather than as a customer we have barely measured.
+ */
+export const MIN_COST_TO_REVENUE_RATIO = 0.01;
+
+/**
+ * Spans of attributed cost an account needs before its margin is read as a cost measurement.
+ *
+ * Shares the floor `costPerUser` uses, for the same reason: below it the account's cost side is a
+ * handful of spans, and a margin computed against it describes our instrumentation coverage rather
+ * than the customer's economics.
+ */
+export const MIN_SPANS_FOR_MARGIN = MIN_SPANS_FOR_COST_PER_USER;
+
+/** Revenue, margin, and everything the reader needs in order not to over-read them. */
+export interface AccountMargin {
+  /** Net revenue in micro-USD, or `null` for "we have not been told". Never 0 to mean unknown. */
+  revenueMicroUsd: MicroUSD | null;
+  /** Revenue minus direct cost. `null` exactly when `revenueMicroUsd` is null. */
+  marginMicroUsd: MicroUSD | null;
+  /** Why revenue and margin are blank. `null` when they are not. */
+  reason: string | null;
+  /**
+   * Why a printed margin must not be read as this customer's true profitability. Never empty when a
+   * margin prints: {@link MARGIN_EXCLUDES_INFRA} applies to every account in v1.
+   */
+  caveats: string[];
+}
+
+/**
+ * Revenue and gross margin for one account row.
+ *
+ * `revenueMicroUsd` is what {@link revenueForAccount} returned: the account's net revenue, or null
+ * for both "no row" and "no money-typed event". Those are the same statement to a reader, so they
+ * get the same blank. `revenueUnavailable` is a third and different case: the revenue read itself
+ * failed, so a blank here is not evidence that nothing is wired up, and the reason says so.
+ */
+export function accountMargin(
+  row: AccountCostRow,
+  revenueMicroUsd: MicroUSD | null,
+  revenueUnavailable = false,
+): AccountMargin {
+  if (revenueMicroUsd === null) {
+    return {
+      revenueMicroUsd: null,
+      marginMicroUsd: null,
+      reason: revenueUnavailable
+        ? "revenue could not be read for this window, so no margin can be computed. This blank is not evidence that no revenue source is wired"
+        : "no revenue source wired for this account, so its revenue is unknown. An unknown is not zero, and a margin against an assumed zero would be invented",
+      caveats: [],
+    };
+  }
+
+  const caveats = [MARGIN_EXCLUDES_INFRA];
+  // Two separate ways the cost side can be too thin to carry a margin, deliberately not merged: one
+  // is about how little we measured, the other about how little what we measured amounts to.
+  if (row.spanCount < MIN_SPANS_FOR_MARGIN) {
+    caveats.push(
+      `thin cost data: ${row.spanCount.toLocaleString()} attributed spans in the window, below the ${MIN_SPANS_FOR_MARGIN}-span floor, so this is closer to raw revenue than to a measured margin`,
+    );
+  }
+  if (
+    revenueMicroUsd > 0 &&
+    row.directCostMicroUsd / revenueMicroUsd < MIN_COST_TO_REVENUE_RATIO
+  ) {
+    caveats.push(
+      "attributed cost is under 1% of revenue, so subtracting it barely moves the figure. Read this as revenue with the cost side largely missing, not as a near-perfect margin",
+    );
+  }
+
+  return {
+    revenueMicroUsd,
+    marginMicroUsd: revenueMicroUsd - row.directCostMicroUsd,
+    reason: null,
+    caveats,
+  };
+}
+
+// --- Presentation helpers for the account detail view (CTO-190, plan D4) -------------------------
+
+/** Characters in a stored account hash: HMAC-SHA256 rendered hex. */
+export const ACCOUNT_HASH_CHARS = 64;
+
+/**
+ * Whether a URL segment is a well-formed account hash.
+ *
+ * The detail route's parameter is user-editable, so it is checked for shape before it reaches a
+ * query. This is a shape test and nothing more: a well-formed hash that matches no rows is a
+ * perfectly ordinary answer (an account with no spend in the window), and the page says so rather
+ * than treating it as an error. Only a segment that could never have been a hash gets the
+ * "that is not an account id" treatment.
+ */
+export function isAccountHash(segment: string): boolean {
+  return new RegExp(`^[0-9a-f]{${ACCOUNT_HASH_CHARS}}$`).test(segment);
+}
+
+/**
+ * What the Account column and the detail header both print for an account.
+ *
+ * One function so the two surfaces cannot drift: a reader who clicks "Acme Corp" in the table must
+ * land on a page headed "Acme Corp", and a reader who clicks a shortened hash must land on the same
+ * shortened hash. `undefined` label (no label set, or labels unavailable) falls back to the short
+ * form; the full hash stays reachable through the copy control on both surfaces.
+ */
+export function accountDisplayName(accountIdHash: string, label: string | undefined): string {
+  return label ?? shortenAccountHash(accountIdHash);
+}
+
+/**
+ * Share of an account's direct spend sitting in one layer, or `null` when it has no direct spend.
+ *
+ * `null` rather than 0 for the same reason {@link unattributedShare} returns it: "0% of spend is
+ * LLM" is a claim about a distribution that does not exist. The caller renders a blank.
+ */
+export function layerShare(row: AccountCostRow, layer: DirectLayer): number | null {
+  if (row.directCostMicroUsd <= 0) return null;
+  return row.byLayer[layer] / row.directCostMicroUsd;
+}
+
+/**
+ * The trend's own total, for the chart to state beside the account total it is drawn under.
+ *
+ * These two are computed from different reads (a per-day group and a per-layer group), so they are
+ * two chances to disagree, and the day-list-from-the-wrong-clock bug drops a day from the chart
+ * while leaving it in the total. Exposing the chart's sum makes the disagreement visible instead of
+ * silent, and the detail page asserts on it.
+ */
+export function trendTotal(trend: readonly AccountTrendPoint[]): MicroUSD {
+  return trend.reduce((sum, p) => sum + p.directCostMicroUsd, 0);
 }
 
 // --- Excluded infrastructure cost (CTO-189, plan D3) ---------------------------------------------
@@ -393,3 +585,40 @@ export const ALLOCATION_RULE_DESCRIPTIONS: Record<AllocationRule, string> = {
   even_split:
     "compute and egress are divided equally across every account and the untagged bucket, regardless of how much each one used",
 };
+
+// --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
+
+/**
+ * Above this share, the unattributed bucket is the story rather than a footnote.
+ *
+ * Lives here rather than in page.tsx because the state machine below is the thing worth testing,
+ * and a threshold the test cannot see is a threshold the test cannot pin.
+ */
+export const MAJORITY_UNATTRIBUTED = 0.5;
+
+/**
+ * The three honest readings of a successful query.
+ *
+ *   - `onboarding`: not one span in the window carried an account, so there is no breakdown to
+ *     show and the reader has almost certainly never seen this page. Explain the page, then say
+ *     how to switch it on.
+ *   - `partial`: some accounts exist but most spend still has none, so the ranking is real and
+ *     incomplete at the same time. Show it, and say what it is missing.
+ *   - `attributed`: most spend carries an account. The table speaks for itself.
+ *
+ * A failed query is deliberately NOT a state here. "ClickHouse is unreachable" is a different fact
+ * from "you have not instrumented this yet", and answering an outage with an onboarding pitch would
+ * blame the reader for our own broken dependency. page.tsx branches on `costs === null` first, and
+ * this function is only ever reached with data in hand.
+ */
+export type AccountsView = "onboarding" | "partial" | "attributed";
+
+export function accountsView(costs: AccountCosts): AccountsView {
+  // Keyed on "are there any accounts", not on "is spend zero". A tenant can have real accounts and
+  // no spend in the window, which is a quiet week rather than an uninstrumented one, and telling it
+  // to go install the SDK it already installed would be wrong.
+  if (costs.accounts.length === 0) return "onboarding";
+  const share = unattributedShare(costs);
+  if (share !== null && share >= MAJORITY_UNATTRIBUTED) return "partial";
+  return "attributed";
+}

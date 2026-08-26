@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from tally.account_identity import AccountLinker
 from tally.enrichment import enrich_cost
 from tally.models import discover_models
 from tally.pricing import seed_catalog
@@ -60,6 +61,7 @@ from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
     hash_customer_email,
+    hash_stripe_customer,
     map_stripe_event,
     verify_stripe_signature,
 )
@@ -125,6 +127,12 @@ from gateway.tenant_guardrails import (
 )
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
+from gateway.tenant_revenue_sources import (
+    RevenueSourceConfigError,
+    RevenueSourceConfigInput,
+    TenantRevenueSourceStore,
+)
+from gateway.revenue_api import revenue_policy_note, to_wire_event
 from gateway.tenant_stripe import TenantStripeStore
 from gateway.tenant_unit_economics import (
     TenantUnitEconomicsStore,
@@ -133,6 +141,7 @@ from gateway.tenant_unit_economics import (
 )
 from gateway.validation import SpanValidator, span_item_id
 
+from tally.cdp_connectors import RevenuePayloadError, WebhookIngestor
 from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway")
@@ -201,6 +210,15 @@ async def lifespan(app: FastAPI):
     # Per-tenant LTV/CAC band thresholds (CTO-126): overrides the hardcoded B2B-SaaS defaults the
     # dashboard's ltvCacBand/paybackBand classifiers use. A tenant with no row keeps the defaults.
     app.state.tenant_unit_economics = TenantUnitEconomicsStore(settings)
+    # Per-tenant revenue source config (CTO-194): which business_events.Source values count as
+    # revenue on /attribution. A tenant with no row counts every source and discriminates on
+    # ValueType, which is what replaced the old hardcoded Source='stripe' filter.
+    app.state.tenant_revenue_sources = TenantRevenueSourceStore(settings)
+    # Generic revenue API (CTO-199): the SDK's WebhookIngestor, shared between the connector
+    # webhooks and POST /v1/revenue/events so one deduplicator covers both. This is only the fast
+    # in-process guard; the durable idempotency is the ClickHouse probe in the endpoint, which is
+    # what still holds after a restart or across replicas.
+    app.state.revenue_ingestor = WebhookIngestor()
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -232,6 +250,11 @@ async def lifespan(app: FastAPI):
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
     app.state.stripe_event_seen = set()
+    # CTO-195: per-tenant user→account map shared by every revenue connector in this process.
+    # It learns from events that state both, and refuses to answer for a user seen against two
+    # accounts (see tally.account_identity). In-process for the same reason the dedup set above
+    # is: losing it on restart costs an honest blank, never a wrong account.
+    app.state.account_linker = AccountLinker()
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -1487,6 +1510,24 @@ async def stripe_webhook(
     hashed = hash_customer_email(registry, tenant, mapped.customer_email)
     user_id_hash = hashed[0] if hashed else ""
 
+    # CTO-195: the Stripe Customer is the account that owns this subscription/invoice, so it goes
+    # to AccountIdHash. UserIdHash above is untouched. When Stripe named no customer (rare, but a
+    # manual charge can arrive without one) the linker may still know which account this user
+    # belongs to from an earlier event; if that user has ever been seen under two accounts it
+    # answers with '' rather than picking one, and the conflict is logged as a DQ finding.
+    stated = hash_stripe_customer(registry, tenant, mapped.stripe_customer_id)
+    linker: AccountLinker = app.state.account_linker
+    resolution = linker.resolve(
+        tenant,
+        user_id_hash=user_id_hash,
+        stated_account_id_hash=stated[0] if stated else "",
+        source="stripe",
+    )
+    if resolution.conflict is not None:
+        logger.warning(
+            "account identity conflict (tenant=%s): %s", tenant, resolution.conflict.as_dict()
+        )
+
     # Build the BusinessEvent. ValueType is "monetary" for everything except churn (which is a
     # count event with value 0). Currency comes off the Stripe payload, defaulting to USD.
     value_type = "monetary"
@@ -1506,6 +1547,7 @@ async def stripe_webhook(
         value_currency=mapped.currency,
         value_type=value_type,
         source="stripe",
+        account_id_hash=resolution.account_id_hash,
     )
 
     store: ClickHouseStore = app.state.store
@@ -1534,6 +1576,11 @@ async def stripe_webhook(
             "event_name": mapped.event_name,
             "value_amount_micro": mapped.value_amount_micro,
             "currency": mapped.currency,
+            # CTO-195: whether this revenue reached an account, and whether that account was
+            # stated by Stripe or inferred from the user. Never the hash itself: the response
+            # goes back over the wire to Stripe and a hash is still an identifier.
+            "account_attributed": resolution.is_attributed,
+            "account_inferred": resolution.inferred,
         },
         status_code=200,
     )
@@ -1680,6 +1727,164 @@ async def upsert_tenant_unit_economics_config(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return JSONResponse(
         {"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200
+    )
+
+
+@app.get("/v1/tenant/revenue-sources/config")
+def get_tenant_revenue_source_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Revenue source config for the caller's tenant (CTO-194).
+
+    Returns ``config: null`` when the tenant has no row — the web reader then applies the defaults
+    (every source counts; ValueType monetary + mrr are revenue; refunds net off). Same per-tenant
+    auth as the unit-economics route.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantRevenueSourceStore = app.state.tenant_revenue_sources
+    config = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "config": config.as_dict() if config else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/revenue-sources/config")
+async def upsert_tenant_revenue_source_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert the tenant's revenue source config. Idempotent on ``change_id`` (CTO-194).
+
+    Body: ``{revenue_sources: string[] | null, include_mrr?: bool, change_id, updated_by?}``.
+    ``revenue_sources: null`` means every source counts. An empty array is rejected (422) because
+    "nothing is revenue" silently blanks the dashboard and is never what a caller means.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    change_id = body.get("change_id")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    try:
+        config_input = RevenueSourceConfigInput.from_json(body)
+        config = app.state.tenant_revenue_sources.upsert(
+            tenant_id,
+            config_input,
+            change_id=change_id,
+            actor=body.get("updated_by"),
+        )
+    except RevenueSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200)
+
+
+# --------------------------------------------------------------------------------------------
+# Generic revenue API (CTO-199).
+# --------------------------------------------------------------------------------------------
+
+
+@app.post("/v1/revenue/events")
+async def ingest_revenue_event(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Post one revenue event for a biller we have no connector for (CTO-199).
+
+    Body: ``{event_id, account_id, amount, currency, occurred_at, event_name}`` plus optional
+    ``value_type`` (``monetary`` default, or ``mrr`` / ``refund`` / ``count``), ``user_id`` and
+    ``properties``. Documented with a worked example in ``docs/revenue-api.md``.
+
+    Idempotent on the caller-supplied ``event_id``, structurally rather than by convention. That id
+    becomes ``business_events.BusinessEventId``, the table's own sort key, and a retry is refused
+    twice over: an in-process deduplicator shared with the connector webhooks, and a ClickHouse
+    probe on that key which is what still holds after a gateway restart. The endpoint will not mint
+    an id for a caller who omits one, because an auto-generated id turns every retry into a second
+    payment.
+
+    Nothing here bypasses the revenue policy. The row is an ordinary ``business_events`` row, and
+    the response reports whether the tenant's own configured revenue sources (CTO-194) will count
+    it, so a narrowed policy shows up on the first request rather than as a blank dashboard later.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+
+    ingestor: WebhookIngestor = app.state.revenue_ingestor
+    try:
+        result = ingestor.ingest_revenue_api(tenant_id, body)
+    except RevenuePayloadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    event_id = str(body.get("event_id")).strip() if isinstance(body, dict) else ""
+    if not result.accepted:
+        # Seen in this process already: the cheap half of the idempotency guard.
+        return JSONResponse(
+            {"ok": True, "deduplicated": True, "event_id": event_id, "stored": False},
+            status_code=200,
+        )
+
+    event = result.accepted[0]
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    wire_event = to_wire_event(registry, tenant_id, event)
+    store: ClickHouseStore = app.state.store
+
+    try:
+        already_stored = store.business_event_exists(tenant_id, wire_event.business_event_id)
+    except Exception:  # noqa: BLE001
+        # Un-mark before failing: leaving the id marked would make the caller's retry look like a
+        # duplicate and lose the revenue outright, which is the same bug as double counting.
+        ingestor.forget(tenant_id, wire_event.business_event_id)
+        logger.exception("clickhouse idempotency probe failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=503, detail="storage unavailable") from None
+
+    if already_stored:
+        return JSONResponse(
+            {"ok": True, "deduplicated": True, "event_id": event_id, "stored": True},
+            status_code=200,
+        )
+
+    try:
+        store.insert_business_events(tenant_id, [wire_event])
+    except Exception:  # noqa: BLE001
+        ingestor.forget(tenant_id, wire_event.business_event_id)
+        logger.exception("clickhouse insert (revenue api) failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=503, detail="storage unavailable") from None
+
+    counted = revenue_policy_note(
+        app.state.tenant_revenue_sources, tenant_id, wire_event.source, wire_event.value_type
+    )
+
+    # Deliberately no tenant_integration_runs stamp (CTO-117). That table's connector column has a
+    # CHECK constraint listing the five webhook integrations, so adding this source means a
+    # migration; the /connectors card for it belongs with that migration, not wedged in here.
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "deduplicated": False,
+            "stored": True,
+            "event_id": wire_event.business_event_id,
+            "event_name": wire_event.event_name,
+            "account_id_hash": wire_event.account_id_hash,
+            "value_amount_micro": wire_event.value_amount_micro,
+            "currency": wire_event.value_currency,
+            "value_type": wire_event.value_type,
+            "source": wire_event.source,
+            # null, not false, when the tenant's revenue policy could not be read. An unknown
+            # answer is reported as unknown.
+            "counted_as_revenue": counted,
+        },
+        status_code=201,
     )
 
 

@@ -149,6 +149,13 @@ stripe listen --forward-to http://localhost:8080/v1/stripe/webhook?tenant=local-
 
 Once events start landing, `/attribution` adds two columns: **Value/user** and **Margin/user** (with margin %). Cells stay `—` until enough events arrive. We never fabricate numbers from absent data.
 
+### Not on Stripe?
+
+`POST /v1/revenue/events` takes `{event_id, account_id, amount, currency, occurred_at, event_name}`
+from any biller: Chargebee, Recurly, Zuora, or a home-grown one. It is idempotent on your own
+`event_id`, so a retry cannot double-count, and it writes the same `business_events` rows the
+connectors do. See [`docs/revenue-api.md`](docs/revenue-api.md).
+
 ## Per-tenant control plane
 
 Stored in Postgres (`db/postgres/*.sql`, migrations `0001`–`0012`), accessed only through the gateway (the web app never talks to Postgres directly):
