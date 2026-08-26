@@ -57,6 +57,11 @@ class BusinessEvent:
     value_currency: str = "USD"
     value_type: str = "monetary"
     source: str = "sdk"
+    # Hashed account the value belongs to: the tenant's own paying customer (CTO-180). HMAC-SHA256
+    # hex under the per-tenant key, exactly like user_id_hash, never a raw id and never a name.
+    # Empty means the writer did not know the account, which reads back as the unattributed bucket
+    # rather than as a customer.
+    account_id_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)
