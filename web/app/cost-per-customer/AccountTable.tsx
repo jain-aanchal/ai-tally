@@ -16,8 +16,8 @@ import {
   type AccountMargin,
   accountMargin,
   costPerUser,
-  shortenAccountHash,
 } from "@/lib/accounts";
+import { AccountCell } from "./AccountIdentity";
 import { lookupAccountAction } from "./actions";
 
 interface SearchState {
@@ -149,22 +149,6 @@ export function AccountTable({
         sortValue: (r) => r.directCostMicroUsd,
       },
       {
-        key: "costPerUser",
-        header: "Cost per user",
-        align: "right",
-        render: (r) => {
-          const { micro, reason } = costPerUser(r);
-          return micro === null ? (
-            <Blank reason={reason ?? "not enough data to divide cost by users"} />
-          ) : (
-            <Money micro={micro} />
-          );
-        },
-        // Low-sample rows carry no value, and `null` sorts last in both directions by design, so a
-        // suppressed account never floats to the top of a "cheapest per user" sort.
-        sortValue: (r) => costPerUser(r).micro,
-      },
-      {
         key: "revenue",
         header: "Revenue",
         align: "right",
@@ -188,6 +172,22 @@ export function AccountTable({
         // Unknown revenue means unknown margin, and `null` sorts last in both directions, so an
         // account we know nothing about never ranks as the most OR the least profitable customer.
         sortValue: (r) => margin(r).marginMicroUsd,
+      },
+      {
+        key: "costPerUser",
+        header: "Cost per user",
+        align: "right",
+        render: (r) => {
+          const { micro, reason } = costPerUser(r);
+          return micro === null ? (
+            <Blank reason={reason ?? "not enough data to divide cost by users"} />
+          ) : (
+            <Money micro={micro} />
+          );
+        },
+        // Low-sample rows carry no value, and `null` sorts last in both directions by design, so a
+        // suppressed account never floats to the top of a "cheapest per user" sort.
+        sortValue: (r) => costPerUser(r).micro,
       },
     ],
     [labels, labelsUnavailable, margin],
@@ -260,23 +260,26 @@ export function AccountTable({
         // A row the search found is filtered to on its own, so the highlight is belt and braces for
         // the case where a tenant later labels two hashes of the same account and both rows show.
         rowClassName={(r) => (matchedSet.has(r.accountIdHash) ? "bg-accent/5" : "")}
-        // Deliberately plain. The onboarding empty state that explains what this page is for and
-        // how to switch it on is CTO-191, stacked on this ticket; a half-built version here would
-        // be the thing that ticket then has to unpick.
+        // Deliberately plain, and unreachable from the page as it stands: with no rows at all the
+        // page renders the CTO-191 onboarding explainer in place of this table, and a search that
+        // matches nothing does not filter. This stays as the honest fallback for any future caller
+        // that renders the table without that branch.
         empty={`No spans carried an account id in the last ${windowDays} days.`}
       />
 
       {/* The margin column's own caveat, kept next to the column rather than only at the top of the
-          page. The tenant-wide excluded-cost banner with the real dollar figure is CTO-189, running
-          concurrently; when it lands this line can point at it instead of restating it. Until then
-          a profitability ranking would otherwise sit here with nothing beside it saying that half
-          the cost base is missing. */}
+          page, because the header scrolls away and this is the number that gets screenshotted. The
+          excluded-cost banner (CTO-189) has since landed above this table with the real dollar
+          figure, so this line points at it rather than restating the size of the gap in different
+          words. What it does not delegate is the ▲ mark: that flags a per-row reason, which no
+          tenant-wide banner can carry. */}
       <p className="max-w-prose text-xs text-warn">
-        Gross margin is revenue minus <em>direct</em> cost only. Compute and egress are excluded
-        from every account, so cost is understated and every margin above is overstated by the same
-        amount. Rows marked ▲ carry a further reason not to read them at face value; hover the mark
-        to see it. Ranking by this column tells you the order to look in, not what a customer
-        actually earns you.
+        Gross margin is revenue minus <em>direct</em> cost only. Compute and egress carry no account
+        on the span, so they sit outside every row here and each margin is overstated by whatever
+        share of that customer&apos;s cost falls in those layers; the excluded-cost note above this
+        table sizes that gap in real money for this tenant. Rows marked ▲ carry a further reason not
+        to read them at face value; hover the mark to see it. Ranking by this column tells you the
+        order to look in, not what a customer actually earns you.
       </p>
     </div>
   );
@@ -318,55 +321,3 @@ function MarginCell({ row, margin }: { row: AccountCostRow; margin: AccountMargi
   );
 }
 
-/**
- * The Account cell: label where the tenant set one, shortened hash otherwise, full hash on hover
- * and on copy.
- *
- * The full hash is what every other surface takes (the label API, a support conversation), so it
- * has to be retrievable from the row. The short form is for width only.
- */
-function AccountCell({
-  accountIdHash,
-  label,
-  labelsUnavailable,
-}: {
-  accountIdHash: string;
-  label: string | undefined;
-  labelsUnavailable: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(accountIdHash);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be refused (insecure origin, denied permission). The hash is already
-      // selectable in the title attribute, so there is nothing to recover and nothing to shout at
-      // the user about.
-      setCopied(false);
-    }
-  };
-
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span title={accountIdHash} className={label ? "font-medium" : "font-mono text-xs"}>
-        {label ?? shortenAccountHash(accountIdHash)}
-      </span>
-      {!label && !labelsUnavailable ? (
-        <span className="text-[11px] text-muted" title="no label set for this account">
-          unlabelled
-        </span>
-      ) : null}
-      <button
-        type="button"
-        onClick={copy}
-        title={`Copy the full account hash: ${accountIdHash}`}
-        className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-white"
-      >
-        {copied ? "Copied" : "Copy hash"}
-      </button>
-    </span>
-  );
-}

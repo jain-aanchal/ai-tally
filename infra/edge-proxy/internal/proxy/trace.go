@@ -18,8 +18,14 @@ type TraceRecord struct {
 	// (X-Tally-Feature-Tag). Optional and informational only — empty when the caller didn't tag
 	// the request. Downstream telemetry uses this to segment cost and traces by feature (CTO-104).
 	FeatureTag string
-	Method     string
-	Path       string
+	// AccountIdHash is the HMAC-SHA256 hex of the caller's own paying customer / account id, taken
+	// verbatim from the control header (X-Tally-Account-Id-Hash) and never computed here (CTO-182).
+	// Optional and informational: empty when the caller did not attribute the request, which is the
+	// unattributed bucket downstream, not a customer named "unknown". Because it is a hash, this
+	// field cannot carry a raw customer identifier and keeps the CTO-42 metadata-only guarantee.
+	AccountIdHash string
+	Method        string
+	Path          string
 	// Model is the model id for the request, extracted from the response (or request path for
 	// Gemini) when a provider protocol is configured (CTO-167). Empty in pure pass-through mode or
 	// when the response carried no recognizable model. It is a short identifier

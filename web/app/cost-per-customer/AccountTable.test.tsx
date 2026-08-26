@@ -56,6 +56,18 @@ describe("AccountTable", () => {
     expect(screen.getByText(`${UNLABELLED.slice(0, 12)}…`)).toBeTruthy();
   });
 
+  it("links each account to its detail view by the FULL hash, never the shortened form", () => {
+    // The short form is a truncation for width and is not an id: a route built from it reaches no
+    // account at all, so a link carrying it would 'work' visually and dead-end for every reader.
+    renderTable([row(LABELLED), row(UNLABELLED)], { [LABELLED]: "Acme Corp" });
+    expect(screen.getByText("Acme Corp").closest("a")?.getAttribute("href")).toBe(
+      `/cost-per-customer/${LABELLED}`,
+    );
+    expect(
+      screen.getByText(`${UNLABELLED.slice(0, 12)}…`).closest("a")?.getAttribute("href"),
+    ).toBe(`/cost-per-customer/${UNLABELLED}`);
+  });
+
   it("keeps the full hash reachable on hover and on copy", () => {
     renderTable([row(UNLABELLED)]);
     expect(screen.getByTitle(UNLABELLED)).toBeTruthy();

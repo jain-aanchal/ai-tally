@@ -93,11 +93,38 @@ export interface AccountTrendPoint {
   directCostMicroUsd: MicroUSD;
 }
 
+/** Heaviest runs are capped for the same reason as features: a shortlist, not an audit trail. */
+export const MAX_ACCOUNT_TOP_RUNS = 8;
+
+/**
+ * One agent run, costed at THIS account's spans only (CTO-190, plan D4).
+ *
+ * A trace can carry spans for more than one account: a batch job that serves several customers in
+ * one run is a normal shape, and so is a run where only some steps were tagged. So the figure here
+ * is the account's share of the run, not the run's total, and it will be smaller than the number
+ * the same run shows on /agents whenever the run is shared. Reporting the run total on a
+ * per-account page would double-count the shared part across every account it touched.
+ */
+export interface AccountRunCost {
+  /** Trace id. Links to the existing /agents/runs/[runId] drill-down, which shows the WHOLE run. */
+  runId: string;
+  /** ServiceName, or `'untagged'` where the run carries none. Matches /agents. */
+  agent: string;
+  /** Cost of this account's spans in the run. See the note above: not the run's total. */
+  accountCostMicroUsd: MicroUSD;
+  /** Spans in the run attributed to this account, again not the run's total step count. */
+  steps: number;
+  /** Only success/failed are inferable from OTel StatusCode; `abandoned` is not tracked. */
+  outcome: "success" | "failed";
+}
+
 export interface AccountDetail extends AccountCostRow {
   /** Heaviest features for this account, capped at {@link MAX_ACCOUNT_TOP_FEATURES}. */
   topFeatures: AccountFeatureCost[];
   /** One point per calendar day across the window, oldest first, gaps filled with zero. */
   trend: AccountTrendPoint[];
+  /** Heaviest runs for this account, capped at {@link MAX_ACCOUNT_TOP_RUNS}. */
+  topRuns: AccountRunCost[];
 }
 
 // --- Presentation helpers for the /cost-per-customer tab (CTO-188, plan D2) ----------------------
@@ -312,4 +339,133 @@ export function accountMargin(
     reason: null,
     caveats,
   };
+}
+
+// --- Presentation helpers for the account detail view (CTO-190, plan D4) -------------------------
+
+/** Characters in a stored account hash: HMAC-SHA256 rendered hex. */
+export const ACCOUNT_HASH_CHARS = 64;
+
+/**
+ * Whether a URL segment is a well-formed account hash.
+ *
+ * The detail route's parameter is user-editable, so it is checked for shape before it reaches a
+ * query. This is a shape test and nothing more: a well-formed hash that matches no rows is a
+ * perfectly ordinary answer (an account with no spend in the window), and the page says so rather
+ * than treating it as an error. Only a segment that could never have been a hash gets the
+ * "that is not an account id" treatment.
+ */
+export function isAccountHash(segment: string): boolean {
+  return new RegExp(`^[0-9a-f]{${ACCOUNT_HASH_CHARS}}$`).test(segment);
+}
+
+/**
+ * What the Account column and the detail header both print for an account.
+ *
+ * One function so the two surfaces cannot drift: a reader who clicks "Acme Corp" in the table must
+ * land on a page headed "Acme Corp", and a reader who clicks a shortened hash must land on the same
+ * shortened hash. `undefined` label (no label set, or labels unavailable) falls back to the short
+ * form; the full hash stays reachable through the copy control on both surfaces.
+ */
+export function accountDisplayName(accountIdHash: string, label: string | undefined): string {
+  return label ?? shortenAccountHash(accountIdHash);
+}
+
+/**
+ * Share of an account's direct spend sitting in one layer, or `null` when it has no direct spend.
+ *
+ * `null` rather than 0 for the same reason {@link unattributedShare} returns it: "0% of spend is
+ * LLM" is a claim about a distribution that does not exist. The caller renders a blank.
+ */
+export function layerShare(row: AccountCostRow, layer: DirectLayer): number | null {
+  if (row.directCostMicroUsd <= 0) return null;
+  return row.byLayer[layer] / row.directCostMicroUsd;
+}
+
+/**
+ * The trend's own total, for the chart to state beside the account total it is drawn under.
+ *
+ * These two are computed from different reads (a per-day group and a per-layer group), so they are
+ * two chances to disagree, and the day-list-from-the-wrong-clock bug drops a day from the chart
+ * while leaving it in the total. Exposing the chart's sum makes the disagreement visible instead of
+ * silent, and the detail page asserts on it.
+ */
+export function trendTotal(trend: readonly AccountTrendPoint[]): MicroUSD {
+  return trend.reduce((sum, p) => sum + p.directCostMicroUsd, 0);
+}
+
+// --- Excluded infrastructure cost (CTO-189, plan D3) ---------------------------------------------
+
+/**
+ * Compute and egress over the same window the per-account table covers.
+ *
+ * These are the two layers {@link DIRECT_LAYERS} deliberately leaves out. They arrive from the
+ * cloud billing connectors as tenant-level daily totals that carry no account, so the tab cannot
+ * split them per customer without an allocation rule, and that rule is workstream C (CTO-192/193).
+ * Carrying the figure here is what lets the page state the SIZE of what it omits rather than a
+ * vague "some costs are excluded": on current data the omission is roughly half of all spend, and
+ * an account figure that quietly understates true cost by half is the exact failure this product
+ * exists to fix.
+ */
+export interface ExcludedInfraCost {
+  /** Calendar days covered. Must match {@link AccountCosts.windowDays} or the share is meaningless. */
+  windowDays: number;
+  computeMicroUsd: MicroUSD;
+  egressMicroUsd: MicroUSD;
+  /** `compute + egress`, summed from the same rounded parts so it cannot contradict them. */
+  totalMicroUsd: MicroUSD;
+}
+
+/**
+ * Excluded spend as a share of ALL spend in the window, or `null` when there is nothing to divide.
+ *
+ * The denominator is direct plus excluded, i.e. the tenant's whole bill for the window, because the
+ * sentence this feeds ("excludes $X, N% of spend") is only meaningful against the total. Dividing
+ * by direct spend alone would print a share above 100 percent the moment infrastructure outweighs
+ * the model bill, which on a compute-heavy tenant it does.
+ *
+ * Both inputs are read over the same window from the same rollup under complementary filters, so
+ * they add to the tenant total exactly and this share reconciles with /cost.
+ */
+export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts): number | null {
+  const all = costs.totalDirectMicroUsd + excluded.totalMicroUsd;
+  if (all <= 0) return null;
+  return excluded.totalMicroUsd / all;
+}
+
+// --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
+
+/**
+ * Above this share, the unattributed bucket is the story rather than a footnote.
+ *
+ * Lives here rather than in page.tsx because the state machine below is the thing worth testing,
+ * and a threshold the test cannot see is a threshold the test cannot pin.
+ */
+export const MAJORITY_UNATTRIBUTED = 0.5;
+
+/**
+ * The three honest readings of a successful query.
+ *
+ *   - `onboarding`: not one span in the window carried an account, so there is no breakdown to
+ *     show and the reader has almost certainly never seen this page. Explain the page, then say
+ *     how to switch it on.
+ *   - `partial`: some accounts exist but most spend still has none, so the ranking is real and
+ *     incomplete at the same time. Show it, and say what it is missing.
+ *   - `attributed`: most spend carries an account. The table speaks for itself.
+ *
+ * A failed query is deliberately NOT a state here. "ClickHouse is unreachable" is a different fact
+ * from "you have not instrumented this yet", and answering an outage with an onboarding pitch would
+ * blame the reader for our own broken dependency. page.tsx branches on `costs === null` first, and
+ * this function is only ever reached with data in hand.
+ */
+export type AccountsView = "onboarding" | "partial" | "attributed";
+
+export function accountsView(costs: AccountCosts): AccountsView {
+  // Keyed on "are there any accounts", not on "is spend zero". A tenant can have real accounts and
+  // no spend in the window, which is a quiet week rather than an uninstrumented one, and telling it
+  // to go install the SDK it already installed would be wrong.
+  if (costs.accounts.length === 0) return "onboarding";
+  const share = unattributedShare(costs);
+  if (share !== null && share >= MAJORITY_UNATTRIBUTED) return "partial";
+  return "attributed";
 }
