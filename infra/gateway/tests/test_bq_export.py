@@ -17,6 +17,7 @@ import pytest
 from gateway import bq_export
 from gateway.bq_export import (
     ALL_SPECS,
+    BUSINESS_EVENTS_SPEC,
     DAILY_ROLLUP_SPEC,
     SPANS_SPEC,
     BigQueryDependencyMissing,
@@ -249,6 +250,25 @@ def test_load_bigquery_sink_guards_missing_dependency() -> None:
             load_bigquery_sink("proj")
     else:  # pragma: no cover - extra installed in this env
         pytest.skip("google-cloud-bigquery is installed; lazy-import guard not exercisable")
+
+
+def test_span_spec_exports_account_dimension() -> None:
+    # CTO-202: cost/revenue per customer needs the account hash on the exported span. It maps to
+    # STRING exactly like the user hash (both are FixedString(64) on the source).
+    fields = {f.name: f for f in SPANS_SPEC.schema}
+    assert "AccountIdHash" in fields
+    assert "AccountIdHashKeyVersion" in fields
+    assert fields["AccountIdHash"].type == fields["UserIdHash"].type == "STRING"
+
+
+def test_business_events_spec_exports_account_dimension() -> None:
+    # CTO-202: business_events.AccountIdHash (populated by CTO-195) must reach the export so a
+    # tenant can group revenue events by account. No AccountIdHashKeyVersion: the source table
+    # has none, unlike otel_spans.
+    fields = {f.name: f for f in BUSINESS_EVENTS_SPEC.schema}
+    assert "AccountIdHash" in fields
+    assert fields["AccountIdHash"].type == fields["UserIdHash"].type == "STRING"
+    assert "AccountIdHashKeyVersion" not in fields
 
 
 def test_all_specs_have_consistent_schema_and_keys() -> None:

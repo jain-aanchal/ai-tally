@@ -126,6 +126,10 @@ SPANS_SPEC = ExportTableSpec(
     source_table="otel_spans",
     watermark_column="Timestamp",
     key_columns=("TenantId", "TraceId", "SpanId"),
+    # Derived 1:1 from the gateway insert column list, so the account dimension CTO-180 added to
+    # otel_spans (AccountIdHash + AccountIdHashKeyVersion) reaches this export automatically via
+    # _SPAN_COLUMNS. Both are FixedString(64)/LowCardinality on the source and map to STRING here,
+    # exactly like UserIdHash/UserIdHashKeyVersion. See CTO-202: a test asserts they are present.
     schema=tuple(BQField(c, _SPAN_TYPES.get(c, "STRING")) for c in _SPAN_COLUMNS),
     json_columns=("SpanAttributes",),
 )
@@ -140,6 +144,13 @@ BUSINESS_EVENTS_SPEC = ExportTableSpec(
         _s("BusinessEventId"),
         _s("EventName"),
         _s("UserIdHash"),
+        # Account dimension (CTO-202). business_events.AccountIdHash is populated by CTO-195 but
+        # was never added to this hand-written spec, so a tenant mirroring revenue events to their
+        # own warehouse got rows with no account grouping and could not rebuild cost-per-customer.
+        # Same treatment as UserIdHash: a FixedString(64) HMAC hash exported as STRING. There is no
+        # AccountIdHashKeyVersion here because business_events carries no such column (unlike
+        # otel_spans); see db/clickhouse/attribution.sql.
+        _s("AccountIdHash"),
         BQField("OccurredAt", "TIMESTAMP"),
         BQField("IngestedAt", "TIMESTAMP"),
         BQField("ValueAmountMicro", "INT64"),

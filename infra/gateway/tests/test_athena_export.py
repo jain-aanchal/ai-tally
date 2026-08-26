@@ -29,6 +29,7 @@ from gateway.athena_export import (
     run_export,
 )
 from gateway.bq_export import (
+    BUSINESS_EVENTS_SPEC,
     DAILY_ROLLUP_SPEC,
     SPANS_SPEC,
     strip_body_keys,
@@ -299,6 +300,21 @@ def test_athena_ddl_maps_shared_schema_and_partitions_by_day() -> None:
     assert "`SpanAttributes` string" in ddl  # JSON map stored as a JSON string
     # The partition column must NOT also be a data column.
     assert "`dt` " not in ddl.split("PARTITIONED BY")[0]
+
+
+def test_account_dimension_appears_in_generated_ddl() -> None:
+    # CTO-202: the widened shared specs must carry the account hash into the Athena DDL for both
+    # the span and the business-event tables, mapped as string like the user hash.
+    span_ddl = athena_create_table_ddl(
+        SPANS_SPEC, database="db", s3_location="s3://bkt/tally/otel_spans/"
+    )
+    assert "`AccountIdHash` string" in span_ddl
+    assert "`AccountIdHashKeyVersion` string" in span_ddl
+    be_ddl = athena_create_table_ddl(
+        BUSINESS_EVENTS_SPEC, database="db", s3_location="s3://bkt/tally/business_events/"
+    )
+    assert "`AccountIdHash` string" in be_ddl
+    assert "AccountIdHashKeyVersion" not in be_ddl
 
 
 def test_daily_rollup_ddl_has_date_partition_and_date_column() -> None:
