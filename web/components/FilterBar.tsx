@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
+  DEFAULT_GROUP_BY,
   DIMENSION_LABEL,
   DIMENSIONS,
   type Dimension,
@@ -36,6 +37,14 @@ export interface FilterBarProps {
   groupByChoices?: readonly Dimension[];
   /** Hide the group-by selector entirely (a page that groups by a fixed dimension). */
   hideGroupBy?: boolean;
+  /**
+   * The group-by a page falls back to when the URL carries none (CTO-224). The global default is
+   * `layer`, which is not in every page's `groupByChoices` (Compare offers only model/provider), so
+   * without this the select value would not match any option. When the active group-by is outside
+   * `groupByChoices`, the bar commits this default to the URL once so the state, the select and the
+   * chart that reads the same group-by all agree.
+   */
+  defaultGroupBy?: Dimension;
 }
 
 const RANGE_PRESETS: { preset: Exclude<TimeRangePreset, "custom">; label: string }[] = [
@@ -44,7 +53,12 @@ const RANGE_PRESETS: { preset: Exclude<TimeRangePreset, "custom">; label: string
   { preset: "90d", label: "90d" },
 ];
 
-export function FilterBar({ options, groupByChoices = DIMENSIONS, hideGroupBy }: FilterBarProps) {
+export function FilterBar({
+  options,
+  groupByChoices = DIMENSIONS,
+  hideGroupBy,
+  defaultGroupBy,
+}: FilterBarProps) {
   const {
     state,
     setRangePreset,
@@ -56,6 +70,20 @@ export function FilterBar({ options, groupByChoices = DIMENSIONS, hideGroupBy }:
   } = useFilters();
 
   const anyActive = DIMENSIONS.some((d) => state.filters[d].length > 0);
+
+  // If the active group-by is not one this page offers, adopt the page default so the select value
+  // is always a real option and the explore chart (which reads the same group-by from the URL) groups
+  // by the page's natural dimension rather than the global `layer` default. One commit, then the
+  // guard is false and it never loops. Only fires when a page both restricts choices and names a
+  // default; a bare FilterBar keeps the foundation's every-dimension behavior untouched.
+  const groupByValid = groupByChoices.includes(state.groupBy);
+  const fallbackGroupBy = defaultGroupBy ?? DEFAULT_GROUP_BY;
+  useEffect(() => {
+    if (!hideGroupBy && !groupByValid && groupByChoices.includes(fallbackGroupBy)) {
+      setGroupBy(fallbackGroupBy);
+    }
+  }, [hideGroupBy, groupByValid, fallbackGroupBy, groupByChoices, setGroupBy]);
+  const selectedGroupBy = groupByValid ? state.groupBy : fallbackGroupBy;
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-edge bg-panel px-3 py-2 text-sm">
@@ -86,7 +114,7 @@ export function FilterBar({ options, groupByChoices = DIMENSIONS, hideGroupBy }:
         <label className="flex items-center gap-1.5 text-muted">
           <span className="uppercase text-xs tracking-wide">Group by</span>
           <select
-            value={state.groupBy}
+            value={selectedGroupBy}
             onChange={(e) => setGroupBy(e.target.value as Dimension)}
             className="rounded-md border border-edge bg-ink px-2 py-1 text-gray-100 focus:border-accent focus:outline-none"
           >
