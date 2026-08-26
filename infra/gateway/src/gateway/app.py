@@ -368,11 +368,18 @@ async def lifespan(app: FastAPI):
         app.state.models = []
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
-    if app.state.scheduler is not None:
-        # Stopped before the stores close: a job in flight is holding one of them.
-        await app.state.scheduler.stop()
+    # Shutdown order matters (CTO-219). The buffer is flushed FIRST, before anything is allowed to
+    # wait on the scheduler: it holds accepted customer telemetry that is not durable anywhere yet,
+    # while the scheduler holds jobs that are re-run from recorded history on the next tick. Stopping
+    # the scheduler first meant a SIGTERM arriving mid-job blocked the flush behind that job, and the
+    # buffered spans died with the process. Nothing about the flush depends on the scheduler's state.
     if app.state.ingest_buffer is not None:
         await app.state.ingest_buffer.stop()  # flush buffered rows before closing the store
+    if app.state.scheduler is not None:
+        # Still before the stores close, because a job in flight is holding one of them. The wait is
+        # bounded (settings.scheduler_shutdown_timeout_s): a job runs on a thread that cannot be
+        # cancelled, so past the bound it is left to die with the process. See Scheduler.stop.
+        await app.state.scheduler.stop()
     app.state.store.close()
 
 

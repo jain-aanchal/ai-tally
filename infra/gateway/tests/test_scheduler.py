@@ -418,3 +418,85 @@ def test_an_empty_registry_is_a_no_op_which_is_all_of_cto_213():
     result = asyncio.run(sched.tick_once())
     assert (result.considered, result.ran) == (0, 0)
     assert store.rows == []
+
+
+# --- bounded shutdown (CTO-219) -------------------------------------------------------------------
+
+
+def test_stop_still_waits_when_the_job_finishes_inside_the_bound():
+    """The bound does not make shutdown impatient. A normal job is waited for and recorded."""
+    store = FakeRunStore()
+    started = threading.Event()
+    registry = JobRegistry()
+
+    def slow(tenant: str) -> None:
+        started.set()
+        time.sleep(0.3)
+
+    registry.register("slow-job", DAY, slow)
+    sched = Scheduler(
+        registry, store, lambda: ["t1"], tick_interval_s=1.0, shutdown_timeout_s=10.0
+    )
+
+    async def drive() -> None:
+        await sched.start()
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        await sched.stop()
+
+    asyncio.run(drive())
+    assert store.statuses("slow-job", "t1") == ["success"]
+    assert not sched.abandoned  # waited it out, nothing orphaned
+    assert not sched.running
+
+
+def test_stop_is_bounded_when_a_job_will_not_finish():
+    """A SIGTERM must not wait forever on an uncancellable job. THE acceptance case for CTO-219.
+
+    The job here is wedged on an event, standing in for a connector waiting on a slow third-party
+    billing API. ``asyncio.wait_for`` around the ``to_thread`` could not kill that thread and would
+    only report a lie, which is why there is still no per-job timeout. What is bounded is how long
+    SHUTDOWN waits before proceeding without it: the deploy finishes, and the thread dies with the
+    process.
+
+    Note what is asserted about the abandoned run: at the moment stop returns there is no row for
+    the pair. That is the honest cost, and it is safe in the direction that matters, because a pair
+    with no row is a pair the next tick considers due again.
+    """
+    store = FakeRunStore()
+    started = threading.Event()
+    release = threading.Event()
+    registry = JobRegistry()
+
+    def wedged(tenant: str) -> None:
+        started.set()
+        release.wait(timeout=30.0)  # released by the test, never by the scheduler
+
+    registry.register("wedged-job", DAY, wedged)
+    sched = Scheduler(registry, store, lambda: ["t1"], tick_interval_s=1.0, shutdown_timeout_s=0.2)
+
+    async def drive() -> tuple[float, list[str]]:
+        await sched.start()
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        began = time.monotonic()
+        await sched.stop()
+        elapsed = time.monotonic() - began
+        rows_at_stop = store.statuses("wedged-job", "t1")
+        # Only now, so the orphaned worker thread does not outlive the test process.
+        release.set()
+        return elapsed, rows_at_stop
+
+    elapsed, rows_at_stop = asyncio.run(drive())
+
+    assert elapsed < 5.0, "shutdown waited on a job that was never going to finish"
+    assert sched.abandoned
+    assert not sched.running
+    assert rows_at_stop == []  # the abandoned run is not recorded, so the pair stays due
+
+
+def test_stop_on_a_scheduler_that_never_started_is_a_no_op():
+    store = FakeRunStore()
+    sched = Scheduler(JobRegistry(), store, lambda: ["t1"], tick_interval_s=1.0)
+    asyncio.run(sched.stop())
+    assert not sched.running and not sched.abandoned
