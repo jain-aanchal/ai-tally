@@ -10,6 +10,13 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="TALLY_", env_file=".env", extra="ignore")
 
+    # Root log level (CTO-218). The gateway never configured logging, so under uvicorn the root
+    # logger kept its WARNING-only lastResort and every gateway logger.info (startup line, ingest
+    # buffer enablement, scheduler per-tick summary) was dropped in a compose deployment. Logging is
+    # now configured once at boot at this level; raise to WARNING to quiet a noisy deployment or drop
+    # to DEBUG to trace one. See gateway.app._configure_logging.
+    log_level: str = "INFO"
+
     # ClickHouse (HTTP interface — clickhouse-connect).
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 8123

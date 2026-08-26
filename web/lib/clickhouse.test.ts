@@ -471,6 +471,78 @@ describe("queryExcludedInfraCost: what the per-account table leaves out (CTO-189
   });
 });
 
+describe("queryCostSeries day buckets (CTO-203)", () => {
+  // The chart draws one stacked bar per day and prints a headline total above it. Those two numbers
+  // are read from the SAME `days` array, so they can only disagree if a day the query returned has
+  // no bucket to land in. That is exactly what happened while the bucket list was built from the
+  // Node clock: whenever the Node timezone and ClickHouse straddle midnight, the JS list shifted a
+  // day against the SQL window and the oldest returned row was silently dropped.
+  //
+  // `respondSeries` mirrors queryCostSeries' two reads in order: the grouped cost rows, then the
+  // one-row window-start boundary select.
+  function respondSeries(costRows: RowShape[], windowStart: string) {
+    respondRows(costRows);
+    respondRows([{ windowStart }]);
+  }
+
+  // CostDayPoint.byLayer is a fixed-key SpendByLayer (no string index signature), so read it as a
+  // plain object of numbers rather than Record<string, number>.
+  const sumDays = (days: ReadonlyArray<{ byLayer: object }>) =>
+    days.reduce(
+      (s, d) => s + Object.values(d.byLayer).reduce((a: number, b) => a + (b as number), 0),
+      0,
+    );
+
+  it("anchors buckets on ClickHouse's reported window, not the Node clock", async () => {
+    const { queryCostSeries } = await freshSut();
+    // A 2021 boundary the Node clock (today is 2026-08-26) would NEVER produce, so if the bucket list
+    // still came from `new Date()` the oldest row below would find no slot and be dropped. Both ends
+    // of the returned window must instead track this ClickHouse-sourced date.
+    const WINDOW_START = "2021-03-01";
+    respondSeries(
+      [
+        { day: "2021-03-01", layer: "llm", cost: "12.75" }, // the oldest day, the one at risk
+        { day: "2021-03-30", layer: "tools", cost: "3.25" }, // today per this window
+      ],
+      WINDOW_START,
+    );
+    const out = await queryCostSeries();
+    expect(out!.days).toHaveLength(30);
+    expect(out!.days[0].date).toBe("2021-03-01");
+    expect(out!.days[29].date).toBe("2021-03-30");
+    // The oldest row landed rather than being dropped.
+    expect(out!.days[0].byLayer.llm).toBe(12_750_000);
+    // Gaps are real zeroes, not missing data.
+    expect(out!.days[1].byLayer.llm).toBe(0);
+    // And nothing fell out: the rendered days sum to the same total the headline is computed from
+    // (every returned row), so the chart and its own total cannot disagree.
+    expect(sumDays(out!.days)).toBe(16_000_000);
+  });
+
+  it("keeps the calendar-aligned window boundary in the SQL, not a rolling one", async () => {
+    const { queryCostSeries } = await freshSut();
+    respondSeries([{ day: "2026-08-26", layer: "llm", cost: "1" }], "2026-07-28");
+    await queryCostSeries();
+    const costSql = (queryMock.mock.calls[0][0] as { query: string }).query;
+    const boundarySql = (queryMock.mock.calls[1][0] as { query: string }).query;
+    // The window predicate stays calendar-aligned so /cost and Home agree to the penny.
+    expect(costSql).toContain("Timestamp >= toDate(now()) - INTERVAL 29 DAY");
+    expect(costSql).not.toContain("now() - INTERVAL 30 DAY");
+    // The bucket list is sourced from a value ClickHouse computes, on that same boundary.
+    expect(boundarySql).toContain("toDate(now()) - INTERVAL 29 DAY");
+  });
+
+  it("renders 30 zero days when the tenant has no spend in the window", async () => {
+    const { queryCostSeries } = await freshSut();
+    respondSeries([], "2026-07-28");
+    const out = await queryCostSeries();
+    expect(out!.days).toHaveLength(30);
+    expect(out!.days[0].date).toBe("2026-07-28");
+    expect(out!.days[29].date).toBe("2026-08-26");
+    expect(sumDays(out!.days)).toBe(0);
+  });
+});
+
 describe("queryAccountDetail (CTO-187)", () => {
   const WINDOW_START = "2026-07-28";
 

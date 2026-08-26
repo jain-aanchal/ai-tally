@@ -264,6 +264,11 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
 
 // --- Cost workflow ------------------------------------------------------------------------------
 
+// The cost chart spans `toDate(now()) - INTERVAL 29 DAY` through today inclusive, i.e. 30 calendar
+// days. The window boundary stays this calendar-aligned form (not a rolling `now() - INTERVAL 30
+// DAY`) so /cost and Home agree to the penny; see CTO-203.
+const COST_SERIES_WINDOW_DAYS = 30;
+
 export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSeries | null> {
   return tryLive(async (db, tenant) => {
     const tag = filter?.tag ?? "";
@@ -277,12 +282,25 @@ export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSe
        ORDER BY day`,
       { tenant, tag },
     );
-    // Pivot into one CostDayPoint per calendar day (fill gaps with zero layers).
+    // CTO-203: the day-bucket LIST must come from the window ClickHouse actually reports, not from
+    // the Node process clock. The two live in different timezones, and when they straddle midnight
+    // the JS-built list shifts a day against the SQL window: the oldest returned row then finds no
+    // bucket, the pivot drops it, and that point vanishes from the stacked chart while STILL counting
+    // toward the headline total above it, so the chart and its own total silently disagree. This is
+    // the exact seam queryAccountDetail (CTO-187) already closes by anchoring its trend on a
+    // ClickHouse-sourced window start; we follow that pattern rather than inventing a new mechanism.
+    // A dedicated one-row select keeps the boundary available even when `out` is empty (a tenant with
+    // no spend in the window still renders 30 zero days).
+    const boundary = await rowsP<{ windowStart: string }>(
+      db,
+      `SELECT toString(toDate(now()) - INTERVAL 29 DAY) AS windowStart`,
+      {},
+    );
+    const windowStart = boundary[0].windowStart;
+    // Pivot into one CostDayPoint per calendar day (fill gaps with zero layers). Both ends of the
+    // list now come from the same ClickHouse clock as the window predicate above.
     const byDay = new Map<string, CostDayPoint>();
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date();
-      d.setUTCDate(d.getUTCDate() - i);
-      const iso = d.toISOString().slice(0, 10);
+    for (const iso of isoDaysFrom(windowStart, COST_SERIES_WINDOW_DAYS)) {
       byDay.set(iso, { date: iso, byLayer: zeroLayers() });
     }
     for (const r of out) {
@@ -376,9 +394,9 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
 // Clocks: every date in the result — window start, today, the day list, the day count — comes from
 // ClickHouse. None of it is generated from the Node process clock. Those are two clocks in two
 // timezones, and when they straddle midnight the JS-built list is shifted a day against the SQL
-// window, so the oldest day silently has no slot to land in while still counting toward the totals
-// (the bug `queryCostSeries` still has, CTO-203). `queryAccountDetail` does it correctly; so does
-// this.
+// window, so the oldest day silently has no slot to land in while still counting toward the totals.
+// This is the seam CTO-203 fixed in `queryCostSeries`; `queryAccountDetail` does it correctly, and
+// so does this.
 
 /** Trailing history for the weekday profile, on the shared calendar-aligned boundary. */
 const SETTLED_TRAILING_DAYS = 30;
