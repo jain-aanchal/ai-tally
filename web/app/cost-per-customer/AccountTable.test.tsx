@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type AccountCostRow, emptyAccountRow } from "@/lib/accounts";
-import { AccountTable } from "./AccountTable";
+import { AccountTable, type TableRow } from "./AccountTable";
 
 // The search box calls a server action. Mocked here so the test covers the matching rule (which is
 // where the interesting bug lives) rather than the transport.
@@ -27,9 +27,21 @@ function row(hash: string, over: Partial<AccountCostRow> = {}): AccountCostRow {
   };
 }
 
-function renderTable(rows: AccountCostRow[], labels: Record<string, string> = {}) {
+function renderTable(
+  rows: AccountCostRow[],
+  labels: Record<string, string> = {},
+  revenue: Record<string, number | null> = {},
+  revenueUnavailable = false,
+) {
   return render(
-    <AccountTable rows={rows} labels={labels} labelsUnavailable={false} windowDays={30} />,
+    <AccountTable
+      rows={rows}
+      labels={labels}
+      labelsUnavailable={false}
+      revenue={revenue}
+      revenueUnavailable={revenueUnavailable}
+      windowDays={30}
+    />,
   );
 }
 
@@ -103,5 +115,145 @@ describe("AccountTable", () => {
 
     await waitFor(() => expect(screen.getByText(/Account lookup unavailable/)).toBeTruthy());
     expect(screen.getByText("Acme Corp")).toBeTruthy();
+  });
+
+  // --- Revenue and margin (CTO-197, plan E4) ----------------------------------------------------
+
+  it("prints a measured zero as $0.00 and an unknown as a blank, never the same cell", () => {
+    renderTable(
+      [row(LABELLED, { directCostMicroUsd: 1_000_000 }), row(UNLABELLED)],
+      { [LABELLED]: "Netted Out", [UNLABELLED]: "No Source" },
+      // Netted to zero by a refund: a measurement. Absent from the record: an unknown.
+      { [LABELLED]: 0 },
+    );
+
+    // The zero-revenue account: revenue $0.00, margin minus its cost. Both are real numbers.
+    expect(screen.getByText("$0.00")).toBeTruthy();
+    expect(screen.getByText("-$1.00")).toBeTruthy();
+    // The unknown account gets a blank that says why, and no invented margin of minus cost.
+    expect(screen.getAllByText(/No value: no revenue source wired/i).length).toBe(2);
+  });
+
+  it("distinguishes an unreadable revenue source from an unwired one", () => {
+    renderTable([row(LABELLED)], {}, {}, true);
+    expect(screen.getAllByText(/No value: revenue could not be read/i).length).toBe(2);
+    expect(screen.queryByText(/no revenue source wired/i)).toBeNull();
+  });
+
+  it("marks a margin whose cost side is too thin to stand behind", () => {
+    // The shape of the current tenant: real revenue, a handful of attributed spans.
+    renderTable(
+      [row(LABELLED, { spanCount: 4, directCostMicroUsd: 130 })],
+      {},
+      { [LABELLED]: 20_000_000_000 },
+    );
+    const mark = screen.getByTestId(`margin-caveat-${LABELLED}`);
+    expect(mark.getAttribute("title")).toMatch(/compute and egress are excluded/i);
+    expect(mark.getAttribute("title")).toMatch(/below the 50-span floor/i);
+    expect(mark.getAttribute("title")).toMatch(/under 1% of revenue/i);
+  });
+
+  it("still marks a well-measured margin, because v1 excludes compute and egress for everyone", () => {
+    renderTable(
+      [row(LABELLED, { spanCount: 5_000, directCostMicroUsd: 4_000_000 })],
+      {},
+      { [LABELLED]: 10_000_000 },
+    );
+    const mark = screen.getByTestId(`margin-caveat-${LABELLED}`);
+    expect(mark.getAttribute("title")).toMatch(/compute and egress are excluded/i);
+    expect(mark.getAttribute("title")).not.toMatch(/span floor/i);
+  });
+
+  it("ranks by margin and keeps unknown-revenue accounts at the bottom of both directions", () => {
+    const LOSS = "4".repeat(64);
+    renderTable(
+      [
+        row(UNLABELLED, { directCostMicroUsd: 1_000_000 }),
+        row(LABELLED, { directCostMicroUsd: 1_000_000 }),
+        row(LOSS, { directCostMicroUsd: 9_000_000 }),
+      ],
+      { [LABELLED]: "Profitable", [UNLABELLED]: "Unknown", [LOSS]: "Loss Maker" },
+      { [LABELLED]: 5_000_000, [LOSS]: 1_000_000 },
+    );
+
+    const names = () =>
+      screen.getAllByRole("row").slice(1).map((r) => r.querySelector("td")?.textContent ?? "");
+
+    // Default sort is margin descending: most profitable first, unknown last.
+    expect(names()[0]).toMatch(/Profitable/);
+    expect(names()[2]).toMatch(/Unknown/);
+
+    fireEvent.click(screen.getByRole("button", { name: /Gross margin/i }));
+    // Ascending puts the customer losing money first, and the unknown STAYS last: it is neither the
+    // most nor the least profitable customer, because it is not a measurement at all.
+    expect(names()[0]).toMatch(/Loss Maker/);
+    expect(names()[2]).toMatch(/Unknown/);
+  });
+});
+
+describe("AccountTable allocated columns (CTO-193)", () => {
+  function allocatedRow(hash: string): TableRow {
+    return { ...row(hash), allocatedMicroUsd: 3_000_000, totalMicroUsd: 5_000_000 };
+  }
+
+  it("shows direct, allocated and total separately, with the rule named", () => {
+    // The core honesty requirement of the ticket. An allocated number folded into one total, or
+    // shown without the rule that produced it, is an estimate wearing a measurement's clothes.
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="pro_rata_direct"
+      />,
+    );
+    expect(screen.getByText("Direct cost")).toBeTruthy();
+    expect(screen.getByText(/Allocated \(pro rata on direct spend\)/)).toBeTruthy();
+    expect(screen.getByText("Total cost")).toBeTruthy();
+    expect(screen.getByText("$2.00")).toBeTruthy(); // direct, measured
+    expect(screen.getByText("$3.00")).toBeTruthy(); // allocated, estimated
+    expect(screen.getByText("$5.00")).toBeTruthy(); // total
+  });
+
+  it("names the rule that actually applied, including a fallback", () => {
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="even_split"
+      />,
+    );
+    expect(screen.getByText(/Allocated \(even split across accounts\)/)).toBeTruthy();
+  });
+
+  it("shows no allocated column at all when nothing was allocated", () => {
+    // Rather than an empty or zero column, which would read as "this account causes no
+    // infrastructure cost" when the truth is that the figure could not be computed.
+    renderTable([row(UNLABELLED)]);
+    expect(screen.queryByText(/Allocated/)).toBeNull();
+    expect(screen.queryByText("Total cost")).toBeNull();
+    expect(screen.getByText("Cost per user")).toBeTruthy();
+  });
+
+  it("labels the per-user ratio as direct once an allocated column sits beside it", () => {
+    render(
+      <AccountTable
+        rows={[allocatedRow(UNLABELLED)]}
+        labels={{}}
+        labelsUnavailable={false}
+        revenue={{}}
+        revenueUnavailable={false}
+        windowDays={30}
+        allocationRule="pro_rata_direct"
+      />,
+    );
+    expect(screen.getByText("Direct cost per user")).toBeTruthy();
   });
 });

@@ -186,7 +186,8 @@ function Report({ detail }: { detail: AccountDetail }) {
  * measurement and these are not measured: no span carries an account for infrastructure spend, so
  * the true statement is "this cannot be attributed per account yet", and printing a zero beside
  * four real numbers reads as "this customer used no compute", which is almost certainly false. The
- * tenant-level figure they are missing from is the excluded-cost banner on the parent tab.
+ * tenant-level figure they are missing from is allocated across accounts on the parent tab
+ * (CTO-193), where it shows as its own estimated column rather than as a measurement here.
  */
 function LayerSplit({ detail }: { detail: AccountDetail }) {
   return (

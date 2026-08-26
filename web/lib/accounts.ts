@@ -7,6 +7,11 @@
 // plausible-looking fake account list would be the single most misleading thing this page could
 // show. The empty state (D5) is the answer to no data, not invented data.
 
+import {
+  allocateShared,
+  type AllocationResult,
+  type AllocationRule,
+} from "./allocation";
 import type { MicroUSD, SpendByLayer } from "./types";
 
 /**
@@ -229,6 +234,118 @@ export function attributedSpend(costs: AccountCosts): MicroUSD {
   return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
 }
 
+// --- Revenue and gross margin (CTO-197, plan E4) -------------------------------------------------
+//
+// The column that turns this tab from a cost report into a profitability view, and the one place on
+// the page where a wrong number gets acted on: someone reads "this customer is unprofitable" and
+// goes and reprices them. So both of the ways this figure can mislead are handled here rather than
+// left to the JSX.
+//
+// 1. NULL IS NOT ZERO. `queryAccountRevenue` (lib/accountRevenue.ts) separates them deliberately.
+//    An account whose only events are `count` engagement signals returns null, meaning we were
+//    never told its revenue. A charge fully netted by a refund returns 0, which is a measurement.
+//    Collapsing the two would either invent revenue for a customer we know nothing about, or claim
+//    a paying customer generates none. So margin is null exactly when revenue is null, and 0
+//    revenue produces a real margin of minus the cost.
+//
+// 2. THE MARGIN IS OVERSTATED, ALWAYS, IN V1. Cost here is direct cost only: compute and egress are
+//    excluded (Decision 2 in docs/cost-per-customer-plan.md, roughly 47 percent of spend on the
+//    current tenant). Every margin on this page is therefore too high by whatever share of that
+//    account's real cost sits in those two layers. That caveat travels with the number, on the cell
+//    itself, because a ranking that silently ignores half the cost base is worse than no ranking.
+
+/**
+ * Why every margin on this page reads high. Attached to each printed margin, not only to the page
+ * header, because the header scrolls away and the number is what gets copied into a pricing
+ * conversation.
+ */
+export const MARGIN_EXCLUDES_INFRA =
+  "understated cost: compute and egress are excluded from every account, so this margin is too high by whatever share of this customer's cost sits in those layers";
+
+/**
+ * Ratio of direct cost to revenue below which the margin is arithmetically indistinguishable from
+ * revenue itself.
+ *
+ * One percent. Under it, subtracting cost moves the figure by less than rounding does, so "margin"
+ * is really just "revenue with a cost column that never arrived". That is the exact shape of the
+ * current tenant: real uploaded revenue against near-zero attributed spend, which would otherwise
+ * render as a flawless customer rather than as a customer we have barely measured.
+ */
+export const MIN_COST_TO_REVENUE_RATIO = 0.01;
+
+/**
+ * Spans of attributed cost an account needs before its margin is read as a cost measurement.
+ *
+ * Shares the floor `costPerUser` uses, for the same reason: below it the account's cost side is a
+ * handful of spans, and a margin computed against it describes our instrumentation coverage rather
+ * than the customer's economics.
+ */
+export const MIN_SPANS_FOR_MARGIN = MIN_SPANS_FOR_COST_PER_USER;
+
+/** Revenue, margin, and everything the reader needs in order not to over-read them. */
+export interface AccountMargin {
+  /** Net revenue in micro-USD, or `null` for "we have not been told". Never 0 to mean unknown. */
+  revenueMicroUsd: MicroUSD | null;
+  /** Revenue minus direct cost. `null` exactly when `revenueMicroUsd` is null. */
+  marginMicroUsd: MicroUSD | null;
+  /** Why revenue and margin are blank. `null` when they are not. */
+  reason: string | null;
+  /**
+   * Why a printed margin must not be read as this customer's true profitability. Never empty when a
+   * margin prints: {@link MARGIN_EXCLUDES_INFRA} applies to every account in v1.
+   */
+  caveats: string[];
+}
+
+/**
+ * Revenue and gross margin for one account row.
+ *
+ * `revenueMicroUsd` is what {@link revenueForAccount} returned: the account's net revenue, or null
+ * for both "no row" and "no money-typed event". Those are the same statement to a reader, so they
+ * get the same blank. `revenueUnavailable` is a third and different case: the revenue read itself
+ * failed, so a blank here is not evidence that nothing is wired up, and the reason says so.
+ */
+export function accountMargin(
+  row: AccountCostRow,
+  revenueMicroUsd: MicroUSD | null,
+  revenueUnavailable = false,
+): AccountMargin {
+  if (revenueMicroUsd === null) {
+    return {
+      revenueMicroUsd: null,
+      marginMicroUsd: null,
+      reason: revenueUnavailable
+        ? "revenue could not be read for this window, so no margin can be computed. This blank is not evidence that no revenue source is wired"
+        : "no revenue source wired for this account, so its revenue is unknown. An unknown is not zero, and a margin against an assumed zero would be invented",
+      caveats: [],
+    };
+  }
+
+  const caveats = [MARGIN_EXCLUDES_INFRA];
+  // Two separate ways the cost side can be too thin to carry a margin, deliberately not merged: one
+  // is about how little we measured, the other about how little what we measured amounts to.
+  if (row.spanCount < MIN_SPANS_FOR_MARGIN) {
+    caveats.push(
+      `thin cost data: ${row.spanCount.toLocaleString()} attributed spans in the window, below the ${MIN_SPANS_FOR_MARGIN}-span floor, so this is closer to raw revenue than to a measured margin`,
+    );
+  }
+  if (
+    revenueMicroUsd > 0 &&
+    row.directCostMicroUsd / revenueMicroUsd < MIN_COST_TO_REVENUE_RATIO
+  ) {
+    caveats.push(
+      "attributed cost is under 1% of revenue, so subtracting it barely moves the figure. Read this as revenue with the cost side largely missing, not as a near-perfect margin",
+    );
+  }
+
+  return {
+    revenueMicroUsd,
+    marginMicroUsd: revenueMicroUsd - row.directCostMicroUsd,
+    reason: null,
+    caveats,
+  };
+}
+
 // --- Presentation helpers for the account detail view (CTO-190, plan D4) -------------------------
 
 /** Characters in a stored account hash: HMAC-SHA256 rendered hex. */
@@ -320,6 +437,154 @@ export function excludedShare(excluded: ExcludedInfraCost, costs: AccountCosts):
   if (all <= 0) return null;
   return excluded.totalMicroUsd / all;
 }
+
+// --- Allocated infrastructure cost (CTO-193, plan C2) --------------------------------------------
+//
+// This is where the excluded half of the bill stops being excluded. CTO-189 could only state the
+// SIZE of what the table left out; with an allocation rule in force (CTO-192 for the arithmetic,
+// C2 for the per-tenant rule) compute and egress can be attributed, and the table carries direct,
+// allocated and total per account instead of a banner apologising for the gap.
+//
+// THE DECISION THIS SECTION ENCODES, and the most consequential one in the ticket: THE
+// UNATTRIBUTED BUCKET PARTICIPATES IN ALLOCATION, as a first-class participant alongside the real
+// accounts.
+//
+// It is a synthetic row, not a customer, so treating it as one deserves a defence. The defence is
+// that every alternative is worse in the case that actually occurs. Shared infrastructure is caused
+// by ALL traffic, and untagged traffic is traffic: on the current tenant it is over 99.99 percent
+// of direct spend, so it is causing essentially all of the compute bill. Leaving the bucket out
+// would divide the whole shared total across only the accounts that happen to be tagged, and hand
+// three accounts with a few dollars of direct spend roughly fourteen thousand dollars of compute
+// each. That figure is not merely unhelpful, it is false, and it is worst exactly when a tenant is
+// earliest in rolling out `account_id` and least equipped to spot it. It also has a property no
+// cost report may have: instrumenting one more account would halve every existing account's cost.
+//
+// With the bucket participating, the same tenant reads honestly. The unattributed row carries
+// almost all of the shared cost, the tagged accounts carry a share proportional to what they
+// actually used, and the page can say plainly that most infrastructure cost belongs to traffic that
+// carries no account yet. The remedy that reading suggests, tag more spans, is the true one.
+//
+// The bucket keeps `unattributed: true` throughout, so no surface can rank it as a customer, and
+// the page labels its share as belonging to untagged traffic rather than to anybody.
+
+/** One table row once shared cost has been allocated. `total = direct + allocated`. */
+export interface AllocatedAccountRow extends AccountCostRow {
+  /** Estimated share of tenant-level compute and egress. NOT measured. */
+  allocatedMicroUsd: MicroUSD;
+  /** `directCostMicroUsd + allocatedMicroUsd`. Part measured, part estimated. */
+  totalMicroUsd: MicroUSD;
+}
+
+export interface AllocatedAccountCosts {
+  windowDays: number;
+  /** The rule asked for. */
+  rule: AllocationRule;
+  /**
+   * The rule actually applied. Differs from {@link AllocatedAccountCosts.rule} when pro rata had no
+   * denominator and the engine fell back to an even split. The page names this one, because it is
+   * the one that produced the numbers.
+   */
+  effectiveRule: AllocationRule;
+  /** Real accounts, ranked by TOTAL cost, most expensive first. */
+  accounts: AllocatedAccountRow[];
+  /** The unattributed bucket with its allocated share. Never ranked among the accounts. */
+  unattributed: AllocatedAccountRow;
+  /** Compute plus egress for the window: the pot that was shared out. */
+  sharedMicroUsd: MicroUSD;
+  directTotalMicroUsd: MicroUSD;
+  allocatedTotalMicroUsd: MicroUSD;
+  /** `direct + shared`. What the rows must add up to, and what `/cost` reports for the window. */
+  tenantTotalMicroUsd: MicroUSD;
+}
+
+/**
+ * Allocate the window's compute and egress across every account plus the unattributed bucket.
+ *
+ * Returns `null` when the excluded total could not be read. That is not a zero: allocating nothing
+ * would print a total equal to direct cost for every account, quietly restoring the understated
+ * figures CTO-189 existed to flag with no banner left to warn about them. The caller renders the
+ * unreadable case explicitly instead.
+ *
+ * RECONCILIATION, the acceptance test of this ticket:
+ *
+ *     sum(accounts.total) + unattributed.total === tenantTotalMicroUsd === direct + compute + egress
+ *
+ * exactly, in integer micro-USD, which is the same total `/cost` reports for the same window. The
+ * guarantee itself comes from `allocateShared`. The job here is to feed it EVERY row holding direct
+ * spend (which is why the unattributed bucket has to go in) and to add nothing to its output.
+ */
+export function allocateAccountCosts(
+  costs: AccountCosts,
+  excluded: ExcludedInfraCost | null,
+  rule: AllocationRule,
+): AllocatedAccountCosts | null {
+  if (excluded === null) return null;
+
+  // The bucket goes in last, so a remainder tie between it and a real account breaks toward the
+  // account: the engine breaks ties by input order. The stake is one micro-USD, so this is
+  // cosmetic, and it is ordered deliberately anyway because "why did the synthetic row get the
+  // spare unit" is a question someone eventually asks of a reconciliation report.
+  const participants = [...costs.accounts, costs.unattributed];
+  const result: AllocationResult = allocateShared(
+    participants.map((row) => ({
+      accountId: row.accountIdHash,
+      directMicroUsd: row.directCostMicroUsd,
+    })),
+    excluded.totalMicroUsd,
+    rule,
+  );
+
+  const allocatedRows: AllocatedAccountRow[] = participants.map((row, i) => ({
+    ...row,
+    allocatedMicroUsd: result.accounts[i].allocatedMicroUsd,
+    totalMicroUsd: result.accounts[i].totalMicroUsd,
+  }));
+  const unattributed = allocatedRows[allocatedRows.length - 1];
+  const accounts = allocatedRows.slice(0, -1);
+  // Ranked on TOTAL, not direct. With roughly half the bill allocated, the most expensive customer
+  // by direct spend is not necessarily the most expensive customer.
+  accounts.sort((a, b) => b.totalMicroUsd - a.totalMicroUsd);
+
+  return {
+    windowDays: costs.windowDays,
+    rule: result.rule,
+    effectiveRule: result.effectiveRule,
+    accounts,
+    unattributed,
+    sharedMicroUsd: excluded.totalMicroUsd,
+    directTotalMicroUsd: result.directTotalMicroUsd,
+    allocatedTotalMicroUsd: result.allocatedTotalMicroUsd,
+    tenantTotalMicroUsd: result.tenantTotalMicroUsd,
+  };
+}
+
+/**
+ * The sum the reconciliation line prints: every row's total, bucket included.
+ *
+ * Summed from the rendered rows rather than read back off `tenantTotalMicroUsd`, so the check is a
+ * real check. Reading the claimed total out of the same object would assert nothing about the
+ * numbers actually on screen.
+ */
+export function allocatedRowsTotal(allocated: AllocatedAccountCosts): MicroUSD {
+  return (
+    allocated.accounts.reduce((sum, r) => sum + r.totalMicroUsd, 0) +
+    allocated.unattributed.totalMicroUsd
+  );
+}
+
+/** Short display name for a rule. Shown wherever an allocated figure is. */
+export const ALLOCATION_RULE_LABELS: Record<AllocationRule, string> = {
+  pro_rata_direct: "pro rata on direct spend",
+  even_split: "even split across accounts",
+};
+
+/** One sentence saying what the rule did, for the reader who wants to check the arithmetic. */
+export const ALLOCATION_RULE_DESCRIPTIONS: Record<AllocationRule, string> = {
+  pro_rata_direct:
+    "each account carries a share of compute and egress in proportion to its own direct spend, so an account with twice the model bill carries twice the infrastructure",
+  even_split:
+    "compute and egress are divided equally across every account and the untagged bucket, regardless of how much each one used",
+};
 
 // --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
 
