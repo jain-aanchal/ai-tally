@@ -36,6 +36,11 @@ from tally.wire import (
     uuid7,
 )
 
+from gateway.account_lookup import (
+    AccountLookupError,
+    hash_account_id,
+    normalize_account_id,
+)
 from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
 from gateway.config import get_settings
@@ -96,6 +101,7 @@ from gateway.connectors.config_admin import (
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
+from gateway.tenant_identity import TenantIdentityResolver
 from gateway.tenant_guardrails import (
     ALLOWED_KINDS as GUARDRAIL_KINDS,
     ALLOWED_STATES as GUARDRAIL_STATES,
@@ -194,6 +200,10 @@ async def lifespan(app: FastAPI):
     # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
     # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
     app.state.hmac_registry = HmacKeyRegistry()
+    # Tenant name <-> tenants.id UUID (CTO-185). Both spellings reach the gateway and each derives
+    # a different HMAC key, so /v1/tenant/account-lookup hashes under every spelling rather than
+    # guessing one and returning a hash that silently matches nothing.
+    app.state.tenant_identity = TenantIdentityResolver(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -1052,6 +1062,79 @@ def get_tenant_reconciliation_status(
     run = store.get_latest(tenant_id)
     return JSONResponse(
         {"tenant_id": tenant_id, "run": run.as_dict() if run is not None else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/account-lookup")
+async def lookup_account_id(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Plaintext account id -> ``AccountIdHash``, for the cost-per-customer search box (CTO-185).
+
+    WHY. The cost-per-customer tab groups spend by ``AccountIdHash`` (CTO-180), and an account
+    label is optional per tenant by design, so an unlabelled account renders as a 64-character
+    hex string. There is no reverse map from hash to id and there deliberately never will be, so
+    without this endpoint an operator who knows their customer as ``acme-corp`` cannot locate that
+    row at all and the tab is a list of opaque strings. This is the forward direction, computed on
+    demand, which is the only direction a one-way hash has.
+
+    Body: ``{"account_id": "acme-corp"}``. Response carries ``account_id_hash`` (the best match)
+    plus every candidate in ``hashes``.
+
+    Two properties this endpoint exists to hold:
+
+    * **Parity with the emitting path.** The digest comes from the SDK's own
+      :class:`tally.hmac_keys.HmacKeyRegistry` under the tenant's active key version, the same
+      derivation ``hash_customer_email`` and ``build_hasher`` already use. A hash computed any
+      other way would be well-formed and match nothing.
+
+    * **The plaintext is transient.** It is used for one HMAC call and then dropped. It is never
+      written to a row, never logged, and never quoted back in an error: every rejection message
+      in :mod:`gateway.account_lookup` describes the problem without echoing the value. That is
+      also why this is a POST with a body rather than a GET with a query string, which would put
+      a customer identifier into access logs.
+
+    An account id nobody has ever emitted is NOT an error. It returns 200 with a perfectly valid
+    hash that simply matches no rows, and the tab renders "no spend recorded for this account".
+    Answering 404 here would leak the difference between an account this tenant has and one it
+    does not, and would also make a genuine typo indistinguishable from a genuinely idle customer.
+
+    ``hashes`` holds one entry per spelling of the tenant identifier (see
+    :mod:`gateway.tenant_identity`): the tenant name and the ``tenants.id`` UUID derive different
+    HMAC keys, so callers should match spans against the whole set rather than assume a spelling.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately no `{exc}` interpolation, unlike the neighbouring endpoints: a decoder
+        # message can quote the offending bytes, and those bytes are the account id.
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    try:
+        account_id = normalize_account_id(body.get("account_id"))
+    except AccountLookupError as exc:
+        # Safe by construction: AccountLookupError messages never contain the submitted value.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    resolver: TenantIdentityResolver = app.state.tenant_identity
+    registry: HmacKeyRegistry = app.state.hmac_registry
+    hashes = hash_account_id(registry, resolver.key_forms(tenant_id), account_id)
+    if not hashes:
+        raise HTTPException(status_code=422, detail="tenant id must be non-empty")
+    # No log line here, at any level. The only interesting thing to report would be what was
+    # looked up, and that is precisely the thing that must not be recorded.
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "account_id_hash": hashes[0].account_id_hash,
+            "key_version": hashes[0].key_version,
+            "hashes": [h.as_dict() for h in hashes],
+        },
         status_code=200,
     )
 
