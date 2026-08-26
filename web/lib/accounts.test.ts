@@ -2,11 +2,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAJORITY_UNATTRIBUTED,
   MIN_SPANS_FOR_COST_PER_USER,
   SHORT_HASH_CHARS,
   type AccountCostRow,
   type AccountCosts,
   type ExcludedInfraCost,
+  accountsView,
   attributedSpend,
   costPerUser,
   emptyAccountRow,
@@ -184,5 +186,73 @@ describe("excludedShare (CTO-189)", () => {
       costs({ totalDirectMicroUsd: 100 }),
     );
     expect(formatShare(share!)).toBe(">99.9%");
+  });
+});
+
+describe("accountsView", () => {
+  // The state machine behind the empty states (CTO-191, plan D5). Each branch produces different
+  // copy, and picking the wrong one is how a page tells a tenant with data that it has none, or
+  // tells a tenant that already instrumented the SDK to go install it.
+
+  it("is onboarding when not one span in the window carried an account", () => {
+    expect(
+      accountsView(
+        costs({
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 9_000_000 },
+          totalDirectMicroUsd: 9_000_000,
+        }),
+      ),
+    ).toBe("onboarding");
+  });
+
+  it("is onboarding when the tenant recorded no direct spend at all", () => {
+    // Nothing to attribute and nothing to explain away: still a first-run reader, still needs the
+    // explainer rather than an empty table.
+    expect(accountsView(costs())).toBe("onboarding");
+  });
+
+  it("is partial once real accounts exist but most spend still has none", () => {
+    expect(
+      accountsView(
+        costs({
+          accounts: [row({ directCostMicroUsd: 1_000_000 })],
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 9_000_000 },
+          totalDirectMicroUsd: 10_000_000,
+        }),
+      ),
+    ).toBe("partial");
+  });
+
+  it("treats the threshold itself as partial, so a coin-flip split gets the honest copy", () => {
+    const half = 5_000_000;
+    const view = accountsView(
+      costs({
+        accounts: [row({ directCostMicroUsd: half })],
+        unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: half },
+        totalDirectMicroUsd: half * 2,
+      }),
+    );
+    expect(MAJORITY_UNATTRIBUTED).toBe(0.5);
+    expect(view).toBe("partial");
+  });
+
+  it("is attributed when most spend carries an account", () => {
+    expect(
+      accountsView(
+        costs({
+          accounts: [row({ directCostMicroUsd: 9_000_000 })],
+          unattributed: { ...emptyAccountRow("", true), directCostMicroUsd: 1_000_000 },
+          totalDirectMicroUsd: 10_000_000,
+        }),
+      ),
+    ).toBe("attributed");
+  });
+
+  it("does not send a fully instrumented but quiet tenant back to onboarding", () => {
+    // Accounts exist with zero spend in the window: a quiet week, not an uninstrumented tenant.
+    // Telling this reader to install the SDK they already installed would be plainly wrong.
+    expect(
+      accountsView(costs({ accounts: [row({ directCostMicroUsd: 0, spanCount: 0 })] })),
+    ).toBe("attributed");
   });
 });
