@@ -153,6 +153,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.FeatureTagHeader != "" {
 		featureTag = r.Header.Get(p.cfg.FeatureTagHeader)
 	}
+	// Account hash is optional on the same terms as the feature tag: capture if present, never
+	// reject when absent (CTO-182). The value is already hashed by the caller and is passed through
+	// untouched -- the proxy holds no HMAC key and must never receive a raw account id.
+	var accountIdHash string
+	if p.cfg.AccountIdHashHeader != "" {
+		accountIdHash = r.Header.Get(p.cfg.AccountIdHashHeader)
+	}
 
 	start := p.now()
 
@@ -186,6 +193,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.FeatureTagHeader != "" {
 		r.Header.Del(p.cfg.FeatureTagHeader)
 	}
+	if p.cfg.AccountIdHashHeader != "" {
+		r.Header.Del(p.cfg.AccountIdHashHeader)
+	}
 
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	// Mark whether the upstream was reachable so the telemetry copy can distinguish a real 502
@@ -201,6 +211,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.sink.Record(TraceRecord{
 		TenantKey:        tenant,
 		FeatureTag:       featureTag,
+		AccountIdHash:    accountIdHash,
 		Method:           r.Method,
 		Path:             r.URL.Path,
 		Model:            meta.Model,

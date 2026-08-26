@@ -79,7 +79,9 @@ func TestEncodeCarriesNoBodyContent(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		"deployment": true, "tenant_key": true, "feature_tag": true,
-		"method": true, "path": true,
+		// account_id_hash is a hash, not an identifier: it cannot carry a name or a body (CTO-182).
+		"account_id_hash": true,
+		"method":          true, "path": true,
 		"status_code": true, "req_bytes": true, "resp_bytes": true,
 		"duration_ns": true, "started_at_ns": true, "failed": true,
 	}
