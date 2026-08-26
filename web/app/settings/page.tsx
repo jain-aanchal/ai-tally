@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import Link from "next/link";
+
 import { Card } from "@/components/Card";
 import { apiGet } from "@/lib/api";
 import type { GuardrailRule } from "@/lib/guardrails";
@@ -28,6 +30,16 @@ export default async function SettingsPage() {
       <Card title="Guardrail rules">
         <GuardrailConfig initialRules={rules} />
       </Card>
+
+      {/* Budgets are their own route (CTO-208, F4) rather than another panel here: they are read
+          by the spend surfaces, so they need a URL worth linking to from elsewhere. */}
+      <p className="text-xs text-muted">
+        Looking for spending budgets?{" "}
+        <Link href="/settings/budgets" className="text-accent hover:underline">
+          Settings — Budgets
+        </Link>
+        .
+      </p>
     </div>
   );
 }
