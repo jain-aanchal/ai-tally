@@ -45,6 +45,7 @@ from gateway.account_lookup import (
 from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
 from gateway.config import get_settings
+from gateway.cost_connector_job import register_cost_connector_job
 from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
@@ -315,16 +316,22 @@ async def lifespan(app: FastAPI):
     # Scheduler (CTO-213): periodic per-tenant job execution. A tick loop that asks each registered
     # job "are you due for this tenant" and answers from run history in Postgres, rather than
     # sleeping for a day and losing its place on the next redeploy. Disabled → no task at all
-    # (None), which is byte-identical to the behaviour before this landed. The registered jobs are
-    # built by register_worker_jobs (CTO-216); the cloud cost connectors are CTO-215.
-    # Safe on multiple replicas as of CTO-214:
-    # per (job, tenant) Postgres advisory locks, so two gateways cannot run the same job at once.
+    # (None), which is byte-identical to the behaviour before this landed.
+    # Safe on multiple replicas as of CTO-214: per (job, tenant) Postgres advisory locks, so two
+    # gateways cannot run the same job at once.
+    #
+    # Two ticket bodies register jobs here, and both switch on code that was written, tested and
+    # called by nobody:
+    #   * CTO-215, the daily cloud cost connectors. A tenant could connect AWS / GCP / Vercel /
+    #     Cloudflare on /connectors and nothing ever acted on that config. Enabling the scheduler
+    #     makes the Compute and Egress columns populate on their own, which CHANGES tenants'
+    #     numbers (see docs/scheduler-scope.md).
+    #   * CTO-216, the third-party ingest workers and the reconciler. This does NOT fix /features,
+    #     which stays blocked on the stitcher runner (CTO-200).
     app.state.scheduler = None
     if settings.scheduler_enabled:
         job_registry = JobRegistry()
-        # CTO-216: the third-party ingest workers (Segment / HubSpot / Pendo) and the reconciler.
-        # Both were written, tested and called by nobody; this is what switches them on. It does
-        # NOT fix /features, which stays blocked on the stitcher runner (CTO-200).
+        register_cost_connector_job(job_registry, settings)  # CTO-215
         register_worker_jobs(
             job_registry,
             settings,
