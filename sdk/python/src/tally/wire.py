@@ -57,6 +57,11 @@ class BusinessEvent:
     value_currency: str = "USD"
     value_type: str = "monetary"
     source: str = "sdk"
+    # The tenant's own paying customer, HMAC'd under the per-tenant key (CTO-180 / CTO-195).
+    # Defaults to '', the honest unattributed bucket, so every existing producer keeps
+    # compiling and every event that predates account routing reads back as "no account" rather
+    # than as a customer named "unknown". Additive: user_id_hash is untouched.
+    account_id_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)

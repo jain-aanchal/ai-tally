@@ -9,12 +9,30 @@ Non-closed-won stage changes are ignored (they aren't a conversion), so a noisy 
 pollute ``business_events``. The deal's associated contact email, when present, is HMAC'd under the
 tenant key so the conversion stitches to the same identity as the spans; a missing email yields an
 empty ``UserIdHash`` — honest unattributed revenue.
+
+Account identity (CTO-195)
+--------------------------
+Closed-won contract revenue belongs to a **company**, not to the individual who signed. The deal's
+associated company id is HMAC'd under the same tenant key into ``AccountIdHash``, so contract
+revenue can be joined against per-account cost. Where a webhook carries no company association we
+fall back to the deal ``objectId``: less precise, since one company can win several deals, but far
+better than the previous behaviour of putting that same deal id in ``UserIdHash`` as though a
+contract were a person. ``UserIdHash`` still takes the contact email exactly as before: this adds
+a column, it does not reinterpret one.
+
+Where a deal names a contact but no company at all, the worker asks the shared
+:class:`~tally.account_identity.AccountLinker` which account that contact already belongs to. Per
+``docs/cost-per-customer-plan.md`` a user belongs to exactly one account, so if that contact has
+ever been seen against two, nothing is attributed and a data-quality finding is raised instead of
+a guess.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
+from tally.account_identity import AccountLinker, hubspot_account_id
 from tally.wire import BusinessEvent
 
 from gateway.integration_workers import (
@@ -26,6 +44,8 @@ from gateway.integration_workers import (
     ms_to_ns,
 )
 from gateway.tenant_integration_secrets import IntegrationSecret
+
+logger = logging.getLogger("tally.gateway.hubspot")
 
 DEFAULT_HUBSPOT_BASE = "https://api.hubapi.com"
 # Illustrative deal-events pull endpoint; the mapping is what this ticket pins down.
@@ -41,13 +61,20 @@ def _is_closed_won(value: object) -> bool:
 
 
 def map_deal_stage_event(
-    event: dict[str, object], hasher: Callable[[str | None], str]
+    event: dict[str, object],
+    hasher: Callable[[str | None], str],
+    *,
+    linker: AccountLinker | None = None,
+    tenant_id: str = "",
 ) -> BusinessEvent | None:
     """Map one HubSpot deal-stage change to a ``conversion`` event, or ``None`` if not closed-won.
 
     Recognizes a ``dealstage`` property change whose new value is closed-won. ``eventId`` (unique
     per notification) becomes ``BusinessEventId`` so HubSpot's routine redeliveries dedup; when
     absent we fall back to a deal-scoped deterministic id.
+
+    ``linker`` is optional so the mapper stays usable (and testable) on its own: without one the
+    account is whatever the payload states, and no user→account inference happens.
     """
     if str(event.get("propertyName") or "").lower() != "dealstage":
         return None
@@ -73,6 +100,24 @@ def map_deal_stage_event(
     email = props.get("email") or event.get("email")
     user_hash = hasher(str(email).strip().lower()) if email else ""
 
+    # CTO-195: company first, deal id as the fallback. See the module docstring.
+    stated_account = hubspot_account_id(event)
+    account_hash = hasher(stated_account) if stated_account else ""
+    if linker is not None:
+        resolution = linker.resolve(
+            tenant_id,
+            user_id_hash=user_hash,
+            stated_account_id_hash=account_hash,
+            source="hubspot",
+        )
+        account_hash = resolution.account_id_hash
+        if resolution.conflict is not None:
+            logger.warning(
+                "account identity conflict (tenant=%s): %s",
+                tenant_id,
+                resolution.conflict.as_dict(),
+            )
+
     return BusinessEvent(
         business_event_id=business_event_id,
         event_name="conversion",
@@ -82,6 +127,7 @@ def map_deal_stage_event(
         value_currency=str(props.get("currency") or "USD").upper(),
         value_type="monetary",
         source="hubspot",
+        account_id_hash=account_hash,
     )
 
 
@@ -99,6 +145,7 @@ class HubSpotWorker(IngestWorker):
         payload = self._http.get_json(url, headers=headers)
 
         hasher = build_hasher(self._registry, tenant_id)
+        linker = self._account_linker
         events: list[BusinessEvent] = []
         errors = 0
         for item in as_event_list(payload):
@@ -106,7 +153,9 @@ class HubSpotWorker(IngestWorker):
                 errors += 1
                 continue
             try:
-                mapped = map_deal_stage_event(item, hasher)
+                mapped = map_deal_stage_event(
+                    item, hasher, linker=linker, tenant_id=tenant_id
+                )
                 if mapped is not None:
                     events.append(mapped)
             except Exception:  # noqa: BLE001 — one bad event shouldn't fail the whole cycle
