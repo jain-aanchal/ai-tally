@@ -57,6 +57,18 @@ import {
   emptyReport,
 } from "./attribution";
 import type { GuardrailMode, GuardrailRule, GuardrailScopeKind } from "./guardrails";
+import {
+  REFUND_VALUE_TYPE,
+  positiveValueTypes,
+  queryRevenuePolicy,
+  revenueSourceFilter,
+} from "./revenueSources";
+import {
+  accountRevenueReport,
+  accountRevenueSql,
+  type AccountRevenueReport,
+  type AccountRevenueSqlRow,
+} from "./accountRevenue";
 
 const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
@@ -1518,6 +1530,11 @@ export async function queryAttribution(
   filters: AttributionFilters,
 ): Promise<AttributionReport | null> {
   return tryLive(async (db, tenant) => {
+    // CTO-194: which sources/value types count as revenue for this tenant. Resolved from the
+    // control plane, and falls back to the defaults (all sources, monetary + mrr, refunds net off)
+    // when the tenant has no row or the gateway is unreachable — it never throws, so a gateway
+    // outage degrades to the default policy rather than blanking the whole attribution report.
+    const policy = await queryRevenuePolicy();
     const outcomeName = filters.outcome ?? "conversion";
     const tagSql = filters.tag ? `AND s.FeatureTag = {tag:String}` : "";
     // CTO-106: prefer the typed GenAiSystem column (the real shape post-CTO-106),
@@ -1577,10 +1594,24 @@ export async function queryAttribution(
       convByProvider.set(r.provider, parseInt(r.conversions, 10) || 0);
     }
 
-    // Revenue per provider (CTO-110): sum (conversion + subscription_renewal) − |refund|, and
-    // count distinct paying users. Joined on UserIdHash the same way as conversion counts. The
-    // sum is in USD decimal (ClickHouse Decimal arithmetic on Int64 micro), we then convert to
-    // integer micro-USD at the boundary like everywhere else.
+    // Revenue per provider (CTO-110, reworked in CTO-194).
+    //
+    // This used to require `b.Source = 'stripe'` and key off EventName. Both were wrong: `Source`
+    // is an unconstrained LowCardinality(String) chosen by whichever connector ingested the row, so
+    // any tenant on a non-Stripe biller had 100% of its revenue silently dropped, and EventName is
+    // equally freeform. `ValueType` is the real discriminator — a ClickHouse enum of
+    // ('monetary'=1,'count'=2,'mrr'=3,'refund'=4) — so we sum the money-typed events and subtract
+    // refunds, which net off rather than being ignored. Source is now only ever a per-tenant
+    // NARROWING, and absent config means every source counts (see lib/revenueSources.ts).
+    //
+    // `users` counts only users who actually carry a revenue-typed event; a user whose only event
+    // is a 'count' engagement signal must not dilute value/user into a fabricated number.
+    //
+    // ValueAmountMicro is Nullable(Int64), so `sumIf` over a group with no matching row yields NULL
+    // rather than 0 and the NULL then swallows the whole subtraction. The `ifNull(..., 0)` inside
+    // each sumIf is what keeps a tenant with zero refunds from reporting NULL revenue.
+    const positiveTypes = positiveValueTypes(policy);
+    const sourceFilter = revenueSourceFilter(policy, "b");
     const revenueRows = await rowsP<{
       provider: string;
       revenue: string;
@@ -1589,19 +1620,30 @@ export async function queryAttribution(
       db,
       `SELECT
          ${providerExpr} AS provider,
-         (sumIf(b.ValueAmountMicro, b.EventName IN ('conversion', 'subscription_renewal'))
-            - sumIf(abs(b.ValueAmountMicro), b.EventName = 'refund')) / 1000000 AS revenue,
-         uniqExact(b.UserIdHash) AS users
+         (sumIf(ifNull(b.ValueAmountMicro, 0), b.ValueType IN {positiveTypes:Array(String)})
+            - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String}))
+           / 1000000 AS revenue,
+         uniqExactIf(
+           b.UserIdHash,
+           b.ValueType IN {positiveTypes:Array(String)} OR b.ValueType = {refundType:String}
+         ) AS users
        FROM business_events b
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
-         AND b.Source = 'stripe'
          AND b.OccurredAt >= now() - INTERVAL 30 DAY
          AND b.UserIdHash != ''
+         ${sourceFilter.sql}
          ${tagSql}
          ${providerSql}
        GROUP BY provider`,
-      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+      {
+        tenant,
+        tag: filters.tag ?? "",
+        provider: filters.provider ?? "",
+        positiveTypes,
+        refundType: REFUND_VALUE_TYPE,
+        ...sourceFilter.params,
+      },
     );
     const revenueByProvider = new Map<
       string,
@@ -1635,6 +1677,33 @@ export async function queryAttribution(
 
     if (perProvider.length === 0) return emptyReport(filters);
     return { filters, perProvider, totals, isMock: false };
+  });
+}
+
+// --- Revenue per account (CTO-196) --------------------------------------------------------------
+
+/**
+ * Net revenue per account over the same 30 day window the cost queries use.
+ *
+ * The SQL and the null-vs-zero rule live in lib/accountRevenue.ts, which documents both; this is
+ * only the round trip. Two properties worth restating here because they are easy to break:
+ *
+ * - The tenant's E1 revenue policy decides what counts, so uploaded revenue and connector revenue
+ *   go through one filter. A gateway outage falls back to the default policy rather than blanking
+ *   the figure, same as queryAttribution.
+ * - The grouping key is the `AccountIdHash` already on the row. Revenue is never re-keyed from a
+ *   user here: E2's AccountLinker owns the one user, one account rule and lands ambiguous revenue
+ *   unattributed with an AccountConflict finding, and the unattributed bucket is reported rather
+ *   than dropped.
+ *
+ * Returns null on any ClickHouse error, so a caller falls back rather than rendering a zero.
+ */
+export async function queryAccountRevenue(): Promise<AccountRevenueReport | null> {
+  return tryLive(async (db, tenant) => {
+    const policy = await queryRevenuePolicy();
+    const { sql, params } = accountRevenueSql(policy);
+    const rows = await rowsP<AccountRevenueSqlRow>(db, sql, { tenant, ...params });
+    return accountRevenueReport(rows);
   });
 }
 

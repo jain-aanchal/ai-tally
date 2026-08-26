@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from tally.account_identity import AccountLinker
 from tally.enrichment import enrich_cost
 from tally.models import discover_models
 from tally.pricing import seed_catalog
@@ -60,6 +61,7 @@ from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
     hash_customer_email,
+    hash_stripe_customer,
     map_stripe_event,
     verify_stripe_signature,
 )
@@ -116,6 +118,11 @@ from gateway.tenant_guardrails import (
 )
 from gateway.tenant_integrations import TenantIntegrationStore
 from gateway.tenant_replay import TenantReplayStore
+from gateway.tenant_revenue_sources import (
+    RevenueSourceConfigError,
+    RevenueSourceConfigInput,
+    TenantRevenueSourceStore,
+)
 from gateway.tenant_stripe import TenantStripeStore
 from gateway.tenant_unit_economics import (
     TenantUnitEconomicsStore,
@@ -192,6 +199,10 @@ async def lifespan(app: FastAPI):
     # Per-tenant LTV/CAC band thresholds (CTO-126): overrides the hardcoded B2B-SaaS defaults the
     # dashboard's ltvCacBand/paybackBand classifiers use. A tenant with no row keeps the defaults.
     app.state.tenant_unit_economics = TenantUnitEconomicsStore(settings)
+    # Per-tenant revenue source config (CTO-194): which business_events.Source values count as
+    # revenue on /attribution. A tenant with no row counts every source and discriminates on
+    # ValueType, which is what replaced the old hardcoded Source='stripe' filter.
+    app.state.tenant_revenue_sources = TenantRevenueSourceStore(settings)
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
     # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
@@ -219,6 +230,11 @@ async def lifespan(app: FastAPI):
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
     app.state.stripe_event_seen = set()
+    # CTO-195: per-tenant user→account map shared by every revenue connector in this process.
+    # It learns from events that state both, and refuses to answer for a user seen against two
+    # accounts (see tally.account_identity). In-process for the same reason the dedup set above
+    # is: losing it on restart costs an honest blank, never a wrong account.
+    app.state.account_linker = AccountLinker()
     app.state.catalog = seed_catalog()
     app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
     app.state.limiter = RateLimiter(
@@ -1383,6 +1399,24 @@ async def stripe_webhook(
     hashed = hash_customer_email(registry, tenant, mapped.customer_email)
     user_id_hash = hashed[0] if hashed else ""
 
+    # CTO-195: the Stripe Customer is the account that owns this subscription/invoice, so it goes
+    # to AccountIdHash. UserIdHash above is untouched. When Stripe named no customer (rare, but a
+    # manual charge can arrive without one) the linker may still know which account this user
+    # belongs to from an earlier event; if that user has ever been seen under two accounts it
+    # answers with '' rather than picking one, and the conflict is logged as a DQ finding.
+    stated = hash_stripe_customer(registry, tenant, mapped.stripe_customer_id)
+    linker: AccountLinker = app.state.account_linker
+    resolution = linker.resolve(
+        tenant,
+        user_id_hash=user_id_hash,
+        stated_account_id_hash=stated[0] if stated else "",
+        source="stripe",
+    )
+    if resolution.conflict is not None:
+        logger.warning(
+            "account identity conflict (tenant=%s): %s", tenant, resolution.conflict.as_dict()
+        )
+
     # Build the BusinessEvent. ValueType is "monetary" for everything except churn (which is a
     # count event with value 0). Currency comes off the Stripe payload, defaulting to USD.
     value_type = "monetary"
@@ -1402,6 +1436,7 @@ async def stripe_webhook(
         value_currency=mapped.currency,
         value_type=value_type,
         source="stripe",
+        account_id_hash=resolution.account_id_hash,
     )
 
     store: ClickHouseStore = app.state.store
@@ -1430,6 +1465,11 @@ async def stripe_webhook(
             "event_name": mapped.event_name,
             "value_amount_micro": mapped.value_amount_micro,
             "currency": mapped.currency,
+            # CTO-195: whether this revenue reached an account, and whether that account was
+            # stated by Stripe or inferred from the user. Never the hash itself: the response
+            # goes back over the wire to Stripe and a hash is still an identifier.
+            "account_attributed": resolution.is_attributed,
+            "account_inferred": resolution.inferred,
         },
         status_code=200,
     )
@@ -1577,6 +1617,61 @@ async def upsert_tenant_unit_economics_config(
     return JSONResponse(
         {"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200
     )
+
+
+@app.get("/v1/tenant/revenue-sources/config")
+def get_tenant_revenue_source_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Revenue source config for the caller's tenant (CTO-194).
+
+    Returns ``config: null`` when the tenant has no row — the web reader then applies the defaults
+    (every source counts; ValueType monetary + mrr are revenue; refunds net off). Same per-tenant
+    auth as the unit-economics route.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    store: TenantRevenueSourceStore = app.state.tenant_revenue_sources
+    config = store.get(tenant_id)
+    return JSONResponse(
+        {"tenant_id": tenant_id, "config": config.as_dict() if config else None},
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/revenue-sources/config")
+async def upsert_tenant_revenue_source_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Upsert the tenant's revenue source config. Idempotent on ``change_id`` (CTO-194).
+
+    Body: ``{revenue_sources: string[] | null, include_mrr?: bool, change_id, updated_by?}``.
+    ``revenue_sources: null`` means every source counts. An empty array is rejected (422) because
+    "nothing is revenue" silently blanks the dashboard and is never what a caller means.
+    """
+    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+    change_id = body.get("change_id")
+    if not isinstance(change_id, str) or not change_id:
+        raise HTTPException(status_code=422, detail="change_id required (uuid)")
+    try:
+        config_input = RevenueSourceConfigInput.from_json(body)
+        config = app.state.tenant_revenue_sources.upsert(
+            tenant_id,
+            config_input,
+            change_id=change_id,
+            actor=body.get("updated_by"),
+        )
+    except RevenueSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": config.as_dict()}, status_code=200)
 
 
 def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, Any]:
