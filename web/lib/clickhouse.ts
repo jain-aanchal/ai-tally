@@ -889,6 +889,81 @@ function isoDaysFrom(startIso: string, count: number): string[] {
 }
 
 /**
+ * The window + dimension slice the /cost-per-customer reads run under (CTO-223, D3).
+ *
+ * The page used to be fixed at {@link ACCOUNT_WINDOW_DAYS}; the design foundation's FilterBar now
+ * drives a user-selectable window and optional feature / account filters. Everything is optional so
+ * an unfiltered caller (and the reconciliation-bound default view) behaves exactly as before.
+ */
+export interface AccountCostQuery {
+  /** Calendar days, inclusive of today. Clamped to the shared explore ceiling. Default 30. */
+  windowDays?: number;
+  /** Restrict the direct-cost scan to these feature tags. Empty / absent = every feature. */
+  features?: string[];
+  /** Restrict to these account id hashes. Empty / absent = every account. */
+  accounts?: string[];
+}
+
+/** Clamp a requested account window to a real number of days, defaulting to the 30-day standard. */
+function accountWindowDays(days?: number): number {
+  return clampWindowDays(days ?? ACCOUNT_WINDOW_DAYS);
+}
+
+/** The `daily_account_rollup` day predicate for a window of `days`, calendar-aligned like the fixed
+ *  constant it generalises. `days` is a clamped integer, so the interpolation carries no user text. */
+function accountDayWindow(days: number): string {
+  return `Day >= toDate(now()) - INTERVAL ${days - 1} DAY`;
+}
+
+/**
+ * The feature / account multi-select clauses for the account rollup reads. Each becomes an
+ * `AND <expr> IN {key:Array(String)}` with the values bound as parameters, never interpolated,
+ * exactly like {@link exploreFilterClauses}. Applied identically to the direct and the excluded
+ * reads so a filtered slice stays internally consistent: whatever share of compute and egress the
+ * selected features/accounts carry is narrowed the same way the direct cost is, rather than pairing
+ * a filtered direct total with the tenant's whole infrastructure bill. The page still hides the
+ * whole-tenant reconciliation line under a filter, because a slice is not the tenant total.
+ */
+function accountRollupFilters(query: AccountCostQuery | undefined): {
+  clause: string;
+  params: Record<string, string[]>;
+} {
+  const clauses: string[] = [];
+  const params: Record<string, string[]> = {};
+  if (query?.features && query.features.length > 0) {
+    clauses.push("AND FeatureTag IN {f_features:Array(String)}");
+    params.f_features = query.features;
+  }
+  if (query?.accounts && query.accounts.length > 0) {
+    clauses.push(`AND ${ACCOUNT_ID} IN {f_accounts:Array(String)}`);
+    params.f_accounts = query.accounts;
+  }
+  return { clause: clauses.join(" "), params };
+}
+
+/**
+ * Distinct feature tags seen on directly attributable spend in the window, for the FilterBar's
+ * feature dropdown (CTO-223). Untagged traffic (`FeatureTag = ''`) is not a feature and is left out,
+ * matching how the account-detail top-features list treats it. Returns `null` when unreachable so
+ * the page renders no feature filter rather than a fabricated option list.
+ */
+export async function queryAccountFeatureTags(days?: number): Promise<string[] | null> {
+  return tryLive(async (db, tenant) => {
+    const windowDays = accountWindowDays(days);
+    const out = await rows<{ feature: string }>(
+      db,
+      `SELECT DISTINCT FeatureTag AS feature
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${accountDayWindow(windowDays)}
+         AND ${DIRECT_ONLY} AND FeatureTag != ''
+       ORDER BY feature`,
+      tenant,
+    );
+    return out.map((r) => r.feature);
+  });
+}
+
+/**
  * Direct cost per account over the window: layer split, distinct users, span count.
  *
  * Real accounts come back ranked by cost; the unattributed bucket is returned separately and is
@@ -896,30 +971,33 @@ function isoDaysFrom(startIso: string, count: number): string[] {
  * no account and it must be statable unconditionally. Returns `null` (via tryLive) when ClickHouse
  * is unreachable so the route can fall back.
  */
-export async function queryAccountCosts(): Promise<AccountCosts | null> {
+export async function queryAccountCosts(query?: AccountCostQuery): Promise<AccountCosts | null> {
   return tryLive(async (db, tenant) => {
+    const windowDays = accountWindowDays(query?.windowDays);
+    const windowClause = accountDayWindow(windowDays);
+    const { clause: filterClause, params: filterParams } = accountRollupFilters(query);
     // Two reads rather than one, and that is forced. Distinct users comes from a `uniq`
     // AggregateFunction state, and merged states cannot be added together: a user who touched both
     // the llm and the tools layer would be counted once per layer if we summed a per-layer
     // uniqMerge. So users and spans are merged at account grain here, and the layer split is a
     // second pass that only ever sums money.
-    const totals = await rows<{ account: string; spans: string; users: string }>(
+    const totals = await rowsP<{ account: string; spans: string; users: string }>(
       db,
       `SELECT ${ACCOUNT_ID} AS account,
               sum(SpanCount) AS spans,
               uniqMerge(UserCountState) AS users
        FROM daily_account_rollup
-       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       WHERE TenantId = {tenant:String} AND ${windowClause} AND ${DIRECT_ONLY} ${filterClause}
        GROUP BY account`,
-      tenant,
+      { tenant, ...filterParams },
     );
-    const byLayerRows = await rows<{ account: string; layer: DirectLayer; cost: string }>(
+    const byLayerRows = await rowsP<{ account: string; layer: DirectLayer; cost: string }>(
       db,
       `SELECT ${ACCOUNT_ID} AS account, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM daily_account_rollup
-       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       WHERE TenantId = {tenant:String} AND ${windowClause} AND ${DIRECT_ONLY} ${filterClause}
        GROUP BY account, layer`,
-      tenant,
+      { tenant, ...filterParams },
     );
 
     const layers = new Map<string, DirectSpendByLayer>();
@@ -952,7 +1030,7 @@ export async function queryAccountCosts(): Promise<AccountCosts | null> {
     accounts.sort((a, b) => b.directCostMicroUsd - a.directCostMicroUsd);
 
     return {
-      windowDays: ACCOUNT_WINDOW_DAYS,
+      windowDays,
       accounts,
       unattributed,
       // Deliberately the sum of the rows as returned, not a separately rounded tenant-level sum, so
@@ -977,19 +1055,24 @@ export async function queryAccountCosts(): Promise<AccountCosts | null> {
  * Returns `null` (via tryLive) when ClickHouse is unreachable; the caller must not read that as
  * zero excluded cost, which would be the most flattering possible reading of a failed query.
  */
-export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null> {
+export async function queryExcludedInfraCost(query?: AccountCostQuery): Promise<ExcludedInfraCost | null> {
   return tryLive(async (db, tenant) => {
+    const windowDays = accountWindowDays(query?.windowDays);
+    // Same feature / account filter as the direct read (accountRollupFilters), so the excluded pot is
+    // narrowed to the same slice: the compute and egress that the selected features/accounts carry,
+    // rather than the tenant's whole infrastructure bill paired with a filtered direct cost.
+    const { clause: filterClause, params: filterParams } = accountRollupFilters(query);
     // Grouped by layer rather than summed flat so the two figures stay separable: compute and
     // egress have very different fixes, and a later drill-down needs them apart. LAYER_CASE is
     // reused rather than reading GenAiOperation directly so the operation-to-layer mapping keeps
     // living in exactly one place.
-    const out = await rows<{ layer: string; cost: string }>(
+    const out = await rowsP<{ layer: string; cost: string }>(
       db,
       `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM daily_account_rollup
-       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND NOT (${DIRECT_ONLY})
+       WHERE TenantId = {tenant:String} AND ${accountDayWindow(windowDays)} AND NOT (${DIRECT_ONLY}) ${filterClause}
        GROUP BY layer`,
-      tenant,
+      { tenant, ...filterParams },
     );
     let computeMicroUsd = 0;
     let egressMicroUsd = 0;
@@ -998,7 +1081,7 @@ export async function queryExcludedInfraCost(): Promise<ExcludedInfraCost | null
       else if (r.layer === "egress") egressMicroUsd = micro(r.cost);
     }
     return {
-      windowDays: ACCOUNT_WINDOW_DAYS,
+      windowDays,
       computeMicroUsd,
       egressMicroUsd,
       totalMicroUsd: computeMicroUsd + egressMicroUsd,
@@ -2286,8 +2369,46 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
  * Returns null on any ClickHouse error so the API can fall back to the mock
  * report (CI / fresh-clone friendliness).
  */
+/**
+ * The window + feature slice the attribution reads run under (CTO-223, D3).
+ *
+ * The report used to be fixed at a rolling 30-day window with no feature multi-select; the design
+ * foundation's FilterBar now drives both. Both fields are optional so an unparameterised caller
+ * behaves exactly as before. Provider narrowing still comes through {@link AttributionFilters}, whose
+ * single-provider shape the FilterBar honours when exactly one provider is selected.
+ */
+export interface AttributionQuery {
+  /** Rolling days back from now. Clamped to the shared explore ceiling. Default 30. */
+  windowDays?: number;
+  /** Restrict to these feature tags (FilterBar multi-select). Empty / absent = every feature. */
+  features?: string[];
+}
+
+/**
+ * Distinct feature tags seen on spans in the window, for the attribution FilterBar's feature
+ * dropdown (CTO-223). Reads otel_spans (the same table the report joins on) so the options match the
+ * data. Returns `null` when unreachable so the page shows no feature filter rather than a made-up
+ * list. Untagged spans (`FeatureTag = ''`) are not a feature and are excluded.
+ */
+export async function querySpanFeatureTags(days?: number): Promise<string[] | null> {
+  return tryLive(async (db, tenant) => {
+    const windowDays = clampWindowDays(days ?? 30);
+    const out = await rows<{ feature: string }>(
+      db,
+      `SELECT DISTINCT FeatureTag AS feature
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${windowDays} DAY
+         AND FeatureTag != ''
+       ORDER BY feature`,
+      tenant,
+    );
+    return out.map((r) => r.feature);
+  });
+}
+
 export async function queryAttribution(
   filters: AttributionFilters,
+  query?: AttributionQuery,
 ): Promise<AttributionReport | null> {
   return tryLive(async (db, tenant) => {
     // CTO-194: which sources/value types count as revenue for this tenant. Resolved from the
@@ -2296,6 +2417,15 @@ export async function queryAttribution(
     // outage degrades to the default policy rather than blanking the whole attribution report.
     const policy = await queryRevenuePolicy();
     const outcomeName = filters.outcome ?? "conversion";
+    // Rolling window, keeping the original semantics (a plain `now() - INTERVAL N DAY`); N is a
+    // clamped integer, never user text, so the interpolation is safe (CTO-223).
+    const windowDays = clampWindowDays(query?.windowDays ?? 30);
+    const windowSql = `now() - INTERVAL ${windowDays} DAY`;
+    // Feature multi-select from the FilterBar, applied on the span side (`s`) the same way the
+    // legacy single `tag` is. Both AND together, which is empty in the normal case where only one is
+    // set; a caller that sets both is deliberately narrowing to their intersection.
+    const featureValues = query?.features ?? [];
+    const featureSql = featureValues.length > 0 ? `AND s.FeatureTag IN {features:Array(String)}` : "";
     const tagSql = filters.tag ? `AND s.FeatureTag = {tag:String}` : "";
     // CTO-106: prefer the typed GenAiSystem column (the real shape post-CTO-106),
     // fall back to the legacy SpanAttributes['chatbot.real_provider'] for
@@ -2317,12 +2447,13 @@ export async function queryAttribution(
          sum(s.EstimatedCost) AS cost
        FROM otel_spans s
        WHERE s.TenantId = {tenant:String}
-         AND s.Timestamp >= now() - INTERVAL 30 DAY
+         AND s.Timestamp >= ${windowSql}
          AND s.GenAiOperation NOT IN ('compute', 'egress')
          ${tagSql}
+         ${featureSql}
          ${providerSql}
        GROUP BY provider`,
-      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "" },
+      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "", features: featureValues },
     );
 
     // Conversions per provider: a business_event whose UserIdHash matches a
@@ -2336,9 +2467,10 @@ export async function queryAttribution(
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
          AND b.EventName = {outcome:String}
-         AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         AND b.OccurredAt >= ${windowSql}
          AND s.GenAiOperation NOT IN ('compute', 'egress')
          ${tagSql}
+         ${featureSql}
          ${providerSql}
        GROUP BY provider`,
       {
@@ -2346,6 +2478,7 @@ export async function queryAttribution(
         outcome: outcomeName,
         tag: filters.tag ?? "",
         provider: filters.provider ?? "",
+        features: featureValues,
       },
     );
 
@@ -2390,16 +2523,18 @@ export async function queryAttribution(
        FROM business_events b
        INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
-         AND b.OccurredAt >= now() - INTERVAL 30 DAY
+         AND b.OccurredAt >= ${windowSql}
          AND b.UserIdHash != ''
          ${sourceFilter.sql}
          ${tagSql}
+         ${featureSql}
          ${providerSql}
        GROUP BY provider`,
       {
         tenant,
         tag: filters.tag ?? "",
         provider: filters.provider ?? "",
+        features: featureValues,
         positiveTypes,
         refundType: REFUND_VALUE_TYPE,
         ...sourceFilter.params,
@@ -2426,6 +2561,37 @@ export async function queryAttribution(
     });
     perProvider.sort((a, b) => b.sessions - a.sessions);
 
+    // Daily LLM cost per provider for the stacked breakdown chart (CTO-223). The day list is built
+    // from ClickHouse's own clock via a bounds SELECT, never the Node clock, so the axis cannot drift
+    // a day against the SQL window (the CTO-203 seam). Days with no spend are zero-filled so the
+    // chart's window is honest about quiet days rather than collapsing them.
+    const dailyRows = await rowsP<{ day: string; provider: string; cost: string }>(
+      db,
+      `SELECT toString(toDate(s.Timestamp)) AS day, ${providerExpr} AS provider, sum(s.EstimatedCost) AS cost
+       FROM otel_spans s
+       WHERE s.TenantId = {tenant:String}
+         AND s.Timestamp >= ${windowSql}
+         AND s.GenAiOperation NOT IN ('compute', 'egress')
+         ${tagSql}
+         ${featureSql}
+         ${providerSql}
+       GROUP BY day, provider`,
+      { tenant, tag: filters.tag ?? "", provider: filters.provider ?? "", features: featureValues },
+    );
+    const bounds = await rowsP<{ start: string }>(
+      db,
+      `WITH toDate(now()) AS td SELECT toString(td - {back:UInt32}) AS start`,
+      { back: Math.max(0, windowDays - 1) },
+    );
+    const startIso = bounds[0]?.start;
+    const dayList = startIso ? isoDaysFrom(startIso, windowDays) : [];
+    const byDay = new Map<string, Record<string, number>>(dayList.map((d) => [d, {}]));
+    for (const r of dailyRows) {
+      const bucket = byDay.get(r.day);
+      if (bucket) bucket[r.provider] = (bucket[r.provider] ?? 0) + micro(r.cost);
+    }
+    const dailyByProvider = dayList.map((date) => ({ date, byProvider: byDay.get(date)! }));
+
     const totals = {
       sessions: perProvider.reduce((s, p) => s + p.sessions, 0),
       conversions: perProvider.reduce((s, p) => s + p.conversions, 0),
@@ -2436,7 +2602,7 @@ export async function queryAttribution(
       totals.conversions > 0 ? Math.round(totals.costMicroUsd / totals.conversions) : null;
 
     if (perProvider.length === 0) return emptyReport(filters);
-    return { filters, perProvider, totals, isMock: false };
+    return { filters, perProvider, totals, dailyByProvider, isMock: false };
   });
 }
 
@@ -2458,12 +2624,15 @@ export async function queryAttribution(
  *
  * Returns null on any ClickHouse error, so a caller falls back rather than rendering a zero.
  */
-export async function queryAccountRevenue(): Promise<AccountRevenueReport | null> {
+export async function queryAccountRevenue(days?: number): Promise<AccountRevenueReport | null> {
   return tryLive(async (db, tenant) => {
+    const windowDays = accountWindowDays(days);
     const policy = await queryRevenuePolicy();
-    const { sql, params } = accountRevenueSql(policy);
+    // Same window as the cost read, so every margin subtracts two figures measured over the same
+    // days rather than netting 7-day cost against 30-day revenue (CTO-223).
+    const { sql, params } = accountRevenueSql(policy, windowDays);
     const rows = await rowsP<AccountRevenueSqlRow>(db, sql, { tenant, ...params });
-    return accountRevenueReport(rows);
+    return accountRevenueReport(rows, windowDays);
   });
 }
 

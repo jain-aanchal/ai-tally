@@ -33,10 +33,14 @@
 // a route handler would only add a hop.
 
 import { Card } from "@/components/Card";
+import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { Blank, Money } from "@/components/HonestValue";
+import { PageHeader } from "@/components/PageHeader";
+import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import {
   ALLOCATION_RULE_DESCRIPTIONS,
   ALLOCATION_RULE_LABELS,
+  accountDisplayName,
   accountsView,
   allocateAccountCosts,
   allocatedRowsTotal,
@@ -52,31 +56,74 @@ import { type AccountRevenueReport } from "@/lib/accountRevenue";
 import { queryAllocationRule, type AllocationRuleSetting } from "@/lib/allocationConfig";
 import {
   queryAccountCosts,
+  queryAccountFeatureTags,
   queryAccountRevenue,
   queryExcludedInfraCost,
 } from "@/lib/clickhouse";
+import { parseFilters, rangeDays } from "@/lib/filters";
 import { AccountTable } from "./AccountTable";
 import { HowToTagDetails, OnboardingEmptyState } from "./Onboarding";
 
 export const dynamic = "force-dynamic";
 
-export default async function CostPerCustomerPage() {
-  const [costs, labels, revenue, excluded, allocationSetting] = await Promise.all([
-    queryAccountCosts(),
+interface PageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+export default async function CostPerCustomerPage({ searchParams }: PageProps) {
+  const params = await searchParams;
+  // Read the same URL query the FilterBar writes (CTO-223): the time range drives the window every
+  // read below runs under, and the feature / account multi-selects narrow the slice. `?tag=`/`?scope=`
+  // and any other unrelated param are preserved by the shared filter serialization.
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === "string") sp.set(k, v);
+    else if (Array.isArray(v) && v[0] !== undefined) sp.set(k, v[0]);
+  }
+  const filterState = parseFilters(sp);
+  const windowDays = rangeDays(filterState.range);
+  const features = filterState.filters.feature;
+  const accounts = filterState.filters.account;
+  const hasDimFilter = features.length > 0 || accounts.length > 0;
+
+  const [costs, labels, revenue, excluded, allocationSetting, featureTags] = await Promise.all([
+    queryAccountCosts({ windowDays, features, accounts }),
     queryAccountLabels(),
-    queryAccountRevenue(),
-    queryExcludedInfraCost(),
+    queryAccountRevenue(windowDays),
+    queryExcludedInfraCost({ windowDays, features, accounts }),
     queryAllocationRule(),
+    queryAccountFeatureTags(windowDays),
   ]);
+
+  // Filter options for the bar. Features come from the window's directly attributable spend; accounts
+  // are the rows we already have, shown by label where one exists so the dropdown is not a wall of
+  // hashes. A dimension with no options renders no control (see FilterBar), so a fresh tenant with no
+  // features or accounts simply sees the time range.
+  const labelMap = labels ?? new Map<string, string>();
+  const featureOptions: FilterOption[] = (featureTags ?? []).map((f) => ({ value: f }));
+  const accountOptions: FilterOption[] = (costs?.accounts ?? []).map((r) => ({
+    value: r.accountIdHash,
+    label: accountDisplayName(r.accountIdHash, labelMap.get(r.accountIdHash)),
+  }));
+
+  const toolbar = (
+    <FilterBar
+      hideGroupBy
+      options={{ feature: featureOptions, account: accountOptions }}
+    />
+  );
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Cost per customer</h1>
-        {costs ? (
-          <span className="text-sm text-muted">Last {costs.windowDays} days</span>
-        ) : null}
-      </div>
+      <PageHeader
+        title="Cost per customer"
+        subtitle={
+          costs
+            ? `Direct spend by account plus each account's allocated share of compute and egress, over the last ${costs.windowDays} days.`
+            : "Direct spend by account plus each account's allocated share of compute and egress."
+        }
+        toolbar={toolbar}
+      />
 
       <p className="max-w-prose text-sm text-muted">
         Directly attributable spend (LLM, tools, vector, embeddings) grouped by the account each span
@@ -94,6 +141,7 @@ export default async function CostPerCustomerPage() {
           revenue={revenue}
           excluded={excluded}
           allocationSetting={allocationSetting}
+          filtered={hasDimFilter}
         />
       )}
     </div>
@@ -106,6 +154,7 @@ function Report({
   revenue,
   excluded,
   allocationSetting,
+  filtered,
 }: {
   costs: AccountCosts;
   labels: Map<string, string> | null;
@@ -113,6 +162,12 @@ function Report({
   revenue: AccountRevenueReport | null;
   excluded: ExcludedInfraCost | null;
   allocationSetting: AllocationRuleSetting;
+  /**
+   * A feature or account filter is narrowing the slice (CTO-223). The whole-tenant reconciliation
+   * line below claims the rows sum to what `/cost` reports for the window, which is only true of the
+   * unfiltered view, so it is suppressed here rather than left to make a false claim about a slice.
+   */
+  filtered: boolean;
 }) {
   const share = unattributedShare(costs);
   const attributed = attributedSpend(costs);
@@ -127,38 +182,45 @@ function Report({
     (revenue?.accounts ?? []).map((a) => [a.accountIdHash, a.revenueMicroUsd]),
   );
 
+  const windowHint = `last ${costs.windowDays} days`;
+
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-4">
-        <Stat label="Direct spend (measured)">
-          <Money micro={costs.totalDirectMicroUsd} />
-        </Stat>
-        <Stat label="Allocated infra (estimated)">
-          {allocated === null ? (
-            <Blank reason="the compute and egress total could not be read, so nothing could be allocated" />
-          ) : (
-            <Money micro={allocated.allocatedTotalMicroUsd} />
-          )}
-        </Stat>
-        <Stat label="Total cost">
-          {allocated === null ? (
-            <Blank reason="total cost needs the compute and egress figure, which could not be read" />
-          ) : (
-            <Money micro={allocated.tenantTotalMicroUsd} />
-          )}
-        </Stat>
-        <Stat label="Direct spend with no account">
-          {/* The valve. `null` only when the tenant recorded no direct spend at all, where "0%
-              unattributed" would claim perfect coverage of nothing. */}
-          {share === null ? (
-            <Blank
-              reason={`no directly attributable spend recorded in the last ${costs.windowDays} days, so there is no share to report`}
-            />
-          ) : (
-            formatShare(share)
-          )}
-        </Stat>
-      </div>
+      <TileGrid>
+        <SummaryTile
+          label="Direct spend (measured)"
+          micro={costs.totalDirectMicroUsd}
+          hint={windowHint}
+        />
+        <SummaryTile
+          label="Allocated infra (estimated)"
+          micro={allocated === null ? null : allocated.allocatedTotalMicroUsd}
+          reason="the compute and egress total could not be read, so nothing could be allocated"
+          hint={windowHint}
+        />
+        <SummaryTile
+          label="Total cost"
+          micro={allocated === null ? null : allocated.tenantTotalMicroUsd}
+          reason="total cost needs the compute and egress figure, which could not be read"
+          hint={windowHint}
+        />
+        {/* The unattributed share is a percentage, not money, so it keeps its own honest-blank tile
+            rather than passing through Money. The valve returns `null` only when the tenant recorded
+            no direct spend at all, where "0% unattributed" would claim perfect coverage of nothing. */}
+        <ShareTile
+          share={share}
+          reason={`no directly attributable spend recorded in the ${windowHint}, so there is no share to report`}
+          hint={windowHint}
+        />
+      </TileGrid>
+
+      {filtered ? (
+        <p className="max-w-prose rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-muted">
+          Filtered view: only the selected features and accounts are counted, so every total here is
+          a slice of the tenant&apos;s spend rather than the whole bill. The whole-tenant
+          reconciliation against the Cost tab is hidden until you clear the filter.
+        </p>
+      ) : null}
 
       <p className="max-w-prose text-xs text-muted">
         Attributed direct spend is <Money micro={attributed} /> of{" "}
@@ -210,8 +272,11 @@ function Report({
       )}
 
       {/* The reconciliation line sums the RENDERED rows, so it only prints where rows were
-          rendered. In the onboarding state there is no table to reconcile. */}
-      {allocated && view !== "onboarding" ? <Reconciliation allocated={allocated} /> : null}
+          rendered. In the onboarding state there is no table to reconcile, and under a dimension
+          filter it would claim a slice equals the whole-tenant bill, so it is suppressed there too. */}
+      {allocated && view !== "onboarding" && !filtered ? (
+        <Reconciliation allocated={allocated} />
+      ) : null}
     </div>
   );
 }
@@ -479,11 +544,29 @@ function Unreachable() {
   );
 }
 
-function Stat({ label, children }: { label: string; children: React.ReactNode }) {
+/**
+ * The unattributed-share tile, matching the SummaryTile shape but rendering a percentage rather than
+ * money. `share === null` is the honesty valve (no direct spend at all), so it renders the same
+ * explained blank the money tiles do rather than a fabricated "0%".
+ */
+function ShareTile({
+  share,
+  reason,
+  hint,
+}: {
+  share: number | null;
+  reason: string;
+  hint: string;
+}) {
   return (
-    <div className="rounded-xl border border-edge bg-panel p-4">
-      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{children}</div>
+    <div className="flex flex-col gap-1 rounded-xl border border-edge bg-panel p-4">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">
+        Direct spend with no account
+      </span>
+      <span className="text-2xl font-semibold tabular-nums">
+        {share === null ? <Blank reason={reason} /> : formatShare(share)}
+      </span>
+      <span className="text-xs text-muted">{hint}</span>
     </div>
   );
 }

@@ -23,6 +23,7 @@ import Link from "next/link";
 
 import { Card } from "@/components/Card";
 import { Blank, Money, Pct } from "@/components/HonestValue";
+import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import {
   DIRECT_LAYERS,
   type AccountDetail,
@@ -120,30 +121,26 @@ function Report({ detail }: { detail: AccountDetail }) {
   const perUser = costPerUser(detail);
   const windowDays = detail.trend.length;
 
+  const windowHint = `last ${windowDays} days`;
+
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-4">
-        <Stat label="Direct cost">
-          <Money micro={detail.directCostMicroUsd} />
-        </Stat>
-        <Stat label="Users">
-          {detail.distinctUsers > 0 ? (
-            detail.distinctUsers.toLocaleString()
-          ) : (
-            <Blank reason="no user id was recorded on this account's spans, so distinct users cannot be counted" />
-          )}
-        </Stat>
-        <Stat label="Spans">
-          <span className="tabular-nums">{detail.spanCount.toLocaleString()}</span>
-        </Stat>
-        <Stat label="Cost per user">
-          {perUser.micro === null ? (
-            <Blank reason={perUser.reason ?? "not enough data to divide cost by users"} />
-          ) : (
-            <Money micro={perUser.micro} />
-          )}
-        </Stat>
-      </div>
+      <TileGrid>
+        <SummaryTile label="Direct cost" micro={detail.directCostMicroUsd} hint={windowHint} />
+        <CountTile
+          label="Users"
+          value={detail.distinctUsers > 0 ? detail.distinctUsers : null}
+          reason="no user id was recorded on this account's spans, so distinct users cannot be counted"
+          hint={windowHint}
+        />
+        <CountTile label="Spans" value={detail.spanCount} hint={windowHint} />
+        <SummaryTile
+          label="Cost per user"
+          micro={perUser.micro}
+          reason={perUser.reason ?? "not enough data to divide cost by users"}
+          hint={windowHint}
+        />
+      </TileGrid>
 
       <p className="max-w-prose text-sm text-muted">
         Directly attributable spend (LLM, tool calls, vector, embeddings) for this account over the
@@ -315,11 +312,33 @@ function Frame({
   );
 }
 
-function Stat({ label, children }: { label: string; children: React.ReactNode }) {
+/**
+ * A count tile matching {@link SummaryTile}'s shape for the non-money headline figures (users,
+ * spans). `value === null` renders the same explained blank the money tiles do, so an uncountable
+ * users figure is a reasoned blank rather than a fabricated zero.
+ */
+function CountTile({
+  label,
+  value,
+  reason,
+  hint,
+}: {
+  label: string;
+  value: number | null;
+  reason?: string;
+  hint?: string;
+}) {
   return (
-    <div className="rounded-xl border border-edge bg-panel p-4">
-      <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{children}</div>
+    <div className="flex flex-col gap-1 rounded-xl border border-edge bg-panel p-4">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <span className="text-2xl font-semibold tabular-nums">
+        {value === null ? (
+          <Blank reason={reason ?? "no value for this figure"} />
+        ) : (
+          value.toLocaleString()
+        )}
+      </span>
+      {hint && <span className="text-xs text-muted">{hint}</span>}
     </div>
   );
 }
