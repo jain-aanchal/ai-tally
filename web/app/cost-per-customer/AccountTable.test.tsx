@@ -130,13 +130,19 @@ describe("AccountTable", () => {
     // The zero-revenue account: revenue $0.00, margin minus its cost. Both are real numbers.
     expect(screen.getByText("$0.00")).toBeTruthy();
     expect(screen.getByText("-$1.00")).toBeTruthy();
-    // The unknown account gets a blank that says why, and no invented margin of minus cost.
-    expect(screen.getAllByText(/No value: no revenue source wired/i).length).toBe(2);
+    // The unknown account gets a blank that says why in the Revenue column, and no invented margin
+    // of minus cost. The Revenue column is the one place that carries the full reason; the Gross
+    // margin cell defers to it rather than repeating the same sentence.
+    expect(screen.getByText(/No value: no revenue source wired/i)).toBeTruthy();
+    expect(screen.getByText(/No value: unknown while this account's revenue is unknown/i)).toBeTruthy();
   });
 
   it("distinguishes an unreadable revenue source from an unwired one", () => {
     renderTable([row(LABELLED)], {}, {}, true);
-    expect(screen.getAllByText(/No value: revenue could not be read/i).length).toBe(2);
+    // The Revenue column carries the "could not be read" reason (distinct from "unwired"); the
+    // Gross margin cell defers to it rather than restating which flavour of unknown it is.
+    expect(screen.getByText(/No value: revenue could not be read/i)).toBeTruthy();
+    expect(screen.getByText(/No value: unknown while this account's revenue is unknown/i)).toBeTruthy();
     expect(screen.queryByText(/no revenue source wired/i)).toBeNull();
   });
 

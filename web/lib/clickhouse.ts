@@ -218,28 +218,20 @@ export async function queryOutliers(): Promise<CostOutlier[] | null> {
 }
 
 export async function queryRoi(): Promise<FeatureRoi[] | null> {
-  return tryLive(async (db, tenant) => {
-    const out = await rows<{ feature: string; cost: string; users: string }>(
-      db,
-      `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users
-       FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != ''
-       GROUP BY FeatureTag
-       ORDER BY cost DESC`,
-      tenant,
-    );
-    return out.map((r) => {
-      const users = Math.max(1, parseInt(r.users, 10) || 1);
-      return {
-        feature: r.feature,
-        costPerUserMicroUsd: Math.round(micro(r.cost) / users),
-        // value/payback/attribution require business-event attribution (not wired yet) → null.
-        valuePerUserMicroUsd: null,
-        paybackDays: null,
-        attributionRate: null,
-      };
-    });
-  });
+  // The Home ROI snapshot is a strict subset of the /features economics table, so it delegates
+  // rather than keeping its own copy. It used to hardcode value/payback/attribution to null with a
+  // "not wired yet" note; once the attribution stitcher started populating attribution_records
+  // (CTO-200) that note was stale and the snapshot silently disagreed with /features. One source of
+  // truth now: whatever /features shows per feature, Home shows the same for value and payback.
+  const econ = await queryFeatureEconomics();
+  if (econ === null) return null;
+  return econ.map((e) => ({
+    feature: e.feature,
+    costPerUserMicroUsd: e.costPerUserMicroUsd,
+    valuePerUserMicroUsd: e.valuePerUserMicroUsd,
+    paybackDays: e.paybackDays,
+    attributionRate: e.attributionRate,
+  }));
 }
 
 export async function queryDataQuality(): Promise<DataQuality | null> {

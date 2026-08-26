@@ -376,10 +376,12 @@ export function AccountTable({
           it at all". What it still does not delegate is the ▲ mark: that flags a per-row reason,
           which no tenant-wide sentence can carry. */}
       <p className="max-w-prose text-xs text-warn">
-        Gross margin subtracts <em>direct</em> cost only. Compute and egress carry no account, so
-        they sit in the Allocated and Total columns rather than in this subtraction, which leaves
-        every margin overstated. Treat the ranking as where to look first, not what a customer
-        actually earns. A ▲ flags a further per-row caveat on hover.
+        Gross margin subtracts <em>direct</em> cost only.{" "}
+        {allocationRule
+          ? "Compute and egress carry no account, so they sit in the Allocated and Total columns rather than in this subtraction, which leaves every margin overstated."
+          : "Compute and egress carry no account and nothing could be allocated this window, so they sit outside every row and each margin is overstated by their share of the customer's cost."}{" "}
+        Treat the ranking as where to look first, not what a customer actually earns. A ▲ flags a
+        further per-row caveat on hover.
       </p>
     </div>
   );
