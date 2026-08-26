@@ -68,6 +68,25 @@ a reaper to get the same property, and a reaper is one more thing that can silen
 A lock-contention skip is NOT a ``skipped`` run and records NO row. See :class:`TickResult` for the
 argument: ``skipped`` settles the cadence window, and settling a window that another replica is at
 this second working on would quietly cost a run.
+
+Shutdown is BOUNDED (CTO-219). The paragraph above about there being no per-job timeout still
+holds: ``asyncio.wait_for`` around a ``to_thread`` cannot kill the thread, so a timeout there would
+report a lie. But "we cannot force-kill the job" is not the same claim as "shutdown must block
+until the job feels like finishing", and the second one is what the original :meth:`Scheduler.stop`
+accidentally implemented. A SIGTERM arriving while a connector is halfway through a slow third
+party held the whole deploy open, and with the old lifespan ordering it also held the ingest
+buffer's flush, so the price of one slow connector was every buffered span in the process. So
+:meth:`Scheduler.stop` now waits a bounded time and then proceeds, leaving the worker thread to die
+with the process. What that abandons is spelled out on :meth:`Scheduler.stop`.
+
+Connections are POOLED on the read path (CTO-219). The first cut opened a fresh Postgres session
+per (job, tenant) per tick for the state read, another per recorded run, and one per tick for the
+tenant list. At five jobs by a few thousand tenants the connection handshakes alone cost more than
+the tick interval, so the loop ran back to back and Postgres forked a backend for each one. The
+state reads, the run inserts and the tenant listing now share a small
+:class:`SchedulerConnectionPool`. The lock path deliberately does NOT: see that class and
+:class:`PostgresAdvisoryLockProvider` for why a pooled connection cannot be allowed anywhere near a
+session-scoped advisory lock.
 """
 
 from __future__ import annotations
@@ -75,8 +94,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Protocol
@@ -114,6 +135,16 @@ _MIN_TICK_INTERVAL_S = 1.0
 # its own once whatever broke is fixed.
 _DEFAULT_BACKOFF_BASE_S = 300.0
 _DEFAULT_BACKOFF_CAP_S = 6 * 3600.0
+
+# How long a shutdown WAITS for the tick loop before proceeding without it (CTO-219). Generous
+# enough that a healthy tick between tenants finishes normally, short enough that a deploy is never
+# held open by one slow connector. It bounds the wait, not the job: see :meth:`Scheduler.stop`.
+_DEFAULT_SHUTDOWN_TIMEOUT_S = 30.0
+
+# Idle sessions the read path keeps warm. Small on purpose: the tick loop walks (job, tenant) pairs
+# sequentially, so one connection carries almost the whole tick, and the spare capacity is only for
+# the job bodies' own recording overlapping the loop's next read.
+_DEFAULT_POOL_MAX_IDLE = 4
 
 
 def _utcnow() -> datetime:
@@ -290,15 +321,147 @@ class RunStore(Protocol):
     ) -> None: ...
 
 
+class SchedulerConnectionPool:
+    """A small thread-safe pool of Postgres sessions for the scheduler's NON-LOCK path (CTO-219).
+
+    WHY. The first cut opened a connection per call, following ``TenantIntegrationStore``. That is
+    fine for a request handler that opens one; the tick loop opens one per (job, tenant) state read,
+    a second per recorded run, and one more per tick for the tenant list. Five jobs by a few thousand
+    tenants is tens of thousands of connects per tick, and a connect (TCP, TLS, auth, backend fork)
+    costs single-digit milliseconds, so the connection overhead alone exceeded the tick interval and
+    the loop ran back to back doing almost nothing else.
+
+    WHAT THIS POOL MUST NEVER HOLD: an advisory lock. ``pg_advisory_lock`` is scoped to the SESSION,
+    so a pooled connection returned while its lock was still held would hand the next borrower a
+    session that silently owns a lock it knows nothing about, and would release that lock at a
+    moment nobody chose. Worse, it would destroy the property CTO-214 picked advisory locks FOR: the
+    lock dying with the process, with no lease and no reaper. :class:`PostgresAdvisoryLockProvider`
+    therefore keeps its own dedicated session per held lock and never touches this pool.
+
+    That separation is sound rather than merely careful, because the pooled path holds no session
+    state at all: every connection is autocommit, and the only statements run on it are a SELECT
+    aggregate, a tenant listing and a single-row INSERT. No ``SET``, no temp table, no advisory lock,
+    no open transaction between checkouts. A connection is therefore interchangeable between
+    borrowers by construction, which is exactly the thing a lock session is not.
+
+    A connection that errors is discarded rather than returned, so a server-side disconnect cannot
+    be handed to the next borrower.
+    """
+
+    __slots__ = ("_connect", "_closed", "_dsn", "_idle", "_lock", "_max_idle", "_opened")
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        max_idle: int = _DEFAULT_POOL_MAX_IDLE,
+        connect: Callable[..., psycopg.Connection] | None = None,
+    ) -> None:
+        self._dsn = dsn
+        self._max_idle = max(1, int(max_idle))
+        self._connect = connect if connect is not None else psycopg.connect
+        self._idle: list[psycopg.Connection] = []
+        self._lock = threading.Lock()
+        self._closed = False
+        self._opened = 0
+
+    @property
+    def opened(self) -> int:
+        """Sessions this pool has opened. The number CTO-219 is about; asserted in the tests."""
+        return self._opened
+
+    @property
+    def idle(self) -> int:
+        return len(self._idle)
+
+    @contextmanager
+    def connection(self) -> Iterator[psycopg.Connection]:
+        """Borrow a session for the length of the block. Returned on success, discarded on error."""
+        conn = self._checkout()
+        try:
+            yield conn
+        except BaseException:
+            _close_quietly(conn)
+            raise
+        self._checkin(conn)
+
+    def _checkout(self) -> psycopg.Connection:
+        while True:
+            with self._lock:
+                conn = self._idle.pop() if self._idle else None
+            if conn is None:
+                break
+            if _connection_is_usable(conn):
+                return conn
+            _close_quietly(conn)
+        # autocommit for the same reason the lock provider uses it: nothing here wants a transaction
+        # spanning statements, and an idle-in-transaction session pins the xmin horizon for nothing.
+        conn = self._connect(self._dsn, autocommit=True)
+        with self._lock:
+            self._opened += 1
+        return conn
+
+    def _checkin(self, conn: psycopg.Connection) -> None:
+        keep = False
+        if _connection_is_usable(conn):
+            with self._lock:
+                if not self._closed and len(self._idle) < self._max_idle:
+                    self._idle.append(conn)
+                    keep = True
+        if not keep:
+            _close_quietly(conn)
+
+    def close(self) -> None:
+        """Drop every idle session. Safe to call twice, and safe to call with borrows outstanding.
+
+        Deliberately NOT a hard shutdown. A bounded stop (CTO-219) can leave a job on a worker
+        thread that is still trying to record its outcome, and killing the connection under it, or
+        refusing it a new one, would turn "the run finished after we stopped waiting" into "the run
+        finished and the history lost it". So a closed pool stops REUSING sessions: a borrow still
+        gets a live connection, and it is closed on return instead of being kept warm.
+        """
+        with self._lock:
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for conn in idle:
+            _close_quietly(conn)
+
+
+def _connection_is_usable(conn: psycopg.Connection) -> bool:
+    """Cheap local check only. A server that went away is caught by the statement failing."""
+    return not (getattr(conn, "closed", False) or getattr(conn, "broken", False))
+
+
+def _close_quietly(conn: psycopg.Connection) -> None:
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 - a connection we are throwing away cannot fail usefully
+        pass
+
+
 class SchedulerRunStore:
     """Postgres-backed run history over ``scheduler_runs`` (migration 0027).
 
-    Mirrors :class:`gateway.tenant_integrations.TenantIntegrationStore`: a connection per call,
-    tenant-scoped SQL, and error strings scrubbed before the parameter is bound.
+    Tenant-scoped SQL and error strings scrubbed before the parameter is bound, as
+    :class:`gateway.tenant_integrations.TenantIntegrationStore` does. Unlike that store this one runs
+    on the tick loop's hot path, so its sessions come from a :class:`SchedulerConnectionPool` rather
+    than a fresh connect per call (CTO-219). Nothing here holds session state, which is what makes
+    the sessions interchangeable; see the pool for the full argument, and for why the advisory locks
+    are excluded from it.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, pool: SchedulerConnectionPool | None = None) -> None:
         self._dsn = settings.postgres_dsn
+        # A private pool when nobody supplied one, so constructing the store directly (tests, a
+        # future worker process) still gets the pooling rather than quietly falling back to the
+        # connect-per-call behaviour this ticket removed.
+        self._pool = pool if pool is not None else SchedulerConnectionPool(self._dsn)
+        self._owns_pool = pool is None
+
+    def close(self) -> None:
+        """Release pooled sessions. Only closes a pool this store made for itself."""
+        if self._owns_pool:
+            self._pool.close()
 
     def get_state(self, job_name: str, tenant_id: str) -> JobState:
         """Everything :func:`is_due` needs for one (job, tenant) pair, in one round trip.
@@ -308,7 +471,7 @@ class SchedulerRunStore:
         clearing a counter, so there is no in-memory state to lose on restart or to drift out of
         sync with the history.
         """
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 WITH agg AS (
@@ -357,7 +520,10 @@ class SchedulerRunStore:
     ) -> None:
         """Append one immutable row. Only a ``failed`` run may carry an error, per the CHECK."""
         scrubbed = scrub_error_message(error_message) if status == "failed" else None
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        # No explicit commit: pooled sessions are autocommit, so the row is durable when execute
+        # returns. A run that is not committed before the lock is released is a run another replica
+        # would repeat, which is why record_run happens inside the lock in the first place.
+        with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO scheduler_runs
@@ -366,7 +532,6 @@ class SchedulerRunStore:
                 """,
                 (job_name, tenant_id, started_at, finished_at, status, scrubbed),
             )
-            conn.commit()
 
 
 class PostgresTenantProvider:
@@ -377,11 +542,19 @@ class PostgresTenantProvider:
     "configured" means for it.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, pool: SchedulerConnectionPool | None = None) -> None:
         self._dsn = settings.postgres_dsn
+        # Shares the run store's pool in production (CTO-219). One listing per tick is not the
+        # expensive part, but there is no reason for it to open a session of its own either.
+        self._pool = pool if pool is not None else SchedulerConnectionPool(self._dsn)
+        self._owns_pool = pool is None
+
+    def close(self) -> None:
+        if self._owns_pool:
+            self._pool.close()
 
     def __call__(self) -> Sequence[str]:
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+        with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT id::text FROM tenants ORDER BY id")
             return [str(row[0]) for row in cur.fetchall()]
 
@@ -554,6 +727,8 @@ class Scheduler:
         tick_interval_s: float = 300.0,
         backoff_base_s: float = _DEFAULT_BACKOFF_BASE_S,
         backoff_cap_s: float = _DEFAULT_BACKOFF_CAP_S,
+        shutdown_timeout_s: float = _DEFAULT_SHUTDOWN_TIMEOUT_S,
+        db_pool: SchedulerConnectionPool | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if tick_interval_s < _MIN_TICK_INTERVAL_S:
@@ -565,10 +740,17 @@ class Scheduler:
         self._tick_interval_s = float(tick_interval_s)
         self._backoff_base_s = float(backoff_base_s)
         self._backoff_cap_s = float(backoff_cap_s)
+        self._shutdown_timeout_s = float(shutdown_timeout_s)
+        # Owned by the scheduler only so that :meth:`stop` can drop its idle sessions; the loop
+        # itself never touches it. The stores hold the same pool and are the ones that use it.
+        self._db_pool = db_pool
         self._now = now if now is not None else _utcnow
         self._task: asyncio.Task[None] | None = None
         self._stop: asyncio.Event | None = None
         self._ticks = 0
+        # A tick loop that outlived the shutdown bound. Held so it is not garbage collected into a
+        # confusing "Task was destroyed but it is pending" at interpreter exit (CTO-219).
+        self._abandoned: asyncio.Task[None] | None = None
 
     @property
     def ticks(self) -> int:
@@ -578,6 +760,11 @@ class Scheduler:
     @property
     def running(self) -> bool:
         return self._task is not None
+
+    @property
+    def abandoned(self) -> bool:
+        """Did the last :meth:`stop` give up waiting on a tick? See that method for the cost."""
+        return self._abandoned is not None
 
     @property
     def job_count(self) -> int:
@@ -591,20 +778,71 @@ class Scheduler:
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="scheduler-tick")
 
-    async def stop(self) -> None:
-        """Signal the loop and wait for the current tick to finish. Never cancels mid-job.
+    async def stop(self, *, timeout_s: float | None = None) -> None:
+        """Signal the loop and wait, for a BOUNDED time, for the current tick to finish.
 
-        Waiting matters: a job is a blocking call on a worker thread that may be halfway through
-        writing spans, and killing the loop out from under it would leave a run with no recorded
-        outcome, which the next tick would read as "never ran". The tick checks the stop event
-        between tenants, so a graceful shutdown costs at most one job's runtime.
+        Waiting at all matters: a job is a blocking call on a worker thread that may be halfway
+        through writing spans, and abandoning it leaves a run with no recorded outcome, which the
+        next tick reads as "never ran". The tick checks the stop event between tenants, so a healthy
+        shutdown costs at most one job's runtime and this returns normally.
+
+        Waiting FOREVER is the bug this fixes (CTO-219). The module docstring is right that
+        ``asyncio.wait_for`` around a ``to_thread`` cannot kill the thread, so a per-job timeout
+        would report a lie. That argument bounds what a timeout can ENFORCE; it does not license
+        holding a deploy open because one connector is talking to a slow billing API. So the wait is
+        bounded and shutdown then proceeds without the loop.
+
+        WHAT AN ABANDONED JOB LEAVES BEHIND, precisely:
+
+        * The worker thread keeps running. Nothing interrupts it, and it dies with the process, so
+          whatever it was part-way through (an HTTP call, an insert) is simply cut off at exit.
+        * Its ``scheduler_runs`` row is most likely never written: recording happens back on the
+          event loop, which stops with the process. The pair therefore keeps its previous history,
+          stays due, and the next replica or the next boot runs it again. For the idempotent daily
+          jobs this schedules that is a repeat, not a corruption, and it is the same failure mode
+          the loop already accepts when ``record_run`` itself fails.
+        * ``record_run`` is a single INSERT, so a job cut off mid-record either committed that row
+          or did not. There is no half-written run.
+        * Its advisory lock releases itself. The lock lives on a dedicated session (see
+          :class:`PostgresAdvisoryLockProvider`) and Postgres drops it when the process dies and the
+          connection goes with it. That is exactly the property CTO-214 chose advisory locks for,
+          and it is why abandoning a job here does not wedge that (job, tenant) pair for anyone.
+
+        The bound is on the WAIT, never on the job. Nothing here claims the job stopped.
         """
-        if self._task is None:
+        task = self._task
+        if task is None:
+            self._close_pool()
             return
         assert self._stop is not None
         self._stop.set()
-        await self._task
+        bound = self._shutdown_timeout_s if timeout_s is None else float(timeout_s)
+        done, _pending = await asyncio.wait({task}, timeout=bound if bound > 0 else None)
         self._task = None
+        if task in done:
+            self._abandoned = None
+            await task  # re-raise anything the loop failed with, as awaiting it always did
+        else:
+            self._abandoned = task
+            # Not logger.exception, and deliberately plain: the gateway configures no logging
+            # (CTO-218), so this is for a future log setup and for a human reading the code. The
+            # observable evidence is the shutdown returning on time and the missing run row.
+            logger.warning(
+                "scheduler: a tick was still running after %.1fs of shutdown; leaving it to die "
+                "with the process. Its run is not recorded, its advisory lock releases with the "
+                "connection, and the next tick will consider the pair due again.",
+                bound,
+            )
+        self._close_pool()
+
+    def _close_pool(self) -> None:
+        """Drop pooled sessions on the way out. Never raises: shutdown has nothing better to do."""
+        if self._db_pool is None:
+            return
+        try:
+            self._db_pool.close()
+        except Exception:  # noqa: BLE001 - a pool we are discarding cannot fail usefully
+            logger.debug("scheduler: closing the connection pool failed")
 
     async def _run(self) -> None:
         assert self._stop is not None
@@ -815,17 +1053,32 @@ def build_scheduler(
     Advisory locking is always on in this path (CTO-214). It needs no flag of its own: it uses the
     same Postgres the run history already requires, and a deployment that wanted it off would be
     asking for the double-counted spend it prevents.
+
+    The run store and the tenant provider share ONE :class:`SchedulerConnectionPool` (CTO-219), so a
+    tick costs a handful of sessions rather than one per (job, tenant) pair. The lock provider is
+    handed no pool at all, on purpose: its sessions are the locks.
     """
+    pool: SchedulerConnectionPool | None = None
+    if run_store is None or tenant_provider is None:
+        pool = SchedulerConnectionPool(
+            settings.postgres_dsn, max_idle=settings.scheduler_db_pool_max_idle
+        )
     return Scheduler(
         registry if registry is not None else JobRegistry(),
-        run_store if run_store is not None else SchedulerRunStore(settings),
-        tenant_provider if tenant_provider is not None else PostgresTenantProvider(settings),
+        run_store if run_store is not None else SchedulerRunStore(settings, pool=pool),
+        (
+            tenant_provider
+            if tenant_provider is not None
+            else PostgresTenantProvider(settings, pool=pool)
+        ),
         lock_provider=(
             lock_provider if lock_provider is not None else PostgresAdvisoryLockProvider(settings)
         ),
         tick_interval_s=settings.scheduler_tick_interval_s,
         backoff_base_s=settings.scheduler_backoff_base_s,
         backoff_cap_s=settings.scheduler_backoff_cap_s,
+        shutdown_timeout_s=settings.scheduler_shutdown_timeout_s,
+        db_pool=pool,
     )
 
 
@@ -843,6 +1096,7 @@ __all__ = [
     "RunStatus",
     "RunStore",
     "Scheduler",
+    "SchedulerConnectionPool",
     "SchedulerRunStore",
     "TenantProvider",
     "TickResult",
