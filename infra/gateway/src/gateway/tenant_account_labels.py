@@ -35,12 +35,12 @@ touches Postgres directly.
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import TenantNotFoundError, resolve_tenant_uuid
 
 # A label is a display string for one table cell, not a description field. The cap is generous
 # enough for any real company name and tight enough that the tab cannot be broken by pasting a
@@ -128,24 +128,19 @@ def normalize_account_id_hash(value: object) -> str:
 def _resolve_tenant_uuid(cur: psycopg.Cursor, tenant_id: str) -> str:
     """Map the caller's tenant identifier onto ``tenants.id``.
 
-    Same shape as :func:`gateway.connectors.config_admin._resolve_tenant_uuid`. This table keys on
-    the UUID because of the foreign key, but the dashboard and local dev identify a tenant by name.
-    Without this a name-based caller trips ``InvalidTextRepresentation`` deep in the driver and
-    surfaces as an opaque 503.
+    The rule now lives in :mod:`gateway.tenant_lookup` so every control-plane store shares one copy
+    (CTO-201). This wrapper only re-types the failure as this module's :class:`TenantNotFound`
+    subclass, which the endpoint above already catches, and keeps the non-quoting message this
+    module deliberately uses.
 
     Note this is the *row identity* question only. It is NOT the same question as which spelling
     hashed the account id, which is key material and cannot be folded this way. See the module
     docstring.
     """
     try:
-        return str(uuid.UUID(tenant_id))
-    except (ValueError, AttributeError, TypeError):
-        pass
-    cur.execute("SELECT id FROM tenants WHERE name = %s", (tenant_id,))
-    row = cur.fetchone()
-    if row is None:
-        raise TenantNotFound("no tenant matches the supplied identifier")
-    return str(row[0])
+        return resolve_tenant_uuid(cur, tenant_id)
+    except TenantNotFoundError as exc:
+        raise TenantNotFound("no tenant matches the supplied identifier") from exc
 
 
 def _row_to_label(row: tuple) -> AccountLabel:

@@ -823,6 +823,20 @@ def _resolve_tenant_for_control_plane(
     return x_tenant_id
 
 
+@app.exception_handler(TenantNotFoundError)
+def _tenant_not_found_handler(_request: Request, exc: TenantNotFoundError) -> JSONResponse:
+    """Map an unresolved tenant identifier onto a clean 404 (CTO-201).
+
+    Control-plane tables key on ``tenants.id`` while the dashboard and local dev identify a tenant
+    by NAME. The stores fold the name onto the UUID via ``resolve_tenant_uuid`` and raise this when
+    the name matches no row. Without this handler that raise would surface as an opaque 500 with a
+    driver-shaped body; here it becomes the same ``{"detail": ...}`` 404 the endpoints that catch it
+    inline already return. Endpoints that translate it themselves still win, so this only backstops
+    the stores whose 404 is not mapped inline.
+    """
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
 @app.get("/v1/tenant/connectors")
 def list_tenant_connectors(
     authorization: str | None = Header(default=None),

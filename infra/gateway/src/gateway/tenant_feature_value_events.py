@@ -18,6 +18,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,9 @@ class TenantFeatureValueEventStore:
 
     def list(self, tenant_id: str) -> list[FeatureValueEvent]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_feature_value_events keys on the tenants.id UUID, but the dashboard
+            # identifies a tenant by NAME. Fold the name onto the UUID so a name caller does not 500.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT feature_tag, event_name, created_at, created_by, notes
@@ -92,7 +96,7 @@ class TenantFeatureValueEventStore:
                 WHERE tenant_id = %s
                 ORDER BY feature_tag
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             return [_row_to_event(row) for row in cur.fetchall()]
 
@@ -115,7 +119,10 @@ class TenantFeatureValueEventStore:
         if not event_name:
             raise ValueError("event_name required")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            before_event = self._fetch(cur, tenant_id, feature_tag)
+            # CTO-201: resolve a name-based tenant id onto the UUID FK once, and use it for the
+            # mapping row and the audit rows alike so both key on the same tenant.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
+            before_event = self._fetch(cur, resolved, feature_tag)
 
             cur.execute(
                 """
@@ -127,7 +134,7 @@ class TenantFeatureValueEventStore:
                 """,
                 (
                     change_id,
-                    tenant_id,
+                    resolved,
                     feature_tag,
                     actor,
                     Json(before_event.as_dict()) if before_event is not None else None,
@@ -136,7 +143,7 @@ class TenantFeatureValueEventStore:
             )
             if cur.fetchone() is None:
                 conn.commit()
-                current = self._fetch(cur, tenant_id, feature_tag)
+                current = self._fetch(cur, resolved, feature_tag)
                 if current is None:
                     raise RuntimeError(
                         "change_id reserved but mapping absent — out-of-band delete?"
@@ -153,7 +160,7 @@ class TenantFeatureValueEventStore:
                       notes = COALESCE(EXCLUDED.notes, tenant_feature_value_events.notes)
                 RETURNING feature_tag, event_name, created_at, created_by, notes
                 """,
-                (tenant_id, feature_tag, event_name, actor, notes),
+                (resolved, feature_tag, event_name, actor, notes),
             )
             row = cur.fetchone()
             assert row is not None
@@ -165,7 +172,7 @@ class TenantFeatureValueEventStore:
                 SET after = %s
                 WHERE tenant_id = %s AND change_id = %s
                 """,
-                (Json(after_event.as_dict()), tenant_id, change_id),
+                (Json(after_event.as_dict()), resolved, change_id),
             )
             conn.commit()
             return after_event
@@ -184,7 +191,9 @@ class TenantFeatureValueEventStore:
         change_id is a replay). The audit row records the removed mapping as ``before``.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            before_event = self._fetch(cur, tenant_id, feature_tag)
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the delete + audit.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
+            before_event = self._fetch(cur, resolved, feature_tag)
 
             cur.execute(
                 """
@@ -196,7 +205,7 @@ class TenantFeatureValueEventStore:
                 """,
                 (
                     change_id,
-                    tenant_id,
+                    resolved,
                     feature_tag,
                     actor,
                     Json(before_event.as_dict()) if before_event is not None else None,
@@ -208,7 +217,7 @@ class TenantFeatureValueEventStore:
 
             cur.execute(
                 "DELETE FROM tenant_feature_value_events WHERE tenant_id = %s AND feature_tag = %s",
-                (tenant_id, feature_tag),
+                (resolved, feature_tag),
             )
             removed = cur.rowcount > 0
             conn.commit()
@@ -221,6 +230,8 @@ class TenantFeatureValueEventStore:
         limit: int = 100,
     ) -> list[FeatureValueEventChange]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before reading the audit log.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             if feature_tag is None:
                 cur.execute(
                     """
@@ -230,7 +241,7 @@ class TenantFeatureValueEventStore:
                     ORDER BY changed_at DESC
                     LIMIT %s
                     """,
-                    (tenant_id, limit),
+                    (resolved, limit),
                 )
             else:
                 cur.execute(
@@ -241,7 +252,7 @@ class TenantFeatureValueEventStore:
                     ORDER BY changed_at DESC
                     LIMIT %s
                     """,
-                    (tenant_id, feature_tag, limit),
+                    (resolved, feature_tag, limit),
                 )
             return [
                 FeatureValueEventChange(

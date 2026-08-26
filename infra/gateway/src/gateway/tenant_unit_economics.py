@@ -22,6 +22,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 class UnitEconomicsConfigError(ValueError):
@@ -143,6 +144,10 @@ class TenantUnitEconomicsStore:
 
     def get(self, tenant_id: str) -> UnitEconomicsConfig | None:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_unit_economics_config keys on the tenants.id UUID, but the dashboard
+            # identifies a tenant by NAME. Fold the name onto the UUID so a name-based caller does
+            # not 500.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT ltv_cac_green_threshold, ltv_cac_yellow_threshold,
@@ -151,7 +156,7 @@ class TenantUnitEconomicsStore:
                 FROM tenant_unit_economics_config
                 WHERE tenant_id = %s
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             row = cur.fetchone()
             return _row_to_config(row) if row else None
@@ -172,6 +177,9 @@ class TenantUnitEconomicsStore:
         """
         config.sanity_check()
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK once, and use it for the
+            # config row and the audit rows alike so both key on the same tenant.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT ltv_cac_green_threshold, ltv_cac_yellow_threshold,
@@ -180,7 +188,7 @@ class TenantUnitEconomicsStore:
                 FROM tenant_unit_economics_config
                 WHERE tenant_id = %s
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             existing_row = cur.fetchone()
             before = _row_to_config(existing_row) if existing_row else None
@@ -195,7 +203,7 @@ class TenantUnitEconomicsStore:
                 """,
                 (
                     change_id,
-                    tenant_id,
+                    resolved,
                     actor or config.updated_by,
                     Json(before.as_dict()) if before is not None else None,
                     None,
@@ -215,7 +223,7 @@ class TenantUnitEconomicsStore:
                         FROM tenant_unit_economics_config
                         WHERE tenant_id = %s
                         """,
-                        (tenant_id,),
+                        (resolved,),
                     )
                     row = cur.fetchone()
                     if row is None:
@@ -243,7 +251,7 @@ class TenantUnitEconomicsStore:
                           created_at, updated_at, updated_by
                 """,
                 (
-                    tenant_id,
+                    resolved,
                     config.ltv_cac_green_threshold,
                     config.ltv_cac_yellow_threshold,
                     config.payback_months_green,
@@ -261,7 +269,7 @@ class TenantUnitEconomicsStore:
                 SET after = %s
                 WHERE tenant_id = %s AND change_id = %s
                 """,
-                (Json(after.as_dict()), tenant_id, change_id),
+                (Json(after.as_dict()), resolved, change_id),
             )
             conn.commit()
             return after

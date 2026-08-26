@@ -17,6 +17,7 @@ from decimal import Decimal
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 # Consent disclosure (CTO-125). When a tenant opts into replay, captured samples AND the candidate
@@ -66,13 +67,17 @@ class TenantReplayStore:
 
     def get(self, tenant_id: str) -> ReplayConfig:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_replay_config keys on the tenants.id UUID, but the dashboard
+            # identifies a tenant by NAME. Fold the name onto the UUID so a name-based caller does
+            # not trip InvalidTextRepresentation. A UUID caller passes through unchanged.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT enabled, sample_rate, retention_days, daily_budget_usd
                 FROM tenant_replay_config
                 WHERE tenant_id = %s
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             row = cur.fetchone()
             if row is None:
@@ -109,6 +114,8 @@ class TenantReplayStore:
         if new.daily_budget_usd < 0:
             raise ValueError("daily_budget_usd must be non-negative")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the write.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 INSERT INTO tenant_replay_config
@@ -122,7 +129,7 @@ class TenantReplayStore:
                       updated_at       = now()
                 """,
                 (
-                    tenant_id,
+                    resolved,
                     new.enabled,
                     new.sample_rate,
                     new.retention_days,

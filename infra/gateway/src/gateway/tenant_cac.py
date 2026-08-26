@@ -25,6 +25,7 @@ from typing import Iterable
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +269,9 @@ class TenantCacStore:
 
     def list(self, tenant_id: str) -> list[CacPeriod]:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: cac_periods.tenant_id is a UUID FK, but the dashboard identifies a tenant by
+            # NAME. Fold the name onto the UUID so a name-based caller does not 500.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT period_start, period_end, currency,
@@ -278,7 +282,7 @@ class TenantCacStore:
                 WHERE tenant_id = %s
                 ORDER BY period_start DESC
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             return [_row_to_period(r) for r in cur.fetchall()]
 
@@ -286,9 +290,11 @@ class TenantCacStore:
         form.sanity_check()
         period_end = _end_of_month(form.period_start)
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before any read or write.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 "SELECT closed_at FROM cac_periods WHERE tenant_id = %s AND period_start = %s",
-                (tenant_id, form.period_start),
+                (resolved, form.period_start),
             )
             existing = cur.fetchone()
             if existing and existing[0] is not None:
@@ -320,7 +326,7 @@ class TenantCacStore:
                           overhead_micro_usd, new_customers_paid, new_customers_total,
                           notes, closed_at, arpa_micro_usd, gross_margin_pct
                 """,
-                (tenant_id, form.period_start, period_end,
+                (resolved, form.period_start, period_end,
                  form.paid_spend_micro_usd, form.sales_spend_micro_usd,
                  form.content_spend_micro_usd, form.overhead_micro_usd,
                  form.new_customers_paid, form.new_customers_total, form.notes,
@@ -332,7 +338,7 @@ class TenantCacStore:
                 UPDATE cac_periods SET closed_at = now()
                  WHERE tenant_id = %s AND period_start < %s AND closed_at IS NULL
                 """,
-                (tenant_id, form.period_start),
+                (resolved, form.period_start),
             )
             conn.commit()
             return _row_to_period(row)

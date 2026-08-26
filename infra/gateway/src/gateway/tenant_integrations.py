@@ -26,6 +26,7 @@ from typing import Literal
 import psycopg
 
 from gateway.config import Settings
+from gateway.tenant_lookup import resolve_tenant_uuid
 from gateway.validation import _EMAIL_RE, _FORBIDDEN_PII_KEYS
 
 # The set of third-party integrations we track. Cost-layer connectors (llm/vector/tools/…) are
@@ -114,6 +115,9 @@ class TenantIntegrationStore:
         across the board, which is the honest first-render state for a fresh tenant.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: tenant_integration_runs keys on the tenants.id UUID, but the dashboard
+            # identifies a tenant by NAME. Fold the name onto the UUID so a name caller does not 500.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 SELECT connector_id, last_run_at, last_run_status, last_run_event_count,
@@ -122,7 +126,7 @@ class TenantIntegrationStore:
                 WHERE tenant_id = %s
                 ORDER BY connector_id
                 """,
-                (tenant_id,),
+                (resolved,),
             )
             return [
                 IntegrationStatus(
@@ -164,6 +168,10 @@ class TenantIntegrationStore:
             raise ValueError("event_count must be non-negative")
         scrubbed = scrub_error_message(error_message)
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # CTO-201: resolve a name-based tenant id onto the UUID FK before the upsert. The worker
+            # and scheduler pass a UUID (passed through unchanged); the Stripe webhook can pass a
+            # NAME, which without this trips InvalidTextRepresentation and loses the run stamp.
+            resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
                 """
                 INSERT INTO tenant_integration_runs
@@ -186,7 +194,7 @@ class TenantIntegrationStore:
                           last_run_error_message, total_events_24h, total_events_7d
                 """,
                 (
-                    tenant_id,
+                    resolved,
                     connector_id,
                     status,
                     event_count,
