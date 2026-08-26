@@ -2,10 +2,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MARGIN_EXCLUDES_INFRA,
   MIN_SPANS_FOR_COST_PER_USER,
+  MIN_SPANS_FOR_MARGIN,
   SHORT_HASH_CHARS,
   type AccountCostRow,
   type AccountCosts,
+  accountMargin,
   attributedSpend,
   costPerUser,
   emptyAccountRow,
@@ -127,5 +130,58 @@ describe("attributedSpend", () => {
     });
     expect(attributedSpend(c)).toBe(500_000);
     expect(attributedSpend(c)).toBe(accounts.reduce((s, a) => s + a.directCostMicroUsd, 0));
+  });
+});
+
+describe("accountMargin", () => {
+  it("treats a netted-to-zero revenue as a measurement, not as an unknown", () => {
+    const m = accountMargin(row({ directCostMicroUsd: 1_000_000 }), 0);
+    expect(m.revenueMicroUsd).toBe(0);
+    // A charge fully refunded is real information: this customer cost us money and paid nothing.
+    expect(m.marginMicroUsd).toBe(-1_000_000);
+    expect(m.reason).toBeNull();
+  });
+
+  it("refuses to compute a margin against an assumed zero when revenue is unknown", () => {
+    const m = accountMargin(row({ directCostMicroUsd: 1_000_000 }), null);
+    expect(m.revenueMicroUsd).toBeNull();
+    expect(m.marginMicroUsd).toBeNull();
+    expect(m.reason).toMatch(/no revenue source wired/i);
+    // No caveats on a blank: there is no number to qualify.
+    expect(m.caveats).toEqual([]);
+  });
+
+  it("says so when the revenue read failed, rather than blaming the tenant's wiring", () => {
+    const m = accountMargin(row(), null, true);
+    expect(m.reason).toMatch(/could not be read/i);
+    expect(m.reason).toMatch(/not evidence/i);
+  });
+
+  it("carries the excluded-infrastructure caveat on every margin it prints", () => {
+    const m = accountMargin(row({ spanCount: 5_000, directCostMicroUsd: 4_000_000 }), 10_000_000);
+    expect(m.marginMicroUsd).toBe(6_000_000);
+    expect(m.caveats).toContain(MARGIN_EXCLUDES_INFRA);
+    // Well measured: no extra caveats beyond the one that applies to every account in v1.
+    expect(m.caveats).toHaveLength(1);
+  });
+
+  it("flags a margin computed against a cost side we barely measured", () => {
+    // The live tenant's shape: $20,000 of uploaded revenue against a few cents of attributed spend.
+    const m = accountMargin(row({ spanCount: 4, directCostMicroUsd: 130 }), 20_000_000_000);
+    expect(m.marginMicroUsd).toBe(20_000_000_000 - 130);
+    expect(m.caveats).toContain(MARGIN_EXCLUDES_INFRA);
+    expect(m.caveats.some((c) => c.includes(`${MIN_SPANS_FOR_MARGIN}-span floor`))).toBe(true);
+    expect(m.caveats.some((c) => /under 1% of revenue/.test(c))).toBe(true);
+  });
+
+  it("does not raise the cost-to-revenue flag on a normal account", () => {
+    const m = accountMargin(row({ spanCount: 900, directCostMicroUsd: 300_000 }), 1_000_000);
+    expect(m.caveats.some((c) => /under 1% of revenue/.test(c))).toBe(false);
+  });
+
+  it("does not divide by a zero revenue when checking the cost-to-revenue ratio", () => {
+    const m = accountMargin(row({ spanCount: 900, directCostMicroUsd: 300_000 }), 0);
+    expect(m.marginMicroUsd).toBe(-300_000);
+    expect(m.caveats.some((c) => /under 1% of revenue/.test(c))).toBe(false);
   });
 });

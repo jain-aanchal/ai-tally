@@ -201,3 +201,115 @@ export function formatShare(share: number): string {
 export function attributedSpend(costs: AccountCosts): MicroUSD {
   return costs.totalDirectMicroUsd - costs.unattributed.directCostMicroUsd;
 }
+
+// --- Revenue and gross margin (CTO-197, plan E4) -------------------------------------------------
+//
+// The column that turns this tab from a cost report into a profitability view, and the one place on
+// the page where a wrong number gets acted on: someone reads "this customer is unprofitable" and
+// goes and reprices them. So both of the ways this figure can mislead are handled here rather than
+// left to the JSX.
+//
+// 1. NULL IS NOT ZERO. `queryAccountRevenue` (lib/accountRevenue.ts) separates them deliberately.
+//    An account whose only events are `count` engagement signals returns null, meaning we were
+//    never told its revenue. A charge fully netted by a refund returns 0, which is a measurement.
+//    Collapsing the two would either invent revenue for a customer we know nothing about, or claim
+//    a paying customer generates none. So margin is null exactly when revenue is null, and 0
+//    revenue produces a real margin of minus the cost.
+//
+// 2. THE MARGIN IS OVERSTATED, ALWAYS, IN V1. Cost here is direct cost only: compute and egress are
+//    excluded (Decision 2 in docs/cost-per-customer-plan.md, roughly 47 percent of spend on the
+//    current tenant). Every margin on this page is therefore too high by whatever share of that
+//    account's real cost sits in those two layers. That caveat travels with the number, on the cell
+//    itself, because a ranking that silently ignores half the cost base is worse than no ranking.
+
+/**
+ * Why every margin on this page reads high. Attached to each printed margin, not only to the page
+ * header, because the header scrolls away and the number is what gets copied into a pricing
+ * conversation.
+ */
+export const MARGIN_EXCLUDES_INFRA =
+  "understated cost: compute and egress are excluded from every account, so this margin is too high by whatever share of this customer's cost sits in those layers";
+
+/**
+ * Ratio of direct cost to revenue below which the margin is arithmetically indistinguishable from
+ * revenue itself.
+ *
+ * One percent. Under it, subtracting cost moves the figure by less than rounding does, so "margin"
+ * is really just "revenue with a cost column that never arrived". That is the exact shape of the
+ * current tenant: real uploaded revenue against near-zero attributed spend, which would otherwise
+ * render as a flawless customer rather than as a customer we have barely measured.
+ */
+export const MIN_COST_TO_REVENUE_RATIO = 0.01;
+
+/**
+ * Spans of attributed cost an account needs before its margin is read as a cost measurement.
+ *
+ * Shares the floor `costPerUser` uses, for the same reason: below it the account's cost side is a
+ * handful of spans, and a margin computed against it describes our instrumentation coverage rather
+ * than the customer's economics.
+ */
+export const MIN_SPANS_FOR_MARGIN = MIN_SPANS_FOR_COST_PER_USER;
+
+/** Revenue, margin, and everything the reader needs in order not to over-read them. */
+export interface AccountMargin {
+  /** Net revenue in micro-USD, or `null` for "we have not been told". Never 0 to mean unknown. */
+  revenueMicroUsd: MicroUSD | null;
+  /** Revenue minus direct cost. `null` exactly when `revenueMicroUsd` is null. */
+  marginMicroUsd: MicroUSD | null;
+  /** Why revenue and margin are blank. `null` when they are not. */
+  reason: string | null;
+  /**
+   * Why a printed margin must not be read as this customer's true profitability. Never empty when a
+   * margin prints: {@link MARGIN_EXCLUDES_INFRA} applies to every account in v1.
+   */
+  caveats: string[];
+}
+
+/**
+ * Revenue and gross margin for one account row.
+ *
+ * `revenueMicroUsd` is what {@link revenueForAccount} returned: the account's net revenue, or null
+ * for both "no row" and "no money-typed event". Those are the same statement to a reader, so they
+ * get the same blank. `revenueUnavailable` is a third and different case: the revenue read itself
+ * failed, so a blank here is not evidence that nothing is wired up, and the reason says so.
+ */
+export function accountMargin(
+  row: AccountCostRow,
+  revenueMicroUsd: MicroUSD | null,
+  revenueUnavailable = false,
+): AccountMargin {
+  if (revenueMicroUsd === null) {
+    return {
+      revenueMicroUsd: null,
+      marginMicroUsd: null,
+      reason: revenueUnavailable
+        ? "revenue could not be read for this window, so no margin can be computed. This blank is not evidence that no revenue source is wired"
+        : "no revenue source wired for this account, so its revenue is unknown. An unknown is not zero, and a margin against an assumed zero would be invented",
+      caveats: [],
+    };
+  }
+
+  const caveats = [MARGIN_EXCLUDES_INFRA];
+  // Two separate ways the cost side can be too thin to carry a margin, deliberately not merged: one
+  // is about how little we measured, the other about how little what we measured amounts to.
+  if (row.spanCount < MIN_SPANS_FOR_MARGIN) {
+    caveats.push(
+      `thin cost data: ${row.spanCount.toLocaleString()} attributed spans in the window, below the ${MIN_SPANS_FOR_MARGIN}-span floor, so this is closer to raw revenue than to a measured margin`,
+    );
+  }
+  if (
+    revenueMicroUsd > 0 &&
+    row.directCostMicroUsd / revenueMicroUsd < MIN_COST_TO_REVENUE_RATIO
+  ) {
+    caveats.push(
+      "attributed cost is under 1% of revenue, so subtracting it barely moves the figure. Read this as revenue with the cost side largely missing, not as a near-perfect margin",
+    );
+  }
+
+  return {
+    revenueMicroUsd,
+    marginMicroUsd: revenueMicroUsd - row.directCostMicroUsd,
+    reason: null,
+    caveats,
+  };
+}

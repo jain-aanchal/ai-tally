@@ -27,7 +27,8 @@ import {
   type AccountCosts,
 } from "@/lib/accounts";
 import { queryAccountLabels } from "@/lib/accountLabels";
-import { queryAccountCosts } from "@/lib/clickhouse";
+import { type AccountRevenueReport } from "@/lib/accountRevenue";
+import { queryAccountCosts, queryAccountRevenue } from "@/lib/clickhouse";
 import { AccountTable } from "./AccountTable";
 
 export const dynamic = "force-dynamic";
@@ -36,7 +37,11 @@ export const dynamic = "force-dynamic";
 const MAJORITY_UNATTRIBUTED = 0.5;
 
 export default async function CostPerCustomerPage() {
-  const [costs, labels] = await Promise.all([queryAccountCosts(), queryAccountLabels()]);
+  const [costs, labels, revenue] = await Promise.all([
+    queryAccountCosts(),
+    queryAccountLabels(),
+    queryAccountRevenue(),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -55,7 +60,11 @@ export default async function CostPerCustomerPage() {
         splitting them per customer would mean inventing an allocation rule.
       </p>
 
-      {costs === null ? <Unreachable /> : <Report costs={costs} labels={labels} />}
+      {costs === null ? (
+        <Unreachable />
+      ) : (
+        <Report costs={costs} labels={labels} revenue={revenue} />
+      )}
     </div>
   );
 }
@@ -63,12 +72,21 @@ export default async function CostPerCustomerPage() {
 function Report({
   costs,
   labels,
+  revenue,
 }: {
   costs: AccountCosts;
   labels: Map<string, string> | null;
+  /** `null` when the revenue read failed: a different statement from "no revenue is wired". */
+  revenue: AccountRevenueReport | null;
 }) {
   const share = unattributedShare(costs);
   const attributed = attributedSpend(costs);
+  // Hash to net revenue, straight from the report. Accounts the report has no row for are simply
+  // absent, which the table reads as unknown; an account present with `revenueMicroUsd: null` says
+  // the same thing, and an account with `0` says something different and keeps its zero.
+  const revenueByAccount = Object.fromEntries(
+    (revenue?.accounts ?? []).map((a) => [a.accountIdHash, a.revenueMicroUsd]),
+  );
 
   return (
     <div className="space-y-6">
@@ -96,11 +114,13 @@ function Report({
         <UnattributedNotice costs={costs} share={share} />
       ) : null}
 
-      <Card title="Accounts by direct cost">
+      <Card title="Accounts by gross margin">
         <AccountTable
           rows={costs.accounts}
           labels={labels ? Object.fromEntries(labels) : {}}
           labelsUnavailable={labels === null}
+          revenue={revenueByAccount}
+          revenueUnavailable={revenue === null}
           windowDays={costs.windowDays}
         />
         {labels === null ? (
