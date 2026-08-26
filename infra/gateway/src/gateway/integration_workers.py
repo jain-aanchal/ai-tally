@@ -20,12 +20,16 @@ and every error string routed to storage goes through :func:`scrub_error_message
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, urlopen
 
 from tally.account_identity import AccountLinker
 from tally.hmac_keys import HmacKeyRegistry
@@ -57,6 +61,48 @@ class HttpClient(Protocol):
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
     ) -> Any: ...
+
+
+class UrllibHttpClient:
+    """The production :class:`HttpClient`. stdlib ``urllib`` only, so the base install stays slim.
+
+    WHY this exists (CTO-216). The Protocol above has always had exactly one implementation, the
+    test fake, because nothing ever ran a cycle outside a test. Scheduling the workers is what makes
+    a real transport necessary, and the docstring on :class:`HttpClient` already named
+    ``urllib / httpx`` as the intended shape. ``urllib`` wins because ``requests`` is not a declared
+    dependency of this package (the Vercel and egress connectors lazy-import it), and one GET every
+    few minutes does not justify adding one.
+
+    Raises on any non-2xx, which is the contract :meth:`IngestWorker.run_cycle` relies on to record
+    an honest ``failed`` run. The status line, not the body, goes into the exception: a third-party
+    error body is exactly where a customer email turns up, and while ``scrub_error_message`` would
+    catch it on the way to storage, not putting it in the string is the cheaper guarantee.
+    """
+
+    def __init__(self, *, timeout_s: float = 30.0) -> None:
+        self._timeout_s = float(timeout_s)
+
+    def get_json(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, str] | None = None,
+    ) -> Any:
+        target = url
+        if params:
+            target = f"{url}{'&' if urlsplit(url).query else '?'}{urlencode(dict(params))}"
+        request = Request(target, headers=dict(headers or {}), method="GET")  # noqa: S310
+        try:
+            with urlopen(request, timeout=self._timeout_s) as response:  # noqa: S310
+                payload = response.read()
+        except HTTPError as exc:  # non-2xx: surface the code, never the body
+            raise RuntimeError(f"HTTP {exc.code} from {urlsplit(url).netloc}") from None
+        except URLError as exc:
+            raise RuntimeError(f"could not reach {urlsplit(url).netloc}: {exc.reason}") from None
+        if not payload:
+            return None
+        return json.loads(payload.decode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)

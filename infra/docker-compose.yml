@@ -71,6 +71,10 @@ services:
       - ../db/postgres/0011_tenant_compute_config.sql:/docker-entrypoint-initdb.d/0011_tenant_compute_config.sql:ro
       - ../db/postgres/0012_tenant_egress_config.sql:/docker-entrypoint-initdb.d/0012_tenant_egress_config.sql:ro
       - ../db/postgres/0013_cac_revenue_fields.sql:/docker-entrypoint-initdb.d/0013_cac_revenue_fields.sql:ro
+      # Credentials-by-reference for the Segment / HubSpot / Pendo workers (CTO-127). Mounted as of
+      # CTO-216, which is what first made the gateway read this table on its own: before the
+      # scheduler ran the ingest workers, nothing in a local stack ever touched it.
+      - ../db/postgres/0018_tenant_integration_secrets.sql:/docker-entrypoint-initdb.d/0018_tenant_integration_secrets.sql:ro
       - ../db/postgres/0019_tenant_unit_economics_config.sql:/docker-entrypoint-initdb.d/0019_tenant_unit_economics_config.sql:ro
       - ../db/postgres/0014_tenant_feature_value_events.sql:/docker-entrypoint-initdb.d/0014_tenant_feature_value_events.sql:ro
       - ../db/postgres/0015_tenant_compute_config_gcp.sql:/docker-entrypoint-initdb.d/0015_tenant_compute_config_gcp.sql:ro

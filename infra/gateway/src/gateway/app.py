@@ -161,6 +161,7 @@ from gateway.tenant_unit_economics import (
     UnitEconomicsConfigInput,
 )
 from gateway.validation import SpanValidator, span_item_id
+from gateway.worker_jobs import register_worker_jobs
 
 from tally.cdp_connectors import RevenuePayloadError, WebhookIngestor
 from tally.hmac_keys import HmacKeyRegistry
@@ -319,15 +320,30 @@ async def lifespan(app: FastAPI):
     # Safe on multiple replicas as of CTO-214: per (job, tenant) Postgres advisory locks, so two
     # gateways cannot run the same job at once.
     #
-    # CTO-215 registers the first job body: the daily cloud cost connectors. Until it, a tenant
-    # could connect AWS / GCP / Vercel / Cloudflare on /connectors and nothing ever acted on that
-    # config. Enabling the scheduler now makes the Compute and Egress columns populate on their
-    # own, which CHANGES tenants' numbers (see docs/scheduler-scope.md).
+    # Two ticket bodies register jobs here, and both switch on code that was written, tested and
+    # called by nobody:
+    #   * CTO-215, the daily cloud cost connectors. A tenant could connect AWS / GCP / Vercel /
+    #     Cloudflare on /connectors and nothing ever acted on that config. Enabling the scheduler
+    #     makes the Compute and Egress columns populate on their own, which CHANGES tenants'
+    #     numbers (see docs/scheduler-scope.md).
+    #   * CTO-216, the third-party ingest workers and the reconciler. This does NOT fix /features,
+    #     which stays blocked on the stitcher runner (CTO-200).
     app.state.scheduler = None
     if settings.scheduler_enabled:
-        registry = JobRegistry()
-        register_cost_connector_job(registry, settings)  # CTO-215
-        scheduler = build_scheduler(settings, registry)
+        job_registry = JobRegistry()
+        register_cost_connector_job(job_registry, settings)  # CTO-215
+        register_worker_jobs(
+            job_registry,
+            settings,
+            store=app.state.store,
+            # Shared with the request path on purpose: a second HMAC registry would write into a
+            # different UserIdHash space, and a second linker would learn nothing. See worker_jobs.
+            hmac_registry=app.state.hmac_registry,
+            account_linker=app.state.account_linker,
+            integrations=app.state.tenant_integrations,
+            reconciliation_store=app.state.reconciliation,
+        )
+        scheduler = build_scheduler(settings, job_registry)
         await scheduler.start()
         app.state.scheduler = scheduler
         logger.info(
