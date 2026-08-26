@@ -41,6 +41,14 @@ export interface ProviderAttribution {
   marginPct: number | null;
 }
 
+/** One calendar day of LLM cost split by provider, for the provider-breakdown chart (CTO-223). */
+export interface ProviderCostDay {
+  /** ISO yyyy-mm-dd, from ClickHouse's window bounds (never the Node clock, per CTO-203). */
+  date: string;
+  /** Micro-USD per provider for this day. A missing provider is a real zero. */
+  byProvider: Record<string, MicroUSD>;
+}
+
 export interface AttributionReport {
   filters: AttributionFilters;
   perProvider: ProviderAttribution[];
@@ -50,6 +58,12 @@ export interface AttributionReport {
     costMicroUsd: MicroUSD;
     costPerConversionMicroUsd: MicroUSD | null;
   };
+  /**
+   * Daily LLM cost per provider across the window, oldest to newest, for the stacked provider chart.
+   * Optional so the mock/empty reports and any older consumer stay valid; the page renders no chart
+   * when it is absent rather than fabricating a series.
+   */
+  dailyByProvider?: ProviderCostDay[];
   // True when ClickHouse couldn't be reached — the page falls back to mock.
   isMock: boolean;
 }
@@ -160,7 +174,25 @@ export function mockReport(filters: AttributionFilters): AttributionReport {
     costPerConversionMicroUsd:
       conversions > 0 ? Math.round(costMicroUsd / conversions) : null,
   };
-  return { filters, perProvider, totals, isMock: true };
+  // A 30-day synthetic per-provider series so the preview chart renders something shaped like real
+  // traffic. Only ever shown behind the SAMPLE DATA banner (isMock), and a mild deterministic wave
+  // per provider keeps the bars from looking like a flat fabrication.
+  const days = 30;
+  const dailyByProvider: ProviderCostDay[] = [];
+  const anchor = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(anchor);
+    d.setUTCDate(anchor.getUTCDate() - i);
+    const date = d.toISOString().slice(0, 10);
+    const byProvider: Record<string, MicroUSD> = {};
+    for (const p of perProvider) {
+      const base = p.costMicroUsd / days;
+      const wave = 1 + 0.25 * Math.sin((i / days) * Math.PI * 2);
+      byProvider[p.provider] = Math.round(base * wave);
+    }
+    dailyByProvider.push({ date, byProvider });
+  }
+  return { filters, perProvider, totals, dailyByProvider, isMock: true };
 }
 
 /** Parse URL search params into typed filters. */

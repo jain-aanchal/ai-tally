@@ -46,6 +46,16 @@ export const REVENUE_WINDOW_SQL = "toDate(now()) - INTERVAL 29 DAY";
 /** Days covered by REVENUE_WINDOW_SQL, for labelling the figure in the UI. */
 export const REVENUE_WINDOW_DAYS = 30;
 
+/**
+ * The window SQL for an arbitrary day count, so the FilterBar's time range can drive revenue over
+ * the same span as cost (CTO-223). `days` is a clamped integer chosen server-side, never user text,
+ * so the interpolation is safe. Defaults to the 30-day constant, which reproduces REVENUE_WINDOW_SQL
+ * byte-for-byte so an unparameterised caller is unchanged.
+ */
+export function revenueWindowSql(days: number = REVENUE_WINDOW_DAYS): string {
+  return `toDate(now()) - INTERVAL ${Math.max(1, Math.trunc(days)) - 1} DAY`;
+}
+
 /** `AccountIdHash` value meaning "no account could be established honestly". */
 export const UNATTRIBUTED_ACCOUNT = "";
 
@@ -114,7 +124,10 @@ function int(v: string | number | null | undefined): number {
  * we have never heard of. Both end up blank in the UI, but only one of them is a connector the
  * tenant can go and configure, so the row is worth returning.
  */
-export function accountRevenueSql(policy: RevenuePolicy): {
+export function accountRevenueSql(
+  policy: RevenuePolicy,
+  windowDays: number = REVENUE_WINDOW_DAYS,
+): {
   sql: string;
   params: Record<string, unknown>;
 } {
@@ -133,7 +146,7 @@ export function accountRevenueSql(policy: RevenuePolicy): {
         uniqExactIf(b.UserIdHash, ${moneyTyped})                                           AS distinct_users
       FROM business_events b
       WHERE b.TenantId = {tenant:String}
-        AND b.OccurredAt >= ${REVENUE_WINDOW_SQL}
+        AND b.OccurredAt >= ${revenueWindowSql(windowDays)}
         ${sourceFilter.sql}
       GROUP BY account_id_hash`,
     params: {
@@ -162,7 +175,10 @@ export function accountRevenueFromRow(row: AccountRevenueSqlRow): AccountRevenue
 }
 
 /** Build the report from raw rows, splitting the unattributed bucket out and ranking the rest. */
-export function accountRevenueReport(rows: AccountRevenueSqlRow[]): AccountRevenueReport {
+export function accountRevenueReport(
+  rows: AccountRevenueSqlRow[],
+  windowDays: number = REVENUE_WINDOW_DAYS,
+): AccountRevenueReport {
   let unattributed: AccountRevenue | null = null;
   const accounts: AccountRevenue[] = [];
 
@@ -187,7 +203,7 @@ export function accountRevenueReport(rows: AccountRevenueSqlRow[]): AccountReven
     }
     return a.accountIdHash.localeCompare(b.accountIdHash);
   });
-  return { accounts, unattributed, windowDays: REVENUE_WINDOW_DAYS };
+  return { accounts, unattributed, windowDays };
 }
 
 /**

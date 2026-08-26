@@ -6,16 +6,25 @@
 // blank. Value/user and margin/user are the blanks that matter here. They are empty because no
 // revenue source is wired for the tenant, not because those providers earn nothing, and until now
 // the page rendered a bare glyph that read as a bug.
+//
+// CTO-223 rebuilds the page onto the design foundation: a `PageHeader` + `FilterBar` (time range,
+// provider, feature) drives the window and slice, the four headline metrics are `SummaryTile`s, and
+// the provider breakdown is an `InteractiveStackedChart` of daily LLM cost per provider. None of the
+// numbers, columns, or honest-blank rules change; this is a design + interactivity pass.
 
 "use client";
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 
 import { Card } from "@/components/Card";
 import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
 import { DataTable, type Column } from "@/components/DataTable";
+import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { Money, Pct } from "@/components/HonestValue";
+import { InteractiveStackedChart, type StackedChartDay } from "@/components/InteractiveStackedChart";
 import { LiveIndicator } from "@/components/LiveIndicator";
+import { PageHeader } from "@/components/PageHeader";
+import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import type { AttributionReport, ProviderAttribution } from "@/lib/attribution";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -32,18 +41,23 @@ const NO_REVENUE_WIRED =
 const NO_REVENUE_FOR_MARGIN =
   "margin needs revenue: no revenue source is wired for this tenant, so only the cost side is known";
 
+/** The providers this workflow knows, for the FilterBar's provider dropdown. */
+const PROVIDER_OPTIONS: FilterOption[] = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+];
+
 export function AttributionLive({
   endpoint,
   initialData,
   outcome,
-  tag,
-  provider,
+  featureTags,
 }: {
   endpoint: string;
   initialData: AttributionReport;
   outcome: string;
-  tag: string | null;
-  provider: string | null;
+  /** Feature tags in the window, for the FilterBar's feature filter. Empty renders no such control. */
+  featureTags: string[];
 }) {
   const { data: report, updatedAt } = useLivePoll<AttributionReport>(endpoint, initialData);
 
@@ -140,28 +154,38 @@ export function AttributionLive({
     [outcome],
   );
 
+  // The chart's stacking order and legend follow the table order (by sessions), so a reader meets
+  // the same providers in the same order in both places.
+  const chartGroups = useMemo(() => report.perProvider.map((p) => p.provider), [report.perProvider]);
+  const chartDays: StackedChartDay[] = useMemo(
+    () => (report.dailyByProvider ?? []).map((d) => ({ date: d.date, byGroup: d.byProvider })),
+    [report.dailyByProvider],
+  );
+  const hasChart = chartGroups.length > 0 && chartDays.length > 0;
+
   const body = (
     <div className="space-y-6">
-      <Card title="Headline">
-        <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-          <Headline k="sessions" v={report.totals.sessions.toLocaleString()} />
-          <Headline
-            k={`${outcome} events`}
-            v={report.totals.conversions.toLocaleString()}
+      <TileGrid>
+        <CountTile label="Sessions" value={report.totals.sessions} />
+        <CountTile label={`${outcome} events`} value={report.totals.conversions} />
+        <SummaryTile label="LLM cost" micro={report.totals.costMicroUsd} />
+        <SummaryTile
+          label={`$ / ${outcome}`}
+          micro={report.totals.costPerConversionMicroUsd}
+          reason={`no ${outcome} events in the window, so there is nothing to divide the cost by`}
+        />
+      </TileGrid>
+
+      {hasChart ? (
+        <Card title="LLM cost by provider">
+          <InteractiveStackedChart
+            days={chartDays}
+            groups={chartGroups}
+            ariaLabel="daily LLM cost stacked by provider"
+            emptyLabel="no LLM spend in this window yet"
           />
-          <Headline k="LLM cost" v={<Money micro={report.totals.costMicroUsd} />} />
-          <Headline
-            k={`$ / ${outcome}`}
-            v={
-              <Money
-                micro={report.totals.costPerConversionMicroUsd}
-                reason={`no ${outcome} events in the window, so there is nothing to divide the cost by`}
-              />
-            }
-            highlight
-          />
-        </dl>
-      </Card>
+        </Card>
+      ) : null}
 
       <Card title={`Per-provider · ${outcome}`}>
         {report.perProvider.length === 0 ? (
@@ -193,16 +217,17 @@ export function AttributionLive({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Attribution</h1>
-          <p className="mt-1 text-sm text-muted">
+      <PageHeader
+        title="Attribution"
+        subtitle={
+          <>
             $/{outcome} per provider, joined from LLM spans and CDP events on{" "}
             <span className="font-mono">UserIdHash</span>.
-          </p>
-        </div>
-        <LiveIndicator updatedAt={updatedAt} />
-      </div>
+          </>
+        }
+        actions={<LiveIndicator updatedAt={updatedAt} />}
+        toolbar={<FilterBar hideGroupBy options={{ provider: PROVIDER_OPTIONS, feature: featureTags.map((f) => ({ value: f })) }} />}
+      />
       {report.isMock ? (
         <SyntheticPreviewBanner workflow="Attribution">{body}</SyntheticPreviewBanner>
       ) : (
@@ -212,25 +237,12 @@ export function AttributionLive({
   );
 }
 
-function Headline({
-  k,
-  v,
-  highlight,
-}: {
-  k: string;
-  // ReactNode rather than string: the money headlines are <Money> now, so a missing one carries
-  // its own explanation instead of collapsing to a bare glyph on the way in.
-  v: ReactNode;
-  highlight?: boolean;
-}) {
+/** A count headline tile matching {@link SummaryTile}'s shape for the non-money metrics. */
+function CountTile({ label, value }: { label: string; value: number }) {
   return (
-    <div>
-      <dt className="text-xs uppercase text-muted">{k}</dt>
-      <dd
-        className={`mt-0.5 tabular-nums ${highlight ? "text-lg font-semibold text-good" : "text-base"}`}
-      >
-        {v}
-      </dd>
+    <div className="flex flex-col gap-1 rounded-xl border border-edge bg-panel p-4">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
     </div>
   );
 }
