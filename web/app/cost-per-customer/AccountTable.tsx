@@ -19,6 +19,7 @@ import {
   type AllocatedAccountRow,
   accountMargin,
   costPerUser,
+  isAccountHash,
 } from "@/lib/accounts";
 import type { AllocationRule } from "@/lib/allocation";
 import { AccountCell } from "./AccountIdentity";
@@ -102,6 +103,23 @@ export function AccountTable({
     const trimmed = raw.trim();
     if (!trimmed) {
       setSearch(null);
+      return;
+    }
+    // The table shows a raw account hash for any account without a label, so the natural thing a
+    // reader does is copy that hash and paste it here. That value is ALREADY hashed, so sending it
+    // through the plaintext lookup (which hashes again) would match nothing. Detect a stored hash
+    // and match it directly against the rows instead of re-hashing it (CTO-188 follow-up).
+    const asHash = trimmed.toLowerCase();
+    if (isAccountHash(asHash)) {
+      const hit = rows.some((r) => r.accountIdHash === asHash);
+      setSearch({
+        matched: [asHash],
+        found: hit,
+        message: hit
+          ? "Showing the matching account. Clear the search to see every account again."
+          : `No account with that hash has directly attributable spend in the last ${windowDays} days.`,
+        tone: hit ? "ok" : "warn",
+      });
       return;
     }
     startTransition(async () => {
@@ -313,8 +331,9 @@ export function AccountTable({
       </form>
 
       <p className="max-w-prose text-xs text-muted">
-        The id is hashed with this tenant&apos;s own key to find its row. It is never stored, logged,
-        or shown back to you, which is also why there is no way to search the other direction.
+        Enter a plaintext account id or paste an account hash from the table. A plaintext id is
+        hashed with this tenant&apos;s own key to find its row, and is never stored, logged, or shown
+        back to you, which is also why there is no way to search the other direction.
       </p>
 
       {search ? (
@@ -357,13 +376,10 @@ export function AccountTable({
           it at all". What it still does not delegate is the ▲ mark: that flags a per-row reason,
           which no tenant-wide sentence can carry. */}
       <p className="max-w-prose text-xs text-warn">
-        Gross margin is revenue minus <em>direct</em> cost only.{" "}
-        {allocationRule
-          ? "Compute and egress carry no account on the span, so each account's share of them is estimated by the allocation rule named above rather than measured, and that estimate is not subtracted here: it sits in the Allocated and Total columns beside this one. Every margin is therefore overstated by whatever share of that customer's cost those layers hold."
-          : "Compute and egress carry no account on the span, and nothing could be allocated for this window, so they sit outside every row here and each margin is overstated by whatever share of that customer's cost falls in those layers."}{" "}
-        Rows marked ▲ carry a further reason not to read them at face value; hover the mark to see
-        it. Ranking by this column tells you the order to look in, not what a customer actually
-        earns you.
+        Gross margin subtracts <em>direct</em> cost only. Compute and egress carry no account, so
+        they sit in the Allocated and Total columns rather than in this subtraction, which leaves
+        every margin overstated. Treat the ranking as where to look first, not what a customer
+        actually earns. A ▲ flags a further per-row caveat on hover.
       </p>
     </div>
   );
@@ -380,7 +396,9 @@ export function AccountTable({
  */
 function MarginCell({ row, margin }: { row: AccountCostRow; margin: AccountMargin }) {
   if (margin.marginMicroUsd === null) {
-    return <Blank reason={margin.reason ?? "margin unknown for this account"} />;
+    // Margin is unknown here only because revenue is, and the Revenue column already carries the
+    // full reason. Repeating that whole sentence in this cell too is noise, so point at it instead.
+    return <Blank reason="unknown while this account's revenue is unknown (see the Revenue column)" />;
   }
   const negative = margin.marginMicroUsd < 0;
   return (
