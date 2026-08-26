@@ -4,6 +4,42 @@
 
 :root {
   color-scheme: dark;
+
+  /* Chart chrome tokens (CTO-221). SVG fill/stroke cannot read Tailwind classes, so the inline-SVG
+     charts reference these variables instead of hardcoding hex. The dark values are byte-identical
+     to the palette the existing charts already inline (edge #252b37, muted #8a93a6, panel #161a22),
+     so dark mode is unchanged; the light block below lets the same charts track a light palette if
+     one is ever applied. Series/data colors (LAYER_COLORS) are intentionally NOT here: those encode
+     data identity and read in both themes. */
+  --chart-axis: #252b37;
+  --chart-muted: #8a93a6;
+  --chart-surface: #161a22;
+  --chart-surface-border: #252b37;
+  --chart-est-band: #252b37;
+  --chart-crosshair: #8a93a6;
+}
+
+/* A light palette for the same tokens. Guarded so an explicit dark choice still wins, matching the
+   theme-aware pattern; the app ships dark today, so this only engages under a light preference or an
+   explicit [data-theme="light"]. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --chart-axis: #dfe3ea;
+    --chart-muted: #5b6470;
+    --chart-surface: #ffffff;
+    --chart-surface-border: #dfe3ea;
+    --chart-est-band: #eef1f6;
+    --chart-crosshair: #5b6470;
+  }
+}
+
+:root[data-theme="light"] {
+  --chart-axis: #dfe3ea;
+  --chart-muted: #5b6470;
+  --chart-surface: #ffffff;
+  --chart-surface-border: #dfe3ea;
+  --chart-est-band: #eef1f6;
+  --chart-crosshair: #5b6470;
 }
 
 body {

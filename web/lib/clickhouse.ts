@@ -24,6 +24,18 @@ import type {
 } from "./types";
 import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "./cost";
 import { LAYERS, type Layer } from "./cost";
+import {
+  type ExploreCostRow,
+  type ExploreDimension,
+  type ExploreFilters,
+  type ExploreGroupTotal,
+  type ExploreParams,
+  type ExploreSeries,
+  capGroups,
+  clampWindowDays,
+  OTHER_GROUP,
+  pivotExploreDays,
+} from "./explore";
 import type { AttributionDiagnostics, FeatureEconomics } from "./features";
 import type {
   AccountCostRow,
@@ -333,6 +345,178 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
       (a, b) =>
         LAYERS.reduce((s, l) => s + b.byLayer[l], 0) - LAYERS.reduce((s, l) => s + a.byLayer[l], 0),
     );
+  });
+}
+
+// --- Flexible cost explore (CTO-221, D1) --------------------------------------------------------
+//
+// The one query behind the design-foundation FilterBar: a user-selectable window grouped by any of
+// feature / model / layer / provider / account, with multi-select dimension filters. It returns a
+// time series (one point per calendar day, per group) AND the breakdown table off the same scan, so
+// the chart and the table can never disagree.
+//
+// WINDOW: user-selectable, so the day list is derived from the window ClickHouse itself reports,
+// NEVER the Node clock. This is the exact CTO-203 seam queryCostSeries / queryAccountDetail already
+// close: a JS-built day list drifts a day against the SQL predicate across a midnight boundary and
+// silently drops the oldest row while it still counts toward the totals. A single bounds SELECT
+// pins windowStart/windowEnd, every read below reuses them as bound parameters, and the day list is
+// generated from that windowStart (isoDaysFrom), so all of it lives on one clock.
+//
+// SCAN BOUND: the window is clamped to MAX_WINDOW_DAYS at the SQL boundary (preset via a
+// ClickHouse-derived start, custom via `greatest(from, to - MAX)`), so a hand-crafted range can't
+// ask for years of spans. Group cardinality is folded to the top MAX_EXPLORE_GROUPS with an honest
+// "other" bucket (capGroups). Honest failure over a wrong number: any ClickHouse error returns null
+// (via tryLive) and the route renders "source unavailable" rather than a fabricated series.
+
+/** Per-dimension SQL expression. Provider/layer reuse the exact expressions the other reads use so
+ *  the operation→layer and system→provider mappings live in one place. */
+const EXPLORE_GROUP_EXPR: Record<ExploreDimension, string> = {
+  feature: "if(FeatureTag != '', FeatureTag, 'untagged')",
+  // Response model when the provider returned one, request model otherwise; matches scopeFilter.
+  model:
+    "if(GenAiResponseModel != '', GenAiResponseModel, if(GenAiRequestModel != '', GenAiRequestModel, 'unknown'))",
+  layer: LAYER_CASE,
+  provider:
+    "coalesce(nullIf(SpanAttributes['chatbot.real_provider'], ''), nullIf(GenAiSystem, ''), 'unknown')",
+  account: "if(empty(AccountIdHash), 'unattributed', toString(AccountIdHash))",
+};
+
+/**
+ * Build the multi-select filter clauses. Each active dimension becomes `AND <expr> IN {key:Array}`
+ * with the values bound as an Array(String) parameter (never interpolated). The group-by dimension
+ * is expected to be excluded upstream (see exploreParamsFromFilters); if it is not, filtering on the
+ * grouped dimension is still a valid, if narrow, query.
+ */
+function exploreFilterClauses(filters: ExploreFilters | undefined): {
+  clause: string;
+  params: Record<string, string[]>;
+} {
+  if (!filters) return { clause: "", params: {} };
+  const clauses: string[] = [];
+  const params: Record<string, string[]> = {};
+  for (const dim of Object.keys(EXPLORE_GROUP_EXPR) as ExploreDimension[]) {
+    const values = filters[dim];
+    if (values && values.length > 0) {
+      const key = `f_${dim}`;
+      clauses.push(`AND ${EXPLORE_GROUP_EXPR[dim]} IN {${key}:Array(String)}`);
+      params[key] = values;
+    }
+  }
+  return { clause: clauses.join(" "), params };
+}
+
+/**
+ * Grouped cost time series + breakdown for the given window / dimension / filters.
+ *
+ * Returns `null` (via tryLive) when ClickHouse is unreachable, which the caller MUST NOT read as
+ * "no spend": the /api/explore route surfaces it as an unavailable source rather than an empty
+ * chart.
+ */
+export async function queryCostExplore(params: ExploreParams): Promise<ExploreSeries | null> {
+  return tryLive(async (db, tenant) => {
+    const groupExpr = EXPLORE_GROUP_EXPR[params.groupBy];
+
+    // Bounds from ClickHouse's clock, clamped to MAX_WINDOW_DAYS at the SQL boundary. Reused by
+    // every read below so the whole result sits on one window even across a midnight boundary.
+    const maxBack = clampWindowDays(Number.MAX_SAFE_INTEGER) - 1; // = MAX_WINDOW_DAYS - 1
+    let boundsRows: { windowStart: string; windowEnd: string; windowDays: number }[];
+    if (params.window.kind === "range") {
+      boundsRows = await rowsP(
+        db,
+        `WITH toDate({from:String}) AS f0,
+              least(toDate({to:String}), toDate(now())) AS t,
+              greatest(f0, t - {maxBack:UInt32}) AS f
+         SELECT toString(f) AS windowStart,
+                toString(t) AS windowEnd,
+                toUInt32(greatest(dateDiff('day', f, t) + 1, 0)) AS windowDays`,
+        { from: params.window.from, to: params.window.to, maxBack },
+      );
+    } else {
+      const back = clampWindowDays(params.window.days) - 1;
+      boundsRows = await rowsP(
+        db,
+        `WITH toDate(now()) AS td
+         SELECT toString(td - {back:UInt32}) AS windowStart,
+                toString(td) AS windowEnd,
+                toUInt32({back:UInt32} + 1) AS windowDays`,
+        { back },
+      );
+    }
+    const b = boundsRows[0];
+    const windowDays = b ? Number(b.windowDays) || 0 : 0;
+    if (!b || windowDays <= 0) return null;
+
+    const { clause: filterClause, params: filterParams } = exploreFilterClauses(params.filters);
+    // Half-open on the high end so the whole of windowEnd's calendar day is included exactly once.
+    const scope = `TenantId = {tenant:String}
+        AND Timestamp >= toDate({windowStart:String})
+        AND Timestamp < toDate({windowEnd:String}) + 1`;
+    const common = { tenant, windowStart: b.windowStart, windowEnd: b.windowEnd, ...filterParams };
+
+    // Per-group totals over the whole window. Group cardinality is inherently small (one row per
+    // distinct dimension value), so this is not the unbounded axis; the day×group read below is
+    // bounded to the kept groups.
+    const totalRows = await rowsP<{ grp: string; cost: string; spans: string }>(
+      db,
+      `SELECT ${groupExpr} AS grp, sum(EstimatedCost) AS cost, count() AS spans
+       FROM otel_spans
+       WHERE ${scope} ${filterClause}
+       GROUP BY grp
+       ORDER BY cost DESC`,
+      common,
+    );
+    const groupTotals: ExploreGroupTotal[] = totalRows.map((r) => ({
+      group: r.grp,
+      totalMicroUsd: micro(r.cost),
+      spanCount: parseInt(r.spans, 10) || 0,
+    }));
+    const capped = capGroups(groupTotals);
+    const kept = [...capped.keptGroups];
+    const hasOther = capped.truncatedGroups > 0;
+
+    // Per-day cost for the kept groups only, plus a single per-day "other" aggregate for the folded
+    // tail (grp NOT IN kept), so the stacked bars sum to each day's true spend without shipping a
+    // day×group row for every long-tail value.
+    const perDayKept =
+      kept.length > 0
+        ? await rowsP<{ day: string; grp: string; cost: string }>(
+            db,
+            `SELECT toString(toDate(Timestamp)) AS day, ${groupExpr} AS grp, sum(EstimatedCost) AS cost
+             FROM otel_spans
+             WHERE ${scope} ${filterClause} AND ${groupExpr} IN {kept:Array(String)}
+             GROUP BY day, grp`,
+            { ...common, kept },
+          )
+        : [];
+    const perDayOther = hasOther
+      ? await rowsP<{ day: string; cost: string }>(
+          db,
+          `SELECT toString(toDate(Timestamp)) AS day, sum(EstimatedCost) AS cost
+           FROM otel_spans
+           WHERE ${scope} ${filterClause} AND ${groupExpr} NOT IN {kept:Array(String)}
+           GROUP BY day`,
+          { ...common, kept },
+        )
+      : [];
+
+    const dayList = isoDaysFrom(b.windowStart, windowDays);
+    const costRows: ExploreCostRow[] = [
+      ...perDayKept.map((r) => ({ day: r.day, group: r.grp, costMicroUsd: micro(r.cost) })),
+      ...perDayOther.map((r) => ({ day: r.day, group: OTHER_GROUP, costMicroUsd: micro(r.cost) })),
+    ];
+    const days = pivotExploreDays(dayList, costRows, capped.keptGroups, hasOther);
+
+    return {
+      groupBy: params.groupBy,
+      windowStart: b.windowStart,
+      windowEnd: b.windowEnd,
+      windowDays,
+      groups: capped.orderedGroups,
+      days,
+      breakdown: capped.breakdown,
+      totalMicroUsd: capped.totalMicroUsd,
+      truncatedGroups: capped.truncatedGroups,
+    };
   });
 }
 
