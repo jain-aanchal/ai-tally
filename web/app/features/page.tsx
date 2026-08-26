@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
+// Features / business attribution, rebuilt on the interactive design foundation (CTO-224, on
+// CTO-221 / CTO-220). Design + interactivity only: the per-feature unit-economics table (with its
+// honest blank cells and inline value-event config), the finish-setup banner and the attribution
+// diagnostics are preserved verbatim. Added: the FilterBar (time range + group-by feature/model +
+// a feature filter) and the interactive cost-over-time-by-feature chart.
+import { Suspense } from "react";
+
 import { Card } from "@/components/Card";
 import { StaleBadge, SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import { ExploreChartCard } from "@/components/ExploreChartCard";
+import { FilterBar } from "@/components/FilterBar";
+import { PageHeader } from "@/components/PageHeader";
 import { apiGet } from "@/lib/api";
 import { deriveDataState, relativeAge, STALE_AFTER_MS } from "@/lib/dataState";
 import {
@@ -34,8 +44,16 @@ export default async function FeaturesPage() {
   // The "Finish setup" onboarding banner and the per-row "configure value event →" CTA live inside
   // FeatureValueEvents (CTO-140) — a client component so both can open the config modal and clear
   // the banner reactively as each feature gets a value event.
+  const featureOptions = features.map((f) => ({ value: f.feature }));
+
   const body = (
     <div className="space-y-6">
+      <ExploreChartCard
+        title="Feature cost over time"
+        groupByChoices={["feature", "model"]}
+        defaultGroupBy="feature"
+      />
+
       <FeatureValueEvents initialFeatures={features} />
 
       <Card title="Attribution diagnostics">
@@ -79,16 +97,28 @@ export default async function FeaturesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Features</h1>
-        {state !== "empty" && (
-          <StaleBadge
-            asOf={relativeAge(reconciledThrough)}
-            age={relativeAge(reconciledThrough)}
-            stale={state === "stale"}
-          />
-        )}
-      </div>
+      <PageHeader
+        title="Features"
+        subtitle="What each feature costs per user, the value attributed to it, and the ROI margin."
+        actions={
+          state !== "empty" ? (
+            <StaleBadge
+              asOf={relativeAge(reconciledThrough)}
+              age={relativeAge(reconciledThrough)}
+              stale={state === "stale"}
+            />
+          ) : undefined
+        }
+        toolbar={
+          <Suspense fallback={null}>
+            <FilterBar
+              groupByChoices={["feature", "model"]}
+              defaultGroupBy="feature"
+              options={{ feature: featureOptions }}
+            />
+          </Suspense>
+        }
+      />
 
       {state === "empty" ? (
         <SyntheticPreviewBanner workflow="Features">{body}</SyntheticPreviewBanner>

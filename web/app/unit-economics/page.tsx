@@ -5,8 +5,14 @@
 // configurable (CTO-126): resolved thresholds come from /api/unit-economics/config and thread into
 // every classify call; a tenant with no override falls back to the hardcoded defaults.
 
+import { Suspense } from "react";
+
 import { Card } from "@/components/Card";
 import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import { ExploreChartCard } from "@/components/ExploreChartCard";
+import { FilterBar } from "@/components/FilterBar";
+import { PageHeader } from "@/components/PageHeader";
+import { SummaryTile } from "@/components/SummaryTile";
 import { apiGet } from "@/lib/api";
 import type { CacPayload } from "@/app/api/cac/route";
 import type { ThresholdConfigPayload } from "@/app/api/unit-economics/config/route";
@@ -98,16 +104,34 @@ export default async function UnitEconomicsPage() {
 
   const body = (
     <div className="space-y-6">
+      {/* Money headlines go through SummaryTile / the Money primitive (CTO-224), so a missing input
+          is the honest blank, not a fabricated 0. Payback (months) and LTV:CAC (a ratio) keep the
+          custom Metric because they carry band coloring and non-money units SummaryTile does not. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Metric label="Blended CAC" value={fmtMoney(blended)} hint="(paid+sales+content) / new customers" />
-        <Metric label="Paid CAC" value={fmtMoney(paid)} hint="paid spend / new paid customers" />
+        <SummaryTile
+          label="Blended CAC"
+          micro={blended}
+          reason="need paid+sales+content spend and new customers"
+          hint="(paid+sales+content) / new customers"
+        />
+        <SummaryTile
+          label="Paid CAC"
+          micro={paid}
+          reason="need paid spend and new paid customers"
+          hint="paid spend / new paid customers"
+        />
         <Metric
           label="Payback"
           value={fmtMonths(payback)}
           valueClass={bandText(paybackBand(payback, thresholds))}
           hint="fully-loaded CAC / monthly margin"
         />
-        <Metric label="LTV" value={fmtMoney(ltvValue)} hint="margin × expected retention" />
+        <SummaryTile
+          label="LTV"
+          micro={ltvValue}
+          reason="need monthly margin and expected retention"
+          hint="margin × expected retention"
+        />
         <Metric
           label="LTV : CAC"
           value={fmtRatio(ratio)}
@@ -115,6 +139,12 @@ export default async function UnitEconomicsPage() {
           hint="vs. fully-loaded CAC"
         />
       </div>
+
+      <ExploreChartCard
+        title="Feature cost over time"
+        groupByChoices={["feature", "model", "provider"]}
+        defaultGroupBy="feature"
+      />
 
       <ThresholdSettings
         initial={thresholds}
@@ -194,14 +224,15 @@ export default async function UnitEconomicsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Unit Economics</h1>
-          <p className="mt-1 text-sm text-muted">
-            CAC by flavor, payback, and LTV — honest under uncertainty. Undefined metrics render {DASH}.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Unit Economics"
+        subtitle={`CAC by flavor, payback, and LTV — honest under uncertainty. Undefined metrics render ${DASH}.`}
+        toolbar={
+          <Suspense fallback={null}>
+            <FilterBar groupByChoices={["feature", "model", "provider"]} defaultGroupBy="feature" />
+          </Suspense>
+        }
+      />
 
       {isMock ? (
         <SyntheticPreviewBanner workflow="Unit Economics">{body}</SyntheticPreviewBanner>
