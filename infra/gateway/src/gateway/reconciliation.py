@@ -13,8 +13,14 @@ pipeline:
   :mod:`gateway.tenant_integrations` — ``record_run`` stamps the outcome of one pass, ``get_latest``
   reads the most recent for the dashboard.
 * :func:`run_reconciliation` is a thin orchestrator: it queries ClickHouse for recent events + their
-  matched span timestamps, calls the pure compute, and records the run. Per-tenant scheduling / a
-  running daemon is out of scope (CTO-139) — a callable orchestrator is enough.
+  matched span timestamps, calls the pure compute, and records the run.
+* :class:`ClickHouseLateArrivalSource` is that CH scan (CTO-216). CTO-139 shipped the orchestrator
+  with no real source because nothing ran the reconciler; the scheduled job needs one to record
+  anything other than zeros. It is last-touch pairing at read time, NOT attribution: it writes
+  nothing to ``attribution_records`` and credits no feature with any value.
+
+Per-tenant scheduling is CTO-216: the scheduler registers ``reconciliation`` as a job and calls
+:func:`run_reconciliation` per tenant on a cadence.
 
 Why a separate table from ``tenant_integration_runs`` — that's a *third-party integration* run log
 ("Stripe last fired 12s ago"). This is the *reconciler* run log ("we re-checked attribution and 180
@@ -194,6 +200,15 @@ class ReconciliationStore:
             )
 
 
+# How far back one reconciliation pass looks, and the ceiling on how many events it examines.
+# Both exist to bound the scan: this runs on a cadence now (CTO-216) rather than by hand, so an
+# unbounded "every event this tenant ever sent" query would get slower every day until it was the
+# most expensive thing the gateway does. Seven days is wider than the one-hour lateness threshold by
+# a large margin, so nothing a pass could sensibly call "late" falls outside it.
+DEFAULT_LOOKBACK_DAYS = 7
+DEFAULT_EVENT_CAP = 50_000
+
+
 class _ClickHouseEventSource(Protocol):
     """Minimal surface the orchestrator needs from a ClickHouse client.
 
@@ -205,6 +220,88 @@ class _ClickHouseEventSource(Protocol):
     def fetch_event_span_pairs(
         self, tenant_id: str
     ) -> Sequence[tuple[datetime, datetime]]: ...
+
+
+class ClickHouseLateArrivalSource:
+    """The real :class:`_ClickHouseEventSource`: pairs each value event with the span it followed.
+
+    WHY this exists (CTO-216). CTO-139 shipped the pure compute, the run log and the orchestrator,
+    and left the CH scan to whoever first ran the reconciler on a schedule. That is this ticket, so
+    the scan has to exist for the job to record anything but zeros.
+
+    WHAT "the span it matched" means here, precisely, because the honest answer is narrow: the most
+    recent span for the SAME hashed user at or before the event. That is last-touch, evaluated at
+    read time, and it is deliberately NOT attribution. Nothing is written to ``attribution_records``
+    and no feature is credited with any value. Real attribution needs the stitcher runner (CTO-200),
+    which does not exist; this query answers only the much smaller question the /features
+    diagnostics card actually asks, which is "how long after the work did the value show up".
+
+    The ``ASOF INNER JOIN`` is what expresses "at or before": ClickHouse resolves it to the nearest
+    preceding row per key. INNER, so an event with no preceding span for that user contributes
+    nothing rather than a fabricated lag of zero — an event we cannot pair is not an event that
+    arrived on time.
+    """
+
+    _SQL = """
+        SELECT e.OccurredAt, s.Timestamp
+        FROM (
+            SELECT UserIdHash, OccurredAt
+            FROM business_events
+            WHERE TenantId = {tenant:String}
+              AND UserIdHash != ''
+              AND OccurredAt >= subtractDays(now64(9), {days:UInt32})
+            ORDER BY OccurredAt DESC
+            LIMIT {cap:UInt32}
+        ) AS e
+        ASOF INNER JOIN (
+            SELECT UserIdHash, Timestamp
+            FROM otel_spans
+            WHERE TenantId = {tenant:String}
+              AND UserIdHash != ''
+              AND Timestamp >= subtractDays(now64(9), {span_days:UInt32})
+        ) AS s
+        ON e.UserIdHash = s.UserIdHash AND e.OccurredAt >= s.Timestamp
+    """
+
+    def __init__(
+        self,
+        store: object,
+        *,
+        lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+        event_cap: int = DEFAULT_EVENT_CAP,
+    ) -> None:
+        if lookback_days <= 0 or event_cap <= 0:
+            raise ValueError("lookback_days and event_cap must be positive")
+        self._store = store
+        self._lookback_days = int(lookback_days)
+        self._event_cap = int(event_cap)
+
+    def fetch_event_span_pairs(self, tenant_id: str) -> Sequence[tuple[datetime, datetime]]:
+        """One tenant-scoped round trip. Raises on a CH failure, which records a ``failed`` run."""
+        result = self._store.client.query(  # type: ignore[attr-defined]
+            self._SQL,
+            parameters={
+                "tenant": tenant_id,
+                "days": self._lookback_days,
+                # Spans are searched over a wider window than events, so an event at the very start
+                # of the event window can still find the span that preceded it. Without the slack
+                # the oldest events in every pass would look unmatched purely because of where the
+                # window boundary happened to fall.
+                "span_days": self._lookback_days * 2,
+                "cap": self._event_cap,
+            },
+        )
+        return [(_as_utc(row[0]), _as_utc(row[1])) for row in result.result_rows]
+
+
+def _as_utc(value: datetime) -> datetime:
+    """ClickHouse hands back naive UTC for a ``DateTime64`` with no timezone. Make that explicit.
+
+    Both halves of a pair come from the same query and are therefore always both naive or both
+    aware, so the subtraction in :func:`compute_late_arrivals` would work either way. Stamping UTC
+    keeps a caller that mixes these with a Python-side timestamp from getting a TypeError.
+    """
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def run_reconciliation(

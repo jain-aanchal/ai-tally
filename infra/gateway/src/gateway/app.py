@@ -57,7 +57,7 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.reconciliation import ReconciliationStore
-from gateway.scheduler import build_scheduler
+from gateway.scheduler import JobRegistry, build_scheduler
 from gateway.store import ClickHouseStore
 from gateway.stripe_ingest import (
     StripeSignatureError,
@@ -160,6 +160,7 @@ from gateway.tenant_unit_economics import (
     UnitEconomicsConfigInput,
 )
 from gateway.validation import SpanValidator, span_item_id
+from gateway.worker_jobs import register_worker_jobs
 
 from tally.cdp_connectors import RevenuePayloadError, WebhookIngestor
 from tally.hmac_keys import HmacKeyRegistry
@@ -314,13 +315,28 @@ async def lifespan(app: FastAPI):
     # Scheduler (CTO-213): periodic per-tenant job execution. A tick loop that asks each registered
     # job "are you due for this tenant" and answers from run history in Postgres, rather than
     # sleeping for a day and losing its place on the next redeploy. Disabled → no task at all
-    # (None), which is byte-identical to the behaviour before this landed. It registers NO jobs
-    # yet: wiring the cost connectors is CTO-215 and the ingest workers CTO-216, so an enabled
-    # scheduler currently ticks over an empty registry. Safe on multiple replicas as of CTO-214:
+    # (None), which is byte-identical to the behaviour before this landed. The registered jobs are
+    # built by register_worker_jobs (CTO-216); the cloud cost connectors are CTO-215.
+    # Safe on multiple replicas as of CTO-214:
     # per (job, tenant) Postgres advisory locks, so two gateways cannot run the same job at once.
     app.state.scheduler = None
     if settings.scheduler_enabled:
-        scheduler = build_scheduler(settings)
+        job_registry = JobRegistry()
+        # CTO-216: the third-party ingest workers (Segment / HubSpot / Pendo) and the reconciler.
+        # Both were written, tested and called by nobody; this is what switches them on. It does
+        # NOT fix /features, which stays blocked on the stitcher runner (CTO-200).
+        register_worker_jobs(
+            job_registry,
+            settings,
+            store=app.state.store,
+            # Shared with the request path on purpose: a second HMAC registry would write into a
+            # different UserIdHash space, and a second linker would learn nothing. See worker_jobs.
+            hmac_registry=app.state.hmac_registry,
+            account_linker=app.state.account_linker,
+            integrations=app.state.tenant_integrations,
+            reconciliation_store=app.state.reconciliation,
+        )
+        scheduler = build_scheduler(settings, job_registry)
         await scheduler.start()
         app.state.scheduler = scheduler
         logger.info(
