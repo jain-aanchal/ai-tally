@@ -38,8 +38,9 @@ services:
       # spans table must exist before the rollup MVs that target it.
       - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
       - ../db/clickhouse/rollups.sql:/docker-entrypoint-initdb.d/02_rollups.sql:ro
-      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/03_last_touch_index.sql:ro
-      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/04_attribution.sql:ro
+      - ../db/clickhouse/account_rollups.sql:/docker-entrypoint-initdb.d/03_account_rollups.sql:ro
+      - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/04_last_touch_index.sql:ro
+      - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/05_attribution.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s

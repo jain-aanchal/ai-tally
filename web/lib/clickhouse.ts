@@ -26,6 +26,22 @@ import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "
 import { LAYERS, type Layer } from "./cost";
 import type { AttributionDiagnostics, FeatureEconomics } from "./features";
 import type {
+  AccountCostRow,
+  AccountCosts,
+  AccountDetail,
+  AccountTrendPoint,
+  DirectLayer,
+  DirectSpendByLayer,
+} from "./accounts";
+import {
+  DIRECT_LAYERS,
+  MAX_ACCOUNT_TOP_FEATURES,
+  UNATTRIBUTED_ACCOUNT,
+  emptyAccountRow,
+  totalDirect,
+  zeroDirectLayers,
+} from "./accounts";
+import type {
   AttributionByFeature,
   CalibrationDay,
   ContextDropsByService,
@@ -291,6 +307,228 @@ export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<F
       (a, b) =>
         LAYERS.reduce((s, l) => s + b.byLayer[l], 0) - LAYERS.reduce((s, l) => s + a.byLayer[l], 0),
     );
+  });
+}
+
+// --- Per-customer cost (CTO-187, D1) ------------------------------------------------------------
+//
+// These read `daily_account_rollup` (CTO-183), not `otel_spans`. AccountIdHash sits nowhere near the
+// front of the spans table's ORDER BY, so grouping by it there cannot skip a granule and degrades
+// into a full tenant scan; the rollup leads with (TenantId, AccountIdHash, Day) and turns both reads
+// below into index range scans. Read db/clickhouse/account_rollups.sql before changing anything
+// here, in particular why its sorting key also carries FeatureTag and GenAiOperation: they are in
+// the key for correctness, because SummingMergeTree collapses rows sharing the FULL key and would
+// otherwise stamp an arbitrary feature and operation onto a merged total, silently destroying the
+// per-layer split these queries depend on.
+//
+// DIRECT COST ONLY. `compute` and `egress` are excluded from every query here, per Decision 2 in
+// docs/cost-per-customer-plan.md. They are tenant-level infrastructure that no span carries an
+// account for, so putting them on a customer's bill means inventing an allocation rule (workstream
+// C, deferred). CTO-189 surfaces the excluded total separately so the page can state it out loud.
+// On the current demo tenant it is about 47 percent of spend, which makes quietly folding it in a
+// large lie rather than a small one.
+//
+// Window: the calendar-aligned `toDate(now()) - INTERVAL 29 DAY` that Home and /cost already use, so
+// all three surfaces agree. A rolling `now() - INTERVAL 30 DAY` drifts by the second and clips a
+// partial day, which would show this tab disagreeing with /cost for a reason nobody can see.
+
+/** Calendar days in the window, inclusive of today. Kept in step with the SQL below. */
+const ACCOUNT_WINDOW_DAYS = 30;
+const ACCOUNT_WINDOW = "Day >= toDate(now()) - INTERVAL 29 DAY";
+
+/** The four directly attributable layers, expressed as an operation filter. See DIRECT_LAYERS. */
+const DIRECT_ONLY = "GenAiOperation NOT IN ('compute', 'egress')";
+
+// AccountIdHash is FixedString(64), which pads to width with NUL bytes, and the unattributed bucket
+// is stored as the empty string. Selecting the column raw therefore hands JavaScript a string of 64
+// NUL characters rather than '', and every `=== ""` check downstream silently fails. Normalise at the
+// SQL boundary so a row's account id is either a real 64-char hex hash or a genuinely empty string.
+const ACCOUNT_ID = "if(empty(AccountIdHash), '', toString(AccountIdHash))";
+
+/** `count` consecutive ISO dates starting at `startIso` (yyyy-mm-dd), inclusive. UTC arithmetic. */
+function isoDaysFrom(startIso: string, count: number): string[] {
+  const [y, m, d] = startIso.split("-").map(Number);
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push(new Date(Date.UTC(y, m - 1, d + i)).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+/**
+ * Direct cost per account over the window: layer split, distinct users, span count.
+ *
+ * Real accounts come back ranked by cost; the unattributed bucket is returned separately and is
+ * always present even at zero, because the page's headline honesty valve is the share of spend with
+ * no account and it must be statable unconditionally. Returns `null` (via tryLive) when ClickHouse
+ * is unreachable so the route can fall back.
+ */
+export async function queryAccountCosts(): Promise<AccountCosts | null> {
+  return tryLive(async (db, tenant) => {
+    // Two reads rather than one, and that is forced. Distinct users comes from a `uniq`
+    // AggregateFunction state, and merged states cannot be added together: a user who touched both
+    // the llm and the tools layer would be counted once per layer if we summed a per-layer
+    // uniqMerge. So users and spans are merged at account grain here, and the layer split is a
+    // second pass that only ever sums money.
+    const totals = await rows<{ account: string; spans: string; users: string }>(
+      db,
+      `SELECT ${ACCOUNT_ID} AS account,
+              sum(SpanCount) AS spans,
+              uniqMerge(UserCountState) AS users
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY account`,
+      tenant,
+    );
+    const byLayerRows = await rows<{ account: string; layer: DirectLayer; cost: string }>(
+      db,
+      `SELECT ${ACCOUNT_ID} AS account, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE TenantId = {tenant:String} AND ${ACCOUNT_WINDOW} AND ${DIRECT_ONLY}
+       GROUP BY account, layer`,
+      tenant,
+    );
+
+    const layers = new Map<string, DirectSpendByLayer>();
+    for (const r of byLayerRows) {
+      let m = layers.get(r.account);
+      if (!m) {
+        m = zeroDirectLayers();
+        layers.set(r.account, m);
+      }
+      if ((DIRECT_LAYERS as readonly string[]).includes(r.layer)) m[r.layer] = micro(r.cost);
+    }
+
+    const accounts: AccountCostRow[] = [];
+    let unattributed = emptyAccountRow(UNATTRIBUTED_ACCOUNT, true);
+    for (const t of totals) {
+      const byLayer = layers.get(t.account) ?? zeroDirectLayers();
+      const row: AccountCostRow = {
+        accountIdHash: t.account,
+        unattributed: t.account === UNATTRIBUTED_ACCOUNT,
+        byLayer,
+        // Sum the rounded per-layer figures rather than rounding the account's own total
+        // separately, so a row's layers always add up to the number printed beside them.
+        directCostMicroUsd: totalDirect(byLayer),
+        distinctUsers: parseInt(t.users, 10) || 0,
+        spanCount: parseInt(t.spans, 10) || 0,
+      };
+      if (row.unattributed) unattributed = row;
+      else accounts.push(row);
+    }
+    accounts.sort((a, b) => b.directCostMicroUsd - a.directCostMicroUsd);
+
+    return {
+      windowDays: ACCOUNT_WINDOW_DAYS,
+      accounts,
+      unattributed,
+      // Deliberately the sum of the rows as returned, not a separately rounded tenant-level sum, so
+      // the headline can never contradict the table beneath it. This is the figure that must
+      // reconcile with /cost's direct spend for the same window.
+      totalDirectMicroUsd:
+        accounts.reduce((s, a) => s + a.directCostMicroUsd, 0) + unattributed.directCostMicroUsd,
+    };
+  });
+}
+
+/**
+ * One account: layer split, top features, and a day-by-day trend across the window.
+ *
+ * Pass `''` for the unattributed bucket. Returns `null` when the tenant has no rollup rows at all
+ * for this account in the window, i.e. we know nothing about it — that is a genuinely unknown
+ * account, not one that cost zero, and the caller should render it as not found rather than as a
+ * free customer. An account we HAVE seen but whose spend is entirely compute and egress comes back
+ * as a real row with zeroes, which is a different and true statement.
+ */
+export async function queryAccountDetail(accountIdHash: string): Promise<AccountDetail | null> {
+  return tryLive(async (db, tenant) => {
+    const params = { tenant, account: accountIdHash };
+    // Comparing FixedString(64) to a String parameter works in both directions: ClickHouse pads the
+    // literal, so `''` matches the unattributed bucket and a 64-char hex hash matches exactly.
+    const scope = `TenantId = {tenant:String} AND AccountIdHash = {account:String} AND ${ACCOUNT_WINDOW}`;
+
+    // `seen` counts rollup rows WITHOUT the direct-only filter, which is what separates "never heard
+    // of this account" from "this account's spend is all infrastructure". The two aggregates beside
+    // it carry the filter via the -If combinator so this stays one read.
+    const totals = await rowsP<{ seen: string; spans: string; users: string; windowStart: string }>(
+      db,
+      `SELECT count() AS seen,
+              sumIf(SpanCount, ${DIRECT_ONLY}) AS spans,
+              uniqMergeIf(UserCountState, ${DIRECT_ONLY}) AS users,
+              toString(toDate(now()) - INTERVAL 29 DAY) AS windowStart
+       FROM daily_account_rollup
+       WHERE ${scope}`,
+      params,
+    );
+    const t = totals[0];
+    if (!t || (parseInt(t.seen, 10) || 0) === 0) return null;
+
+    const byLayerRows = await rowsP<{ layer: DirectLayer; cost: string }>(
+      db,
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY}
+       GROUP BY layer`,
+      params,
+    );
+    const byLayer = zeroDirectLayers();
+    for (const r of byLayerRows) {
+      if ((DIRECT_LAYERS as readonly string[]).includes(r.layer)) byLayer[r.layer] = micro(r.cost);
+    }
+
+    // FeatureTag = '' is untagged traffic, not a feature. It is left out of the top-features list
+    // rather than shown as a nameless row, matching queryFeatureCostRows.
+    const featureRows = await rowsP<{ feature: string; cost: string; spans: string }>(
+      db,
+      `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, sum(SpanCount) AS spans
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY} AND FeatureTag != ''
+       GROUP BY feature
+       ORDER BY cost DESC
+       LIMIT ${MAX_ACCOUNT_TOP_FEATURES}`,
+      params,
+    );
+
+    const trendRows = await rowsP<{ day: string; cost: string }>(
+      db,
+      `SELECT toString(Day) AS day, sum(EstimatedCost) AS cost
+       FROM daily_account_rollup
+       WHERE ${scope} AND ${DIRECT_ONLY}
+       GROUP BY day`,
+      params,
+    );
+    // Fill every calendar day so the chart has no invisible gaps: a day with no spans is a real
+    // zero for this account, not missing data.
+    //
+    // The day list is generated from the window start ClickHouse itself reported, NOT from the
+    // Node process clock. Those are two different clocks in two different timezones, and when they
+    // straddle midnight the JS-generated list is shifted a day against the SQL window: the oldest
+    // day in the result set has no slot to land in and is silently dropped from the trend while
+    // still counting toward the account's total, so the chart quietly fails to add up to the number
+    // printed above it. Deriving both ends from the same clock removes the seam.
+    const byDay = new Map<string, AccountTrendPoint>();
+    for (const iso of isoDaysFrom(t.windowStart, ACCOUNT_WINDOW_DAYS)) {
+      byDay.set(iso, { date: iso, directCostMicroUsd: 0 });
+    }
+    for (const r of trendRows) {
+      const point = byDay.get(r.day);
+      if (point) point.directCostMicroUsd = micro(r.cost);
+    }
+
+    return {
+      accountIdHash,
+      unattributed: accountIdHash === UNATTRIBUTED_ACCOUNT,
+      byLayer,
+      directCostMicroUsd: totalDirect(byLayer),
+      distinctUsers: parseInt(t.users, 10) || 0,
+      spanCount: parseInt(t.spans, 10) || 0,
+      topFeatures: featureRows.map((r) => ({
+        feature: r.feature,
+        directCostMicroUsd: micro(r.cost),
+        spanCount: parseInt(r.spans, 10) || 0,
+      })),
+      trend: [...byDay.values()],
+    };
   });
 }
 
