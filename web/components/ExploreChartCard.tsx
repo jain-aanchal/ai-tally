@@ -128,7 +128,7 @@ export function ExploreChartCard({
         {series && (
           <span className="text-xs text-muted">
             by {DIMENSION_LABEL[series.groupBy].toLowerCase()} ·{" "}
-            <span className="tabular-nums text-gray-200">{formatUSD(series.totalMicroUsd)}</span> ·{" "}
+            <span className="tabular-nums text-fg">{formatUSD(series.totalMicroUsd)}</span> ·{" "}
             <span className="tabular-nums">
               {series.windowStart} → {series.windowEnd}
             </span>

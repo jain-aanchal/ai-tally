@@ -99,7 +99,7 @@ export function Onboarding({
             1 · Point your app at the proxy
           </h2>
           <p className="mb-3 text-sm text-muted">
-            Set two environment variables. Your <code className="text-gray-300">OPENAI_API_KEY</code>{" "}
+            Set two environment variables. Your <code className="text-muted">OPENAI_API_KEY</code>{" "}
             stays in your environment — we never see it.
           </p>
 
@@ -113,13 +113,13 @@ export function Onboarding({
           </div>
 
           <div className="relative">
-            <pre className="overflow-x-auto rounded-lg border border-edge bg-ink p-3 font-mono text-xs leading-relaxed text-gray-200">
+            <pre className="overflow-x-auto rounded-lg border border-edge bg-ink p-3 font-mono text-xs leading-relaxed text-fg">
               {snippet}
             </pre>
             <button
               type="button"
               onClick={onCopy}
-              className="absolute right-2 top-2 rounded-md border border-edge bg-panel px-2 py-1 text-xs text-gray-300 hover:text-accent"
+              className="absolute right-2 top-2 rounded-md border border-edge bg-panel px-2 py-1 text-xs text-muted hover:text-accent"
             >
               {copied ? "Copied ✓" : "Copy"}
             </button>
@@ -137,7 +137,7 @@ export function Onboarding({
 
           {progress.firstTraceAt === null ? (
             <div className="flex items-center justify-between gap-4 rounded-lg border border-edge bg-ink p-4">
-              <span className="flex items-center gap-2 text-sm text-gray-200">
+              <span className="flex items-center gap-2 text-sm text-fg">
                 <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
                 Waiting for your first trace…
               </span>
@@ -183,7 +183,7 @@ export function Onboarding({
                   {s.done ? "✓" : ""}
                 </span>
                 <div>
-                  <div className={`text-sm ${s.done ? "text-gray-200" : "text-gray-300"}`}>
+                  <div className={`text-sm ${s.done ? "text-fg" : "text-muted"}`}>
                     {s.title}
                   </div>
                   <div className="text-xs text-muted">{s.hint}</div>
@@ -214,7 +214,7 @@ function TabButton({
       type="button"
       onClick={onClick}
       className={`rounded-md px-2 py-1 ${
-        active ? "bg-edge text-white" : "text-muted hover:text-gray-200"
+        active ? "bg-edge text-fg" : "text-muted hover:text-fg"
       }`}
     >
       {children}

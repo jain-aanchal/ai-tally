@@ -113,7 +113,7 @@ function Sparkline({ values }: { values: readonly number[] }) {
       aria-label="trend sparkline"
       className="shrink-0"
     >
-      <polyline points={points} fill="none" stroke="#5e6ad2" strokeWidth="1.5" />
+      <polyline points={points} fill="none" stroke="#5e81ac" strokeWidth="1.5" />
     </svg>
   );
 }

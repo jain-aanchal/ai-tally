@@ -145,7 +145,7 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
                           configure value event →
                         </button>
                       ) : (
-                        <span className="font-mono text-xs text-gray-300">{f.valueEvent}</span>
+                        <span className="font-mono text-xs text-muted">{f.valueEvent}</span>
                       )}
                     </td>
                   </tr>
@@ -346,7 +346,7 @@ function ConfigureModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:text-gray-200"
+            className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:text-fg"
           >
             Cancel
           </button>

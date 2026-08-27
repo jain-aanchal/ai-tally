@@ -184,7 +184,7 @@ export default async function UnitEconomicsPage() {
                     className={`border-t border-edge ${p.locked ? "text-muted" : ""}`}
                   >
                     <td className="py-2 font-medium">
-                      <span className={p.locked ? "" : "text-white"}>{fmtMonthLabel(p.periodStart)}</span>
+                      <span className={p.locked ? "" : "text-fg"}>{fmtMonthLabel(p.periodStart)}</span>
                       {p.locked && (
                         <span
                           className="ml-2 rounded bg-edge px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted"

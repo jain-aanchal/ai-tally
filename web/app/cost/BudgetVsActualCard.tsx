@@ -73,7 +73,7 @@ export function BudgetVsActualCard({ payload }: { payload: BudgetPayload }) {
           {budget === null ? (
             <p className="mt-2 text-sm text-muted">
               Month to date is {" "}
-              <span className="font-medium text-white">
+              <span className="font-medium text-fg">
                 <Money micro={c.actualMicroUsd} />
               </span>
               .{" "}

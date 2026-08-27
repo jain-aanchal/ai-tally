@@ -26,7 +26,7 @@ export function TrendChart({ trend }: { trend: readonly AccountTrendPoint[] }) {
   if (n === 0) {
     return (
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="no trend data" className="w-full">
-        <text x={W / 2} y={H / 2} fontSize="12" fill="#8a93a6" textAnchor="middle">
+        <text x={W / 2} y={H / 2} fontSize="12" fill="var(--chart-muted)" textAnchor="middle">
           no daily cost recorded for this account
         </text>
       </svg>
@@ -66,7 +66,7 @@ export function TrendChart({ trend }: { trend: readonly AccountTrendPoint[] }) {
               <title>{`${p.date} · ${formatUSD(p.directCostMicroUsd)}`}</title>
             </rect>
             {i % 5 === 0 ? (
-              <text x={cx} y={H - 8} fontSize="9" fill="#8a93a6" textAnchor="middle">
+              <text x={cx} y={H - 8} fontSize="9" fill="var(--chart-muted)" textAnchor="middle">
                 {p.date.slice(5)}
               </text>
             ) : null}

@@ -116,7 +116,7 @@ export function FilterBar({
           <select
             value={selectedGroupBy}
             onChange={(e) => setGroupBy(e.target.value as Dimension)}
-            className="rounded-md border border-edge bg-ink px-2 py-1 text-gray-100 focus:border-accent focus:outline-none"
+            className="rounded-md border border-edge bg-ink px-2 py-1 text-fg focus:border-accent focus:outline-none"
           >
             {groupByChoices.map((dim) => (
               <option key={dim} value={dim}>
@@ -143,7 +143,7 @@ export function FilterBar({
         <button
           type="button"
           onClick={clearAll}
-          className="ml-auto rounded-md px-2 py-1 text-xs text-muted hover:text-white"
+          className="ml-auto rounded-md px-2 py-1 text-xs text-muted hover:text-fg"
         >
           Clear filters
         </button>
@@ -155,7 +155,7 @@ export function FilterBar({
 function segmentClass(active: boolean): string {
   return [
     "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-    active ? "bg-accent text-white" : "text-muted hover:text-white",
+    active ? "bg-accent text-white" : "text-muted hover:text-fg",
   ].join(" ");
 }
 
@@ -199,7 +199,7 @@ function CustomRangeControl({
               value={draftFrom}
               max={draftTo}
               onChange={(e) => setDraftFrom(e.target.value)}
-              className="rounded-md border border-edge bg-ink px-2 py-1 text-gray-100"
+              className="rounded-md border border-edge bg-ink px-2 py-1 text-fg"
             />
           </label>
           <label className="flex items-center justify-between gap-2 text-xs text-muted">
@@ -209,7 +209,7 @@ function CustomRangeControl({
               value={draftTo}
               min={draftFrom}
               onChange={(e) => setDraftTo(e.target.value)}
-              className="rounded-md border border-edge bg-ink px-2 py-1 text-gray-100"
+              className="rounded-md border border-edge bg-ink px-2 py-1 text-fg"
             />
           </label>
           <button
@@ -264,8 +264,8 @@ function FilterDropdown({
         className={[
           "flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium",
           count > 0
-            ? "border-accent/60 bg-accent/10 text-white"
-            : "border-edge text-muted hover:text-white",
+            ? "border-accent/60 bg-accent/10 text-fg"
+            : "border-edge text-muted hover:text-fg",
         ].join(" ")}
       >
         {DIMENSION_LABEL[dim]}
@@ -285,7 +285,7 @@ function FilterDropdown({
             return (
               <label
                 key={opt.value}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-gray-200 hover:bg-edge"
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-fg hover:bg-edge"
               >
                 <input
                   type="checkbox"
@@ -301,7 +301,7 @@ function FilterDropdown({
             <button
               type="button"
               onClick={onClear}
-              className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted hover:text-white"
+              className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted hover:text-fg"
             >
               Clear {DIMENSION_LABEL[dim].toLowerCase()}
             </button>

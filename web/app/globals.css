@@ -3,47 +3,22 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
   /* Chart chrome tokens (CTO-221). SVG fill/stroke cannot read Tailwind classes, so the inline-SVG
-     charts reference these variables instead of hardcoding hex. The dark values are byte-identical
-     to the palette the existing charts already inline (edge #252b37, muted #8a93a6, panel #161a22),
-     so dark mode is unchanged; the light block below lets the same charts track a light palette if
-     one is ever applied. Series/data colors (LAYER_COLORS) are intentionally NOT here: those encode
-     data identity and read in both themes. */
-  --chart-axis: #252b37;
-  --chart-muted: #8a93a6;
-  --chart-surface: #161a22;
-  --chart-surface-border: #252b37;
-  --chart-est-band: #252b37;
-  --chart-crosshair: #8a93a6;
-}
-
-/* A light palette for the same tokens. Guarded so an explicit dark choice still wins, matching the
-   theme-aware pattern; the app ships dark today, so this only engages under a light preference or an
-   explicit [data-theme="light"]. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --chart-axis: #dfe3ea;
-    --chart-muted: #5b6470;
-    --chart-surface: #ffffff;
-    --chart-surface-border: #dfe3ea;
-    --chart-est-band: #eef1f6;
-    --chart-crosshair: #5b6470;
-  }
-}
-
-:root[data-theme="light"] {
-  --chart-axis: #dfe3ea;
-  --chart-muted: #5b6470;
+     charts reference these variables instead of hardcoding hex. These are the Nord-light values that
+     track the palette the app now ships: a white plotting surface with nord4 axes and nord3 muted
+     text. Series/data colors (LAYER_COLORS) are intentionally NOT here: those encode data identity. */
+  --chart-axis: #d8dee9;
+  --chart-muted: #4c566a;
   --chart-surface: #ffffff;
-  --chart-surface-border: #dfe3ea;
-  --chart-est-band: #eef1f6;
-  --chart-crosshair: #5b6470;
+  --chart-surface-border: #d8dee9;
+  --chart-est-band: #e5e9f0;
+  --chart-crosshair: #4c566a;
 }
 
 body {
-  @apply bg-ink text-gray-100;
+  @apply bg-ink text-fg;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

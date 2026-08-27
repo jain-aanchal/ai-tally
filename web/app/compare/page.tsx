@@ -118,7 +118,7 @@ export default async function ComparePage({
       </Card>
 
       <Card title={`Recommendation — ${recommendation.verdict}`}>
-        <p className="text-sm text-gray-200">{recommendation.summary}</p>
+        <p className="text-sm text-fg">{recommendation.summary}</p>
         <div className="mt-3 flex items-baseline gap-2 text-sm">
           <span className="text-good text-lg font-semibold">
             saves {formatUSD(recommendation.projectedSavingsMicroUsd)}/mo
@@ -129,7 +129,7 @@ export default async function ComparePage({
         </div>
         <button
           type="button"
-          className="mt-3 rounded-md border border-edge bg-ink px-3 py-1.5 text-sm text-gray-200 hover:bg-edge"
+          className="mt-3 rounded-md border border-edge bg-ink px-3 py-1.5 text-sm text-fg hover:bg-edge"
         >
           Export routing rule
         </button>
@@ -152,7 +152,7 @@ export default async function ComparePage({
         title="Compare"
         subtitle={
           <>
-            Workload: <span className="font-mono text-gray-300">{workload}</span>
+            Workload: <span className="font-mono text-muted">{workload}</span>
           </>
         }
         actions={

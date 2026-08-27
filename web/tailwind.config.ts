@@ -6,14 +6,19 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: "#0f1115",
-        panel: "#161a22",
-        edge: "#252b37",
-        muted: "#8a93a6",
-        accent: "#5e6ad2",
-        good: "#4cb782",
-        warn: "#f2c94c",
-        bad: "#eb5757",
+        // Nord light palette (chosen over the original dark theme): a calm, low-glare snow-storm
+        // background with a frost-blue accent and aurora status colors, all kept dark enough to
+        // read as text on the light surface. `fg` is the primary text token that replaced the
+        // former white/light-gray text the dark theme relied on.
+        ink: "#eceff4", // page background (nord6)
+        panel: "#ffffff", // cards / raised surfaces
+        edge: "#d8dee9", // hairline borders (nord4)
+        muted: "#4c566a", // secondary text (nord3), readable on light
+        fg: "#2e3440", // primary text (nord0)
+        accent: "#5e81ac", // frost blue (nord10)
+        good: "#4c9f70", // success, darkened from nord14 so it reads as text
+        warn: "#b7791f", // warning, darkened from nord13 so it reads as text
+        bad: "#bf616a", // danger (nord11)
       },
     },
   },

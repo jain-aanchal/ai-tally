@@ -17,7 +17,7 @@ export function StackedBarChart({ series }: { series: CostSeries }) {
   if (n === 0) {
     return (
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="no data" className="w-full">
-        <text x={W / 2} y={H / 2} fontSize="12" fill="#8a93a6" textAnchor="middle">
+        <text x={W / 2} y={H / 2} fontSize="12" fill="var(--chart-muted)" textAnchor="middle">
           no data for this filter yet
         </text>
       </svg>
@@ -42,11 +42,11 @@ export function StackedBarChart({ series }: { series: CostSeries }) {
         y={PAD_T}
         width={W - PAD_R - boundaryX}
         height={plotH}
-        fill="#252b37"
+        fill="var(--chart-est-band)"
         opacity="0.35"
       />
-      <line x1={boundaryX} x2={boundaryX} y1={PAD_T} y2={H - PAD_B} stroke="#8a93a6" strokeDasharray="4 3" />
-      <text x={boundaryX + 4} y={PAD_T + 12} fontSize="10" fill="#8a93a6">
+      <line x1={boundaryX} x2={boundaryX} y1={PAD_T} y2={H - PAD_B} stroke="var(--chart-muted)" strokeDasharray="4 3" />
+      <text x={boundaryX + 4} y={PAD_T + 12} fontSize="10" fill="var(--chart-muted)">
         ← reconciled · estimated →
       </text>
 
@@ -73,7 +73,7 @@ export function StackedBarChart({ series }: { series: CostSeries }) {
               );
             })}
             {i % 3 === 0 && (
-              <text x={cx} y={H - 10} fontSize="9" fill="#8a93a6" textAnchor="middle">
+              <text x={cx} y={H - 10} fontSize="9" fill="var(--chart-muted)" textAnchor="middle">
                 {d.date.slice(5)}
               </text>
             )}

@@ -99,8 +99,8 @@ export function Shell({ children }: { children: ReactNode }) {
                         "relative block rounded-md px-3 py-2 text-sm transition-colors",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
                         active
-                          ? "bg-edge font-medium text-white"
-                          : "text-gray-300 hover:bg-edge/60 hover:text-white",
+                          ? "bg-edge font-medium text-fg"
+                          : "text-muted hover:bg-edge/60 hover:text-fg",
                       ].join(" ")}
                     >
                       {active && (

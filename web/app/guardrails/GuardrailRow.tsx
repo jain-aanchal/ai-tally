@@ -149,7 +149,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
               type="button"
               onClick={openEdit}
               disabled={pending}
-              className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:bg-edge hover:text-white"
+              className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:bg-edge hover:text-fg"
             >
               Edit
             </button>
@@ -183,7 +183,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
             disabled={pending}
             onChange={(e) => onModeChange(e.target.value as GuardrailMode)}
             aria-label={`Mode for ${rule.scope}`}
-            className="rounded border border-edge bg-ink/40 px-2 py-1 text-xs text-white disabled:opacity-50"
+            className="rounded border border-edge bg-ink/40 px-2 py-1 text-xs text-fg disabled:opacity-50"
           >
             {GUARDRAIL_MODES.map((m) => (
               <option key={m.mode} value={m.mode}>
@@ -202,7 +202,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
             type="button"
             onClick={toggleAudit}
             aria-expanded={auditOpen}
-            className="rounded border border-edge px-2 py-1 text-xs text-muted hover:bg-edge hover:text-white"
+            className="rounded border border-edge px-2 py-1 text-xs text-muted hover:bg-edge hover:text-fg"
           >
             {auditOpen ? "Hide" : "Audit"}
           </button>
@@ -222,7 +222,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
                   value={costInput}
                   onChange={(e) => setCostInput(e.target.value)}
                   placeholder="none"
-                  className="mt-1 w-32 rounded border border-edge bg-ink/40 px-2 py-1 text-sm text-white"
+                  className="mt-1 w-32 rounded border border-edge bg-ink/40 px-2 py-1 text-sm text-fg"
                 />
               </label>
               <label className="flex flex-col text-xs text-muted">
@@ -234,7 +234,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
                   value={stepsInput}
                   onChange={(e) => setStepsInput(e.target.value)}
                   placeholder="none"
-                  className="mt-1 w-32 rounded border border-edge bg-ink/40 px-2 py-1 text-sm text-white"
+                  className="mt-1 w-32 rounded border border-edge bg-ink/40 px-2 py-1 text-sm text-fg"
                 />
               </label>
               <div className="ml-auto flex items-center gap-2">
@@ -244,7 +244,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
                 <button
                   type="button"
                   onClick={() => setEditing(false)}
-                  className="rounded border border-edge px-2.5 py-1 text-xs text-muted hover:bg-edge hover:text-white"
+                  className="rounded border border-edge px-2.5 py-1 text-xs text-muted hover:bg-edge hover:text-fg"
                 >
                   Cancel
                 </button>
@@ -270,7 +270,7 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
               <ul className="space-y-1 text-xs">
                 {auditRows.map((c) => (
                   <li key={c.change_id} className="flex flex-wrap gap-2 text-muted">
-                    <span className="text-white">{c.changed_at || "—"}</span>
+                    <span className="text-fg">{c.changed_at || "—"}</span>
                     <span>
                       {(c.before?.state ?? "∅")} → {(c.after?.state ?? "∅")}
                     </span>

@@ -323,7 +323,7 @@ export function AccountTable({
               setQuery("");
               setSearch(null);
             }}
-            className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:text-white"
+            className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:text-fg"
           >
             Clear
           </button>
