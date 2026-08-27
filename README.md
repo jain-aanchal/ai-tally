@@ -8,14 +8,18 @@ Click on the thumbnail to watch the demo.
 
 Cost-and-value observability for AI products. See what your AI actually costs (all-in) and what it returns.
 
-Four workflows on one shared data spine:
+Six workflows on one shared data spine:
 
-1. **Agent loop cost visibility.** Why did this run cost 50× median?
-2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks. Google/Gemini is now a first-class priced provider here (CTO-149), not a mock column — Compare ranks it against OpenAI and Anthropic on real cost.
-3. **End-to-end cost.** What does this feature really cost? Every cost layer now has a real ingest path: LLM tokens, tools, and embeddings from instrumented spans; vector from wrapped clients (Pinecone/Weaviate/Qdrant + Vertex Vector Search); and compute + egress from daily cloud-billing connectors (AWS Cost Explorer / GCP Billing / Vercel / Cloudflare). Compute and egress are configured per-tenant via the gateway API today; their `/connectors` tiles land with the per-tenant connector UI.
-4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook (the dashboard-side connector UI is the next thing on deck).
+1. **Agent loop cost visibility.** Why did this run cost 50× median? Per-agent cost, run distribution (p50/p99), and the pathological runs that blow the budget, with a windowed daily-average cost per agent (CTO-226).
+2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks. Google/Gemini is a first-class priced provider here (CTO-149), not a mock column, and Compare ranks it against OpenAI and Anthropic on real cost.
+3. **End-to-end cost.** What does this feature really cost? Every cost layer has a real ingest path: LLM tokens, tools, and embeddings from instrumented spans; vector from wrapped clients (Pinecone/Weaviate/Qdrant + Vertex Vector Search); and compute + egress from daily cloud-billing connectors (AWS Cost Explorer / GCP Billing / Vercel / Cloudflare). Compute and egress are configured per-tenant via the gateway API today; their `/connectors` tiles land with the per-tenant connector UI.
+4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook or the generic revenue API.
+5. **Cost per customer.** Which customers cost you the most, and which pay for themselves? Direct AI spend attributed to each tenant customer by hashed account id, plus each account's allocated share of shared compute/egress (pro-rata on direct spend, the allocation rule named on screen), and gross margin per account once a revenue source is wired. Optional human-readable account labels, an account search, and a per-account detail view (CTO-176).
+6. **Spend forecasting.** Where does this month land, and when do you cross budget? A day-of-week-weighted median projection of month-end AI spend with an 80% confidence cone and a breach date, per tenant and per scope (feature/model/layer), refusing to project below a 14-day settled-history floor rather than drawing a volatile number. Surfaced as the burn-down on `/cost` and a compact "Monthly predicted AI cost" card on Home (CTO-204/210/211/227).
 
-A fifth surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
+A seventh surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
+
+Behind the cost connectors, a per-tenant **scheduler** in the gateway (CTO-212) runs the recurring jobs on a cadence, with per-tenant locking so a slow run never overlaps itself: cloud cost connectors, reconciliation, and third-party ingest workers.
 
 ## Product principles
 
@@ -25,6 +29,21 @@ A fifth surface (pre-deploy "what will this change cost?") is half-built. The in
 - **Tail-aware, not median-aware.** Agent cost is a power law; stratified sampling keeps the tail at ~100% and samples the cheap body down.
 - **Never corrupt customer state.** Guardrails default to OBSERVE (record what would have fired), never hard-kill.
 - **OTel-native.** Built on OpenTelemetry `gen_ai.*` conventions; extensions namespaced under the same.
+
+## Dashboard
+
+The Next.js dashboard is a grouped set of pages sharing one interactive foundation (CTO-220, "interactive design overhaul"), rebuilt from static server-rendered tables into a dynamic surface closer to what AWS / GCP / Datadog cost tools offer, without dropping a single feature or honest blank:
+
+- **Overview:** Home, with the headline spend tiles, the ROI snapshot, per-provider conversion, and the "Monthly predicted AI cost" forecast card.
+- **Analyze:** Cost (spend by layer + by feature, budget vs actual, burn-down), Features (per-feature economics), Agents (per-agent distribution and outlier runs), Compare (cross-provider replay + eval), Attribution (`$/conversion` and margin per provider), Unit Economics (CAC / LTV / payback), and Cost per Customer (direct + allocated cost and margin per account).
+- **Configure:** Connectors (which cost layers and providers a tenant streams in), Guardrails (observe/enforce rules and audit), and Budgets (per-tenant and per-scope monthly budgets).
+
+The shared foundation, merged before any page adopted it:
+
+- **A global filter bar (URL-synced).** Time range (7 / 30 / 90 days / custom), a group-by dimension (feature / model / layer / provider / account), and multi-select dimension filters. State lives in the query string, so a filtered view is shareable and the browser back button walks the filter history. Windows are ClickHouse-clock derived, never the Node clock, now that they are user-selectable (CTO-203/226).
+- **Interactive charts.** The inline-SVG charts gained hover tooltips, legend toggling, and click-to-drill (click a series to add it as a filter). No charting library: the charts stay inline SVG and theme-token driven.
+- **Summary tiles and a refreshed shell.** Dense KPI tiles through the honest `Money` / `Pct` / `Blank` primitives, a grouped sticky sidebar with active-route highlighting, and a consistent page header / toolbar.
+- **Live, honest, decoupled.** Each page server-renders once, then a visibility-aware `useLivePoll` refreshes it; a filter change re-fetches immediately rather than waiting for the next tick. Every value shown is a real measurement or a blank with a reason, never a fabricated or flattering zero.
 
 ## Repository layout
 
@@ -37,7 +56,8 @@ infra/             docker-compose stack (ClickHouse, Postgres, Redpanda, MinIO) 
 db/clickhouse/     ClickHouse DDL: otel_spans, attribution, business_events, replay_samples, eval_runs
 db/postgres/       Postgres control-plane schema: tenants, connectors, stripe, replay,
                    eval, guardrails, CAC, integration runs
-web/               Next.js dashboard (the four shipped workflows)
+web/               Next.js dashboard: all workflows on one interactive foundation
+                   (global filter bar, live interactive charts, drill-downs)
 examples/          End-to-end demos: Aider edge-proxy traffic, Vercel AI Chatbot
 ```
 
@@ -158,20 +178,23 @@ connectors do. See [`docs/revenue-api.md`](docs/revenue-api.md).
 
 ## Per-tenant control plane
 
-Stored in Postgres (`db/postgres/*.sql`, migrations `0001`–`0012`), accessed only through the gateway (the web app never talks to Postgres directly):
+Stored in Postgres (`db/postgres/*.sql`, numbered migrations `0001` upward), accessed only through the gateway (the web app never talks to Postgres directly):
 
 - **Tenants + API keys + HMAC key versions** for per-tenant user-id hashing
 - **Cost-layer connector declarations** (which of LLM / vector / tools / compute / egress this tenant streams in)
 - **Compute + egress connector config** (`tenant_compute_config`, `tenant_egress_config`): cloud provider, a credentials *reference* (Secret Manager / KMS, never a raw key), and `last_run_at` / `last_status`
 - **Stripe config**, **replay config**, **eval config**, **guardrail rules** + audit log, **BigQuery export config**
 - **CAC periods** for the unit-economics workflow (one row per finance-entered month)
+- **Account labels + cost-allocation config** for the cost-per-customer workflow (optional human-readable name per hashed account id; the allocation rule used to split shared compute/egress across accounts)
+- **Per-tenant + per-scope monthly budgets** the forecast measures against (`tenant_budgets`)
+- **Scheduler run bookkeeping** (`scheduler_runs`) and **third-party ingest cursors** (`tenant_ingest_cursors`) for the scheduler and its workers
 - **Integration run status** for third-party connectors (workers call `record_run` after each cycle with `last_run_at` + 24h/7d event counts; the surfacing UI card was removed pending the real per-connector UI)
 
 Every control-plane write is audited with an idempotent `change_id` (UUID), and `INSERT … ON CONFLICT DO NOTHING` makes a UI double-click safe.
 
 ## Status
 
-The four shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. Every `/cost` column now has a real ingest path (LLM / tools / embeddings / vector from spans, compute / egress from cloud-billing connectors). The remaining backlog turns the last `—`s into real numbers (per-feature attribution, Unit-Economics ARPA + margin, guardrail trip counts, body-driven pre-deploy estimation) and broadens provider/cloud coverage (Amazon Bedrock, the Vercel AI Gateway, AWS/Vercel deploys).
+The shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`, and the dashboard is now interactive across every page (filter bar, live charts, drill-downs) rather than a set of static tables. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. Every `/cost` column has a real ingest path (LLM / tools / embeddings / vector from spans, compute / egress from cloud-billing connectors), and the cost-per-customer and forecasting workflows read the same spine. The remaining backlog turns the last `—`s into real numbers (guardrail trip counts, body-driven pre-deploy estimation) and broadens provider/cloud coverage (Amazon Bedrock, the Vercel AI Gateway, AWS/Vercel deploys).
 
 Decisions and the full system spec live in the project tracker. Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
 
