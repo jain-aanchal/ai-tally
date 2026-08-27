@@ -25,14 +25,15 @@ async function json<T = unknown>(res: Response): Promise<T> {
 }
 
 describe("api routes", () => {
-  it("GET /api/home returns the four cards", async () => {
-    const body = await json<{ spend: unknown; outliers: unknown[]; roi: unknown[]; dq: unknown }>(
-      // CTO-226: /api/home now reads the time-range window from the request URL; the default (no
-      // range param) preserves the historical 30-day view this smoke test asserts.
+  it("GET /api/home returns spend, ROI and data-quality", async () => {
+    // CTO-227 dropped the cost-outliers card from Home (replaced by the month-end forecast, which is
+    // served by /api/cost/budget), so /api/home no longer carries an `outliers` array.
+    const body = await json<{ spend: unknown; roi: unknown[]; dq: unknown }>(
+      // CTO-226: /api/home reads the time-range window from the request URL; the default (no range
+      // param) preserves the historical 30-day view this smoke test asserts.
       await HomeGET(new Request("http://test/api/home")),
     );
     expect(body.spend).toBeDefined();
-    expect(Array.isArray(body.outliers)).toBe(true);
     expect(Array.isArray(body.roi)).toBe(true);
     expect(body.dq).toBeDefined();
   });

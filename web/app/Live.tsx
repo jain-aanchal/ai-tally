@@ -8,14 +8,23 @@
 // banners, LiveIndicator and StaleBadge all stay exactly where they were.
 //
 // FilterBar sits under the title via PageHeader. The time range now re-parameterises the endpoint
-// (CTO-226): the managed query string rides on /api/home, so 7d/30d/90d re-query SPEND, the cost
-// outliers and the ROI snapshot over the chosen window rather than only restyling a fixed roll-up.
-// The dimension multi-selects still filter the rows the page already holds rather than re-querying:
-// selecting a feature narrows the ROI snapshot, selecting a provider narrows the per-provider
-// conversion table. That is an honest hide of rows, never a fabricated slice. Group-by is hidden
-// here because Home has no grouped chart to re-key (see the interactive chart on /cost).
+// (CTO-226): the managed query string rides on /api/home, so 7d/30d/90d re-query SPEND and the ROI
+// snapshot over the chosen window rather than only restyling a fixed roll-up. The dimension
+// multi-selects still filter the rows the page already holds rather than re-querying: selecting a
+// feature narrows the ROI snapshot, selecting a provider narrows the per-provider conversion table.
+// That is an honest hide of rows, never a fabricated slice. Group-by is hidden here because Home has
+// no grouped chart to re-key (see the interactive chart on /cost).
+//
+// CTO-227 replaces the "Top cost outliers" card with a compact month-end forecast: the same
+// tenant-wide projection /cost draws (fetched once, not polled), so Home and Cost can never disagree.
+// The full burn-down, the confidence cone and the per-scope roster stay on /cost; this is the
+// headline plus the one honest caveat, and it links through for the rest. The month-end figure is
+// NOT windowed by the range selector: the forecast is always for the current calendar month, which
+// the card says out loud so a 7-day range next to a monthly projection cannot read as a mismatch.
 
 "use client";
+
+import Link from "next/link";
 
 import { Card } from "@/components/Card";
 import {
@@ -24,21 +33,22 @@ import {
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
 import { FilterBar, type FilterOption } from "@/components/FilterBar";
+import { Blank, Money, Pct } from "@/components/HonestValue";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import type { ProviderAttribution } from "@/lib/attribution";
+import type { BurndownSection, ForecastPayload } from "@/lib/burndown";
 import { LAYERS, type Layer } from "@/lib/cost";
 import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
 import { rangeDays } from "@/lib/filters";
-import type { CostOutlier, FeatureRoi, SpendSummary } from "@/lib/types";
+import type { FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 export interface HomePayload {
   spend: SpendSummary;
-  outliers: CostOutlier[];
   roi: FeatureRoi[];
   perProviderConversion: ProviderAttribution[];
 }
@@ -46,9 +56,12 @@ export interface HomePayload {
 export function HomeLive({
   initialData,
   enabledLayers,
+  forecast,
 }: {
   initialData: HomePayload;
   enabledLayers: readonly Layer[];
+  /** Tenant-wide month-end projection, the same one /cost draws. Fetched once, not polled. */
+  forecast: ForecastPayload;
 }) {
   // Same URL-synced filter state the FilterBar writes. Home reads it BOTH to narrow the tables it
   // holds and, since CTO-226, to drive the time-range window: the endpoint carries the managed query
@@ -57,7 +70,7 @@ export function HomeLive({
   const windowDays = rangeDays(filterState.range);
   const endpoint = queryString ? `/api/home?${queryString}` : "/api/home";
   const { data, updatedAt } = useLivePoll<HomePayload>(endpoint, initialData);
-  const { spend: s, outliers, roi, perProviderConversion } = data;
+  const { spend: s, roi, perProviderConversion } = data;
 
   const featureFilter = filterState.filters.feature;
   const providerFilter = filterState.filters.provider;
@@ -119,19 +132,7 @@ export function HomeLive({
 
   const grid = (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <Card title={`Top cost outliers (${windowDays}d)`}>
-        <ul className="space-y-2 text-sm">
-          {outliers.map((o) => (
-            <li key={o.runId} className="flex items-center justify-between gap-3">
-              <span className="truncate font-mono text-gray-300">{o.runId}</span>
-              <span className="shrink-0">
-                <span className="font-medium">{formatUSD(o.costMicroUsd)}</span>{" "}
-                <span className="text-bad">{o.multipleOfMedian}× median</span>
-              </span>
-            </li>
-          ))}
-        </ul>
-      </Card>
+      <MonthlyForecastCard forecast={forecast} />
 
       <Card title="ROI snapshot">
         <table className="w-full text-sm">
@@ -255,5 +256,152 @@ export function HomeLive({
         body
       )}
     </div>
+  );
+}
+
+/**
+ * The compact month-end forecast that replaced the cost-outliers card (CTO-227). It renders the
+ * headline and the ONE caveat that decides whether to believe it, then links to /cost for the cone,
+ * the input window and the per-scope roster. It reuses the exact section /cost draws, so the two
+ * surfaces can never state different projections. Every honest-blank rule the burn-down card
+ * enforces is preserved: a refusal below the history floor is a blank with its reason, never a
+ * flattering zero; a missing budget shows the projection with no variance rather than a variance
+ * against zero.
+ */
+function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
+  const section = forecast.section;
+  if (!section) {
+    return (
+      <Card title="Monthly predicted cost">
+        <p className="text-sm text-muted">
+          <Blank reason={forecast.unavailable ?? "this forecast could not be computed"} /> No
+          forecast: {forecast.unavailable ?? "this forecast could not be computed"}.
+        </p>
+      </Card>
+    );
+  }
+
+  const { forecast: f, period } = section;
+  const month = period.start.slice(0, 7);
+
+  if (f.status === "insufficient_history") {
+    // The refusal, compact. Not a claim of safety: "we do not know" is a different answer from
+    // "this will not breach", and the full explanation lives on /cost.
+    const short = Math.max(0, f.historyDays);
+    return (
+      <Card title="Monthly predicted cost">
+        <div className="text-2xl font-semibold text-muted">
+          <Blank reason={`only ${short} settled days of history, 14 are needed to project`} /> Not
+          enough history yet
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          A projection needs at least two full weeks of settled days so each weekday has a real
+          median. This is not a statement that spend is under control, only that we will not put a
+          volatile number on screen.{" "}
+          <Link href="/cost" className="text-accent underline">
+            See the forecast detail
+          </Link>
+          .
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card title="Monthly predicted cost">
+      <div className="text-3xl font-semibold tabular-nums">
+        <Money micro={f.projectedMicroUsd} reason="nothing was projected" />
+      </div>
+      <div className="mt-1 text-sm text-muted">
+        projected for {month}, a forecast and not a commitment
+      </div>
+
+      <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-muted">80% range</dt>
+          <dd className="mt-0.5 tabular-nums">
+            <Money micro={f.lowMicroUsd} reason="nothing was projected" /> to{" "}
+            <Money micro={f.highMicroUsd} reason="nothing was projected" />
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-wide text-muted">Settled so far</dt>
+          <dd className="mt-0.5 tabular-nums">
+            <Money micro={f.spendToDateMicroUsd} />
+            <span className="ml-2 text-xs text-muted">
+              {f.daysElapsed} of {f.daysInPeriod} days
+            </span>
+          </dd>
+        </div>
+      </dl>
+
+      <div className="mt-4 border-t border-edge pt-3 text-sm">
+        <ForecastStanding section={section} />
+      </div>
+    </Card>
+  );
+}
+
+/** The one budget line: the breach date, the under-budget note, or the honest "no budget" state. */
+function ForecastStanding({ section }: { section: BurndownSection }) {
+  const { breach } = section.forecast;
+  const { budget, varianceMicroUsd, variancePct, period } = section;
+
+  if (breach.outcome === "no_budget") {
+    return (
+      <p className="text-muted">
+        <Blank reason={section.noBudgetReason ?? "no budget set"} /> No monthly budget is set, so
+        there is no breach date or variance.{" "}
+        <Link href="/settings/budgets" className="text-accent underline">
+          Set a budget
+        </Link>{" "}
+        to track this against one.
+      </p>
+    );
+  }
+
+  if (breach.outcome === "breaches" && breach.date !== null) {
+    return (
+      <p>
+        <span className="font-medium text-bad">Crosses budget {breach.date}</span>{" "}
+        <span className="text-bad">
+          ({varianceMicroUsd !== null && varianceMicroUsd > 0 ? "+" : ""}
+          <Money micro={varianceMicroUsd} reason="no budget to compare against" /> over
+          {variancePct === null ? null : (
+            <>
+              {" "}
+              <Pct value={variancePct} />
+            </>
+          )}
+          )
+        </span>{" "}
+        by {period.end} against the{" "}
+        <Money micro={budget?.amountMicroUsd ?? null} reason="no budget set" /> budget.
+      </p>
+    );
+  }
+
+  // `never`: projected, and it stays under. Said in those words, distinct from "cannot project".
+  return (
+    <p>
+      <span className="font-medium text-good">Under budget this month</span>{" "}
+      <span className="text-good">
+        (
+        <Money
+          micro={varianceMicroUsd === null ? null : Math.abs(varianceMicroUsd)}
+          reason="no budget to compare against"
+        />{" "}
+        under
+        {variancePct === null ? null : (
+          <>
+            {" "}
+            <Pct value={Math.abs(variancePct)} />
+          </>
+        )}
+        )
+      </span>{" "}
+      versus the <Money micro={budget?.amountMicroUsd ?? null} reason="no budget set" /> budget by{" "}
+      {period.end}.
+    </p>
   );
 }
