@@ -37,7 +37,8 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
     items: [
       { label: "Cost", href: "/cost" },
       { label: "Features", href: "/features" },
-      { label: "Agents", href: "/agents" },
+      // Agents folded into the Cost explorer as the `agent` group-by (CTO-241); /agents redirects
+      // to /cost?groupBy=agent, so the standalone nav item is retired.
       { label: "Compare", href: "/compare" },
       { label: "Attribution", href: "/attribution" },
       { label: "Unit Economics", href: "/unit-economics" },

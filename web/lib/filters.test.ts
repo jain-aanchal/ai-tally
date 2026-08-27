@@ -37,6 +37,7 @@ describe("parseFilters", () => {
       layer: [],
       provider: [],
       account: [],
+      agent: [],
     });
   });
 

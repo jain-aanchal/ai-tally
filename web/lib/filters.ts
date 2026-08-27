@@ -38,7 +38,10 @@ export const PRESET_DAYS: Record<Exclude<TimeRangePreset, "custom">, number> = {
  * The dimensions a page can group by or filter on. These are also the multi-select filter keys, so
  * the list drives both the group-by selector and the set of dimension-filter URL params.
  */
-export const DIMENSIONS = ["feature", "model", "layer", "provider", "account"] as const;
+// `agent` (= ServiceName) folds the retired /agents view into the explorer as one more group-by
+// dimension (CTO-241, M2 of the unified Cost explorer CTO-239). It is a first-class dimension so it
+// flows through group-by, the multi-select filter, and the shareable URL exactly like the others.
+export const DIMENSIONS = ["feature", "model", "layer", "provider", "account", "agent"] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
 
 export const DIMENSION_LABEL: Record<Dimension, string> = {
@@ -47,6 +50,7 @@ export const DIMENSION_LABEL: Record<Dimension, string> = {
   layer: "Layer",
   provider: "Provider",
   account: "Account",
+  agent: "Agent",
 };
 
 export interface TimeRange {
@@ -72,7 +76,7 @@ export const DEFAULT_GROUP_BY: Dimension = "layer";
 export const MANAGED_KEYS: readonly string[] = ["range", "from", "to", "groupBy", ...DIMENSIONS];
 
 function emptyFilters(): DimensionFilters {
-  return { feature: [], model: [], layer: [], provider: [], account: [] };
+  return { feature: [], model: [], layer: [], provider: [], account: [], agent: [] };
 }
 
 export function defaultFilterState(): FilterState {

@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { apiGet } from "@/lib/api";
-import { filtersToQueryString, parseFilters } from "@/lib/filters";
-import { searchParamsFromRecord } from "@/lib/searchParams";
-import { AgentsLive, type AgentsPayload } from "./Live";
+// The standalone Agents workflow was folded into the unified Cost explorer as the `agent` group-by
+// dimension (CTO-241, M2 of CTO-239). This route now redirects to /cost?groupBy=agent so old links,
+// bookmarks, and the retired nav item all land on the explorer's cost-by-agent view. The run
+// drill-down (/agents/runs/[runId]) and its API are deliberately kept and untouched.
 
-export default async function AgentsPage({
-  searchParams,
-}: {
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  // Forward ?tag= / ?run= (CTO-104 deep links) AND the URL-synced time range (CTO-226): the managed
-  // filter serializer preserves the unmanaged tag/run keys while adding the range, so SSR's first
-  // paint matches the URL and the client re-derives the same endpoint from useFilters as it changes.
-  const sp = searchParamsFromRecord(await searchParams);
-  const qs = filtersToQueryString(parseFilters(sp), sp);
-  const endpoint = qs ? `/api/agents?${qs}` : "/api/agents";
-  const initialData = await apiGet<AgentsPayload>(endpoint);
-  return <AgentsLive initialData={initialData} />;
+import { redirect } from "next/navigation";
+
+export default function AgentsPage() {
+  redirect("/cost?groupBy=agent");
 }
