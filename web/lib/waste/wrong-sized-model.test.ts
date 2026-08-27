@@ -171,4 +171,42 @@ describe("detectWrongSizedModel", () => {
     expect(findings[0].scopeKind).toBe("feature");
     expect(findings[0].reason).toContain("on chatbot");
   });
+
+  it("emits one finding per feature scope, each with its OWN feature + incumbent (CTO-238)", () => {
+    // Two features, each with a different incumbent and a different cheaper candidate. The detector
+    // must not collapse them: one finding per scope, scoped to that feature's own incumbent.
+    const research = scope({
+      scopeKind: "feature",
+      scopeValue: "research_agent",
+      feature: "research_agent",
+      incumbentModel: "claude-sonnet-4-5",
+      incumbentPerCallMicroUsd: 10_000,
+      candidates: [candidate({ candidateModel: "claude-haiku-4-5", perCallMicroUsd: 5_000 })],
+    });
+    const chatbot = scope({
+      scopeKind: "feature",
+      scopeValue: "chatbot",
+      feature: "chatbot",
+      incumbentModel: "gpt-4o",
+      incumbentPerCallMicroUsd: 8_000,
+      candidates: [
+        candidate({ candidateModel: "gpt-5-mini", provider: "openai", perCallMicroUsd: 2_000 }),
+      ],
+    });
+    const findings = detectWrongSizedModel(input([research, chatbot]));
+    expect(findings).toHaveLength(2);
+
+    const byFeature = new Map(findings.map((f) => [f.scopeValue, f]));
+    const r = byFeature.get("research_agent")!;
+    expect(r.scopeKind).toBe("feature");
+    expect(r.evidence.incumbentModel).toBe("claude-sonnet-4-5");
+    expect(r.evidence.candidateModel).toBe("claude-haiku-4-5");
+    expect(r.reason).toContain("on research_agent");
+
+    const c = byFeature.get("chatbot")!;
+    expect(c.scopeKind).toBe("feature");
+    expect(c.evidence.incumbentModel).toBe("gpt-4o");
+    expect(c.evidence.candidateModel).toBe("gpt-5-mini");
+    expect(c.reason).toContain("on chatbot");
+  });
 });

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Wrong-sized-model waste detector (CTO-231, W4; epic CTO-227; per-call basis CTO-236).
+// Wrong-sized-model waste detector (CTO-231, W4; epic CTO-227; per-call basis CTO-236; per-feature
+// incumbent CTO-238).
 //
 // WHY: the epic answers "where is this tenant paying for AI that returns nothing". One shape of that
 // waste is running an expensive model on work a cheaper one handles at statistically indistinguishable
@@ -29,6 +30,17 @@
 // least as good. Candidate cost is from resolved-context replay (no live retrieval); the incumbent
 // cost is measured on real traffic; the two are compared per call and the reason says exactly that.
 //
+// CTO-238 (the per-feature incumbent): the collector used to resolve ONE tenant-wide dominant model
+// (queryCurrentModel, e.g. gpt-4o) and compare every feature's replay candidates against it. But the
+// replay corpus and the eval are captured PER FEATURE TAG, so this paired one feature's candidates
+// against a global incumbent that may not even be the model that feature runs. The incumbent is a
+// property of the feature, not the tenant: each feature's own dominant model (max spend) is the thing
+// a cheaper candidate must beat. So the collector now resolves the incumbent per feature from a single
+// grouped (FeatureTag, model) read, iterates the top-K features by spend, and emits one scope per
+// feature with THAT feature's incumbent + window spend + measured per-call cost. queryCurrentModel is
+// no longer the incumbent source here. The pure detector already supported multiple per-feature scopes,
+// so only the collector changes.
+//
 // The pure detector (detectWrongSizedModel) is I/O-free and deterministic so it is trivially testable;
 // collectWrongSizedModel does the ClickHouse + Compare-path reads and maps them through it.
 
@@ -38,7 +50,6 @@ import { clampWindowDays } from "@/lib/explore";
 import type { DimensionFilters } from "@/lib/filters";
 import {
   micro,
-  queryCurrentModel,
   queryEvalCandidates,
   queryReplayCandidates,
   rowsP,
@@ -227,66 +238,126 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
   return findings;
 }
 
+// The replay corpus + eval are captured per FeatureTag, so an incumbent resolved tenant-wide would be
+// compared against a different feature's traffic (CTO-238). Cap the per-feature replay/eval fan-out at
+// the top-K features by spend: replay/eval each burn real provider/judge spend, and the tail of tiny
+// features is not where the tenant's money is. K is a named const so the bound is visible.
+const MAX_FEATURES = 12;
+
+/** One feature's incumbent: its dominant model (max spend) and that model's window spend + per-call
+ *  cost, plus the feature's total spend across all models (the top-K ranking key). Integer micro-USD. */
+interface FeatureIncumbent {
+  feature: string;
+  incumbentModel: string;
+  /** The dominant model's observed spend over the window. Always known. */
+  windowSpendMicroUsd: number;
+  /** The dominant model's measured average cost per call over the window (real traffic). */
+  incumbentPerCallMicroUsd: number;
+  /** The feature's spend across ALL its models, used only to rank features for the top-K cap. */
+  totalSpendMicroUsd: number;
+}
+
 /**
- * The incumbent's measured average cost PER CALL and its windowed total spend, read directly from the
- * incumbent's own chat traffic (CTO-236). This is the per-call basis the candidate replay projections
- * are compared against: `avg(EstimatedCost)` over the incumbent model's chat spans (LLM-family only,
- * excluding the synthetic compute/egress rows), tenant-scoped, over the clamped ClickHouse-clock
- * window. It never touches a candidate id or a replay row, so neither prior bug (incumbent-not-in-replay
- * or dated-vs-base id mis-keying) can occur.
+ * Resolve each feature's incumbent in ONE grouped ClickHouse read (CTO-238).
  *
- * The model id is resolved on the SAME response-model-first expression `queryCurrentModel` /
- * `queryCostExplore` use, so `incumbentModel` here is the id the caller already holds. Returns null on
- * any ClickHouse error (honest fall-through); a zero-count/zero-cost slice yields callCount 0, which
- * the caller treats as "no incumbent traffic to rescale" -> no finding.
+ * The incumbent is a property of the FEATURE, not the tenant: the replay corpus and eval this detector
+ * compares against are captured per feature tag, so the model a cheaper candidate must beat is the one
+ * THAT feature actually runs, not the tenant's globally dominant model. We read per (FeatureTag, model)
+ * `sum(EstimatedCost)` and `count()` over the same LLM-family, chat-only, clamped-window slice the rest
+ * of the code uses (response-model-first id, matching EXPLORE_GROUP_EXPR.model), and for each feature
+ * pick its dominant model (max spend; tie-break higher call count, then higher id, so it is
+ * deterministic regardless of row order). The dominant model's spend / calls give the per-feature
+ * incumbent window spend and its measured per-call cost, and the feature's total spend across models is
+ * the top-K ranking key. Features with an empty FeatureTag are skipped (untagged traffic is not a
+ * feature). Returns null on any ClickHouse error (honest fall-through), or [] when there is no tagged
+ * chat traffic in the window.
  */
-async function queryIncumbentPerCall(
-  incumbentModel: string,
-  windowDays: number,
-  featureTag: string | undefined,
-): Promise<{ perCallMicroUsd: number; windowSpendMicroUsd: number; callCount: number } | null> {
+async function queryFeatureIncumbents(windowDays: number): Promise<FeatureIncumbent[] | null> {
   const w = clampWindowDays(windowDays);
   return tryLive(async (db, tenant) => {
-    const tagClause = featureTag ? "AND FeatureTag = {feature:String}" : "";
-    // Resolve the incumbent on the response-model-first expression (matches EXPLORE_GROUP_EXPR.model),
-    // filter to that model's chat spans over the window, and read total spend + call count so the
-    // per-call average and the window spend come from ONE tenant-scoped read of the same slice.
-    const out = await rowsP<{ spend: string; calls: string | number }>(
+    const out = await rowsP<{ feature: string; model: string; spend: string; calls: string | number }>(
       db,
-      `SELECT sum(EstimatedCost) AS spend, count() AS calls
+      `SELECT FeatureTag AS feature,
+              if(GenAiResponseModel != '', GenAiResponseModel,
+                 if(GenAiRequestModel != '', GenAiRequestModel, 'unknown')) AS model,
+              sum(EstimatedCost) AS spend,
+              count() AS calls
        FROM otel_spans
        WHERE TenantId = {tenant:String}
          AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
          AND GenAiOperation NOT IN ('compute', 'egress')
-         AND if(GenAiResponseModel != '', GenAiResponseModel,
-                if(GenAiRequestModel != '', GenAiRequestModel, 'unknown')) = {model:String}
-         ${tagClause}`,
-      { tenant, model: incumbentModel, ...(featureTag ? { feature: featureTag } : {}) },
+         AND FeatureTag != ''
+       GROUP BY feature, model`,
+      { tenant },
     );
-    const row = out[0];
-    const calls =
-      row == null ? 0 : typeof row.calls === "number" ? row.calls : parseInt(row.calls, 10) || 0;
-    const windowSpendMicroUsd = row == null ? 0 : micro(row.spend);
-    // Money stays integer micro-USD; the per-call average is rounded at this boundary.
-    const perCallMicroUsd = calls > 0 ? Math.round(windowSpendMicroUsd / calls) : 0;
-    return { perCallMicroUsd, windowSpendMicroUsd, callCount: calls };
+
+    // Fold (feature, model) rows into one incumbent per feature. The dominant model is the running
+    // max on (spend, calls, id); the feature total sums every model's spend for the top-K ranking.
+    interface Agg {
+      incumbentModel: string;
+      windowSpendMicroUsd: number;
+      incumbentCalls: number;
+      totalSpendMicroUsd: number;
+    }
+    const byFeature = new Map<string, Agg>();
+    for (const r of out) {
+      if (!r.feature) continue; // defensive: the SQL already excludes '' FeatureTag
+      const spend = micro(r.spend);
+      const calls =
+        typeof r.calls === "number" ? r.calls : parseInt(r.calls, 10) || 0;
+      let a = byFeature.get(r.feature);
+      if (!a) {
+        a = { incumbentModel: r.model, windowSpendMicroUsd: spend, incumbentCalls: calls, totalSpendMicroUsd: 0 };
+        byFeature.set(r.feature, a);
+      }
+      a.totalSpendMicroUsd += spend;
+      // Dominant = max spend; tie-break on higher call count, then higher id, for a deterministic pick.
+      const better =
+        spend > a.windowSpendMicroUsd ||
+        (spend === a.windowSpendMicroUsd &&
+          (calls > a.incumbentCalls ||
+            (calls === a.incumbentCalls && r.model > a.incumbentModel)));
+      if (better) {
+        a.incumbentModel = r.model;
+        a.windowSpendMicroUsd = spend;
+        a.incumbentCalls = calls;
+      }
+    }
+
+    const features: FeatureIncumbent[] = [];
+    for (const [feature, a] of byFeature) {
+      features.push({
+        feature,
+        incumbentModel: a.incumbentModel,
+        windowSpendMicroUsd: a.windowSpendMicroUsd,
+        // Money stays integer micro-USD; the per-call average is rounded at this boundary.
+        incumbentPerCallMicroUsd:
+          a.incumbentCalls > 0 ? Math.round(a.windowSpendMicroUsd / a.incumbentCalls) : 0,
+        totalSpendMicroUsd: a.totalSpendMicroUsd,
+      });
+    }
+    return features;
   });
 }
 
 /**
- * Collect wrong-sized-model findings from the LIVE stack (CTO-231; per-call basis CTO-236).
+ * Collect wrong-sized-model findings from the LIVE stack, PER FEATURE (CTO-231; per-call basis CTO-236;
+ * per-feature incumbent CTO-238).
  *
- * Order matters for honesty and for not doing pointless reads:
- *   1. Replay projection first. No captured corpus (`samples_available <= 0`) -> [] before any other
- *      read. No corpus means no candidate cost, so there is nothing to compute and nothing to fabricate.
- *   2. Eval projection. If no candidate has a judged win-rate (all below the floor / null) there is no
- *      quality signal, and the "/compare no fake quality number" rule says we emit nothing.
- *   3. Incumbent identity + its MEASURED per-call cost from real traffic, plus its window spend.
- *   4. Map to the pure detector on the per-call basis.
+ * The incumbent is resolved per feature (a single grouped read), never tenant-wide. For each in-scope
+ * feature, honesty and read-frugality drive the order:
+ *   1. Feature incumbent from real traffic (dominant model, its window spend, its measured per-call
+ *      cost). No positive per-call cost / no traffic -> skip before any replay/eval read.
+ *   2. Replay projection for THAT feature. No captured corpus (`samples_available <= 0`) -> skip.
+ *   3. Eval projection for THAT feature. No candidate over the judged floor (or eval null) -> skip.
+ *   4. Build the feature's per-call candidates (join replay cost + eval quality by provider+model).
+ *   5. Push one scope per qualifying feature; call the pure detector ONCE over all scopes.
  *
- * Filter-driven: the window is clamped ClickHouse-clock days, a single selected `filters.feature`
- * becomes the compare tag and scopes the incumbent read, and `filters.model` restricts which incumbent
- * model we will flag. There is NO static fallback: any missing signal returns [], the honest answer.
+ * Filter-driven: the window is clamped ClickHouse-clock days; a single selected `filters.feature`
+ * restricts to that one feature; a non-empty `filters.model` keeps only features whose incumbent
+ * (dominant) model is in the set. The fan-out is bounded to the top-{@link MAX_FEATURES} features by
+ * spend. There is NO static fallback: any missing signal yields no finding for that feature, and an
+ * empty result overall is the honest answer.
  */
 export async function collectWrongSizedModel(
   windowDays: number,
@@ -294,69 +365,88 @@ export async function collectWrongSizedModel(
 ): Promise<WasteFinding[]> {
   const window = clampWindowDays(windowDays);
 
-  // The Compare projection is per-feature-tag. Only a single selected feature maps cleanly onto one
-  // tag; zero or several features means "all traffic" (undefined tag), matching how /compare scopes.
-  const featureTag = filters.feature.length === 1 ? filters.feature[0] : undefined;
+  // Per-feature incumbents in one grouped read. Null (ClickHouse down) or [] (no tagged traffic) both
+  // mean nothing to flag.
+  const features = await queryFeatureIncumbents(window);
+  if (!features || features.length === 0) return [];
 
-  // (1) Replay FIRST. No corpus -> [] before we issue any other read (CTO-236: honest, no fabrication,
-  // and no wasted reads when there is nothing to compare against).
-  const replay = await queryReplayCandidates(featureTag);
-  if (!replay || replay.samples_available <= 0) return [];
-  const samplesAvailable = replay.samples_available;
+  // Respect the FilterBar: a single selected feature narrows to that feature; a model filter keeps only
+  // features whose incumbent is one of the selected models (the model we would actually flag).
+  let inScope = features;
+  if (filters.feature.length === 1) {
+    const only = filters.feature[0];
+    inScope = inScope.filter((f) => f.feature === only);
+  }
+  if (filters.model.length > 0) {
+    const models = new Set(filters.model);
+    inScope = inScope.filter((f) => models.has(f.incumbentModel));
+  }
+  if (inScope.length === 0) return [];
 
-  // (2) Eval quality signal. If NO candidate cleared the judged floor (or eval is null), there is no
-  // honest quality number, so we flag nothing - the same rule /compare enforces.
-  const evalProj = await queryEvalCandidates(featureTag);
-  if (!evalProj) return [];
-  const hasJudged = evalProj.per_candidate.some((e) => e.samples_judged >= MIN_JUDGED_SAMPLES);
-  if (!hasJudged) return [];
+  // Bound the replay/eval fan-out to the top-K features by spend (deterministic: spend desc, then
+  // feature id asc) so per-feature Compare-path reads stay bounded.
+  const ranked = [...inScope]
+    .sort((a, b) =>
+      b.totalSpendMicroUsd !== a.totalSpendMicroUsd
+        ? b.totalSpendMicroUsd - a.totalSpendMicroUsd
+        : a.feature < b.feature
+          ? -1
+          : 1,
+    )
+    .slice(0, MAX_FEATURES);
 
-  // (3) Incumbent identity from real traffic (response-model-first, matching the cost breakdown).
-  const live = await queryCurrentModel();
-  if (!live) return [];
-  const incumbentModel = live.model;
+  const scopes: WrongSizedModelScope[] = [];
+  for (const f of ranked) {
+    // (1) No incumbent traffic to rescale against -> no finding for this feature (skip before the
+    // replay/eval reads, which each burn real provider/judge spend).
+    if (f.incumbentPerCallMicroUsd <= 0 || f.windowSpendMicroUsd <= 0) continue;
 
-  // If the caller filtered to specific models and the incumbent is not among them, nothing to flag.
-  if (filters.model.length > 0 && !filters.model.includes(incumbentModel)) return [];
+    // (2) Replay corpus for THIS feature. No corpus -> skip.
+    const replay = await queryReplayCandidates(f.feature);
+    if (!replay || replay.samples_available <= 0) continue;
+    const samplesAvailable = replay.samples_available;
 
-  // The incumbent's MEASURED per-call cost and window spend over the same slice. This is the per-call
-  // rescale basis - no incumbent replay row and no cross-id cost join (CTO-227 review's two bugs).
-  const incumbent = await queryIncumbentPerCall(incumbentModel, window, featureTag);
-  if (!incumbent || incumbent.callCount <= 0 || incumbent.perCallMicroUsd <= 0) return [];
-  if (incumbent.windowSpendMicroUsd <= 0) return [];
+    // (3) Eval quality signal for THIS feature. No candidate cleared the judged floor (or eval null) ->
+    // no honest quality number, skip (the same rule /compare enforces).
+    const evalProj = await queryEvalCandidates(f.feature);
+    if (!evalProj) continue;
+    const hasJudged = evalProj.per_candidate.some((e) => e.samples_judged >= MIN_JUDGED_SAMPLES);
+    if (!hasJudged) continue;
 
-  // (4) Build per-call candidates: join replay (cost) and eval (quality) by provider+model. Each
-  // candidate's per-call cost is `projected_monthly_cost_micro_usd / samples_available` (the gateway
-  // built the projection as `round(avg_per_call * samples_available)`, so this recovers avg per call).
-  const candidates: WrongSizedModelCandidate[] = [];
-  for (const r of replay.per_candidate) {
-    const e = evalProj.per_candidate.find((x) => x.provider === r.provider && x.model === r.model);
-    if (!e) continue;
-    candidates.push({
-      candidateModel: r.model,
-      provider: r.provider,
-      perCallMicroUsd: Math.round(r.projected_monthly_cost_micro_usd / samplesAvailable),
-      winRate: e.win_rate,
-      ciLow: e.win_rate_ci_lo,
-      ciHigh: e.win_rate_ci_hi,
-      samplesJudged: e.samples_judged,
-      samplesReplayed: r.samples_replayed,
+    // (4) Build per-call candidates: join replay (cost) and eval (quality) by provider+model. Each
+    // candidate's per-call cost is `projected_monthly_cost_micro_usd / samples_available` (the gateway
+    // built the projection as `round(avg_per_call * samples_available)`, so this recovers avg per call).
+    const candidates: WrongSizedModelCandidate[] = [];
+    for (const r of replay.per_candidate) {
+      const e = evalProj.per_candidate.find((x) => x.provider === r.provider && x.model === r.model);
+      if (!e) continue;
+      candidates.push({
+        candidateModel: r.model,
+        provider: r.provider,
+        perCallMicroUsd: Math.round(r.projected_monthly_cost_micro_usd / samplesAvailable),
+        winRate: e.win_rate,
+        ciLow: e.win_rate_ci_lo,
+        ciHigh: e.win_rate_ci_hi,
+        samplesJudged: e.samples_judged,
+        samplesReplayed: r.samples_replayed,
+      });
+    }
+    if (candidates.length === 0) continue;
+
+    // (5) One scope per qualifying feature, carrying THAT feature's incumbent + spend + per-call basis.
+    scopes.push({
+      scopeKind: "feature",
+      scopeValue: f.feature,
+      feature: f.feature,
+      incumbentModel: f.incumbentModel,
+      windowSpendMicroUsd: f.windowSpendMicroUsd,
+      incumbentPerCallMicroUsd: f.incumbentPerCallMicroUsd,
+      candidates,
     });
   }
-  if (candidates.length === 0) return [];
+  if (scopes.length === 0) return [];
 
-  return detectWrongSizedModel({
-    windowDays: window,
-    scopes: [
-      {
-        scopeKind: featureTag ? "feature" : "model",
-        scopeValue: featureTag ?? incumbentModel,
-        feature: featureTag,
-        incumbentModel,
-        windowSpendMicroUsd: incumbent.windowSpendMicroUsd,
-        incumbentPerCallMicroUsd: incumbent.perCallMicroUsd,
-        candidates,
-      },
-    ],
-  });
+  // One call, all per-feature scopes: the pure detector already emits one finding per scope with the
+  // right per-feature incumbent in its reason.
+  return detectWrongSizedModel({ windowDays: window, scopes });
 }
