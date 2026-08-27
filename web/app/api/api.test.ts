@@ -19,6 +19,7 @@ import {
 import { GET as GuardrailsGET, POST as GuardrailsPOST } from "./guardrails/route";
 import { GET as AttributionGET } from "./attribution/route";
 import { GET as CacGET } from "./cac/route";
+import { GET as WasteGET } from "./waste/route";
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -203,5 +204,18 @@ describe("api routes", () => {
       }),
     );
     expect(bad.status).toBe(422);
+  });
+
+  it("GET /api/waste returns a WasteReport (findings + byCategory), resilient to empty", async () => {
+    // CTO-234: the waste endpoint runs all five detectors and rolls them up with aggregateWaste.
+    // Detectors return [] when their data is unavailable, so the report may be empty; assert only the
+    // stable WasteReport shape, never a specific finding count.
+    const body = await json<{
+      findings: unknown[];
+      byCategory: Record<string, unknown>;
+    }>(await WasteGET(new Request("http://test/api/waste")));
+    expect(Array.isArray(body.findings)).toBe(true);
+    expect(body.byCategory).toBeTypeOf("object");
+    expect(body.byCategory).not.toBeNull();
   });
 });
