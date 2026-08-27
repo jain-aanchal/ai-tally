@@ -42,7 +42,7 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
       { label: "Attribution", href: "/attribution" },
       { label: "Unit Economics", href: "/unit-economics" },
       { label: "Cost per Customer", href: "/cost-per-customer" },
-      { label: "Waste", href: "/waste" },
+      { label: "Recoverable Cost", href: "/waste" },
     ],
   },
   {

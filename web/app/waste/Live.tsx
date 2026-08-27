@@ -163,7 +163,7 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
         ))}
       </TileGrid>
 
-      <Card title="Findings — hypotheses with evidence, not verdicts">
+      <Card title="Findings — hypotheses with evidence">
         {report.unavailable ? (
           // Hard failure: the report could not be produced. Render the honest reason, not an empty
           // table that would read as "no waste" (CTO-227).
@@ -191,8 +191,8 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Waste"
-        subtitle="Recoverable AI spend: findings are hypotheses with evidence, not verdicts."
+        title="Recoverable Cost"
+        subtitle="Recoverable AI spend: findings are hypotheses with evidence."
         actions={<LiveIndicator updatedAt={updatedAt} />}
         toolbar={
           <Suspense fallback={null}>
