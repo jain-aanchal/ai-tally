@@ -281,9 +281,11 @@ export function BurndownChart({
       )}
 
       {points.map((p, i) =>
-        // The last day always gets a label (it is the period end); the tick before it is dropped
-        // when it would collide, which on a 31-day month it otherwise does.
-        (i % labelEvery === 0 && i < n - 2) || i === n - 1 ? (
+        // The last day always gets a label (it is the period end); any regular tick within one
+        // label-interval of it is dropped so the two do not overprint. On a 31-day month with
+        // labelEvery=4 the regular tick at day 29 (i=28) otherwise collides with the day-31 label at
+        // the right edge; requiring a full interval of clearance (i <= n-1-labelEvery) fixes it.
+        (i % labelEvery === 0 && i <= n - 1 - labelEvery) || i === n - 1 ? (
           <text
             key={p.date}
             x={x(i)}
