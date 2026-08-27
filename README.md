@@ -95,7 +95,7 @@ The runbook covers nine end-to-end steps, including the demos that exercise each
 | Replay-backed Compare | RUNNING.md §8 | Opt-in 5% sampling, cross-provider replay with daily budget cap |
 | Pairwise LLM-judge quality | RUNNING.md §9 | Pairwise judge with Wilson 95% CIs on win-rate |
 
-Demos need provider keys exported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. `GOOGLE_API_KEY` / `GEMINI_API_KEY` is optional — the demos run without it, and enable the Google/Gemini models (chatbot picker + `PROVIDER=google make aider-demo`) when present.
+Demos need provider keys exported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. `GOOGLE_API_KEY` / `GEMINI_API_KEY` is optional: the demos run without it, and enable the Google/Gemini models (chatbot picker + `PROVIDER=google make aider-demo`) when present.
 
 Deploying on GCP? See `deploy/gcp/` (CTO-153).
 
@@ -124,7 +124,7 @@ cd web && npx vitest run
 
 ## Model auto-discovery
 
-On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and — since CTO-149 — `GOOGLE_API_KEY` / `GEMINI_API_KEY` for Google's model list), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `flash` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU (`claude-3-5-haiku-latest` was the case that prompted this) the next boot picks up the replacement automatically.
+On startup the gateway hits `GET /v1/models` on every provider whose API key it has (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and, since CTO-149, `GOOGLE_API_KEY` / `GEMINI_API_KEY` for Google's model list), classifies each id into a coarse family (`haiku` / `sonnet` / `opus` / `mini` / `flagship` / `flash` / `embedding`), and writes the result to `.tally/models.json` with a 24h TTL. The demos read that file via `tally.models.latest_anthropic("sonnet")` (Python) or `resolveLatest()` (Node), so when a provider retires a SKU (`claude-3-5-haiku-latest` was the case that prompted this) the next boot picks up the replacement automatically.
 
 Knobs:
 
