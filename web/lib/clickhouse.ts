@@ -113,8 +113,9 @@ export async function tryLive<T>(fn: (db: ClickHouseClient, tenant: string) => P
   }
 }
 
-// Decimal string (USD) -> integer micro-USD.
-function micro(decimalUsd: string | number | null | undefined): number {
+// Decimal string (USD) -> integer micro-USD. Exported so sibling lib modules (e.g. the waste
+// detectors, CTO-227) can build tenant-scoped reads with the same money conversion (CTO-234 prep).
+export function micro(decimalUsd: string | number | null | undefined): number {
   const n = typeof decimalUsd === "number" ? decimalUsd : parseFloat(decimalUsd ?? "0");
   return Math.round((Number.isFinite(n) ? n : 0) * 1_000_000);
 }
@@ -126,10 +127,10 @@ function zeroLayers(): SpendByLayer {
 // Map a gen_ai operation to a cost layer. LLM-family spans come from the SDK; `compute` (CTO-143)
 // and `egress` (CTO-144) spans are synthetic daily rows the cloud-billing connectors land so the
 // Compute and Egress layers populate.
-const LAYER_CASE =
+export const LAYER_CASE =
   "multiIf(GenAiOperation = 'tool', 'tools', GenAiOperation = 'embeddings', 'embeddings', GenAiOperation = 'vector', 'vector', GenAiOperation = 'compute', 'compute', GenAiOperation = 'egress', 'egress', 'llm')";
 
-async function rows<T>(db: ClickHouseClient, query: string, tenant: string): Promise<T[]> {
+export async function rows<T>(db: ClickHouseClient, query: string, tenant: string): Promise<T[]> {
   const rs = await db.query({
     query,
     query_params: { tenant },
@@ -139,7 +140,7 @@ async function rows<T>(db: ClickHouseClient, query: string, tenant: string): Pro
 }
 
 // Like `rows` but allows extra named query params (e.g. an Array(String) of trace ids).
-async function rowsP<T>(
+export async function rowsP<T>(
   db: ClickHouseClient,
   query: string,
   params: Record<string, unknown>,
