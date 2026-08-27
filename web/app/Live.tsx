@@ -272,7 +272,7 @@ function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
   const section = forecast.section;
   if (!section) {
     return (
-      <Card title="Monthly predicted cost">
+      <Card title="Monthly predicted AI cost">
         <p className="text-sm text-muted">
           <Blank reason={forecast.unavailable ?? "this forecast could not be computed"} /> No
           forecast: {forecast.unavailable ?? "this forecast could not be computed"}.
@@ -289,7 +289,7 @@ function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
     // "this will not breach", and the full explanation lives on /cost.
     const short = Math.max(0, f.historyDays);
     return (
-      <Card title="Monthly predicted cost">
+      <Card title="Monthly predicted AI cost">
         <div className="text-2xl font-semibold text-muted">
           <Blank reason={`only ${short} settled days of history, 14 are needed to project`} /> Not
           enough history yet
@@ -308,12 +308,13 @@ function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
   }
 
   return (
-    <Card title="Monthly predicted cost">
+    <Card title="Monthly predicted AI cost">
       <div className="text-3xl font-semibold tabular-nums">
         <Money micro={f.projectedMicroUsd} reason="nothing was projected" />
       </div>
       <div className="mt-1 text-sm text-muted">
-        projected for {month}, a forecast and not a commitment
+        all-in AI spend for {month} (LLM, vector, tools, compute, embeddings, egress), a forecast and
+        not a commitment
       </div>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
