@@ -122,6 +122,37 @@ describe("detectPaidForNothing", () => {
     expect(report.byCategory.paid_for_nothing).toBe(250_000);
   });
 
+  // CTO-227 review pass 2 (Fix A): the per-scope DENOMINATOR is the scope's TRUE total spend, not the
+  // single-scoped subtotal. For an agent, that total includes the feature-tagged runs on it that the
+  // wasted-cost roll-up attributed to a feature scope. The query now supplies that true total as
+  // `scopeCost`; here we lock the detector's contract on it: an agent whose $0.20 wasted spend is 20%
+  // of its real $1.00 total must report windowSpend = full $1.00 and share = 20%, NOT windowSpend =
+  // $0.20 and share = 100% (the pre-fix behaviour when scopeCost excluded feature-tagged runs).
+  it("uses the agent's true total spend as the share denominator (not the single-scoped subtotal)", () => {
+    const findings = detectPaidForNothing([
+      row({
+        scopeKind: "agent",
+        scopeValue: "aider",
+        wastedCost: "0.20", // $0.20 wasted (single-scoped, counted once)
+        // True agent total over the window: includes this agent's feature-tagged runs too.
+        scopeCost: "1.00", // $1.00 real total on the agent
+        failedRuns: "2",
+        exampleTrace: "trace-agent",
+      }),
+    ]);
+
+    expect(findings).toHaveLength(1);
+    const f = findings[0];
+    expect(f.scopeKind).toBe("agent");
+    expect(f.scopeValue).toBe("aider");
+    expect(f.recoverableMicroUsd).toBe(200_000);
+    // Full agent spend, not the $0.20 single-scoped subtotal.
+    expect(f.windowSpendMicroUsd).toBe(1_000_000);
+    // 0.20 / 1.00 = 20%, not the 100% the pre-fix (subtotal) denominator produced.
+    expect(f.evidence.shareOfScopeSpend).toBe(20);
+    expect(f.reason).toContain("20%");
+  });
+
   it("counts abandoned runs into the wasted-run tally when present", () => {
     const findings = detectPaidForNothing([
       row({
