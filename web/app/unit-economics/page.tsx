@@ -226,7 +226,7 @@ export default async function UnitEconomicsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Unit Economics"
-        subtitle={`CAC by flavor, payback, and LTV — honest under uncertainty. Undefined metrics render ${DASH}.`}
+        subtitle="CAC by flavor, payback, and LTV"
         toolbar={
           <Suspense fallback={null}>
             <FilterBar groupByChoices={["feature", "model", "provider"]} defaultGroupBy="feature" />

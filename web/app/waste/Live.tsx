@@ -191,7 +191,7 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Waste"
+        title="Recoverable Cost"
         subtitle="Recoverable AI spend: findings are hypotheses with evidence."
         actions={<LiveIndicator updatedAt={updatedAt} />}
         toolbar={
