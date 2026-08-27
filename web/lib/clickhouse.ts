@@ -1540,6 +1540,10 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
           valuePerUserMicroUsd: null,
           paybackDays: null,
           attributionRate: null,
+          // CTO-227 review finding (Bug 3): carry the RAW conversion count even when the rate is
+          // nulled for trust. A sparse-but-converting feature has conversions > 0 here, which lets
+          // the no-measured-return detector tell it apart from a genuinely-unattributed one (0).
+          conversions,
           attributionBreakdown,
         };
       }
@@ -1557,6 +1561,7 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
         valuePerUserMicroUsd,
         paybackDays,
         attributionRate,
+        conversions,
         attributionBreakdown,
       };
     });
@@ -2713,12 +2718,15 @@ export async function queryCurrentModel(): Promise<{
       // uses `=== 2` for OTel error semantics, e.g. agents.ts toRunSpan().)
       // DurationNs is wrapped in `if(... > 0, ..., NULL)` because some insertion paths land
       // 0-ns durations (mid-stream / early-fail) which would otherwise drag the p95 down.
+      // CTO-227 review finding (Bug 4): the incumbent id this returns is joined by string equality
+      // against queryCostExplore's per-model breakdown, which keys models by EXPLORE_GROUP_EXPR.model
+      // (response model first, request model otherwise). Resolving the model any other way (e.g. the
+      // old SpanAttributes['chatbot.real_model'] coalesce, whose historical-fallback rows have long
+      // rolled out of the 30-day window per CTO-106) produced an id that never matched a breakdown row
+      // on the chatbot demo, so the wrong-sized-model detector always returned []. Resolve — and GROUP
+      // BY — on the SAME expression the cost breakdown uses so the join key matches by construction.
       `SELECT
-         coalesce(
-           nullIf(any(SpanAttributes['chatbot.real_model']), ''),
-           any(GenAiResponseModel),
-           any(GenAiRequestModel)
-         ) AS model,
+         ${EXPLORE_GROUP_EXPR.model} AS model,
          coalesce(
            nullIf(any(SpanAttributes['chatbot.real_provider']), ''),
            any(GenAiSystem)
@@ -2730,8 +2738,8 @@ export async function queryCurrentModel(): Promise<{
        FROM otel_spans
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 7 DAY
-         AND coalesce(GenAiResponseModel, GenAiRequestModel) != ''
-       GROUP BY coalesce(GenAiResponseModel, GenAiRequestModel)
+         AND (GenAiResponseModel != '' OR GenAiRequestModel != '')
+       GROUP BY ${EXPLORE_GROUP_EXPR.model}
        ORDER BY count() DESC
        LIMIT 1`,
       tenant,
