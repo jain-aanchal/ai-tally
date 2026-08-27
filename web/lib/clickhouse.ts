@@ -403,6 +403,20 @@ const EXPLORE_GROUP_EXPR: Record<ExploreDimension, string> = {
   provider:
     "coalesce(nullIf(SpanAttributes['chatbot.real_provider'], ''), nullIf(GenAiSystem, ''), 'unknown')",
   account: "if(empty(AccountIdHash), 'unattributed', toString(AccountIdHash))",
+  // Agent identity is ServiceName, exactly as queryAgents reads it (CTO-241). The synthetic
+  // ''/'unknown' services and the compute/egress rows are excluded via EXPLORE_GROUP_SCOPE below,
+  // not here, so the raw expression stays a plain column reference the filter clause can reuse.
+  agent: "ServiceName",
+};
+
+// Extra WHERE predicate applied ONLY when the explorer groups by this dimension (CTO-241). Agent
+// cost is run-shaped: it drops the ''/'unknown' ServiceName rows and the synthetic compute/egress
+// rows that queryAgents also excludes, so group-by=agent lists exactly the agents the retired
+// /agents view listed and each agent's cost matches. Other group-bys are unaffected, and the agent
+// multi-select filter (ServiceName IN ...) is deliberately just the membership test, applied on any
+// group-by, so filtering to an agent narrows every dimension consistently.
+const EXPLORE_GROUP_SCOPE: Partial<Record<ExploreDimension, string>> = {
+  agent: "AND ServiceName NOT IN ('', 'unknown') AND GenAiOperation NOT IN ('compute', 'egress')",
 };
 
 /**
@@ -472,9 +486,13 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
 
     const { clause: filterClause, params: filterParams } = exploreFilterClauses(params.filters);
     // Half-open on the high end so the whole of windowEnd's calendar day is included exactly once.
+    // The group-scope predicate (agent's run-shaped exclusions, CTO-241) rides on every read below
+    // so the totals, the breakdown, and the day×group series all sit on the same excluded slice.
+    const groupScope = EXPLORE_GROUP_SCOPE[params.groupBy] ?? "";
     const scope = `TenantId = {tenant:String}
         AND Timestamp >= toDate({windowStart:String})
-        AND Timestamp < toDate({windowEnd:String}) + 1`;
+        AND Timestamp < toDate({windowEnd:String}) + 1
+        ${groupScope}`;
     const common = { tenant, windowStart: b.windowStart, windowEnd: b.windowEnd, ...filterParams };
 
     // Per-group totals over the whole window. Group cardinality is inherently small (one row per
@@ -2056,7 +2074,7 @@ function buildRun(agg: RunAgg, spans: RunSpan[], agentMedian: number): AgentRun 
 
 /** Per-agent summaries + the top expensive runs (with span trees), built from otel_spans. */
 export async function queryAgents(
-  filter?: { tag?: string; run?: string },
+  filter?: { tag?: string; run?: string; agent?: string },
   windowDays = 30,
 ): Promise<{ agents: AgentSummary[]; runs: AgentRun[] } | null> {
   return tryLive(async (db, tenant) => {
@@ -2065,8 +2083,13 @@ export async function queryAgents(
     const w = clampWindowDays(windowDays);
     const tag = filter?.tag ?? "";
     const run = filter?.run ?? "";
+    // Narrow to a single agent by ServiceName (CTO-241): the unified Cost explorer fetches this when
+    // group-by=agent is filtered to exactly one agent, to render that agent's run distribution and
+    // pathological runs inline. Bound as a param, never interpolated.
+    const agent = filter?.agent ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
     const runClause = run ? "AND TraceId = {run:String}" : "";
+    const agentClause = agent ? "AND ServiceName = {agent:String}" : "";
     // Agent identity comes from ServiceName (e.g. "aider", "vercel-chatbot-demo"),
     // not FeatureTag (which is the workflow-3 dimension — that's the /features view).
     // ?tag= still narrows agents to runs that produced a given feature.
@@ -2086,8 +2109,9 @@ export async function queryAgents(
          AND GenAiOperation NOT IN ('compute', 'egress')
          ${tagClause}
          ${runClause}
+         ${agentClause}
        GROUP BY TraceId`,
-      { tenant, tag, run },
+      { tenant, tag, run, agent },
     );
     if (aggs.length === 0) return { agents: [], runs: [] };
 

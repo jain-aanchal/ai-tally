@@ -17,7 +17,11 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const tag = searchParams.get("tag") ?? "";
   const run = searchParams.get("run") ?? "";
-  const hasFilter = Boolean(tag || run);
+  // ?agent=<ServiceName> (CTO-241): the unified Cost explorer requests one agent's detail when
+  // group-by=agent is narrowed to a single agent. Like ?tag=/?run=, a set filter with no live data
+  // returns empty rather than the unfiltered mock, so the inline detail never fabricates numbers.
+  const agent = searchParams.get("agent") ?? "";
+  const hasFilter = Boolean(tag || run || agent);
   // The time-range selector drives the windowed cost/day average (CTO-226): resolve the URL-synced
   // filter state to a day count the ClickHouse-derived window clamps and interpolates.
   const windowDays = rangeDays(parseFilters(searchParams).range);
@@ -25,7 +29,7 @@ export async function GET(req: Request) {
   // the real reconciliation_runs value (CTO-169) — or null when the reconciler has never run / the
   // gateway is unavailable, which the page renders as `—` rather than a fabricated constant.
   const [live, reconcilerLastRunMinutesAgo] = await Promise.all([
-    queryAgents({ tag, run }, windowDays),
+    queryAgents({ tag, run, agent }, windowDays),
     queryReconcilerLastRun(),
   ]);
   return NextResponse.json({

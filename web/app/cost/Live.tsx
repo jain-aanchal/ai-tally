@@ -65,6 +65,7 @@ import { formatUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
+import { AgentDetail } from "./AgentDetail";
 import { BudgetVsActualCard } from "./BudgetVsActualCard";
 import { BurndownCard, type CostBudgetPayload } from "./BurndownCard";
 
@@ -212,6 +213,24 @@ export function CostLive({
   // The breakdown group-by: whatever /api/explore grouped by, or the URL's group-by while it loads.
   const breakdownGroupBy: Dimension = explore.series?.groupBy ?? filterState.groupBy;
 
+  // Agent filter options (CTO-241): /api/cost doesn't enumerate agents, but the explore breakdown
+  // does once grouped by agent, so the FilterBar offers an Agent dropdown listing the agents in the
+  // slice. The synthetic "other" fold is not a real agent, so it is never a filterable option.
+  const agentOptions: FilterOption[] =
+    breakdownGroupBy === "agent" && explore.series
+      ? explore.series.breakdown
+          .filter((r) => r.group !== OTHER_GROUP)
+          .map((r) => ({ value: r.group }))
+      : [];
+
+  // The single-agent detail is shown only when the explorer groups by agent AND is narrowed to
+  // exactly one agent (CTO-241): that is the slice for which one agent's run distribution and
+  // pathological runs are meaningful. It reuses the /agents data + components (see AgentDetail).
+  const singleAgent =
+    filterState.groupBy === "agent" && filterState.filters.agent.length === 1
+      ? filterState.filters.agent[0]
+      : null;
+
   // Breakdown rows: from /api/explore when present; else, on the default slice, a per-layer fallback
   // off the /api/cost layer totals so the offline / synthetic-preview view keeps a table.
   const breakdownRows: ExploreBreakdownRow[] = useMemo(() => {
@@ -314,6 +333,10 @@ export function CostLive({
         matchesSearch={matchesSearch}
         unavailable={sliceUnavailable}
       />
+
+      {/* The retired /agents view, preserved for one agent (CTO-241): when grouping by agent and
+          narrowed to a single agent, its run distribution + pathological runs render here. */}
+      {singleAgent && <AgentDetail agent={singleAgent} queryString={queryString} />}
     </div>
   );
 
@@ -334,7 +357,11 @@ export function CostLive({
             )}
           </>
         }
-        toolbar={<FilterBar options={{ feature: featureOptions, layer: layerOptions }} />}
+        toolbar={
+          <FilterBar
+            options={{ feature: featureOptions, layer: layerOptions, agent: agentOptions }}
+          />
+        }
       />
 
       {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}

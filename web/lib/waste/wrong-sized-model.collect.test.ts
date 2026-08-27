@@ -41,7 +41,7 @@ const tryLive = ch.tryLive as unknown as ReturnType<typeof vi.fn>;
 const rowsP = ch.rowsP as unknown as ReturnType<typeof vi.fn>;
 
 function filters(over: Partial<DimensionFilters> = {}): DimensionFilters {
-  return { feature: [], model: [], layer: [], provider: [], account: [], ...over };
+  return { feature: [], model: [], layer: [], provider: [], account: [], agent: [], ...over };
 }
 
 // The grouped (FeatureTag, model) read the collector runs. research_agent's dominant model is
