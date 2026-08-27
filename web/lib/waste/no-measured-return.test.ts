@@ -20,6 +20,9 @@ function row(over: Partial<NoReturnEconRow> = {}): NoReturnEconRow {
     scopeValue: "chatbot",
     windowSpendMicroUsd: 100 * USD,
     attributionRate: null,
+    // Default is genuinely-zero attribution (flaggable). Cases that model a converting feature set
+    // conversions > 0 explicitly.
+    conversions: 0,
     ...over,
   };
 }
@@ -86,6 +89,32 @@ describe("detectNoMeasuredReturn", () => {
     );
     // Only the unattributed one is flagged; the attributed feature is left alone.
     expect(findings.map((f) => f.scopeValue)).toEqual(["orphan"]);
+  });
+
+  // CTO-227 review finding (Bug 3): a sparse-but-converting feature has conversions > 0 while its
+  // attributionRate is null (below the MIN_CONVERSIONS_FOR_ECONOMICS trust floor). It must NOT be
+  // flagged: it DID convert, just sparsely. Only a genuinely-zero-conversion feature is waste.
+  it("does not flag a sparse-but-converting feature (conversions > 0, rate null)", () => {
+    const findings = detectNoMeasuredReturn(
+      [
+        // Genuinely unattributed: zero conversions -> flagged.
+        row({ scopeValue: "orphan", windowSpendMicroUsd: 300 * USD, attributionRate: null, conversions: 0 }),
+        // Converted, but too few to trust the rate (null). Real return -> NOT flagged.
+        row({ scopeValue: "sparse", windowSpendMicroUsd: 400 * USD, attributionRate: null, conversions: 3 }),
+      ],
+      0.8,
+    );
+    expect(findings.map((f) => f.scopeValue)).toEqual(["orphan"]);
+  });
+
+  it("flags a genuinely-zero-conversion feature even when its rate is null", () => {
+    const findings = detectNoMeasuredReturn(
+      [row({ scopeValue: "dead-weight", windowSpendMicroUsd: 500 * USD, attributionRate: null, conversions: 0 })],
+      0.6,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].scopeValue).toBe("dead-weight");
+    expect(findings[0].recoverableMicroUsd).toBe(500 * USD);
   });
 
   it("does not flag a scope with no spend at risk", () => {

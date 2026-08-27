@@ -24,6 +24,7 @@ function feature(overrides: Partial<FeatureEconomics>): FeatureEconomics {
     valuePerUserMicroUsd: null,
     paybackDays: null,
     attributionRate: null,
+    conversions: 0,
     attributionBreakdown: { direct: 0, sessionStitched: 0, identityGraphStitched: 0, unmatched: 0 },
     ...overrides,
   };

@@ -134,8 +134,10 @@ function detectorFilters(filters: DimensionFilters): {
  *      (`max(StatusCode) = 2`), matching `queryAgents` exactly. A run also carries its feature tag
  *      and its agent (ServiceName). `GenAiOperation NOT IN ('compute','egress')` keeps this to
  *      run-shaped, billable spend (the synthetic infra rows are not runs).
- *   2. Roll runs up BY feature and BY agent separately, summing wasted cost (cost of the runs that
- *      ended failed) and total scope cost, and counting the wasted runs.
+ *   2. Assign each run to EXACTLY ONE scope (its feature when tagged, else its agent) and roll those
+ *      single-scope groups up, summing wasted cost (cost of the runs that ended failed) and total
+ *      scope cost, and counting the wasted runs. One run's dollars land in one scope, never two
+ *      (CTO-227 review finding, Bug 2: the previous by-feature-AND-by-agent union double-counted).
  */
 export async function collectPaidForNothing(
   windowDays: number,
@@ -147,8 +149,9 @@ export async function collectPaidForNothing(
 
     // Stage 1 (runs subquery): one row per TraceId with its cost, terminal-error flag, feature and
     // agent. `isFailed` reuses queryAgents' derivation: max(StatusCode)=2 (OTel Error) => failed.
-    // Stage 2 (outer): two GROUP BYs unioned -- by feature and by agent -- each emitting a scope row
-    // with wasted vs. total spend and the wasted-run counts. `wastedCost`/`failedRuns` gate on the
+    // Stage 2 (outer): attribute each run to ONE scope (feature when tagged, else agent), then GROUP
+    // BY that scope, each group emitting a row with wasted vs. total spend and the wasted-run counts.
+    // One run's dollars count once (CTO-227 Bug 2). `wastedCost`/`failedRuns` gate on the
     // run being both billed (runCost > 0) AND failed. `abandonedRuns` is 0: abandonment is not
     // derivable from OTel StatusCode today (see queryAgents), but the column is kept so the shape and
     // the evidence are stable if a future signal lands.
@@ -169,34 +172,38 @@ export async function collectPaidForNothing(
     // A wasted run: billed (runCost > 0) and failed. We express the gate once as a reusable flag.
     const wastedRunExpr = "(runCost > 0 AND isFailed)";
 
+    // CTO-227 review finding (Bug 2): assign each run to EXACTLY ONE scope before rolling up, so its
+    // dollars are counted once. The old query rolled the same runs up BY feature AND BY agent in a
+    // UNION ALL, so a failed feature-tagged run on a named agent surfaced as TWO findings whose
+    // recoverables BOTH fed `aggregateWaste`'s total — overstating "Recoverable" up to 2x. Here a run
+    // with a FeatureTag is attributed to its feature; an untagged run falls back to its agent. Runs
+    // that are neither tagged nor on a usable agent cannot be attributed to any scope, so they are
+    // dropped rather than double-counted or mis-assigned.
+    const scopeKindExpr = "if(feature != '', 'feature', 'agent')";
+    const scopeValueExpr = "if(feature != '', feature, agent)";
+
     const sql = `
-      WITH runs AS (${runsCte})
+      WITH runs AS (${runsCte}),
+      scoped AS (
+        SELECT
+          ${scopeKindExpr} AS scopeKind,
+          ${scopeValueExpr} AS scopeValue,
+          runCost,
+          isFailed,
+          runId
+        FROM runs
+        WHERE NOT (feature = '' AND (agent = '' OR agent = 'unknown'))
+      )
       SELECT
-        'feature' AS scopeKind,
-        feature AS scopeValue,
+        scopeKind,
+        scopeValue,
         toString(sumIf(runCost, ${wastedRunExpr})) AS wastedCost,
         toString(sum(runCost)) AS scopeCost,
         toString(countIf(${wastedRunExpr})) AS failedRuns,
         '0' AS abandonedRuns,
         anyIf(runId, ${wastedRunExpr}) AS exampleTrace
-      FROM runs
-      WHERE feature != ''
-      GROUP BY feature
-      HAVING sumIf(runCost, ${wastedRunExpr}) > 0
-
-      UNION ALL
-
-      SELECT
-        'agent' AS scopeKind,
-        agent AS scopeValue,
-        toString(sumIf(runCost, ${wastedRunExpr})) AS wastedCost,
-        toString(sum(runCost)) AS scopeCost,
-        toString(countIf(${wastedRunExpr})) AS failedRuns,
-        '0' AS abandonedRuns,
-        anyIf(runId, ${wastedRunExpr}) AS exampleTrace
-      FROM runs
-      WHERE agent != '' AND agent != 'unknown'
-      GROUP BY agent
+      FROM scoped
+      GROUP BY scopeKind, scopeValue
       HAVING sumIf(runCost, ${wastedRunExpr}) > 0`;
 
     const raw = await rowsP<PaidForNothingRow>(db, sql, { tenant, ...params });

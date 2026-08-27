@@ -49,6 +49,14 @@ export interface NoReturnEconRow {
   windowSpendMicroUsd: MicroUSD;
   /** 0..1, or `null` for "no measured attribution". From `queryFeatureEconomics`, never re-derived. */
   attributionRate: number | null;
+  /**
+   * Raw attributed-conversion count for the scope over the window, from `queryFeatureEconomics`.
+   * CTO-227 review finding (Bug 3): `attributionRate` is `null` in TWO different states — a feature
+   * with genuinely zero attribution AND a feature with some conversions but below the trust floor
+   * (MIN_CONVERSIONS_FOR_ECONOMICS). Only the count tells them apart, so the detector gates on this,
+   * not on the null rate, to avoid false-flagging a sparse-but-converting feature as pure waste.
+   */
+  conversions: number;
 }
 
 /**
@@ -79,6 +87,14 @@ export function detectNoMeasuredReturn(
   const findings: WasteFinding[] = [];
   for (const row of econRows) {
     if (row.windowSpendMicroUsd <= 0) continue; // no spend at risk, nothing to flag
+    // CTO-227 review finding (Bug 3): flag ONLY when attribution is genuinely zero. A feature with
+    // any attributed conversions (conversions > 0) has measured return, even when its `attributionRate`
+    // is null because it sits below the MIN_CONVERSIONS_FOR_ECONOMICS trust floor. Reading that
+    // null-because-untrusted rate as "zero attribution" false-flagged sparse-but-converting features
+    // for their full spend. Treat conversions > 0 as "unknown / real return", never waste.
+    if (row.conversions > 0) continue;
+    // Defensive: a positive rate should never coincide with zero conversions, but if it does, honor
+    // the measured return rather than flag.
     const hasReturn =
       row.attributionRate !== null && row.attributionRate > NEAR_ZERO_ATTRIBUTION;
     if (hasReturn) continue; // real measured return -> not waste
@@ -140,6 +156,9 @@ export async function collectNoMeasuredReturn(
   const econ = await queryFeatureEconomics(w);
   if (econ === null) return [];
   const attrRateByFeature = new Map(econ.map((e) => [e.feature, e.attributionRate]));
+  // CTO-227 review finding (Bug 3): carry the RAW conversion count too, so the detector can tell a
+  // genuinely-unattributed feature (0) from a sparse-but-converting one (rate null, conversions > 0).
+  const conversionsByFeature = new Map(econ.map((e) => [e.feature, e.conversions]));
 
   const featureFilter = filters.feature ?? [];
   const hasFeatureFilter = featureFilter.length > 0;
@@ -190,6 +209,8 @@ export async function collectNoMeasuredReturn(
     scopeValue: r.feature,
     windowSpendMicroUsd: micro(r.cost),
     attributionRate: attrRateByFeature.get(r.feature) ?? null,
+    // A feature with spend but no economics row attributes nothing -> 0 (genuinely zero, flaggable).
+    conversions: conversionsByFeature.get(r.feature) ?? 0,
   }));
 
   return detectNoMeasuredReturn(econRows, live.tenantAttributionRate);

@@ -8,6 +8,7 @@ import {
   detectPaidForNothing,
   type PaidForNothingRow,
 } from "./paid-for-nothing";
+import { aggregateWaste } from "@/lib/waste";
 
 /** A fully-specified fixture row; individual tests override just the fields they care about. */
 function row(overrides: Partial<PaidForNothingRow>): PaidForNothingRow {
@@ -93,6 +94,32 @@ describe("detectPaidForNothing", () => {
     expect(byScope.agent.scopeValue).toBe("aider");
     expect(byScope.agent.recoverableMicroUsd).toBe(300_000);
     expect(byScope.agent.evidence.shareOfScopeSpend).toBe(50);
+  });
+
+  // CTO-227 review finding (Bug 2): a single failed feature-tagged run must produce exactly ONE
+  // finding and be counted ONCE in the roll-up total. The old SQL rolled the same runs up BY feature
+  // AND BY agent, so the run surfaced as two findings and its recoverable was summed twice, overstating
+  // "Recoverable" up to 2x. The query now assigns each run to one scope; this locks the single-count
+  // guarantee at the row -> detector -> aggregate boundary the endpoint actually uses.
+  it("counts a single feature-tagged wasted run once in the aggregate total", () => {
+    // The single-scope query yields ONE row for a feature-tagged run (no overlapping agent row).
+    const rows: PaidForNothingRow[] = [
+      row({
+        scopeKind: "feature",
+        scopeValue: "search",
+        wastedCost: "0.25",
+        scopeCost: "1.00",
+        failedRuns: "1",
+        exampleTrace: "trace-1",
+      }),
+    ];
+    const findings = detectPaidForNothing(rows);
+    expect(findings).toHaveLength(1);
+
+    const report = aggregateWaste(findings, 30);
+    // Counted exactly once: total equals the single wasted amount, not double it.
+    expect(report.totalRecoverableMicroUsd).toBe(250_000);
+    expect(report.byCategory.paid_for_nothing).toBe(250_000);
   });
 
   it("counts abandoned runs into the wasted-run tally when present", () => {

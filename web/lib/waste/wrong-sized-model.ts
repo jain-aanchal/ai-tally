@@ -194,7 +194,10 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
 /**
  * The model id ClickHouse attributes spend to, matching the resolution `queryCostExplore`'s `model`
  * dimension and `queryCurrentModel` both use (response model when present, request model otherwise).
- * The incumbent from `queryCurrentModel` already resolves this way, so we compare against it directly.
+ * CTO-227 review finding (Bug 4): `queryCurrentModel` now resolves the incumbent on that SAME
+ * response-model-first expression (previously it preferred `SpanAttributes['chatbot.real_model']`,
+ * which never matched a cost-breakdown group on the chatbot demo, so this detector always returned []).
+ * With both sides aligned, we compare the id directly.
  */
 function resolveIncumbentModel(model: string): string {
   return model;
@@ -256,6 +259,19 @@ export async function collectWrongSizedModel(
   // No observed spend on the incumbent in this window → nothing to recover, so nothing to report.
   if (!incumbentRow || incumbentRow.totalMicroUsd <= 0) return [];
 
+  // CTO-227 review finding (Bug 1): the rescale denominator MUST be the incumbent's REPLAY-corpus
+  // projection, the SAME basis every candidate's `projected_monthly_cost_micro_usd` is measured on.
+  // The old denominator was `live.monthlyCostMicroUsd`, a 7-day-traffic figure linearly projected to
+  // 30d — an incompatible basis. Dividing a replay-corpus candidate cost by a traffic projection made
+  // the "cheaper" gate and the recoverable ratio meaningless (a candidate could pass while being more
+  // expensive per call, yielding absurd recoverables). The replay projection includes the incumbent
+  // model (the gateway projects it alongside the candidates); if it does NOT — so the two sides cannot
+  // be compared apples-to-apples — we return NOTHING for this scope (honest), never fall back to the
+  // traffic projection.
+  const incumbentReplay = replay.per_candidate.find((r) => r.model === incumbentModel);
+  if (!incumbentReplay || incumbentReplay.projected_monthly_cost_micro_usd <= 0) return [];
+  const incumbentProjectedMonthlyMicroUsd = incumbentReplay.projected_monthly_cost_micro_usd;
+
   // Join replay (cost) and eval (quality) by provider+model, excluding the incumbent itself.
   const candidates: WrongSizedModelCandidate[] = [];
   for (const r of replay.per_candidate) {
@@ -284,7 +300,8 @@ export async function collectWrongSizedModel(
         feature: featureTag,
         incumbentModel,
         windowSpendMicroUsd: incumbentRow.totalMicroUsd,
-        incumbentProjectedMonthlyMicroUsd: live.monthlyCostMicroUsd,
+        // Replay-corpus projection for the incumbent — shares the candidates' basis (see above).
+        incumbentProjectedMonthlyMicroUsd,
         candidates,
       },
     ],

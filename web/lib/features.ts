@@ -11,6 +11,14 @@ export interface FeatureEconomics {
   valuePerUserMicroUsd: MicroUSD | null;
   paybackDays: number | null;
   attributionRate: number | null; // 0..1
+  /**
+   * Raw count of attributed conversions for this feature over the window. Unlike `attributionRate`
+   * (which `queryFeatureEconomics` nulls out below the MIN_CONVERSIONS_FOR_ECONOMICS trust floor),
+   * this is the honest observed count and is `0` only when the feature genuinely attributes nothing.
+   * CTO-227 review finding: the no-measured-return detector needs a true zero, not a null-because-
+   * untrusted rate, to avoid false-flagging a sparse-but-converting feature.
+   */
+  conversions: number;
   /** events attributed by stitching source */
   attributionBreakdown: {
     direct: number;
@@ -40,6 +48,7 @@ export const features: FeatureEconomics[] = [
     valuePerUserMicroUsd: 1_400_000,
     paybackDays: 13,
     attributionRate: 0.91,
+    conversions: 1658,
     attributionBreakdown: { direct: 1313, sessionStitched: 255, identityGraphStitched: 90, unmatched: 162 },
   },
   {
@@ -49,6 +58,7 @@ export const features: FeatureEconomics[] = [
     valuePerUserMicroUsd: 210_000,
     paybackDays: 7,
     attributionRate: 0.88,
+    conversions: 1035,
     attributionBreakdown: { direct: 880, sessionStitched: 120, identityGraphStitched: 35, unmatched: 145 },
   },
   {
@@ -58,6 +68,7 @@ export const features: FeatureEconomics[] = [
     valuePerUserMicroUsd: null,
     paybackDays: null,
     attributionRate: null,
+    conversions: 0,
     attributionBreakdown: { direct: 0, sessionStitched: 0, identityGraphStitched: 0, unmatched: 0 },
   },
 ];
