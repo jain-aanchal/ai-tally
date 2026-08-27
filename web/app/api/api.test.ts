@@ -26,7 +26,11 @@ async function json<T = unknown>(res: Response): Promise<T> {
 
 describe("api routes", () => {
   it("GET /api/home returns the four cards", async () => {
-    const body = await json<{ spend: unknown; outliers: unknown[]; roi: unknown[]; dq: unknown }>(await HomeGET());
+    const body = await json<{ spend: unknown; outliers: unknown[]; roi: unknown[]; dq: unknown }>(
+      // CTO-226: /api/home now reads the time-range window from the request URL; the default (no
+      // range param) preserves the historical 30-day view this smoke test asserts.
+      await HomeGET(new Request("http://test/api/home")),
+    );
     expect(body.spend).toBeDefined();
     expect(Array.isArray(body.outliers)).toBe(true);
     expect(Array.isArray(body.roi)).toBe(true);

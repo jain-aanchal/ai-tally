@@ -41,6 +41,7 @@ import {
   relativeAge,
 } from "@/lib/dataState";
 import { formatUSD, type MicroUSD } from "@/lib/types";
+import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 export interface AgentsPayload {
@@ -64,12 +65,16 @@ function maxBy<T>(rows: T[], pick: (r: T) => MicroUSD): { value: MicroUSD; row: 
 }
 
 export function AgentsLive({
-  endpoint,
   initialData,
 }: {
-  endpoint: string;
   initialData: AgentsPayload;
 }) {
+  // The time-range selector re-parameterises the endpoint (CTO-226): the managed query string rides
+  // on /api/agents (preserving any ?tag=/?run= deep link), so flipping 7d/30d/90d re-queries the
+  // windowed cost/day average and useLivePoll re-fetches. See queryAgents for why cost/day is a
+  // windowed daily average rather than a trailing-24h Node-clock sum.
+  const { queryString } = useFilters();
+  const endpoint = queryString ? `/api/agents?${queryString}` : "/api/agents";
   const { data, updatedAt } = useLivePoll<AgentsPayload>(endpoint, initialData);
   const { agents, runs, reconcilerLastRunMinutesAgo } = data;
 

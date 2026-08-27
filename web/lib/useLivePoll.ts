@@ -62,6 +62,11 @@ export function useLivePoll<T>(
   // Refs keep the polling loop stable across renders without re-subscribing.
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // First-run flag (CTO-226): SSR provides initialData for the mount endpoint, so the FIRST effect
+  // run must not fetch immediately (that is the deliberate "no double-render storm on mount"). But a
+  // LATER endpoint change (e.g. flipping the Home time range) must repaint at once rather than wait a
+  // whole interval, so any run after the first fetches immediately when the tab is visible.
+  const firstRunRef = useRef(true);
 
   useEffect(() => {
     if (!enabled) return;
@@ -121,8 +126,12 @@ export function useLivePoll<T>(
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
       // Paused initially; wait for visibilitychange to resume.
     } else {
+      // A post-mount endpoint change fetches immediately so the new slice paints without a full
+      // interval's wait; the very first run stays SSR-only (no immediate fetch).
+      if (!firstRunRef.current) void fetchOnce();
       startInterval();
     }
+    firstRunRef.current = false;
 
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisibilityChange);

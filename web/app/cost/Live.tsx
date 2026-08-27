@@ -58,6 +58,7 @@ import {
   DEFAULT_RANGE_PRESET,
   DIMENSION_LABEL,
   hasActiveFilters,
+  rangeDays,
 } from "@/lib/filters";
 import { formatUSD, type SpendByLayer } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
@@ -85,13 +86,11 @@ interface ExploreState {
 }
 
 export function CostLive({
-  endpoint,
   initialData,
   enabledLayers,
   budget,
   tag = null,
 }: {
-  endpoint: string;
   initialData: CostPayload;
   enabledLayers: readonly Layer[];
   // Not part of the polled payload (CTO-209/210): a budget changes about monthly and the settled
@@ -101,10 +100,15 @@ export function CostLive({
   /** The active ?tag= breakdown filter, carried so a scope change does not silently drop it. */
   tag?: string | null;
 }) {
+  const { state: filterState, toggleFilter, queryString } = useFilters();
+  // The time-range selector re-parameterises the headline tiles + By-feature table (CTO-226): the
+  // managed query string (preserving any ?tag=/?scope=) rides on /api/cost, so 7d/30d/90d re-query
+  // the window and useLivePoll re-fetches. The interactive chart is still served by /api/explore.
+  const endpoint = queryString ? `/api/cost?${queryString}` : "/api/cost";
+  const windowDays = rangeDays(filterState.range);
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
 
-  const { state: filterState, toggleFilter, queryString } = useFilters();
   const featureFilter = filterState.filters.feature;
 
   // The default slice is drawn from the shipped payload; anything else goes through /api/explore.
@@ -179,7 +183,7 @@ export function CostLive({
   const body = (
     <div className="space-y-6">
       <TileGrid>
-        <SummaryTile label="Total" micro={total} hint="last 30 days" />
+        <SummaryTile label="Total" micro={total} hint={`last ${windowDays} days`} />
         <SummaryTile
           label="Reconciled"
           micro={reconciled}

@@ -7,6 +7,7 @@ import {
   queryFeatureCostRows,
   queryHiddenCostAlerts,
 } from "@/lib/clickhouse";
+import { parseFilters, rangeDays } from "@/lib/filters";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,11 +17,16 @@ export async function GET(req: Request) {
   // a single feature tag. When the filter is set we never fall back to unfiltered mock — that would
   // misrepresent the filtered view as real data.
   // Use the standard URL API rather than NextRequest.nextUrl so unit tests can pass plain Request.
-  const tag = new URL(req.url).searchParams.get("tag") ?? "";
+  const searchParams = new URL(req.url).searchParams;
+  const tag = searchParams.get("tag") ?? "";
   const hasFilter = Boolean(tag);
+  // The time-range selector reshapes the headline tiles and the By-feature table (CTO-226): resolve
+  // the URL-synced filter state to a day count the ClickHouse-derived window clamps and interpolates.
+  // The interactive chart itself is served by /api/explore, so the chart contract is untouched.
+  const windowDays = rangeDays(parseFilters(searchParams).range);
   const [series, rows, alerts] = await Promise.all([
-    queryCostSeries({ tag }),
-    queryFeatureCostRows({ tag }),
+    queryCostSeries({ tag }, windowDays),
+    queryFeatureCostRows({ tag }, windowDays),
     queryHiddenCostAlerts({ tag }),
   ]);
   return NextResponse.json({

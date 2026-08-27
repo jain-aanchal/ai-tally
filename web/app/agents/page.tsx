@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { apiGet } from "@/lib/api";
+import { filtersToQueryString, parseFilters } from "@/lib/filters";
+import { searchParamsFromRecord } from "@/lib/searchParams";
 import { AgentsLive, type AgentsPayload } from "./Live";
 
 export default async function AgentsPage({
   searchParams,
 }: {
-  searchParams?: Promise<{ tag?: string; run?: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  // Forward ?tag= / ?run= to the API so the table is pre-filtered (CTO-104 deep links).
-  const sp = (await searchParams) ?? {};
-  const qs = new URLSearchParams();
-  if (sp.tag) qs.set("tag", sp.tag);
-  if (sp.run) qs.set("run", sp.run);
-  const query = qs.toString() ? `?${qs.toString()}` : "";
-  const endpoint = `/api/agents${query}`;
+  // Forward ?tag= / ?run= (CTO-104 deep links) AND the URL-synced time range (CTO-226): the managed
+  // filter serializer preserves the unmanaged tag/run keys while adding the range, so SSR's first
+  // paint matches the URL and the client re-derives the same endpoint from useFilters as it changes.
+  const sp = searchParamsFromRecord(await searchParams);
+  const qs = filtersToQueryString(parseFilters(sp), sp);
+  const endpoint = qs ? `/api/agents?${qs}` : "/api/agents";
   const initialData = await apiGet<AgentsPayload>(endpoint);
-  return <AgentsLive endpoint={endpoint} initialData={initialData} />;
+  return <AgentsLive initialData={initialData} />;
 }
