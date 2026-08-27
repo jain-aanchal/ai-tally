@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -11,6 +12,7 @@ from tally.wire import BusinessEvent, IdentityLink
 
 from gateway.config import Settings
 from gateway.mapping import COLUMNS
+from gateway.replay_store import REPLAY_SAMPLE_COLS, ReplaySampleRow
 
 _BUSINESS_EVENT_COLS = (
     "TenantId", "BusinessEventId", "EventName", "UserIdHash", "AccountIdHash", "OccurredAt",
@@ -157,6 +159,57 @@ class ClickHouseStore:
         ]
         self.client.insert("identity_graph", rows, column_names=list(_IDENTITY_COLS))
         return len(rows)
+
+    def insert_replay_samples(self, rows: list[ReplaySampleRow]) -> int:
+        """Insert opt-in replay sample index rows into ``replay_samples`` (CTO-237).
+
+        The scrubbed envelope body itself lives in object storage (MinIO/S3/GCS); this table is the
+        durable index the gateway re-hydrates its in-memory corpus from on boot, so replay-backed
+        Compare/eval survives a restart. Only counts + the object key are stored here, never a body
+        (the body carve-out is object storage, gated by the tenant's opt-in retention TTL).
+        """
+        if not rows:
+            return 0
+        self.client.insert(
+            "replay_samples",
+            [r.as_clickhouse_row() for r in rows],
+            column_names=list(REPLAY_SAMPLE_COLS),
+        )
+        return len(rows)
+
+    def recent_replay_samples(self, limit: int) -> list[ReplaySampleRow]:
+        """Return the most recent ``limit`` replay sample index rows, newest first (CTO-237).
+
+        Used once on boot to re-hydrate the in-memory ``replay_sample_index`` so a fresh gateway
+        process serves the durably captured corpus rather than an empty one. Bounded by ``limit``.
+        """
+        if limit <= 0:
+            return []
+        result = self.client.query(
+            "SELECT TenantId, SampleId, TraceId, FeatureTag, RealProvider, RealModel, "
+            "InputTokens, OutputTokens, CapturedAt, S3ObjectKey, PIIScrubbed, ContextFidelity "
+            "FROM replay_samples ORDER BY CapturedAt DESC LIMIT %(n)s",
+            parameters={"n": int(limit)},
+        )
+        out: list[ReplaySampleRow] = []
+        for r in result.result_rows:
+            out.append(
+                ReplaySampleRow(
+                    tenant_id=str(r[0]),
+                    sample_id=r[1] if isinstance(r[1], UUID) else UUID(str(r[1])),
+                    trace_id=str(r[2]),
+                    feature_tag=str(r[3]),
+                    real_provider=str(r[4]),
+                    real_model=str(r[5]),
+                    input_tokens=int(r[6]),
+                    output_tokens=int(r[7]),
+                    captured_at=r[8],
+                    s3_object_key=str(r[9]),
+                    pii_scrubbed=bool(r[10]),
+                    context_fidelity=str(r[11]),
+                )
+            )
+        return out
 
     def close(self) -> None:
         if self._client is not None:

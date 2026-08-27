@@ -169,6 +169,15 @@ from tally.hmac_keys import HmacKeyRegistry
 
 logger = logging.getLogger("tally.gateway")
 
+# CTO-237: bound on the in-memory replay sample index, per tenant, newest-wins. The index is read
+# on the hot /v1/replay + /v1/eval paths and persists for the process lifetime; capping it keeps a
+# high-volume tenant from growing it without limit while leaving a healthy corpus to project from.
+REPLAY_INDEX_PER_TENANT_CAP = 500
+# How many recent replay_samples rows to pull back from ClickHouse on boot to re-hydrate the
+# in-memory index (CTO-237). Bounded so a large corpus does not blow up startup; the per-tenant cap
+# above then trims each tenant's slice to REPLAY_INDEX_PER_TENANT_CAP.
+REPLAY_HYDRATE_LIMIT = 5000
+
 # Guards _configure_logging so a re-created app (e.g. the test suite spinning up many TestClients in
 # one process) attaches the root handler exactly once and never stacks duplicates. See CTO-218.
 _logging_configured = False
@@ -291,6 +300,20 @@ async def lifespan(app: FastAPI):
     app.state.tenant_replay = TenantReplayStore(settings)
     app.state.replay_blob_store = _build_replay_blob_store(settings)
     app.state.replay_sample_index = []  # list[ReplaySampleRow]
+    # Hydrate the in-memory replay index from ClickHouse so /v1/replay + /v1/eval serve a captured
+    # corpus after a restart, not just what this process has ingested since boot (CTO-237). The
+    # index resets to [] every boot, so without this a fresh gateway would show an empty Compare /
+    # eval even though the samples are durably persisted. Fail-soft: a fresh or unreachable
+    # ClickHouse (or a not-yet-migrated replay_samples table) just leaves the index empty and boots.
+    try:
+        hydrated = app.state.store.recent_replay_samples(REPLAY_HYDRATE_LIMIT)
+        # recent_replay_samples returns newest-first; reverse to chronological so the bounded append
+        # keeps the newest per tenant when trimming.
+        _extend_replay_index_bounded(app.state.replay_sample_index, list(reversed(hydrated)))
+        if hydrated:
+            logger.info("replay: hydrated %d sample(s) from ClickHouse", len(hydrated))
+    except Exception as exc:  # noqa: BLE001 - hydrate must never crash boot
+        logger.warning("replay: hydrate skipped (%s)", exc)
     app.state.replay_runs = []  # list[ReplayRunRow]
     # Eval harness (CTO-114): pairwise-LLM-judge over the replay outputs. Opt-in like replay;
     # judge calls accumulate in-memory until the ClickHouse writeback path lands.
@@ -666,6 +689,11 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     validator: SpanValidator = app.state.validator
     metering: UsageRollup = app.state.metering
     rows: list[tuple[object, ...]] = []
+    # CTO-237: candidates for the opt-in replay corpus, collected in lockstep with the written
+    # rows. Building these is cheap and body-free (token counts + resolved-context metadata only);
+    # the tenant's replay config gates whether any are actually sampled/persisted, in
+    # capture_replay_samples_for_batch below.
+    replay_candidates: list[SampleCandidate] = []
     drift_count = 0
     for index, span in enumerate(batch.resource_spans):
         item_id = span_item_id(span, index) if isinstance(span, dict) else f"#{index}"
@@ -700,6 +728,37 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
                 tenant_id=batch.tenant_id,
                 effective_ts_ns=skew.effective_ts_ns,
                 sample_rate=batch.sampling.head_sample_rate,
+            )
+        )
+        # CTO-237: mirror this accepted span into a replay SampleCandidate. The envelope carries
+        # ONLY token counts + resolved-context metadata, never a prompt/completion body (the SDK
+        # never sends one and the validator rejects bodies), so the no-bodies-in-telemetry posture
+        # is preserved; build_payloads still PII-scrubs the envelope before it reaches object
+        # storage. The mock candidate client replays purely off these token counts.
+        span_id = span.get("SpanId") or span.get("span_id")
+        input_tokens = _as_int(result.attributes.get(GenAI.USAGE_INPUT_TOKENS))
+        output_tokens = _as_int(result.attributes.get(GenAI.USAGE_OUTPUT_TOKENS))
+        provider = result.attributes.get(GenAI.SYSTEM)
+        model = result.attributes.get(GenAI.RESPONSE_MODEL) or result.attributes.get(
+            GenAI.REQUEST_MODEL
+        )
+        replay_candidates.append(
+            SampleCandidate(
+                trace_id=trace_id if isinstance(trace_id, str) else "",
+                span_id=span_id if isinstance(span_id, str) else "",
+                feature_tag=feature_tag if isinstance(feature_tag, str) else "untagged",
+                real_provider=str(provider) if provider else "",
+                real_model=str(model) if model else "",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                envelope={
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "real_provider": str(provider) if provider else "",
+                    "real_model": str(model) if model else "",
+                    "feature_tag": feature_tag if isinstance(feature_tag, str) else "untagged",
+                    "context_fidelity": "resolved-context",
+                },
             )
         )
 
@@ -751,6 +810,22 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
             resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
             idempotency.record(batch, resp)
             return JSONResponse(_response_dict(resp), status_code=503)
+
+    # --- replay capture (CTO-237): populate the opt-in replay corpus from this batch ---
+    # Runs AFTER the ClickHouse write and AFTER per-item validation (the no-bodies/PII guard), so a
+    # sample is only ever captured for a span that was accepted and scrubbed. Gated inside
+    # capture_replay_samples_for_batch on the tenant's replay config (default OFF): a non-opted-in
+    # tenant captures nothing. Best-effort: a capture or Postgres-config hiccup must never fail an
+    # already-accepted ingest, so it is wrapped and swallowed with a logged exception.
+    if replay_candidates:
+        try:
+            capture_replay_samples_for_batch(
+                batch.tenant_id,
+                replay_candidates,
+                store=store,
+            )
+        except Exception:  # noqa: BLE001 - capture is best-effort; never fail accepted ingest
+            logger.exception("replay capture failed for batch %s", batch.batch_id)
 
     if drift_count:
         logger.info("catalog drift on %d/%d spans (batch %s)", drift_count, len(rows), batch.batch_id)
@@ -2446,6 +2521,49 @@ async def set_tenant_replay_config(
     return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
 
 
+def _as_int(value: object) -> int:
+    """Coerce a span-attribute value to int, defaulting to 0. Token counts arrive as ints, but a
+    malformed/absent value must never crash replay capture (CTO-237)."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extend_replay_index_bounded(
+    sample_index: list,
+    rows: list,
+    *,
+    per_tenant_cap: int | None = None,
+) -> None:
+    """Append ``rows`` to the in-memory index, then trim to the newest ``per_tenant_cap`` per tenant.
+
+    CTO-237: the index is read on the hot ``/v1/replay`` + ``/v1/eval`` paths and lives for the
+    life of the process, so it must not grow without bound. The list is append-ordered (oldest
+    first), so newest-wins trimming keeps the tail. Kept tenant-scoped so a noisy tenant cannot
+    evict another tenant's corpus. Mutates ``sample_index`` in place so app.state and every handler
+    holding the same list object see the trim. ``per_tenant_cap`` defaults to the module constant,
+    read at call time so it can be tuned/patched.
+    """
+    cap = per_tenant_cap if per_tenant_cap is not None else REPLAY_INDEX_PER_TENANT_CAP
+    sample_index.extend(rows)
+    counts: dict[str, int] = {}
+    for r in sample_index:
+        counts[r.tenant_id] = counts.get(r.tenant_id, 0) + 1
+    over = {t for t, c in counts.items() if c > cap}
+    if not over:
+        return
+    kept_reversed: list = []
+    seen: dict[str, int] = {}
+    for r in reversed(sample_index):
+        if r.tenant_id in over:
+            if seen.get(r.tenant_id, 0) >= cap:
+                continue
+            seen[r.tenant_id] = seen.get(r.tenant_id, 0) + 1
+        kept_reversed.append(r)
+    sample_index[:] = list(reversed(kept_reversed))
+
+
 def capture_replay_samples_for_batch(
     tenant_id: str,
     candidates: list[SampleCandidate],
@@ -2453,12 +2571,20 @@ def capture_replay_samples_for_batch(
     config_store: TenantReplayStore | None = None,
     blob_store=None,
     sample_index: list | None = None,
+    store: ClickHouseStore | None = None,
     captured_at=None,
 ) -> int:
     """Hook the gateway calls per accepted batch. Returns the number of samples persisted.
 
     Pulled out as a free function so tests can drive it without standing up a FastAPI app. The
     real ``POST /v1/batches`` path wires this in after the ingest pipeline writes to ClickHouse.
+
+    Persistence (CTO-237): each sampled envelope is written to object storage (``persist_sample``)
+    and its index row is (a) appended to the bounded in-memory ``sample_index`` that ``/v1/replay``
+    and ``/v1/eval`` read, and (b) inserted into the ``replay_samples`` ClickHouse table when a
+    ``store`` is provided, so the corpus survives a gateway restart and can be re-hydrated on boot.
+    The ClickHouse write is best-effort: a failure there is logged but never loses the in-memory
+    capture nor fails ingest.
 
     No-op (returns 0) when the tenant has not opted in.
     """
@@ -2474,15 +2600,24 @@ def capture_replay_samples_for_batch(
 
     sampled = stratified_sample(candidates, sample_rate=cfg.sample_rate)
     payloads = build_payloads(sampled, scrub=True)
-    for p in payloads:
-        row = persist_sample(
+    rows = [
+        persist_sample(
             blob_store=blob_store,
             tenant_id=tenant_id,
             payload=p,
             captured_at=captured_at,
         )
-        sample_index.append(row)
-    return len(payloads)
+        for p in payloads
+    ]
+    # Durable index (CTO-237): mirror the rows into ClickHouse so a restart can re-hydrate them.
+    # Best-effort: the in-memory corpus is authoritative for this process either way.
+    if rows and store is not None:
+        try:
+            store.insert_replay_samples(rows)
+        except Exception:  # noqa: BLE001 - durable writeback is best-effort; keep the in-memory row
+            logger.exception("replay: ClickHouse writeback failed for %d sample(s)", len(rows))
+    _extend_replay_index_bounded(sample_index, rows)
+    return len(rows)
 
 
 @app.post("/v1/replay")
@@ -3156,13 +3291,37 @@ def _todays_eval_spend(rows: list, tenant_id: str) -> int:
 
 
 async def _mock_judge_client(call: JudgeCall) -> JudgeResponse:
-    """Deterministic mock judge for tests / dev. Always emits "TIE" with token counts
-    derived from the prompt length. Production deployments wire a real Anthropic client via
-    ``app.state.eval_judge_client``.
+    """Deterministic MOCK judge for local dev + tests (CTO-237). NOT a real judge: production
+    wires a real Anthropic client via ``app.state.eval_judge_client``.
+
+    The previous mock always emitted "TIE", which made every candidate's win-rate 0.0 and left the
+    replay-backed Compare/eval and the wrong-sized-model waste detector unable to produce the one
+    signal they exist for: "this cheaper model is statistically indistinguishable in quality".
+
+    This mock instead derives a verdict letter deterministically from the rubric prompt (same
+    prompt -> same letter, so tests stay stable) with a balanced split: ~47.5% A, ~47.5% B, ~5%
+    TIE. The executor already randomizes A/B placement per sample (position-bias mitigation), so a
+    balanced A/B letter maps to a candidate win-rate of ~(1 - tie_fraction)/2 ≈ 0.475 whose Wilson
+    CI overlaps 0.5 at the sample sizes real Compare/eval passes use. That "statistically
+    indistinguishable" outcome is exactly the honest right-sizing signal the wrong-sized-model
+    waste detector keys on; the mock deliberately does NOT favor the candidate. The small tie
+    fraction keeps win-rate near 0.5 (ties count in the win-rate denominator, so a large tie share
+    would drag it down and let a fair candidate look worse than it is).
     """
+    # blake2b over the full prompt (instruction + both responses) -> a stable, uniform bucket.
+    import hashlib
+    bucket = int.from_bytes(
+        hashlib.blake2b(call.prompt.encode("utf-8"), digest_size=8).digest(), "big"
+    ) % 40
+    if bucket < 19:
+        text = "A"
+    elif bucket < 38:
+        text = "B"
+    else:
+        text = "TIE"
     input_tokens = max(10, len(call.prompt) // 4)
     return JudgeResponse(
-        text="TIE",
+        text=text,
         input_tokens=input_tokens,
         output_tokens=2,
         status_code=200,

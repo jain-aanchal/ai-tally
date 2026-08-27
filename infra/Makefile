@@ -24,7 +24,8 @@ nuke: ## Stop and wipe all data volumes (DDL re-applies on next up)
 # Canonical ClickHouse DDL, in the same dependency order compose mounts it into initdb.
 CH_DDL := ../db/clickhouse/otel_spans.sql ../db/clickhouse/rollups.sql \
           ../db/clickhouse/account_rollups.sql \
-          ../db/clickhouse/last_touch_index.sql ../db/clickhouse/attribution.sql
+          ../db/clickhouse/last_touch_index.sql ../db/clickhouse/attribution.sql \
+          ../db/clickhouse/replay_samples.sql
 
 ch-migrate: ## Apply db/clickhouse DDL to a RUNNING stack (initdb only fires on a fresh volume)
 	@# The /docker-entrypoint-initdb.d mounts in docker-compose.yml run ONLY on a first boot
