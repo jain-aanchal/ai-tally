@@ -72,7 +72,12 @@ export function Shell({ children }: { children: ReactNode }) {
             aria-hidden
             className="inline-block h-2.5 w-2.5 rounded-sm bg-accent"
           />
-          ai-<span className="text-accent">tally</span>
+          {/* The wordmark is one flex child so the row `gap-2` only separates it from the mark, not
+              the two halves of "ai-tally"; without this wrapper the gap split it into "ai- tally"
+              with a dangling hyphen (CTO-227). */}
+          <span>
+            ai-<span className="text-accent">tally</span>
+          </span>
         </div>
 
         <nav className="app-scroll flex-1 space-y-6 overflow-y-auto px-3 pb-6" aria-label="Primary">
