@@ -79,6 +79,21 @@ export interface ExploreSeries {
   truncatedGroups: number;
 }
 
+/**
+ * Filter-aware headline totals for the tiles (CTO-240). The Cost tiles must move with the FULL
+ * filter set, not just the time window, so they read this slice total rather than the /api/cost
+ * per-layer series (which only knew the window and the legacy ?tag=). The estimated / reconciled
+ * split comes from CostSource, matching the Home summary, so the same slice reads the same way on
+ * both pages. `reconciledThrough` is the newest invoiced day or '1970-01-01' when nothing has
+ * settled (honest-under-uncertainty: a real boundary, never a fabricated recent date).
+ */
+export interface CostSliceTotals {
+  totalMicroUsd: MicroUSD;
+  estimatedMicroUsd: MicroUSD;
+  reconciledMicroUsd: MicroUSD;
+  reconciledThrough: string;
+}
+
 /** A raw per-group total row as it comes back from ClickHouse before capping. */
 export interface ExploreGroupTotal {
   group: string;
