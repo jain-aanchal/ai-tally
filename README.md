@@ -8,7 +8,7 @@ Click on the thumbnail to watch the demo.
 
 Cost-and-value observability for AI products. See what your AI actually costs (all-in) and what it returns.
 
-Six workflows on one shared data spine:
+Seven workflows on one shared data spine:
 
 1. **Agent loop cost visibility.** Why did this run cost 50× median? Per-agent cost, run distribution (p50/p99), and the pathological runs that blow the budget, with a windowed daily-average cost per agent (CTO-226).
 2. **Cross-provider comparison.** Are we on the right model? Real replay, real eval, no marketing benchmarks. Google/Gemini is a first-class priced provider here (CTO-149), not a mock column, and Compare ranks it against OpenAI and Anthropic on real cost.
@@ -16,8 +16,9 @@ Six workflows on one shared data spine:
 4. **Business-outcome attribution.** Is this AI feature profitable? `$/conversion` and margin per provider, joined on a hashed user id. The chatbot demo (`make chatbot-demo`) proves it end-to-end with synthetic conversions; production tenants wire their own revenue source via the gateway's Stripe webhook or the generic revenue API.
 5. **Cost per customer.** Which customers cost you the most, and which pay for themselves? Direct AI spend attributed to each tenant customer by hashed account id, plus each account's allocated share of shared compute/egress (pro-rata on direct spend, the allocation rule named on screen), and gross margin per account once a revenue source is wired. Optional human-readable account labels, an account search, and a per-account detail view (CTO-176).
 6. **Spend forecasting.** Where does this month land, and when do you cross budget? A day-of-week-weighted median projection of month-end AI spend with an 80% confidence cone and a breach date, per tenant and per scope (feature/model/layer), refusing to project below a 14-day settled-history floor rather than drawing a volatile number. Surfaced as the burn-down on `/cost` and a compact "Monthly predicted AI cost" card on Home (CTO-204/210/211/227).
+7. **Waste detection.** Where are we paying for AI that returns nothing? Five detector categories surface recoverable spend: billed runs that failed, retried failed work, over-sized models, spend with no measured return, and structural inefficiency. Each finding names where the waste is, an estimated recoverable amount, a confidence, and a drill-through into the run/compare/attribution surface behind it. Honest under uncertainty: a finding that cannot defensibly bound its recoverable dollars renders a blank with a reason, never a fabricated or zero figure, and every finding is a hypothesis with evidence rather than a verdict (epic CTO-227).
 
-A seventh surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
+An eighth surface (pre-deploy "what will this change cost?") is half-built. The infrastructure (replay sampling + per-candidate cost) ships today via Workflow 2; what's missing is a body-driven what-if form that accepts a candidate model + prompt override. Tracked separately, page hidden from the nav until it has signal end-to-end.
 
 Behind the cost connectors, a per-tenant **scheduler** in the gateway (CTO-212) runs the recurring jobs on a cadence, with per-tenant locking so a slow run never overlaps itself: cloud cost connectors, reconciliation, and third-party ingest workers.
 
@@ -35,7 +36,7 @@ Behind the cost connectors, a per-tenant **scheduler** in the gateway (CTO-212) 
 The Next.js dashboard is a grouped set of pages sharing one interactive foundation (CTO-220, "interactive design overhaul"), rebuilt from static server-rendered tables into a dynamic surface closer to what AWS / GCP / Datadog cost tools offer, without dropping a single feature or honest blank:
 
 - **Overview:** Home, with the headline spend tiles, the ROI snapshot, per-provider conversion, and the "Monthly predicted AI cost" forecast card.
-- **Analyze:** Cost (spend by layer + by feature, budget vs actual, burn-down), Features (per-feature economics), Agents (per-agent distribution and outlier runs), Compare (cross-provider replay + eval), Attribution (`$/conversion` and margin per provider), Unit Economics (CAC / LTV / payback), and Cost per Customer (direct + allocated cost and margin per account).
+- **Analyze:** Cost (spend by layer + by feature, budget vs actual, burn-down), Features (per-feature economics), Agents (per-agent distribution and outlier runs), Compare (cross-provider replay + eval), Attribution (`$/conversion` and margin per provider), Unit Economics (CAC / LTV / payback), Cost per Customer (direct + allocated cost and margin per account), and Waste (recoverable spend across the five detector categories).
 - **Configure:** Connectors (which cost layers and providers a tenant streams in), Guardrails (observe/enforce rules and audit), and Budgets (per-tenant and per-scope monthly budgets).
 
 The shared foundation, merged before any page adopted it:
@@ -44,6 +45,18 @@ The shared foundation, merged before any page adopted it:
 - **Interactive charts.** The inline-SVG charts gained hover tooltips, legend toggling, and click-to-drill (click a series to add it as a filter). No charting library: the charts stay inline SVG and theme-token driven.
 - **Summary tiles and a refreshed shell.** Dense KPI tiles through the honest `Money` / `Pct` / `Blank` primitives, a grouped sticky sidebar with active-route highlighting, and a consistent page header / toolbar.
 - **Live, honest, decoupled.** Each page server-renders once, then a visibility-aware `useLivePoll` refreshes it; a filter change re-fetches immediately rather than waiting for the next tick. Every value shown is a real measurement or a blank with a reason, never a fabricated or flattering zero.
+
+## Waste detection
+
+`/waste` (epic CTO-227) answers "where is this tenant paying for AI that returns nothing" with five detectors, each owning its own query and a pure, unit-tested detector:
+
+- **Paid for nothing** (CTO-229): billed runs that ended failed or abandoned, so the tokens bought no result. The wasted spend is directly observed, so this is the highest-confidence finding and its recoverable is always bounded.
+- **Duplicated work** (CTO-230): error-then-retry only. A run that failed and was superseded by a later same-shape success is spend the retry made redundant. A pure repeat with no failure is NOT claimed as waste: with no message bodies in telemetry it is indistinguishable from legitimate multi-turn use, so flagging it would fabricate savings. Medium confidence, and the reason says so.
+- **Wrong-sized model** (CTO-231, per-call basis CTO-236): a cheaper candidate that ties on quality. The candidate's per-call cost comes from resolved-context replay; the incumbent's per-call cost is measured on its own real traffic; the two are compared per call and gated on the pairwise-judge eval CI. It needs a captured replay corpus plus a judged eval pass to fire, otherwise it stays honestly blank (see CTO-236 / CTO-237). There is no mock path.
+- **No measured return** (CTO-232): spend on a feature with zero attributed value, but only on a tenant that attributes value elsewhere. It is a flag to investigate, not a verdict (top-of-funnel work or revenue simply not yet wired looks identical from telemetry alone), and it returns nothing when the whole tenant has no revenue source wired.
+- **Structural inefficiency** (CTO-233): context bloat and runaway agent loops, judged against each feature/agent's own median with robust stats (Tukey IQR fence plus a relative floor), never a global average, so a uniformly heavy feature produces no outliers.
+
+Shared rules across all five: findings are hypotheses with evidence, not verdicts; money is integer micro-USD, and a recoverable that cannot be defensibly bounded renders a blank with a reason, never `0`; windows are ClickHouse-clock derived. `/waste` lives on the same interactive foundation as the rest of the dashboard (filter bar, live re-query) and the whole thing reads `otel_spans`, the attribution join, and the Compare replay/eval results. On clean data most detectors correctly find little; the value is that the numbers shown are honest.
 
 ## Repository layout
 
@@ -194,7 +207,7 @@ Every control-plane write is audited with an idempotent `change_id` (UUID), and 
 
 ## Status
 
-The shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`, and the dashboard is now interactive across every page (filter bar, live charts, drill-downs) rather than a set of static tables. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. Every `/cost` column has a real ingest path (LLM / tools / embeddings / vector from spans, compute / egress from cloud-billing connectors), and the cost-per-customer and forecasting workflows read the same spine. The remaining backlog turns the last `—`s into real numbers (guardrail trip counts, body-driven pre-deploy estimation) and broadens provider/cloud coverage (Amazon Bedrock, the Vercel AI Gateway, AWS/Vercel deploys).
+The shipped workflows are wired end-to-end on a laptop with `make chatbot-demo`, and the dashboard is now interactive across every page (filter bar, live charts, drill-downs) rather than a set of static tables. Each `—` you see on a dashboard tile is honest, a placeholder for a metric we haven't grounded yet. Every `/cost` column has a real ingest path (LLM / tools / embeddings / vector from spans, compute / egress from cloud-billing connectors), and the cost-per-customer and forecasting workflows read the same spine. Waste detection shipped too: the five detectors and the `/waste` page are live, with the wrong-sized-model detector functional on a per-call basis (CTO-236) once replay capture is wired into ingest (CTO-237); it fires only with a captured replay corpus plus a judged eval pass, and stays blank otherwise. The remaining backlog turns the last `—`s into real numbers (guardrail trip counts, body-driven pre-deploy estimation) and broadens provider/cloud coverage (Amazon Bedrock, the Vercel AI Gateway, AWS/Vercel deploys).
 
 Decisions and the full system spec live in the project tracker. Tickets follow a Context / Acceptance criteria / Out-of-scope format and are picked up one PR at a time.
 
