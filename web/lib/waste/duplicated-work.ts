@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // The "duplicated and retried work" waste detector (CTO-230, W3; epic CTO-227).
 //
-// What it finds: money a tenant paid to do the SAME unit of work more than once. Two shapes:
-//   1. error-then-retry: a run that errored, then another run of the same shape ran moments later
-//      and (in at least one later attempt) succeeded. The failed attempt is spend that produced
-//      nothing once the retry landed.
-//   2. rapid-repeat: three or more runs of the same shape fired inside a few minutes. All but one
-//      are treated as redundant repeats of the survivor.
+// What it finds: money a tenant paid to do a unit of work that a later retry made redundant. ONE
+// shape, and only one, carries a recoverable dollar figure:
+//   error-then-retry: a run that errored, then another run of the same shape ran moments later
+//     and (in at least one later attempt) succeeded. The failed attempt is spend that produced
+//     nothing once the retry landed. We can stand behind that: a run actually FAILED, so its cost
+//     bought nothing, and the recoverable dollars are exactly the failed attempts' cost.
 //
-// HEURISTIC, and honest about it (CTO-227): telemetry carries NO prompt or completion text (see
-// CLAUDE.md, "No bodies in telemetry"), so we cannot prove two runs did identical work. We
-// approximate "duplicate" by SHAPE + TIME PROXIMITY: runs that share feature + agent + model +
-// user and land within a short window. That is a signal, not a proof, so every finding is
-// `confidence: 'medium'` and its `reason` says so out loud. A run's identity here is exactly the
-// four dimensions above; the model expression mirrors queryCostExplore's `groupBy: 'model'` case
-// so "same model" means the same thing on this surface as everywhere else on the dashboard.
+// What it deliberately does NOT quantify (CTO-227; review: rapid-repeat conflated with normal
+// conversation): a plain burst of same-shape runs with NO failure among them. Telemetry carries no
+// prompt or completion text (see CLAUDE.md, "No bodies in telemetry"), so a rapid repeat is
+// indistinguishable from a legitimate multi-turn session: a user asking follow-up questions of a
+// chatbot looks exactly like a user re-running the same request. On the demo that "rapid-repeat"
+// rule fired on ordinary conversation and fabricated ~$19.7k of "recoverable" spend that was not
+// real, dominating the page's Recoverable headline with a number we could not defend. Honest under
+// uncertainty means we do not put a dollar on it: a pure repeat with no error produces NO finding.
+//
+// HEURISTIC even for what we do keep, and honest about it: "same shape" is same feature + agent +
+// model + user landing within a short window, not proof of identical inputs. So the failure signal
+// is what earns the dollars, and every finding is `confidence: 'medium'` with a `reason` that says
+// so out loud. A run's identity here is exactly those four dimensions; the model expression mirrors
+// queryCostExplore's `groupBy: 'model'` case so "same model" means the same thing on this surface as
+// everywhere else on the dashboard.
 
 import type { WasteFinding } from "../waste";
 import type { DimensionFilters } from "../filters";
@@ -28,13 +36,6 @@ import { tryLive, rowsP, micro } from "../clickhouse";
 // staying far under the gap between two genuinely independent pieces of work for the same user. Two
 // same-shape runs separated by more than this are treated as unrelated, not as a duplicate.
 const RETRY_WINDOW_SECONDS = 5 * 60;
-
-// CTO-230: a single retry (two same-shape runs close in time) is already covered by the
-// error-then-retry pattern, which additionally requires an observed failure. The rapid-repeat
-// pattern is the *outcome-agnostic* net, so it needs a stronger shape signal to avoid flagging a
-// legitimate "the user asked twice" pair. Three or more identical-shape runs in the window is that
-// signal; all but one are counted as repeats.
-const RAPID_REPEAT_MIN = 3;
 
 // --- Pure detector input --------------------------------------------------------------------------
 
@@ -86,15 +87,12 @@ function burstsOf(runs: DuplicatedWorkRun[]): DuplicatedWorkRun[][] {
   return bursts;
 }
 
-type Pattern = "error-then-retry" | "rapid-repeat";
-
 /** One finding under construction, accumulated across clusters that share scope + agent + model. */
 interface Accumulator {
   scopeKind: "feature" | "agent";
   scopeValue: string;
   agent: string;
   model: string;
-  pattern: Pattern;
   recoverableMicroUsd: number;
   supersededRuns: number;
   /** Observed spend on the runs that make up this finding (superseded plus the kept survivor). */
@@ -104,31 +102,31 @@ interface Accumulator {
   exampleTrace: string;
 }
 
-/** Accumulation key: same scope + agent + model + pattern collapse into one finding. */
+/** Accumulation key: same scope + agent + model collapse into one finding. */
 function accKey(a: {
   scopeKind: string;
   scopeValue: string;
   agent: string;
   model: string;
-  pattern: Pattern;
 }): string {
-  return JSON.stringify([a.scopeKind, a.scopeValue, a.agent, a.model, a.pattern]);
+  return JSON.stringify([a.scopeKind, a.scopeValue, a.agent, a.model]);
 }
 
 /**
  * Detect duplicated/retried work over pre-grouped clusters. PURE and deterministic: no queries, no
  * clock, no randomness, so it is trivially testable.
  *
- * Per cluster, runs are split into time bursts. Each burst is classified into exactly ONE pattern so
- * a run's cost is never counted twice:
- *   - >= RAPID_REPEAT_MIN runs   -> rapid-repeat. All but the single most expensive run are repeats;
- *     recoverable = burst spend minus the survivor we keep. Keeping the priciest run makes the
- *     recoverable the conservative (smaller) figure, which is the honest direction (CTO-227).
- *   - otherwise (a short burst)  -> error-then-retry, but ONLY when a failed run is followed by a
- *     later success in the same burst. Those failed attempts are the superseded, recoverable spend.
+ * Per cluster, runs are split into time bursts. Within each burst we look for the ONE thing we can
+ * defend: a failed run superseded by a LATER success in the same burst. Those failed attempts are
+ * the recoverable, superseded spend; their cost is what stopping the waste would save.
  *
- * Findings sharing scope + agent + model + pattern are merged (summed) so multiple users or multiple
- * bursts of the same slice roll into one honest line rather than many near-duplicates.
+ * A burst with no such error-then-success sequence yields nothing (CTO-227; review: rapid-repeat
+ * conflated with normal conversation). Without message bodies a plain burst of same-shape runs is
+ * indistinguishable from a legitimate multi-turn session, so we refuse to claim dollars for it: no
+ * failure, no finding.
+ *
+ * Findings sharing scope + agent + model are merged (summed) so multiple users or multiple bursts of
+ * the same slice roll into one honest line rather than many near-duplicates.
  */
 export function detectDuplicatedWork(clusters: DuplicatedWorkCluster[]): WasteFinding[] {
   const accs = new Map<string, Accumulator>();
@@ -138,49 +136,29 @@ export function detectDuplicatedWork(clusters: DuplicatedWorkCluster[]): WasteFi
     const scopeValue = cluster.feature || cluster.agent || "untagged";
 
     for (const burst of burstsOf(cluster.runs)) {
+      // Only a real failure superseded by a later success is duplicated work we can put a number on.
+      const hasSuccess = burst.some((r) => r.outcome === "success");
+      const supersededList: DuplicatedWorkRun[] = [];
+      for (let i = 0; i < burst.length; i++) {
+        if (burst[i].outcome !== "failed") continue;
+        // A failed run counts only if some LATER run in the burst succeeded (the retry that
+        // replaced it). `hasSuccess` is a cheap prefilter; the inner check enforces order.
+        if (hasSuccess && burst.slice(i + 1).some((r) => r.outcome === "success")) {
+          supersededList.push(burst[i]);
+        }
+      }
+      if (supersededList.length === 0) continue;
+
       const burstSpend = burst.reduce((s, r) => s + r.costMicroUsd, 0);
       const windowSeconds = burst[burst.length - 1].timestampSec - burst[0].timestampSec;
+      const recoverable = supersededList.reduce((s, r) => s + r.costMicroUsd, 0);
 
-      let pattern: Pattern;
-      let recoverable: number;
-      let superseded: number;
-      let contributedSpend: number;
-      let exampleTrace: string;
-
-      if (burst.length >= RAPID_REPEAT_MIN) {
-        // Keep the single most expensive run; everything else is a redundant repeat.
-        const survivorCost = burst.reduce((m, r) => Math.max(m, r.costMicroUsd), 0);
-        pattern = "rapid-repeat";
-        superseded = burst.length - 1;
-        recoverable = burstSpend - survivorCost;
-        contributedSpend = burstSpend;
-        exampleTrace = burst[0].traceId;
-      } else {
-        // Short burst: only a real failure superseded by a later success is duplicated work.
-        const hasSuccess = burst.some((r) => r.outcome === "success");
-        const supersededList: DuplicatedWorkRun[] = [];
-        for (let i = 0; i < burst.length; i++) {
-          if (burst[i].outcome !== "failed") continue;
-          // A failed run counts only if some LATER run in the burst succeeded (the retry that
-          // replaced it). `hasSuccess` is a cheap prefilter; the inner check enforces order.
-          if (hasSuccess && burst.slice(i + 1).some((r) => r.outcome === "success")) {
-            supersededList.push(burst[i]);
-          }
-        }
-        if (supersededList.length === 0) continue;
-        pattern = "error-then-retry";
-        superseded = supersededList.length;
-        recoverable = supersededList.reduce((s, r) => s + r.costMicroUsd, 0);
-        contributedSpend = burstSpend;
-        exampleTrace = supersededList[0].traceId;
-      }
-
-      const key = accKey({ scopeKind, scopeValue, agent: cluster.agent, model: cluster.model, pattern });
+      const key = accKey({ scopeKind, scopeValue, agent: cluster.agent, model: cluster.model });
       const existing = accs.get(key);
       if (existing) {
         existing.recoverableMicroUsd += recoverable;
-        existing.supersededRuns += superseded;
-        existing.windowSpendMicroUsd += contributedSpend;
+        existing.supersededRuns += supersededList.length;
+        existing.windowSpendMicroUsd += burstSpend;
         existing.windowSeconds = Math.max(existing.windowSeconds, windowSeconds);
       } else {
         accs.set(key, {
@@ -188,12 +166,11 @@ export function detectDuplicatedWork(clusters: DuplicatedWorkCluster[]): WasteFi
           scopeValue,
           agent: cluster.agent,
           model: cluster.model,
-          pattern,
           recoverableMicroUsd: recoverable,
-          supersededRuns: superseded,
-          windowSpendMicroUsd: contributedSpend,
+          supersededRuns: supersededList.length,
+          windowSpendMicroUsd: burstSpend,
           windowSeconds,
-          exampleTrace,
+          exampleTrace: supersededList[0].traceId,
         });
       }
     }
@@ -202,29 +179,27 @@ export function detectDuplicatedWork(clusters: DuplicatedWorkCluster[]): WasteFi
   return [...accs.values()].map(toFinding);
 }
 
-/** The heuristic disclaimer, shared by both patterns so the honesty posture reads identically. */
-function heuristicReason(pattern: Pattern): string {
+/** The heuristic disclaimer, stated out loud so the honesty posture is explicit (CTO-227). */
+function heuristicReason(): string {
   const minutes = RETRY_WINDOW_SECONDS / 60;
-  const shape =
-    pattern === "error-then-retry"
-      ? `An errored run was followed within ${minutes} min by another run of the same shape that succeeded, so the failed attempt is spend the retry made redundant.`
-      : `${RAPID_REPEAT_MIN} or more runs of the same shape fired within ${minutes} min, so all but one are treated as repeats.`;
-  // CTO-227 honesty: this is a shape-and-timing signal, NOT proof of identical work. No prompt or
-  // completion text reaches telemetry, so we cannot compare inputs; "same shape" is same feature,
-  // agent, model and user. Hence medium confidence, stated here rather than implied.
+  // CTO-227 honesty: the recoverable dollars ride on a real FAILURE, not on repetition alone. An
+  // errored run followed by a same-shape success is spend the retry made redundant. "Same shape" is
+  // same feature, agent, model and user, close in time; no prompt or completion text reaches
+  // telemetry, so we cannot compare inputs and the match is approximated, not proven. Hence medium
+  // confidence. We do NOT flag pure repeats without a failure: without bodies they are
+  // indistinguishable from legitimate multi-turn use, so claiming dollars for them would fabricate
+  // waste (review: rapid-repeat conflated with normal conversation).
   return (
-    `${shape} This is a heuristic on run SHAPE and TIMING (same feature, agent, model and user, ` +
-    `close in time), not on content equality: telemetry stores no prompts or completions, so ` +
+    `An errored run was followed within ${minutes} min by another run of the same shape that ` +
+    `succeeded, so the failed attempt is spend the retry made redundant. This is a heuristic on run ` +
+    `SHAPE and TIMING (same feature, agent, model and user, close in time), earning its dollars from ` +
+    `the observed failure, not from repetition: telemetry stores no prompts or completions, so ` +
     `identical work is approximated, not proven. Confidence is medium for that reason.`
   );
 }
 
 function toFinding(a: Accumulator): WasteFinding {
   const label = `${a.agent || "untagged"} / ${a.model || "unknown"}`;
-  const title =
-    a.pattern === "error-then-retry"
-      ? `Retried failed work: ${label}`
-      : `Rapid repeated runs: ${label}`;
   return {
     category: "duplicated_work",
     scopeKind: a.scopeKind,
@@ -232,10 +207,10 @@ function toFinding(a: Accumulator): WasteFinding {
     recoverableMicroUsd: a.recoverableMicroUsd,
     windowSpendMicroUsd: a.windowSpendMicroUsd,
     confidence: "medium",
-    title,
-    reason: heuristicReason(a.pattern),
+    title: `Retried failed work: ${label}`,
+    reason: heuristicReason(),
     evidence: {
-      pattern: a.pattern,
+      pattern: "error-then-retry",
       supersededRuns: a.supersededRuns,
       windowSeconds: a.windowSeconds,
       exampleTrace: a.exampleTrace,

@@ -2,7 +2,8 @@
 // Tests for the duplicated/retried-work detector (CTO-230, W3; epic CTO-227). Each case pins one
 // rule of the shape-and-timing heuristic that would otherwise regress silently: an error-then-retry
 // pair charges the failed attempt as recoverable, two well-separated runs are NOT a duplicate, a
-// rapid burst of three charges two as recoverable, and distinct users never cluster together.
+// rapid burst with NO failure is NOT charged (review: rapid-repeat conflated with normal
+// conversation), a failure inside a larger burst is still charged, and distinct users never cluster.
 
 import { describe, expect, it } from "vitest";
 
@@ -73,7 +74,10 @@ describe("detectDuplicatedWork", () => {
     expect(findings).toEqual([]);
   });
 
-  it("flags two of three rapid identical runs as recoverable", () => {
+  it("does NOT charge a rapid burst that never failed", () => {
+    // Three same-shape runs in 40s, all successful. Without message bodies this is indistinguishable
+    // from a legitimate multi-turn session (a user asking follow-ups), so we refuse to claim any
+    // recoverable dollars for it (CTO-227; review: rapid-repeat conflated with normal conversation).
     const findings = detectDuplicatedWork([
       cluster({
         runs: [
@@ -84,12 +88,29 @@ describe("detectDuplicatedWork", () => {
       }),
     ]);
 
+    expect(findings).toEqual([]);
+  });
+
+  it("still charges a failure that a later success supersedes inside a larger burst", () => {
+    // A failure earns the dollars even when the burst has several runs: the error-then-retry signal
+    // does not depend on burst size, only on a real failure followed by a same-shape success.
+    const findings = detectDuplicatedWork([
+      cluster({
+        runs: [
+          run({ traceId: "a", timestampSec: T0, costMicroUsd: 5 * USD, outcome: "success" }),
+          run({ traceId: "b", timestampSec: T0 + 20, costMicroUsd: 4 * USD, outcome: "failed" }),
+          run({ traceId: "c", timestampSec: T0 + 40, costMicroUsd: 6 * USD, outcome: "success" }),
+        ],
+      }),
+    ]);
+
     expect(findings).toHaveLength(1);
     const f = findings[0];
-    expect(f.evidence.pattern).toBe("rapid-repeat");
-    expect(f.evidence.supersededRuns).toBe(2);
-    // Keep one of three identical runs; the other two (2 x 5 USD) are recoverable.
-    expect(f.recoverableMicroUsd).toBe(10 * USD);
+    expect(f.evidence.pattern).toBe("error-then-retry");
+    expect(f.evidence.supersededRuns).toBe(1);
+    expect(f.evidence.exampleTrace).toBe("b");
+    // Only the failed attempt's cost (4 USD) is recoverable; both successes are kept.
+    expect(f.recoverableMicroUsd).toBe(4 * USD);
     expect(f.windowSpendMicroUsd).toBe(15 * USD);
     expect(f.evidence.windowSeconds).toBe(40);
   });
