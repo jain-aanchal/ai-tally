@@ -1,19 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
-// Wrong-sized-model waste detector (CTO-231, W4; epic CTO-227).
+// Wrong-sized-model waste detector (CTO-231, W4; epic CTO-227; per-call basis CTO-236).
 //
 // WHY: the epic answers "where is this tenant paying for AI that returns nothing". One shape of that
 // waste is running an expensive model on work a cheaper one handles at statistically indistinguishable
 // quality. The Compare workflow (CTO-113 replay + CTO-114 pairwise-judge eval) already measures both
-// halves of that claim honestly: a cheaper candidate's replay-projected cost AND its pairwise win-rate
-// vs the incumbent with a Wilson 95% CI. This detector does not re-measure anything; it reads those
+// halves of that claim honestly: a candidate's replay-projected cost AND its pairwise win-rate vs the
+// incumbent with a Wilson 95% CI. This detector does not re-measure any of that; it reads those
 // existing results and, ONLY when they clear the same judged/replayed floors the /compare route uses,
 // turns a clear cost win at no significant quality regression into a WasteFinding.
 //
+// CTO-236 (the per-call rewrite): the prior version rescaled current spend by the ratio of the
+// candidate's replay projection to the INCUMBENT's replay projection. That denominator was never
+// obtainable on v1 - the gateway's /v1/replay projects only the requested candidate models, never the
+// incumbent (see app.py per-candidate loop over `candidates`), so the collector returned [] every time.
+// It also mis-keyed: matching a dated response-model incumbent id against a candidate base id never
+// lined up. The per-call basis avoids BOTH bugs. Each replay candidate's average cost per call is
+// `projected_monthly_cost_micro_usd / samples_available` (the gateway builds the projection as
+// `round(avg_cost_per_call * samples_available)`, so dividing recovers the per-call figure). The
+// incumbent's average cost per call is measured DIRECTLY from its own real traffic (avg EstimatedCost
+// over its chat spans), never joined to a candidate id. We compare per call vs per call: apples to
+// apples, no incumbent replay row required, no cross-id cost join.
+//
 // The honesty posture (CLAUDE.md, and the "no fake quality number" rule the /compare page already
-// enforces) is load-bearing: if there is no eval pass (below the judged floor) or no replay for the
-// tenant, this detector emits NOTHING for that scope. There is deliberately NO mock path. A quality
-// regression whose CI sits below the pairwise even line disqualifies the candidate; we never present a
-// guessed saving over a candidate we cannot show is at least as good.
+// enforces) is load-bearing: no captured replay corpus (`samples_available <= 0`) or no judged eval
+// signal (every candidate below the judged floor / null) emits NOTHING for that scope. There is
+// deliberately NO mock path. A quality regression whose CI sits below the pairwise even line
+// disqualifies the candidate; we never present a guessed saving over a candidate we cannot show is at
+// least as good. Candidate cost is from resolved-context replay (no live retrieval); the incumbent
+// cost is measured on real traffic; the two are compared per call and the reason says exactly that.
 //
 // The pure detector (detectWrongSizedModel) is I/O-free and deterministic so it is trivially testable;
 // collectWrongSizedModel does the ClickHouse + Compare-path reads and maps them through it.
@@ -23,10 +37,12 @@ import type { WasteConfidence, WasteFinding, WasteScopeKind } from "@/lib/waste"
 import { clampWindowDays } from "@/lib/explore";
 import type { DimensionFilters } from "@/lib/filters";
 import {
-  queryCostExplore,
+  micro,
   queryCurrentModel,
   queryEvalCandidates,
   queryReplayCandidates,
+  rowsP,
+  tryLive,
 } from "@/lib/clickhouse";
 
 // The pairwise-LLM-judge win-rate is candidate-vs-incumbent, so the incumbent's own quality is the
@@ -43,7 +59,7 @@ const PAIRWISE_EVEN = 0.5;
 const MIN_JUDGED_SAMPLES = 10;
 const MIN_REPLAYED_SAMPLES = 50;
 
-// A Wilson 95% CI narrower than this is "tight" — a clear, well-bounded overlap with the even line,
+// A Wilson 95% CI narrower than this is "tight" - a clear, well-bounded overlap with the even line,
 // which we report at high confidence. A wider (but still non-regressing) CI is real signal but a
 // looser one, so it lands at medium. This gates ONLY confidence, never the dollar math.
 const TIGHT_CI_WIDTH = 0.1;
@@ -54,16 +70,29 @@ const TIGHT_CI_WIDTH = 0.1;
 const REPLAY_FIDELITY_CAVEAT = "resolved-context replay, no live retrieval";
 
 /**
- * One cheaper candidate for a scope, as measured by the Compare workflow. `projectedMonthlyMicroUsd`
- * is the candidate's replay-projected monthly cost over the SAME corpus the incumbent projection uses,
- * so its ratio to the incumbent's projection is the per-call cost ratio we rescale current spend by.
- * `winRate` / `ciLow` / `ciHigh` are the pairwise-judge win-rate (0..1) vs the incumbent and its
- * Wilson 95% CI. Sample counts are the judged / replayed floors gate.
+ * Strip a dated / versioned suffix so two ids for the SAME model compare equal. This is used ONLY to
+ * skip a candidate that is really the incumbent (self-comparison) - CTO-236 does NOT reintroduce a
+ * cross-id COST join (that was the mis-keying bug). Costs are compared per call, never matched by id.
+ * Examples: `claude-sonnet-4-5-20250219` -> `claude-sonnet-4-5`, `gpt-5-mini-2025-01-01` -> `gpt-5-mini`.
+ */
+export function baseModelId(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/[-@](\d{6,8}|\d{4}-\d{2}-\d{2}|v\d+)$/i, "");
+}
+
+/**
+ * One cheaper candidate for a scope, as measured by the Compare workflow, on a PER-CALL basis.
+ * `perCallMicroUsd` is the candidate's average replay cost per call (derived from the gateway's
+ * `projected_monthly_cost_micro_usd / samples_available`), directly comparable to the incumbent's own
+ * measured per-call cost. `winRate` / `ciLow` / `ciHigh` are the pairwise-judge win-rate (0..1) vs the
+ * incumbent and its Wilson 95% CI. Sample counts are the judged / replayed floors gate.
  */
 export interface WrongSizedModelCandidate {
   candidateModel: string;
   provider: string;
-  projectedMonthlyMicroUsd: MicroUSD;
+  perCallMicroUsd: MicroUSD;
   winRate: number;
   ciLow: number;
   ciHigh: number;
@@ -73,8 +102,8 @@ export interface WrongSizedModelCandidate {
 
 /**
  * One scope (an incumbent model, optionally within a feature) with its current windowed spend, the
- * incumbent's own replay-projected monthly cost (the rescale denominator), and the cheaper candidates
- * the Compare workflow measured against it.
+ * incumbent's own MEASURED average cost per call (the rescale basis, from real traffic), and the
+ * cheaper candidates the Compare workflow measured against it.
  */
 export interface WrongSizedModelScope {
   scopeKind: WasteScopeKind;
@@ -84,8 +113,8 @@ export interface WrongSizedModelScope {
   incumbentModel: string;
   /** Observed spend on this scope over the window. Always known. Integer micro-USD. */
   windowSpendMicroUsd: MicroUSD;
-  /** Incumbent's replay-projected monthly cost over the same corpus as the candidates. */
-  incumbentProjectedMonthlyMicroUsd: MicroUSD;
+  /** Incumbent's measured average cost per call over the window (real traffic). Integer micro-USD. */
+  incumbentPerCallMicroUsd: MicroUSD;
   candidates: WrongSizedModelCandidate[];
 }
 
@@ -100,17 +129,24 @@ function microRound(n: number): number {
 }
 
 /**
- * Does this candidate qualify? It must be measured over both floors, be cheaper than the incumbent on
- * the replay projection, AND show no significant quality regression (its win-rate CI upper bound still
- * reaches the pairwise even line). A candidate the judge finds significantly worse (ciHigh < 0.5) is
- * rejected even when it is cheaper — that is the whole "no fake saving over a worse model" rule.
+ * Does this candidate qualify? It must be measured over both floors, be cheaper than the incumbent PER
+ * CALL, AND show no significant quality regression (its win-rate CI upper bound still reaches the
+ * pairwise even line). A candidate the judge finds significantly worse (ciHigh < 0.5) is rejected even
+ * when it is cheaper - that is the whole "no fake saving over a worse model" rule. A candidate that is
+ * really the incumbent (same base id) is skipped: comparing a model to itself is never a finding.
  */
-function qualifies(c: WrongSizedModelCandidate, incumbentProjectedMonthlyMicroUsd: MicroUSD): boolean {
+function qualifies(
+  c: WrongSizedModelCandidate,
+  incumbentModel: string,
+  incumbentPerCallMicroUsd: MicroUSD,
+): boolean {
+  // Self-comparison: the candidate IS the incumbent (dated/base id aside). Never flag a model vs itself.
+  if (baseModelId(c.candidateModel) === baseModelId(incumbentModel)) return false;
   if (c.samplesJudged < MIN_JUDGED_SAMPLES) return false;
   if (c.samplesReplayed < MIN_REPLAYED_SAMPLES) return false;
-  // A ratio is only defensible when the incumbent has a positive projection to rescale against.
-  if (incumbentProjectedMonthlyMicroUsd <= 0) return false;
-  if (c.projectedMonthlyMicroUsd >= incumbentProjectedMonthlyMicroUsd) return false;
+  // A ratio is only defensible when the incumbent has a positive per-call cost to rescale against.
+  if (incumbentPerCallMicroUsd <= 0) return false;
+  if (c.perCallMicroUsd >= incumbentPerCallMicroUsd) return false;
   // No significant regression: the CI still overlaps (or sits above) the even line.
   return c.ciHigh >= PAIRWISE_EVEN;
 }
@@ -118,44 +154,40 @@ function qualifies(c: WrongSizedModelCandidate, incumbentProjectedMonthlyMicroUs
 /**
  * Detect wrong-sized-model waste. PURE and deterministic.
  *
- * For each scope, consider only candidates that clear both sample floors, are cheaper on the replay
- * projection, and show no significant quality regression (see {@link qualifies}). Among those, the one
- * with the lowest projected cost recovers the most, so it is the one we surface — one finding per
- * scope. Recoverable is the current windowed spend minus that spend rescaled to the candidate's
- * per-call replay cost:
+ * For each scope, consider only candidates that clear both sample floors, are cheaper PER CALL than the
+ * incumbent, and show no significant quality regression (see {@link qualifies}). Among those, the one
+ * with the lowest per-call cost recovers the most, so it is the one we surface - one finding per scope.
+ * Recoverable rescales the current windowed spend by the per-call cost ratio:
  *
- *     recoverable = windowSpend - round(windowSpend × candidateProjected / incumbentProjected)
+ *     recoverable = round(windowSpend × (1 − candidatePerCall / incumbentPerCall))
  *
- * which is always positive here (the candidate is strictly cheaper). Confidence is `high` when the
- * winning candidate's CI is tight, `medium` otherwise. A scope with no qualifying candidate yields
- * NOTHING — never a zero-dollar finding.
+ * which is always positive here (the candidate is strictly cheaper per call). Confidence is `high` when
+ * the winning candidate's CI is tight, `medium` otherwise. A scope with no qualifying candidate yields
+ * NOTHING - never a zero-dollar finding.
  */
 export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding[] {
   const findings: WasteFinding[] = [];
 
   for (const scope of input.scopes) {
     const eligible = scope.candidates.filter((c) =>
-      qualifies(c, scope.incumbentProjectedMonthlyMicroUsd),
+      qualifies(c, scope.incumbentModel, scope.incumbentPerCallMicroUsd),
     );
     if (eligible.length === 0) continue;
 
-    // Cheapest qualifying candidate = largest recoverable. Ties break on the higher win-rate, then on
-    // the model id, so the choice is deterministic regardless of input order.
+    // Cheapest qualifying candidate per call = largest recoverable. Ties break on the higher win-rate,
+    // then on the model id, so the choice is deterministic regardless of input order.
     const best = eligible.reduce((a, b) => {
-      if (b.projectedMonthlyMicroUsd !== a.projectedMonthlyMicroUsd) {
-        return b.projectedMonthlyMicroUsd < a.projectedMonthlyMicroUsd ? b : a;
+      if (b.perCallMicroUsd !== a.perCallMicroUsd) {
+        return b.perCallMicroUsd < a.perCallMicroUsd ? b : a;
       }
       if (b.winRate !== a.winRate) return b.winRate > a.winRate ? b : a;
       return b.candidateModel < a.candidateModel ? b : a;
     });
 
-    const ratio = best.projectedMonthlyMicroUsd / scope.incumbentProjectedMonthlyMicroUsd;
+    const ratio = best.perCallMicroUsd / scope.incumbentPerCallMicroUsd;
     const rescaled = microRound(scope.windowSpendMicroUsd * ratio);
     const recoverableMicroUsd = Math.max(0, scope.windowSpendMicroUsd - rescaled);
-    const projectedMonthlySavings = Math.max(
-      0,
-      scope.incumbentProjectedMonthlyMicroUsd - best.projectedMonthlyMicroUsd,
-    );
+    const perCallSavings = Math.max(0, scope.incumbentPerCallMicroUsd - best.perCallMicroUsd);
     const qualityDelta = best.winRate - PAIRWISE_EVEN;
     // Round the width before the threshold test so float noise (0.54 - 0.44 = 0.1000…03) does not
     // tip a genuinely tight CI over the boundary.
@@ -172,17 +204,21 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
       confidence,
       title: `${scope.incumbentModel} is over-sized for this workload`,
       reason:
-        `${best.candidateModel} replayed cheaper than ${scope.incumbentModel}${featureClause} at no ` +
-        `significant quality regression (pairwise win-rate ${best.winRate.toFixed(2)}, 95% CI ` +
-        `${best.ciLow.toFixed(2)}-${best.ciHigh.toFixed(2)} overlaps the even line). Figures are from ` +
-        `${REPLAY_FIDELITY_CAVEAT}.`,
+        `${best.candidateModel} replayed cheaper per call than ${scope.incumbentModel}${featureClause} ` +
+        `at no significant quality regression (pairwise win-rate ${best.winRate.toFixed(2)}, 95% CI ` +
+        `${best.ciLow.toFixed(2)}-${best.ciHigh.toFixed(2)} overlaps the even line). Candidate cost is ` +
+        `from ${REPLAY_FIDELITY_CAVEAT} over a representative corpus; the incumbent cost is measured on ` +
+        `real traffic; the two are compared per call.`,
       evidence: {
         incumbentModel: scope.incumbentModel,
         candidateModel: best.candidateModel,
+        incumbentPerCall: scope.incumbentPerCallMicroUsd,
+        candidatePerCall: best.perCallMicroUsd,
+        perCallSavings,
         qualityDelta: Math.round(qualityDelta * 1000) / 1000,
         qualityCiLow: Math.round(best.ciLow * 1000) / 1000,
         qualityCiHigh: Math.round(best.ciHigh * 1000) / 1000,
-        projectedMonthlySavings,
+        samplesReplayed: best.samplesReplayed,
       },
       drillHref: "/compare",
     });
@@ -192,121 +228,114 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
 }
 
 /**
- * The model id ClickHouse attributes spend to, matching the resolution `queryCostExplore`'s `model`
- * dimension and `queryCurrentModel` both use (response model when present, request model otherwise).
- * CTO-227 review finding (Bug 4): `queryCurrentModel` now resolves the incumbent on that SAME
- * response-model-first expression (previously it preferred `SpanAttributes['chatbot.real_model']`,
- * which never matched a cost-breakdown group on the chatbot demo, so this detector always returned []).
- * With both sides aligned, we compare the id directly.
+ * The incumbent's measured average cost PER CALL and its windowed total spend, read directly from the
+ * incumbent's own chat traffic (CTO-236). This is the per-call basis the candidate replay projections
+ * are compared against: `avg(EstimatedCost)` over the incumbent model's chat spans (LLM-family only,
+ * excluding the synthetic compute/egress rows), tenant-scoped, over the clamped ClickHouse-clock
+ * window. It never touches a candidate id or a replay row, so neither prior bug (incumbent-not-in-replay
+ * or dated-vs-base id mis-keying) can occur.
+ *
+ * The model id is resolved on the SAME response-model-first expression `queryCurrentModel` /
+ * `queryCostExplore` use, so `incumbentModel` here is the id the caller already holds. Returns null on
+ * any ClickHouse error (honest fall-through); a zero-count/zero-cost slice yields callCount 0, which
+ * the caller treats as "no incumbent traffic to rescale" -> no finding.
  */
-function resolveIncumbentModel(model: string): string {
-  return model;
+async function queryIncumbentPerCall(
+  incumbentModel: string,
+  windowDays: number,
+  featureTag: string | undefined,
+): Promise<{ perCallMicroUsd: number; windowSpendMicroUsd: number; callCount: number } | null> {
+  const w = clampWindowDays(windowDays);
+  return tryLive(async (db, tenant) => {
+    const tagClause = featureTag ? "AND FeatureTag = {feature:String}" : "";
+    // Resolve the incumbent on the response-model-first expression (matches EXPLORE_GROUP_EXPR.model),
+    // filter to that model's chat spans over the window, and read total spend + call count so the
+    // per-call average and the window spend come from ONE tenant-scoped read of the same slice.
+    const out = await rowsP<{ spend: string; calls: string | number }>(
+      db,
+      `SELECT sum(EstimatedCost) AS spend, count() AS calls
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
+         AND GenAiOperation NOT IN ('compute', 'egress')
+         AND if(GenAiResponseModel != '', GenAiResponseModel,
+                if(GenAiRequestModel != '', GenAiRequestModel, 'unknown')) = {model:String}
+         ${tagClause}`,
+      { tenant, model: incumbentModel, ...(featureTag ? { feature: featureTag } : {}) },
+    );
+    const row = out[0];
+    const calls =
+      row == null ? 0 : typeof row.calls === "number" ? row.calls : parseInt(row.calls, 10) || 0;
+    const windowSpendMicroUsd = row == null ? 0 : micro(row.spend);
+    // Money stays integer micro-USD; the per-call average is rounded at this boundary.
+    const perCallMicroUsd = calls > 0 ? Math.round(windowSpendMicroUsd / calls) : 0;
+    return { perCallMicroUsd, windowSpendMicroUsd, callCount: calls };
+  });
 }
 
 /**
- * Collect wrong-sized-model findings from the LIVE stack (CTO-231).
+ * Collect wrong-sized-model findings from the LIVE stack (CTO-231; per-call basis CTO-236).
  *
- * This reuses the EXISTING Compare workflow reads — the cached `/v1/replay` (CTO-113) and `/v1/eval`
- * (CTO-114) projections behind the /compare page, plus the live current model — rather than re-running
- * replay or eval. It joins them to the windowed cost-by-model read (`queryCostExplore` grouped by
- * model) so the incumbent's window spend, the rescale denominator, and the candidates all describe the
- * same tenant slice, then maps through {@link detectWrongSizedModel}.
+ * Order matters for honesty and for not doing pointless reads:
+ *   1. Replay projection first. No captured corpus (`samples_available <= 0`) -> [] before any other
+ *      read. No corpus means no candidate cost, so there is nothing to compute and nothing to fabricate.
+ *   2. Eval projection. If no candidate has a judged win-rate (all below the floor / null) there is no
+ *      quality signal, and the "/compare no fake quality number" rule says we emit nothing.
+ *   3. Incumbent identity + its MEASURED per-call cost from real traffic, plus its window spend.
+ *   4. Map to the pure detector on the per-call basis.
  *
- * Filter-driven: the window is clamped ClickHouse-clock days, `filters.feature` narrows the Compare
- * projection (a single selected feature becomes the compare tag) and the cost read, and `filters.model`
- * restricts which incumbent model we will flag. There is NO static fallback: if replay, eval, the
- * current model, or the cost read is unavailable — as on a demo tenant with no eval pass — this returns
- * `[]`, which is the honest answer, not a failure.
- *
- * CTO-227 review pass 2, inert on v1: even with every read present, this returns `[]` in production
- * today. v1 `/v1/replay` projects only the requested candidate models, never the incumbent, so the
- * rescale denominator (the incumbent's replay-corpus projection) cannot be formed and the per-call
- * rescale is not computable. The honest per-call-cost approach is CTO-236; see the denominator lookup
- * below for the full explanation. This is documented, intended behaviour, not a masked dead path.
+ * Filter-driven: the window is clamped ClickHouse-clock days, a single selected `filters.feature`
+ * becomes the compare tag and scopes the incumbent read, and `filters.model` restricts which incumbent
+ * model we will flag. There is NO static fallback: any missing signal returns [], the honest answer.
  */
 export async function collectWrongSizedModel(
   windowDays: number,
   filters: DimensionFilters,
 ): Promise<WasteFinding[]> {
-  // CTO-227 review pass 3 (Fix 3): gate this collector OFF before it issues any read. As the
-  // honest-state note further down documents, v1 `/v1/replay` does not project the incumbent, so the
-  // rescale denominator can never be formed and this collector already returned [] EVERY time in
-  // production. Issuing its four ClickHouse/Compare reads (queryReplayCandidates, queryEvalCandidates,
-  // queryCurrentModel, queryCostExplore) on every dashboard load only to reach that guaranteed [] is
-  // pure waste, so we short-circuit here and do zero reads today. Re-enable when CTO-236 lands the
-  // incumbent replay projection (or a per-call-cost rescale that needs no incumbent replay row): the
-  // live-read body below is kept intact as the wiring reference for that work, and the pure
-  // `detectWrongSizedModel` above stays correct for a valid input. The flag is a plain boolean, so the
-  // retained body still type-checks and its imports stay used.
-  const CTO236_LANDED = false;
-  if (!CTO236_LANDED) return [];
-
   const window = clampWindowDays(windowDays);
 
   // The Compare projection is per-feature-tag. Only a single selected feature maps cleanly onto one
   // tag; zero or several features means "all traffic" (undefined tag), matching how /compare scopes.
   const featureTag = filters.feature.length === 1 ? filters.feature[0] : undefined;
 
-  // Reuse the cached Compare-path reads. Any null means the signal we require is unavailable; there is
-  // no mock path, so we return [] rather than guess.
-  const [replay, evalProj, live] = await Promise.all([
-    queryReplayCandidates(featureTag),
-    queryEvalCandidates(featureTag),
-    queryCurrentModel(),
-  ]);
-  if (!replay || !evalProj || !live) return [];
+  // (1) Replay FIRST. No corpus -> [] before we issue any other read (CTO-236: honest, no fabrication,
+  // and no wasted reads when there is nothing to compare against).
+  const replay = await queryReplayCandidates(featureTag);
+  if (!replay || replay.samples_available <= 0) return [];
+  const samplesAvailable = replay.samples_available;
 
-  const incumbentModel = resolveIncumbentModel(live.model);
+  // (2) Eval quality signal. If NO candidate cleared the judged floor (or eval is null), there is no
+  // honest quality number, so we flag nothing - the same rule /compare enforces.
+  const evalProj = await queryEvalCandidates(featureTag);
+  if (!evalProj) return [];
+  const hasJudged = evalProj.per_candidate.some((e) => e.samples_judged >= MIN_JUDGED_SAMPLES);
+  if (!hasJudged) return [];
 
-  // If the caller filtered to specific models and the incumbent is not among them, there is nothing to
-  // flag for this slice.
+  // (3) Incumbent identity from real traffic (response-model-first, matching the cost breakdown).
+  const live = await queryCurrentModel();
+  if (!live) return [];
+  const incumbentModel = live.model;
+
+  // If the caller filtered to specific models and the incumbent is not among them, nothing to flag.
   if (filters.model.length > 0 && !filters.model.includes(incumbentModel)) return [];
 
-  // Windowed cost-by-model over the same slice, so the incumbent's window spend comes from real
-  // telemetry rather than the 7-day→30-day projection the Compare current-cost uses.
-  const costByModel = await queryCostExplore({
-    window: { kind: "preset", days: window },
-    groupBy: "model",
-    filters: {
-      ...(filters.feature.length > 0 ? { feature: filters.feature } : {}),
-      ...(filters.model.length > 0 ? { model: filters.model } : {}),
-    },
-  });
-  if (!costByModel) return [];
+  // The incumbent's MEASURED per-call cost and window spend over the same slice. This is the per-call
+  // rescale basis - no incumbent replay row and no cross-id cost join (CTO-227 review's two bugs).
+  const incumbent = await queryIncumbentPerCall(incumbentModel, window, featureTag);
+  if (!incumbent || incumbent.callCount <= 0 || incumbent.perCallMicroUsd <= 0) return [];
+  if (incumbent.windowSpendMicroUsd <= 0) return [];
 
-  const incumbentRow = costByModel.breakdown.find((r) => r.group === incumbentModel);
-  // No observed spend on the incumbent in this window → nothing to recover, so nothing to report.
-  if (!incumbentRow || incumbentRow.totalMicroUsd <= 0) return [];
-
-  // The rescale denominator has to be the incumbent's projection on the SAME replay corpus every
-  // candidate's `projected_monthly_cost_micro_usd` is measured on (CTO-227 review Bug 1: the old
-  // `live.monthlyCostMicroUsd` denominator was a 7-day-traffic figure, an incompatible basis that made
-  // the "cheaper" gate and the recoverable ratio meaningless).
-  //
-  // CTO-227 review pass 2 (HONEST-STATE NOTE): v1 `/v1/replay` does NOT project the incumbent. The
-  // gateway builds `per_candidate` ONLY from the requested `candidate_models` (see app.py: the
-  // per-candidate loop iterates `candidates`), and `queryReplayCandidates` sends just DEFAULT_CANDIDATES
-  // (claude-haiku-4-5, gpt-5-mini, gemini-3-flash), never the incumbent. So for a real incumbent this
-  // `find` is ALWAYS undefined and the collector returns [] here EVERY time in production: an
-  // apples-to-apples per-call rescale is simply not computable on v1. This is deliberate honesty, not a
-  // latent bug; we never fabricate a denominator from an incompatible basis. The real implementation
-  // (an incumbent replay projection, or a per-call-cost rescale that needs no incumbent replay row)
-  // lands in CTO-236; until then this detector is inert by design. The pure `detectWrongSizedModel`
-  // above stays correct FOR A VALID INPUT, but no such input can be produced on v1.
-  const incumbentReplay = replay.per_candidate.find((r) => r.model === incumbentModel);
-  if (!incumbentReplay || incumbentReplay.projected_monthly_cost_micro_usd <= 0) return [];
-  const incumbentProjectedMonthlyMicroUsd = incumbentReplay.projected_monthly_cost_micro_usd;
-
-  // Join replay (cost) and eval (quality) by provider+model, excluding the incumbent itself.
+  // (4) Build per-call candidates: join replay (cost) and eval (quality) by provider+model. Each
+  // candidate's per-call cost is `projected_monthly_cost_micro_usd / samples_available` (the gateway
+  // built the projection as `round(avg_per_call * samples_available)`, so this recovers avg per call).
   const candidates: WrongSizedModelCandidate[] = [];
   for (const r of replay.per_candidate) {
-    if (r.model === incumbentModel) continue;
     const e = evalProj.per_candidate.find((x) => x.provider === r.provider && x.model === r.model);
     if (!e) continue;
     candidates.push({
       candidateModel: r.model,
       provider: r.provider,
-      projectedMonthlyMicroUsd: r.projected_monthly_cost_micro_usd,
+      perCallMicroUsd: Math.round(r.projected_monthly_cost_micro_usd / samplesAvailable),
       winRate: e.win_rate,
       ciLow: e.win_rate_ci_lo,
       ciHigh: e.win_rate_ci_hi,
@@ -320,13 +349,12 @@ export async function collectWrongSizedModel(
     windowDays: window,
     scopes: [
       {
-        scopeKind: "model",
-        scopeValue: incumbentModel,
+        scopeKind: featureTag ? "feature" : "model",
+        scopeValue: featureTag ?? incumbentModel,
         feature: featureTag,
         incumbentModel,
-        windowSpendMicroUsd: incumbentRow.totalMicroUsd,
-        // Replay-corpus projection for the incumbent — shares the candidates' basis (see above).
-        incumbentProjectedMonthlyMicroUsd,
+        windowSpendMicroUsd: incumbent.windowSpendMicroUsd,
+        incumbentPerCallMicroUsd: incumbent.perCallMicroUsd,
         candidates,
       },
     ],
