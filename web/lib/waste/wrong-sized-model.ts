@@ -217,6 +217,12 @@ function resolveIncumbentModel(model: string): string {
  * restricts which incumbent model we will flag. There is NO static fallback: if replay, eval, the
  * current model, or the cost read is unavailable — as on a demo tenant with no eval pass — this returns
  * `[]`, which is the honest answer, not a failure.
+ *
+ * CTO-227 review pass 2, inert on v1: even with every read present, this returns `[]` in production
+ * today. v1 `/v1/replay` projects only the requested candidate models, never the incumbent, so the
+ * rescale denominator (the incumbent's replay-corpus projection) cannot be formed and the per-call
+ * rescale is not computable. The honest per-call-cost approach is CTO-236; see the denominator lookup
+ * below for the full explanation. This is documented, intended behaviour, not a masked dead path.
  */
 export async function collectWrongSizedModel(
   windowDays: number,
@@ -259,15 +265,21 @@ export async function collectWrongSizedModel(
   // No observed spend on the incumbent in this window → nothing to recover, so nothing to report.
   if (!incumbentRow || incumbentRow.totalMicroUsd <= 0) return [];
 
-  // CTO-227 review finding (Bug 1): the rescale denominator MUST be the incumbent's REPLAY-corpus
-  // projection, the SAME basis every candidate's `projected_monthly_cost_micro_usd` is measured on.
-  // The old denominator was `live.monthlyCostMicroUsd`, a 7-day-traffic figure linearly projected to
-  // 30d — an incompatible basis. Dividing a replay-corpus candidate cost by a traffic projection made
-  // the "cheaper" gate and the recoverable ratio meaningless (a candidate could pass while being more
-  // expensive per call, yielding absurd recoverables). The replay projection includes the incumbent
-  // model (the gateway projects it alongside the candidates); if it does NOT — so the two sides cannot
-  // be compared apples-to-apples — we return NOTHING for this scope (honest), never fall back to the
-  // traffic projection.
+  // The rescale denominator has to be the incumbent's projection on the SAME replay corpus every
+  // candidate's `projected_monthly_cost_micro_usd` is measured on (CTO-227 review Bug 1: the old
+  // `live.monthlyCostMicroUsd` denominator was a 7-day-traffic figure, an incompatible basis that made
+  // the "cheaper" gate and the recoverable ratio meaningless).
+  //
+  // CTO-227 review pass 2 (HONEST-STATE NOTE): v1 `/v1/replay` does NOT project the incumbent. The
+  // gateway builds `per_candidate` ONLY from the requested `candidate_models` (see app.py: the
+  // per-candidate loop iterates `candidates`), and `queryReplayCandidates` sends just DEFAULT_CANDIDATES
+  // (claude-haiku-4-5, gpt-5-mini, gemini-3-flash), never the incumbent. So for a real incumbent this
+  // `find` is ALWAYS undefined and the collector returns [] here EVERY time in production: an
+  // apples-to-apples per-call rescale is simply not computable on v1. This is deliberate honesty, not a
+  // latent bug; we never fabricate a denominator from an incompatible basis. The real implementation
+  // (an incumbent replay projection, or a per-call-cost rescale that needs no incumbent replay row)
+  // lands in CTO-236; until then this detector is inert by design. The pure `detectWrongSizedModel`
+  // above stays correct FOR A VALID INPUT, but no such input can be produced on v1.
   const incumbentReplay = replay.per_candidate.find((r) => r.model === incumbentModel);
   if (!incumbentReplay || incumbentReplay.projected_monthly_cost_micro_usd <= 0) return [];
   const incumbentProjectedMonthlyMicroUsd = incumbentReplay.projected_monthly_cost_micro_usd;
