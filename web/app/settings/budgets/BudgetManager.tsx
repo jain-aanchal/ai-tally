@@ -267,7 +267,7 @@ export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }
               <button
                 type="button"
                 onClick={() => openConflicting(status.conflictingBudgetId as string)}
-                className="ml-2 rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-white"
+                className="ml-2 rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-fg"
               >
                 Edit {status.conflictingBudgetId}
               </button>

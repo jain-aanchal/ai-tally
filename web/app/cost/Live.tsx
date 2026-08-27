@@ -345,7 +345,7 @@ function CostChart({
       <InteractiveStackedChart
         days={days}
         groups={LAYERS}
-        color={(g) => LAYER_COLORS[g as Layer] ?? "#8a93a6"}
+        color={(g) => LAYER_COLORS[g as Layer] ?? "#4c566a"}
         label={(g) => LAYER_LABEL[g as Layer] ?? g}
         onDrill={onDrillLayer}
         ariaLabel="stacked cost by layer over time"

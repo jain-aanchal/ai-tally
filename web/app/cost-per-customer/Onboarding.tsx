@@ -73,7 +73,7 @@ export function OnboardingEmptyState({ windowDays }: { windowDays: number }) {
       <div className="mt-4 space-y-3">
         <h3 className="text-base font-semibold">What this page is for</h3>
         <p className="max-w-prose text-sm text-muted">
-          It breaks your AI spend down by <span className="text-white">your own customers</span>, so
+          It breaks your AI spend down by <span className="text-fg">your own customers</span>, so
           you can see which accounts are expensive to serve and which ones are worth what they pay.
           Everywhere else in this dashboard groups spend by model, feature or provider. This is the
           only tab that groups it by who you are serving.
@@ -115,18 +115,18 @@ export function OnboardingEmptyState({ windowDays }: { windowDays: number }) {
 
         <ul className="max-w-prose list-disc space-y-1.5 pl-5 text-sm text-muted">
           <li>
-            <span className="text-white">The label is optional.</span> Leave it out and the account
+            <span className="text-fg">The label is optional.</span> Leave it out and the account
             shows as a shortened hash, which is a supported way to run. The label is wire-only: it
             is stored against the hash and never written to the telemetry store, so no customer name
             lands in your span data.
           </li>
           <li>
-            <span className="text-white">The raw account id never leaves your process.</span> It is
+            <span className="text-fg">The raw account id never leaves your process.</span> It is
             HMAC-SHA256&apos;d under your per-tenant key at emit time, exactly like a user id, which
             is also why the table can only show you a hash you already know.
           </li>
           <li>
-            <span className="text-white">
+            <span className="text-fg">
               Rows appear as soon as the next tagged spans land.
             </span>{" "}
             The hash is written at emit time, so spans already recorded stay unattributed. The
@@ -192,7 +192,7 @@ function Snippet({ code }: { code: string }) {
       <button
         type="button"
         onClick={copy}
-        className="absolute right-2 top-2 rounded border border-edge bg-panel px-2 py-1 text-[11px] text-muted hover:text-white"
+        className="absolute right-2 top-2 rounded border border-edge bg-panel px-2 py-1 text-[11px] text-muted hover:text-fg"
       >
         {copied ? "Copied" : "Copy"}
       </button>

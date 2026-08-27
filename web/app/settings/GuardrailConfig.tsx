@@ -270,7 +270,7 @@ function ObserveStats({
         : "bg-edge text-muted";
   return (
     <>
-      <span className="rounded bg-edge px-1.5 py-0.5 tabular-nums text-gray-200">
+      <span className="rounded bg-edge px-1.5 py-0.5 tabular-nums text-fg">
         would have fired{" "}
         <strong>{rule.wouldHaveFiredThisWeek.toLocaleString()}</strong> ×/wk
         {rule.runsThisWeek > 0 && <> ({(rate * 100).toFixed(1)}% of runs)</>}

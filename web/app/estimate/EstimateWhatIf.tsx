@@ -157,7 +157,7 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
         <ul className="space-y-2 text-sm">
           {initial.drivers.map((d) => (
             <li key={d.reason} className="flex items-baseline justify-between gap-3">
-              <span className="text-gray-300">{d.reason}</span>
+              <span className="text-muted">{d.reason}</span>
               <span
                 className={`tabular-nums font-medium ${d.delta > 0 ? "text-bad" : "text-good"}`}
               >

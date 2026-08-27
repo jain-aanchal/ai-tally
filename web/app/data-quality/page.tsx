@@ -110,7 +110,7 @@ export default async function DataQualityPage() {
               return (
                 <tr key={`${d.service}-${d.sdkVersion}`} className="border-t border-edge">
                   <td className="py-2">{d.service}</td>
-                  <td className="py-2 font-mono text-xs text-gray-300">{d.sdkVersion}</td>
+                  <td className="py-2 font-mono text-xs text-muted">{d.sdkVersion}</td>
                   <td className="py-2 text-right tabular-nums">
                     {inactive ? (
                       <span className="text-muted" title="no spans in the last 24h">—</span>
@@ -146,7 +146,7 @@ export default async function DataQualityPage() {
               const h = classify("calibration", Math.abs(pct));
               return (
                 <tr key={c.date} className="border-t border-edge">
-                  <td className="py-2 font-mono text-xs text-gray-300">{c.date}</td>
+                  <td className="py-2 font-mono text-xs text-muted">{c.date}</td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(c.estimatedMicroUsd)}</td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(c.reconciledMicroUsd)}</td>
                   <td className="py-2 text-right tabular-nums">
@@ -339,10 +339,10 @@ function AccountStitchingCard({ stitching }: { stitching?: AccountStitching }) {
             <tbody>
               {conflicts.map((c) => (
                 <tr key={c.userIdHash} className="border-t border-edge">
-                  <td className="py-2 font-mono text-xs text-gray-300" title={c.userIdHash}>
+                  <td className="py-2 font-mono text-xs text-muted" title={c.userIdHash}>
                     {c.userIdHash.slice(0, 12)}…
                   </td>
-                  <td className="py-2 font-mono text-xs text-gray-300" title={c.accounts.join(", ")}>
+                  <td className="py-2 font-mono text-xs text-muted" title={c.accounts.join(", ")}>
                     {c.accounts.map((a) => a.slice(0, 8)).join(" · ")}
                   </td>
                   <td className="py-2 text-right tabular-nums">

@@ -56,7 +56,7 @@ export function CopyHashButton({
       type="button"
       onClick={copy}
       title={`Copy the full account hash: ${accountIdHash}`}
-      className={`rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-white ${className}`.trim()}
+      className={`rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:text-fg ${className}`.trim()}
     >
       {copied ? "Copied" : "Copy hash"}
     </button>

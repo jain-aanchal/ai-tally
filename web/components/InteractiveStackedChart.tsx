@@ -57,12 +57,12 @@ export interface InteractiveStackedChartProps {
 // spenders) are the most distinct; it repeats past its length, which the group cap (MAX_EXPLORE_
 // GROUPS) keeps us well short of in practice.
 const PALETTE = [
-  "#5e6ad2", // accent
+  "#5e81ac", // accent
   "#26b5ce",
-  "#4cb782", // good
-  "#f2c94c", // warn
+  "#4c9f70", // good
+  "#cc9a1f", // warn
   "#bb87fc",
-  "#eb5757", // bad
+  "#bf616a", // bad
   "#5cc8ff",
   "#f2994a",
   "#7ed3b2",
@@ -105,7 +105,7 @@ export function InteractiveStackedChart({
   const colorOf = useMemo(() => {
     const m = new Map<string, string>();
     groups.forEach((g, i) => m.set(g, color(g, i)));
-    return (g: string) => m.get(g) ?? "#8a93a6";
+    return (g: string) => m.get(g) ?? "#4c566a";
   }, [groups, color]);
 
   const visibleGroups = groups.filter((g) => !hidden.has(g));
@@ -221,7 +221,7 @@ export function InteractiveStackedChart({
                     })
                   }
                   aria-pressed={!off}
-                  className={`flex items-center gap-1.5 hover:text-white ${off ? "opacity-40" : ""}`}
+                  className={`flex items-center gap-1.5 hover:text-fg ${off ? "opacity-40" : ""}`}
                   title={off ? `Show ${label(g)}` : `Hide ${label(g)}`}
                 >
                   <span
@@ -283,10 +283,10 @@ function Tooltip({
           className="inline-block h-2 w-2 rounded-sm"
           style={{ background: swatch }}
         />
-        <span className="font-medium text-gray-100">{group}</span>
+        <span className="font-medium text-fg">{group}</span>
       </div>
       <div className="mt-0.5 tabular-nums">
-        {date} · <span className="text-gray-100">{value}</span>
+        {date} · <span className="text-fg">{value}</span>
       </div>
     </div>
   );

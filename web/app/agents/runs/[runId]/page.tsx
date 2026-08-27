@@ -41,7 +41,7 @@ export default async function RunPage({ params }: { params: Promise<{ runId: str
       </div>
 
       <Card title="Why expensive">
-        <p className="text-sm leading-relaxed text-gray-200">{run.whyExpensive}</p>
+        <p className="text-sm leading-relaxed text-fg">{run.whyExpensive}</p>
       </Card>
 
       <Card title="Run waterfall">

@@ -29,12 +29,12 @@ export const LAYERS = ["llm", "vector", "tools", "compute", "embeddings", "egres
 export type Layer = (typeof LAYERS)[number];
 
 export const LAYER_COLORS: Record<Layer, string> = {
-  llm: "#5e6ad2",      // accent
+  llm: "#5e81ac",      // accent
   vector: "#26b5ce",
-  tools: "#4cb782",    // good
-  compute: "#f2c94c",  // warn
+  tools: "#4c9f70",    // good
+  compute: "#cc9a1f",  // warn
   embeddings: "#bb87fc",
-  egress: "#8a93a6",   // muted
+  egress: "#4c566a",   // muted
 };
 
 export const LAYER_LABEL: Record<Layer, string> = {

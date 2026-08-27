@@ -42,14 +42,14 @@ const PLOT_H = H - PAD_T - PAD_B;
 
 /** Theme tokens, inlined because SVG `fill`/`stroke` cannot read Tailwind classes. */
 const COLOR = {
-  actual: "#5e6ad2", // accent
+  actual: "#5e81ac", // accent
   projection: "#26b5ce",
   cone: "#26b5ce",
-  budget: "#f2c94c", // warn
-  breach: "#eb5757", // bad
-  naive: "#8a93a6", // muted
-  axis: "#252b37", // edge
-  text: "#8a93a6",
+  budget: "#cc9a1f", // warn
+  breach: "#bf616a", // bad
+  naive: "#4c566a", // muted
+  axis: "#d8dee9", // edge
+  text: "#4c566a",
 };
 
 export interface BurndownChartProps {

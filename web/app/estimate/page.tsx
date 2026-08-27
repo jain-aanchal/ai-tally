@@ -48,7 +48,7 @@ export default async function EstimatePage() {
         <div>
           <h1 className="text-xl font-semibold">Estimate</h1>
           <p className="mt-1 text-sm text-muted">
-            Workload: <span className="font-mono text-gray-300">{workload}</span>
+            Workload: <span className="font-mono text-muted">{workload}</span>
           </p>
         </div>
         {state !== "empty" && asOf && (

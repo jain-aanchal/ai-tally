@@ -195,7 +195,7 @@ export function DataTable<Row>({
                         setSort((current) => nextSort(c, current));
                         setPage(0);
                       }}
-                      className={`inline-flex items-center gap-1 uppercase hover:text-white ${
+                      className={`inline-flex items-center gap-1 uppercase hover:text-fg ${
                         c.align === "right" ? "flex-row-reverse" : ""
                       }`}
                     >
@@ -276,7 +276,7 @@ function PagerButton({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="rounded-md border border-edge px-2 py-1 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-muted"
+      className="rounded-md border border-edge px-2 py-1 hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-muted"
     >
       {children}
     </button>
