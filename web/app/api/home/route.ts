@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
-import { mockDataQuality, mockOutliers, mockRoi, mockSpend } from "@/lib/mock";
+import { mockDataQuality, mockRoi, mockSpend } from "@/lib/mock";
 import {
   queryAttribution,
   queryDataQuality,
-  queryOutliers,
   queryRoi,
   querySpendSummary,
 } from "@/lib/clickhouse";
@@ -24,16 +23,14 @@ export async function GET(request: Request) {
   // Match the Attribution page's default view so the Home compact table reads
   // the same numbers a user would see on /attribution with no filters set.
   const attributionFilters = { tag: null, provider: null, outcome: "conversion" as const };
-  const [spend, outliers, roi, dq, attribution] = await Promise.all([
+  const [spend, roi, dq, attribution] = await Promise.all([
     querySpendSummary(windowDays),
-    queryOutliers(windowDays),
     queryRoi(windowDays),
     queryDataQuality(),
     queryAttribution(attributionFilters, { windowDays }),
   ]);
   return NextResponse.json({
     spend: spend ?? mockSpend,
-    outliers: outliers && outliers.length > 0 ? outliers : mockOutliers,
     roi: roi && roi.length > 0 ? roi : mockRoi,
     dq: dq ?? mockDataQuality,
     perProviderConversion: attribution?.perProvider ?? [],
