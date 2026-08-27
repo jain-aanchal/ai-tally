@@ -41,6 +41,10 @@ services:
       - ../db/clickhouse/account_rollups.sql:/docker-entrypoint-initdb.d/03_account_rollups.sql:ro
       - ../db/clickhouse/last_touch_index.sql:/docker-entrypoint-initdb.d/04_last_touch_index.sql:ro
       - ../db/clickhouse/attribution.sql:/docker-entrypoint-initdb.d/05_attribution.sql:ro
+      # CTO-237: the opt-in replay corpus index. The gateway writes sampled index rows here and
+      # re-hydrates its in-memory corpus from this table on boot, so replay-backed Compare/eval
+      # survives a restart. No dependency on the tables above, so any tail number is fine.
+      - ../db/clickhouse/replay_samples.sql:/docker-entrypoint-initdb.d/06_replay_samples.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
