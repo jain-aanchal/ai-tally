@@ -135,22 +135,29 @@ function detectorFilters(filters: DimensionFilters): {
  * the pure detector, and return the findings. Returns `[]` when ClickHouse is unreachable (`tryLive`
  * returns null) -- no mock/static fallback, so a blank stack is honest rather than fabricated.
  *
- * The query works in two stages, both anchored on the ClickHouse clock (`now() - INTERVAL {w} DAY`),
- * never the Node clock (CTO-203):
+ * The query is a SINGLE pass over the base data, anchored on the ClickHouse clock
+ * (`now() - INTERVAL {w} DAY`), never the Node clock (CTO-203):
  *   1. Collapse spans into runs (per TraceId): total run cost and whether the run ended in error
  *      (`max(StatusCode) = 2`), matching `queryAgents` exactly. A run also carries its feature tag
  *      and its agent (ServiceName). `GenAiOperation NOT IN ('compute','egress')` keeps this to
  *      run-shaped, billable spend (the synthetic infra rows are not runs).
- *   2. Assign each run to EXACTLY ONE scope (its feature when tagged, else its agent) and roll those
- *      single-scope groups up, summing wasted cost (cost of the runs that ended failed) and counting
- *      the wasted runs. One run's dollars land in one scope, never two (CTO-227 review finding, Bug 2:
- *      the previous by-feature-AND-by-agent union double-counted the recoverable total).
- *   3. Separately, compute each scope's TRUE total spend (all runs of that FeatureTag; all runs of
- *      that ServiceName, feature-tagged ones included) and join it in as the share DENOMINATOR
- *      (CTO-227 review pass 2). The wasted attribution stays single-scoped so the recoverable total
- *      still counts each dollar once, but the denominator is no longer the single-scoped subtotal;
- *      that subtotal made an agent's `shareOfScopeSpend` read 100% when its feature-tagged spend was
- *      excluded.
+ *   2. Fan each run out (ARRAY JOIN) into the scope rows it belongs to: its feature scope (when
+ *      tagged) and its agent scope (when on a usable ServiceName). Every fanned row carries the run's
+ *      FULL cost as the scope TOTAL, but the WASTED cost only in the run's single "waste scope" (its
+ *      feature when tagged, else its agent). Grouping those rows by scope therefore yields, in one
+ *      aggregate, both the scope's TRUE total spend (an agent's includes its feature-tagged runs) and
+ *      its wasted spend attributed exactly once (CTO-227 review finding Bug 2: no by-feature-AND-by-
+ *      agent double count; review pass 2: the denominator is the true total, not the single-scoped
+ *      subtotal, so an agent's `shareOfScopeSpend` is not inflated to 100%).
+ *
+ * CTO-227 review pass 3 (Fix 1+2): this replaces a `runs` CTE that was referenced THREE times (once
+ * for the wasted roll-up, twice in a `scope_totals` UNION). ClickHouse inlines a multiply-referenced
+ * WITH, so the otel_spans scan + group ran ~3x per call on a user-facing hot path; the single grouped
+ * pass here scans the base data ONCE. It also drops the LEFT JOIN to `scope_totals`, whose 0-fill
+ * (`join_use_nulls=0`) could have emitted `windowSpendMicroUsd = 0` alongside `recoverable > 0` had the
+ * two WHERE clauses ever drifted, a fabricated 0 that breaks the honest-blank invariant. By
+ * construction each scope's wasted cost is a subset of the SAME aggregate's total cost, so a scope can
+ * never emit `windowSpendMicroUsd < recoverableMicroUsd`.
  */
 export async function collectPaidForNothing(
   windowDays: number,
@@ -162,16 +169,7 @@ export async function collectPaidForNothing(
 
     // Stage 1 (runs subquery): one row per TraceId with its cost, terminal-error flag, feature and
     // agent. `isFailed` reuses queryAgents' derivation: max(StatusCode)=2 (OTel Error) => failed.
-    // Stage 2 (scoped/wasted): attribute each run to ONE scope (feature when tagged, else agent), then
-    // GROUP BY that scope for the wasted spend and the wasted-run counts. One run's dollars count once
-    // (CTO-227 Bug 2). `wastedCost`/`failedRuns` gate on the run being both billed (runCost > 0) AND
-    // failed. `abandonedRuns` is 0: abandonment is not derivable from OTel StatusCode today (see
-    // queryAgents), but the column is kept so the shape and the evidence are stable if a future signal
-    // lands.
-    // Stage 3 (scope_totals): the TRUE per-scope total spend, computed independently of the
-    // single-scope assignment: every FeatureTag run for a feature scope, every ServiceName run
-    // (feature-tagged included) for an agent scope. Joined in as `scopeCost` so `shareOfScopeSpend`
-    // divides by the real total, not the single-scoped subtotal (CTO-227 review pass 2).
+    // `GenAiOperation NOT IN ('compute','egress')` keeps this to run-shaped, billable spend.
     const runsCte = `
       SELECT
         TraceId AS runId,
@@ -186,68 +184,62 @@ export async function collectPaidForNothing(
         ${clause}
       GROUP BY TraceId`;
 
-    // A wasted run: billed (runCost > 0) and failed. We express the gate once as a reusable flag.
+    // A wasted run: billed (runCost > 0) and failed (terminal error). Expressed once as a reusable gate.
     const wastedRunExpr = "(runCost > 0 AND isFailed)";
 
-    // CTO-227 review finding (Bug 2): assign each run to EXACTLY ONE scope before rolling up, so its
-    // dollars are counted once. The old query rolled the same runs up BY feature AND BY agent in a
-    // UNION ALL, so a failed feature-tagged run on a named agent surfaced as TWO findings whose
-    // recoverables BOTH fed `aggregateWaste`'s total — overstating "Recoverable" up to 2x. Here a run
-    // with a FeatureTag is attributed to its feature; an untagged run falls back to its agent. Runs
-    // that are neither tagged nor on a usable agent cannot be attributed to any scope, so they are
-    // dropped rather than double-counted or mis-assigned.
-    const scopeKindExpr = "if(feature != '', 'feature', 'agent')";
-    const scopeValueExpr = "if(feature != '', feature, agent)";
-
-    // TRUE per-scope totals (the share denominator). Kept apart from the single-scope assignment so an
-    // agent's total includes its feature-tagged runs. Empty/`unknown` scope keys are dropped to match
-    // the `scoped` filter, so every wasted scope has exactly one totals row to join.
-    const scopeTotalsCte = `
-      SELECT 'feature' AS scopeKind, feature AS scopeValue, sum(runCost) AS totalCost
-      FROM runs
-      WHERE feature != ''
-      GROUP BY feature
-      UNION ALL
-      SELECT 'agent' AS scopeKind, agent AS scopeValue, sum(runCost) AS totalCost
-      FROM runs
-      WHERE agent != '' AND agent != 'unknown'
-      GROUP BY agent`;
+    // Stage 2 (single grouped pass): fan each run out into the scope rows it belongs to, then GROUP BY
+    // scope ONCE. This replaces the old scoped/wasted + scope_totals-UNION-and-LEFT-JOIN shape, which
+    // referenced the `runs` CTE three times (ClickHouse inlines a multiply-referenced WITH, so the
+    // otel_spans scan ran ~3x) and 0-filled the total on any clause drift (CTO-227 review pass 3,
+    // Fix 1+2).
+    //
+    // Each run emits up to two membership tuples via ARRAY JOIN:
+    //   (present, scopeKind, scopeValue, totalCost, wastedCost, wastedCount, exampleTrace)
+    // - feature membership (present when FeatureTag is set): totalCost = the run's full cost; the run's
+    //   whole wasted cost lands HERE, because a tagged run's single "waste scope" is its feature.
+    // - agent membership (present on a usable ServiceName): totalCost = the run's full cost too, so an
+    //   agent's total includes its feature-tagged runs (CTO-227 review pass 2 denominator); but its
+    //   wasted cost is non-zero ONLY for an UNTAGGED run, whose single waste scope is the agent. A
+    //   tagged run therefore contributes its wasted dollars to exactly one scope (CTO-227 Bug 2), never
+    //   two. A run that is neither tagged nor on a usable agent emits no membership and is dropped.
+    // Because both memberships carry the same full totalCost while the wasted cost is a subset of it,
+    // sum(wastedCost) <= sum(totalCost) within every group by construction: no scope can ever report
+    // windowSpend < recoverable, and there is no join to 0-fill.
+    //
+    // Money stays in ClickHouse Decimal end to end: `EstimatedCost` is Decimal(38,8), so the wasted
+    // cost is `runCost * flag` (Decimal x UInt8 -> Decimal), never `if(cond, runCost, 0.0)`, whose
+    // Float64 zero would both break type unification AND float-ify money (CLAUDE.md: never float
+    // dollars). `toString` hands the pure detector a decimal string, exactly as before.
+    const featurePresent = "toUInt8(feature != '')";
+    const agentPresent = "toUInt8(agent != '' AND agent != 'unknown')";
+    // Wasted attributed to the agent scope only when the run is UNTAGGED (else it is the feature's).
+    const agentWasted = `(${wastedRunExpr} AND feature = '')`;
 
     const sql = `
-      WITH runs AS (${runsCte}),
-      scoped AS (
-        SELECT
-          ${scopeKindExpr} AS scopeKind,
-          ${scopeValueExpr} AS scopeValue,
-          runCost,
-          isFailed,
-          runId
-        FROM runs
-        WHERE NOT (feature = '' AND (agent = '' OR agent = 'unknown'))
-      ),
-      wasted AS (
-        SELECT
-          scopeKind,
-          scopeValue,
-          sumIf(runCost, ${wastedRunExpr}) AS wastedCostNum,
-          countIf(${wastedRunExpr}) AS failedRunsNum,
-          anyIf(runId, ${wastedRunExpr}) AS exampleTraceVal
-        FROM scoped
-        GROUP BY scopeKind, scopeValue
-        HAVING sumIf(runCost, ${wastedRunExpr}) > 0
-      ),
-      scope_totals AS (${scopeTotalsCte})
+      WITH runs AS (${runsCte})
       SELECT
-        w.scopeKind AS scopeKind,
-        w.scopeValue AS scopeValue,
-        toString(w.wastedCostNum) AS wastedCost,
-        toString(t.totalCost) AS scopeCost,
-        toString(w.failedRunsNum) AS failedRuns,
+        m.2 AS scopeKind,
+        m.3 AS scopeValue,
+        toString(sum(m.5)) AS wastedCost,
+        toString(sum(m.4)) AS scopeCost,
+        toString(sum(m.6)) AS failedRuns,
         '0' AS abandonedRuns,
-        w.exampleTraceVal AS exampleTrace
-      FROM wasted AS w
-      LEFT JOIN scope_totals AS t
-        ON w.scopeKind = t.scopeKind AND w.scopeValue = t.scopeValue`;
+        anyIf(m.7, m.7 != '') AS exampleTrace
+      FROM runs
+      ARRAY JOIN arrayFilter(t -> t.1 = 1, [
+        (
+          ${featurePresent}, 'feature', feature, runCost,
+          runCost * toUInt8(${wastedRunExpr}), toUInt8(${wastedRunExpr}),
+          if(${wastedRunExpr}, runId, '')
+        ),
+        (
+          ${agentPresent}, 'agent', agent, runCost,
+          runCost * toUInt8(${agentWasted}), toUInt8(${agentWasted}),
+          if(${agentWasted}, runId, '')
+        )
+      ]) AS m
+      GROUP BY scopeKind, scopeValue
+      HAVING sum(m.5) > 0`;
 
     const raw = await rowsP<PaidForNothingRow>(db, sql, { tenant, ...params });
     return detectPaidForNothing(raw);

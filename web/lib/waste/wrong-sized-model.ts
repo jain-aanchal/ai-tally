@@ -228,6 +228,19 @@ export async function collectWrongSizedModel(
   windowDays: number,
   filters: DimensionFilters,
 ): Promise<WasteFinding[]> {
+  // CTO-227 review pass 3 (Fix 3): gate this collector OFF before it issues any read. As the
+  // honest-state note further down documents, v1 `/v1/replay` does not project the incumbent, so the
+  // rescale denominator can never be formed and this collector already returned [] EVERY time in
+  // production. Issuing its four ClickHouse/Compare reads (queryReplayCandidates, queryEvalCandidates,
+  // queryCurrentModel, queryCostExplore) on every dashboard load only to reach that guaranteed [] is
+  // pure waste, so we short-circuit here and do zero reads today. Re-enable when CTO-236 lands the
+  // incumbent replay projection (or a per-call-cost rescale that needs no incumbent replay row): the
+  // live-read body below is kept intact as the wiring reference for that work, and the pure
+  // `detectWrongSizedModel` above stays correct for a valid input. The flag is a plain boolean, so the
+  // retained body still type-checks and its imports stay used.
+  const CTO236_LANDED = false;
+  if (!CTO236_LANDED) return [];
+
   const window = clampWindowDays(windowDays);
 
   // The Compare projection is per-feature-tag. Only a single selected feature maps cleanly onto one
