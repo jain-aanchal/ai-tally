@@ -1,31 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Client-side live wrapper for /cost (CTO-108, restyled onto the D1 design foundation in
-// CTO-222/D2).
+// CTO-222/D2, turned into the unified Cost explorer in CTO-239/CTO-240 M1).
 //
-// WHAT THE DESIGN PASS KEEPS: every figure, column, banner and honest-blank the shipped page had.
-// The three headline numbers (total, reconciled, estimated) move into SummaryTiles without changing
-// what they read; the budget-vs-actual card, the burn-down forecast, the hidden-cost alerts and the
-// by-feature table with its footer row are all still here, unchanged.
+// WHAT M1 CHANGES (CTO-240): the tiles, the chart, and the breakdown table now all respond to the
+// FULL filter set (window + group-by + dimension filters + a client-side search), not just the
+// window. The gap it closes: the FilterBar writes `?feature=` but the old tiles came off /api/cost,
+// which only read the window and the legacy `?tag=`, so a Feature filter narrowed the table while
+// the headline number sat unchanged. The tiles now read the filter-aware slice totals from
+// /api/explore, so they move with the whole filter set.
 //
-// WHAT IT ADDS:
-//   - A FilterBar under the title (via PageHeader), URL-synced through useFilters.
-//   - The static StackedBarChart is replaced by the interactive chart (tooltip, legend toggle,
-//     click-to-drill). Click-to-drill adds a dimension filter through useFilters.
+// DATA SOURCES (three, each honest on its own):
+//   - /api/cost (polled): the hidden-cost alerts, the per-layer default chart series, and the
+//     enabled-layers / partial-data state. Its per-layer series still draws the DEFAULT chart
+//     byte-for-byte, and its mock fallback keeps the offline / synthetic-preview view working.
+//   - /api/explore (fetched on every filter change): the grouped time series, the per-group
+//     breakdown rows, and the slice tile totals. No mock fallback by design: an arbitrary live slice
+//     that cannot be read is stated, never zero-filled.
+//   - /api/cost/budget (fetched once per render): the budget-vs-actual and burn-down cards, kept
+//     exactly as they were (they change on a human/daily cadence, not a 5-second one).
 //
-// FILTER-APPLICATION PATH (stated for the PR): the interactive chart honours the FULL filter set
-// (window, group-by, dimension filters) through the /api/explore endpoint the foundation built for
-// exactly this. At the DEFAULT slice (30 days, grouped by layer, no dimension filter) the chart is
-// drawn from the existing /api/cost `series` payload, so the shipped per-layer numbers and the
-// reconciled/estimated split are byte-for-byte what they were; any non-default slice fetches
-// /api/explore and states honestly when the live source is unreachable rather than drawing a
-// fabricated or zero-filled chart. The by-feature table honours the `feature` multi-select by hiding
-// unselected rows (its footer re-totals over what is visible) — an honest hide, never a re-query
-// against an endpoint that cannot take these filters. The three tiles stay the 30-day payload
-// headline and are labelled as such.
+// KEPT UNCHANGED: the budget-vs-actual card, the burn-down forecast, the hidden-cost alerts, and the
+// `?tag=`/`?scope=` carry-through.
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   PartialDataBanner,
@@ -36,6 +35,7 @@ import { Card } from "@/components/Card";
 import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { InteractiveStackedChart, type StackedChartDay } from "@/components/InteractiveStackedChart";
 import { LiveIndicator } from "@/components/LiveIndicator";
+import { Money } from "@/components/HonestValue";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import {
@@ -51,16 +51,17 @@ import {
   totalRange,
 } from "@/lib/cost";
 import { asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
-import type { ExploreSeries } from "@/lib/explore";
+import type { CostSliceTotals, ExploreBreakdownRow, ExploreSeries } from "@/lib/explore";
 import { OTHER_GROUP } from "@/lib/explore";
 import {
   DEFAULT_GROUP_BY,
   DEFAULT_RANGE_PRESET,
   DIMENSION_LABEL,
+  type Dimension,
   hasActiveFilters,
   rangeDays,
 } from "@/lib/filters";
-import { formatUSD, type SpendByLayer } from "@/lib/types";
+import { formatUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -77,12 +78,26 @@ function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
 }
 
-/** The live slice fetched from /api/explore for any non-default filter state. */
+/** The live slice fetched from /api/explore for the active filter state. */
 interface ExploreState {
   loading: boolean;
   /** "live" when a series came back, "unavailable" when ClickHouse could not be read, null when idle. */
   source: "live" | "unavailable" | null;
   series: ExploreSeries | null;
+  /** Filter-aware headline totals for the tiles. null when unreachable (rendered as honest blank). */
+  totals: CostSliceTotals | null;
+}
+
+/**
+ * Display label for a group value under the active group-by. Layers get their human label (so a
+ * group-by=layer view reads "LLM" / "Tool calls" like the shipped layer view); every other dimension
+ * carries its raw value (a model id, a provider, a feature tag), and the synthetic "other" fold keeps
+ * its own namespaced label.
+ */
+function groupLabel(groupBy: Dimension, value: string): string {
+  if (value === OTHER_GROUP) return value;
+  if (groupBy === "layer") return LAYER_LABEL[value as Layer] ?? value;
+  return value;
 }
 
 export function CostLive({
@@ -101,53 +116,62 @@ export function CostLive({
   tag?: string | null;
 }) {
   const { state: filterState, toggleFilter, queryString } = useFilters();
-  // The time-range selector re-parameterises the headline tiles + By-feature table (CTO-226): the
-  // managed query string (preserving any ?tag=/?scope=) rides on /api/cost, so 7d/30d/90d re-query
-  // the window and useLivePoll re-fetches. The interactive chart is still served by /api/explore.
+  // The time-range selector re-parameterises the /api/cost payload (CTO-226): the managed query
+  // string (preserving any ?tag=/?scope=) rides on /api/cost, so 7d/30d/90d re-query the window and
+  // useLivePoll re-fetches. The tiles and breakdown come from /api/explore (CTO-240).
   const endpoint = queryString ? `/api/cost?${queryString}` : "/api/cost";
   const windowDays = rangeDays(filterState.range);
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
 
-  const featureFilter = filterState.filters.feature;
-
-  // The default slice is drawn from the shipped payload; anything else goes through /api/explore.
+  // The default slice keeps the shipped per-layer chart + tile numbers where /api/explore is idle or
+  // unreachable; every slice still fetches /api/explore for the filter-aware totals and breakdown.
   const isDefaultSlice =
     filterState.range.preset === DEFAULT_RANGE_PRESET &&
     filterState.groupBy === DEFAULT_GROUP_BY &&
     !hasActiveFilters(filterState);
 
+  // Case-insensitive substring search over the breakdown group values. Client-side only (a transient
+  // view tweak, not a shareable filter): it narrows the breakdown rows AND the chart bands.
+  const [search, setSearch] = useState("");
+
   const [explore, setExplore] = useState<ExploreState>({
     loading: false,
     source: null,
     series: null,
+    totals: null,
   });
 
   useEffect(() => {
-    if (isDefaultSlice) {
-      setExplore({ loading: false, source: null, series: null });
-      return;
-    }
+    // Every filter change re-fetches the filter-aware slice (CTO-240): the tiles must move with the
+    // whole filter set, not just the window, so this runs even on the default slice.
     const ctrl = new AbortController();
     setExplore((e) => ({ ...e, loading: true }));
     fetch(`/api/explore?${queryString}`, { signal: ctrl.signal, cache: "no-store" })
       .then((r) => r.json())
-      .then((j: { source: "live" | "unavailable"; series: ExploreSeries | null }) => {
-        setExplore({ loading: false, source: j.source, series: j.series });
-      })
+      .then(
+        (j: {
+          source: "live" | "unavailable";
+          series: ExploreSeries | null;
+          totals: CostSliceTotals | null;
+        }) => {
+          setExplore({ loading: false, source: j.source, series: j.series, totals: j.totals ?? null });
+        },
+      )
       .catch((err: unknown) => {
         // An abort is expected on a fast filter change; keep the last state instead of flashing.
         if (err instanceof Error && err.name === "AbortError") return;
-        // Honest-under-uncertainty: a failed fetch is "unavailable", never a zero-filled chart.
-        setExplore({ loading: false, source: "unavailable", series: null });
+        // Honest-under-uncertainty: a failed fetch is "unavailable", never a zero-filled slice.
+        setExplore({ loading: false, source: "unavailable", series: null, totals: null });
       });
     return () => ctrl.abort();
-  }, [isDefaultSlice, queryString]);
+  }, [queryString]);
 
+  // Shipped /api/cost figures, kept as the DEFAULT-slice fallback for the tiles so the offline / mock
+  // / synthetic-preview view still renders today's numbers when /api/explore is idle or unreachable.
   const total = totalRange(costSeries);
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
-  const hasReconciledDate = costSeries.reconciledThrough > "1970-01-01";
 
   const layerTotals = LAYERS.reduce<Record<Layer, number>>(
     (acc, l) => {
@@ -164,17 +188,51 @@ export function CostLive({
   });
   const asOf = asOfLabel(costSeries.reconciledThrough);
 
+  // Tile values: the filter-aware slice totals when /api/explore answered, else the shipped
+  // /api/cost figures on the default slice (so the byte-for-byte default and the offline view hold),
+  // else an honest blank (null) on a non-default slice we could not read — never a zero.
+  const slice = explore.totals;
+  const tileTotal = slice ? slice.totalMicroUsd : isDefaultSlice ? total : null;
+  const tileReconciled = slice ? slice.reconciledMicroUsd : isDefaultSlice ? reconciled : null;
+  const tileEstimated = slice ? slice.estimatedMicroUsd : isDefaultSlice ? estimated : null;
+  const tileReconciledThrough = slice ? slice.reconciledThrough : costSeries.reconciledThrough;
+  const hasReconciledDate = tileReconciledThrough > "1970-01-01";
+  const sliceUnavailable = explore.source === "unavailable" && !isDefaultSlice;
+  const tileReason = sliceUnavailable
+    ? "this slice is served live and the telemetry source could not be reached"
+    : "no cost data for this slice";
+
   // Feature options for the FilterBar come from the payload the page already holds; layer options
-  // are the fixed cost layers. The other dimensions (model/provider/account) are not known to
-  // /api/cost, so the bar simply shows no control for them (never an empty menu), while group-by can
-  // still key the interactive chart on them through /api/explore.
+  // are the fixed cost layers. The other dimensions (model/provider/account) are not enumerated by
+  // /api/cost, so the bar shows no filter control for them (never an empty menu), while group-by can
+  // still key the chart, breakdown and tiles on them through /api/explore.
   const featureOptions: FilterOption[] = featureRows.map((r) => ({ value: r.feature }));
   const layerOptions: FilterOption[] = LAYERS.map((l) => ({ value: l, label: LAYER_LABEL[l] }));
 
-  const visibleFeatureRows =
-    featureFilter.length > 0
-      ? featureRows.filter((r) => featureFilter.includes(r.feature))
-      : featureRows;
+  // The breakdown group-by: whatever /api/explore grouped by, or the URL's group-by while it loads.
+  const breakdownGroupBy: Dimension = explore.series?.groupBy ?? filterState.groupBy;
+
+  // Breakdown rows: from /api/explore when present; else, on the default slice, a per-layer fallback
+  // off the /api/cost layer totals so the offline / synthetic-preview view keeps a table.
+  const breakdownRows: ExploreBreakdownRow[] = useMemo(() => {
+    if (explore.series) return explore.series.breakdown;
+    if (isDefaultSlice) {
+      return LAYERS.map((l) => ({ group: l, totalMicroUsd: layerTotals[l], spanCount: 0 }));
+    }
+    return [];
+    // layerTotals is recomputed each render from featureRows; depend on its values, not identity.
+  }, [explore.series, isDefaultSlice, layerTotals]);
+
+  // The search predicate matches the raw group value OR its display label, so "tool" finds the
+  // `tools` layer / "Tool calls", and it narrows the breakdown rows and the chart bands identically.
+  const q = search.trim().toLowerCase();
+  const matchesSearch = useMemo(
+    () => (value: string) =>
+      q === "" ||
+      value.toLowerCase().includes(q) ||
+      groupLabel(breakdownGroupBy, value).toLowerCase().includes(q),
+    [q, breakdownGroupBy],
+  );
 
   const chartTitle = isDefaultSlice
     ? "Cost by layer — last 30 days"
@@ -183,13 +241,24 @@ export function CostLive({
   const body = (
     <div className="space-y-6">
       <TileGrid>
-        <SummaryTile label="Total" micro={total} hint={`last ${windowDays} days`} />
+        <SummaryTile
+          label="Total"
+          micro={tileTotal}
+          reason={tileReason}
+          hint={`last ${windowDays} days`}
+        />
         <SummaryTile
           label="Reconciled"
-          micro={reconciled}
-          hint={hasReconciledDate ? `through ${costSeries.reconciledThrough}` : "invoiced spend"}
+          micro={tileReconciled}
+          reason={tileReason}
+          hint={hasReconciledDate ? `through ${tileReconciledThrough}` : "invoiced spend"}
         />
-        <SummaryTile label="Estimated" micro={estimated} hint="not yet reconciled" />
+        <SummaryTile
+          label="Estimated"
+          micro={tileEstimated}
+          reason={tileReason}
+          hint="not yet reconciled"
+        />
       </TileGrid>
 
       <Card title={chartTitle}>
@@ -197,6 +266,7 @@ export function CostLive({
           isDefaultSlice={isDefaultSlice}
           costSeries={costSeries}
           explore={explore}
+          matchesSearch={matchesSearch}
           onDrillLayer={(g) => toggleFilter("layer", g)}
           onDrillGroup={(g) => {
             // The synthetic "other" fold is not a real dimension value, so it is not a filter.
@@ -236,40 +306,14 @@ export function CostLive({
         </div>
       ))}
 
-      <Card title="By feature">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-xs uppercase text-muted">
-              <tr>
-                <th className="py-1 text-left font-medium">Feature</th>
-                {LAYERS.map((l) => (
-                  <th key={l} className="py-1 text-right font-medium">
-                    {LAYER_LABEL[l]}
-                  </th>
-                ))}
-                <th className="py-1 text-right font-medium">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleFeatureRows.map((r) => {
-                const t = LAYERS.reduce((s, l) => s + r.byLayer[l], 0);
-                return (
-                  <tr key={r.feature} className="border-t border-edge">
-                    <td className="py-2 font-medium">{r.feature}</td>
-                    {LAYERS.map((l) => (
-                      <td key={l} className="py-2 text-right tabular-nums">
-                        {formatUSD(r.byLayer[l])}
-                      </td>
-                    ))}
-                    <td className="py-2 text-right tabular-nums">{formatUSD(t)}</td>
-                  </tr>
-                );
-              })}
-              <FooterRow rows={visibleFeatureRows} />
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      <BreakdownTable
+        groupBy={breakdownGroupBy}
+        rows={breakdownRows}
+        search={search}
+        onSearch={setSearch}
+        matchesSearch={matchesSearch}
+        unavailable={sliceUnavailable}
+      />
     </div>
   );
 
@@ -321,18 +365,21 @@ function sliceLabel(preset: string): string {
 /**
  * The interactive chart. Two data sources, one component: the default slice maps the shipped
  * CostSeries onto the generic chart keyed by layer (colours and labels unchanged), any other slice
- * renders the explore series or states honestly that the live source is unavailable.
+ * renders the explore series or states honestly that the live source is unavailable. Either way the
+ * search box narrows the rendered bands to the matching groups.
  */
 function CostChart({
   isDefaultSlice,
   costSeries,
   explore,
+  matchesSearch,
   onDrillLayer,
   onDrillGroup,
 }: {
   isDefaultSlice: boolean;
   costSeries: CostSeries;
   explore: ExploreState;
+  matchesSearch: (value: string) => boolean;
   onDrillLayer: (group: string) => void;
   onDrillGroup: (group: string) => void;
 }) {
@@ -341,14 +388,16 @@ function CostChart({
       date: d.date,
       byGroup: { ...d.byLayer },
     }));
+    const groups = LAYERS.filter((l) => matchesSearch(l));
     return (
       <InteractiveStackedChart
         days={days}
-        groups={LAYERS}
+        groups={groups}
         color={(g) => LAYER_COLORS[g as Layer] ?? "#4c566a"}
         label={(g) => LAYER_LABEL[g as Layer] ?? g}
         onDrill={onDrillLayer}
         ariaLabel="stacked cost by layer over time"
+        emptyLabel="no layers match the search"
       />
     );
   }
@@ -369,34 +418,122 @@ function CostChart({
 
   const series = explore.series;
   const days: StackedChartDay[] = series.days.map((d) => ({ date: d.date, byGroup: d.byGroup }));
+  const groups = series.groups.filter((g) => matchesSearch(g));
   return (
     <InteractiveStackedChart
       days={days}
-      groups={series.groups}
+      groups={groups}
       onDrill={onDrillGroup}
       ariaLabel="stacked cost by selected dimension over time"
+      emptyLabel="no groups match the search"
     />
   );
 }
 
-function FooterRow({ rows }: { rows: FeatureCostRow[] }) {
-  const totals = LAYERS.reduce<SpendByLayer>(
-    (acc, l) => {
-      acc[l] = sumLayer(rows, l);
-      return acc;
-    },
-    { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
-  );
-  const grand = LAYERS.reduce((s, l) => s + totals[l], 0);
+/**
+ * The general "By {dimension}" breakdown table (CTO-240): one row per group value, a single cost
+ * column, sortable by cost, with a footer that re-totals exactly the rows on screen. A client-side
+ * search box narrows the rows (and, via the shared predicate, the chart bands above). When there is
+ * nothing to show the table states why (loading, unavailable, or no match) rather than an empty grid.
+ */
+function BreakdownTable({
+  groupBy,
+  rows,
+  search,
+  onSearch,
+  matchesSearch,
+  unavailable,
+}: {
+  groupBy: Dimension;
+  rows: ExploreBreakdownRow[];
+  search: string;
+  onSearch: (value: string) => void;
+  matchesSearch: (value: string) => boolean;
+  unavailable: boolean;
+}) {
+  // Default sort is cost desc (the big spenders first, like the shipped by-feature table); the
+  // header toggles it. Search is applied before the sort so the footer totals what is shown.
+  const [dir, setDir] = useState<"desc" | "asc">("desc");
+  const visible = rows
+    .filter((r) => matchesSearch(r.group))
+    .sort((a, b) =>
+      dir === "desc" ? b.totalMicroUsd - a.totalMicroUsd : a.totalMicroUsd - b.totalMicroUsd,
+    );
+  const footerTotal = visible.reduce((s, r) => s + r.totalMicroUsd, 0);
+  const dimLabel = DIMENSION_LABEL[groupBy].toLowerCase();
+
   return (
-    <tr className="border-t border-edge bg-ink/40 font-medium">
-      <td className="py-2">all features</td>
-      {LAYERS.map((l) => (
-        <td key={l} className="py-2 text-right tabular-nums">
-          {formatUSD(totals[l])}
-        </td>
-      ))}
-      <td className="py-2 text-right tabular-nums">{formatUSD(grand)}</td>
-    </tr>
+    <Card title={`By ${dimLabel}`}>
+      <div className="mb-3 flex items-center gap-2">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          placeholder={`Search ${dimLabel}…`}
+          aria-label={`Search ${dimLabel}`}
+          className="w-56 rounded-md border border-edge bg-ink px-2 py-1 text-sm text-fg focus:border-accent focus:outline-none"
+        />
+        {search && (
+          <button
+            type="button"
+            onClick={() => onSearch("")}
+            className="rounded-md px-2 py-1 text-xs text-muted hover:text-fg"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase text-muted">
+            <tr>
+              <th className="py-1 text-left font-medium">{DIMENSION_LABEL[groupBy]}</th>
+              <th className="py-1 text-right font-medium">
+                <button
+                  type="button"
+                  onClick={() => setDir((d) => (d === "desc" ? "asc" : "desc"))}
+                  className="inline-flex items-center gap-1 uppercase hover:text-fg"
+                  aria-label={`Sort by cost ${dir === "desc" ? "ascending" : "descending"}`}
+                >
+                  Cost
+                  <span aria-hidden>{dir === "desc" ? "▼" : "▲"}</span>
+                </button>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.length === 0 ? (
+              <tr className="border-t border-edge">
+                <td colSpan={2} className="py-6 text-center text-muted">
+                  {unavailable
+                    ? "This slice is served live and the telemetry source could not be reached."
+                    : search
+                      ? `No ${dimLabel} matches “${search}”.`
+                      : `No ${dimLabel} spend in this slice.`}
+                </td>
+              </tr>
+            ) : (
+              <>
+                {visible.map((r) => (
+                  <tr key={r.group} className="border-t border-edge">
+                    <td className="py-2 font-medium">{groupLabel(groupBy, r.group)}</td>
+                    <td className="py-2 text-right tabular-nums">{formatUSD(r.totalMicroUsd)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t border-edge bg-ink/40 font-medium">
+                  <td className="py-2">
+                    {search ? `all shown ${dimLabel}` : `all ${dimLabel}`}
+                  </td>
+                  <td className="py-2 text-right tabular-nums">
+                    <Money micro={footerTotal} />
+                  </td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }

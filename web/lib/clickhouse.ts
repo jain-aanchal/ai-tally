@@ -31,6 +31,7 @@ import {
   type ExploreGroupTotal,
   type ExploreParams,
   type ExploreSeries,
+  type CostSliceTotals,
   capGroups,
   clampWindowDays,
   OTHER_GROUP,
@@ -539,6 +540,59 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       breakdown: capped.breakdown,
       totalMicroUsd: capped.totalMicroUsd,
       truncatedGroups: capped.truncatedGroups,
+    };
+  });
+}
+
+/**
+ * Filter-aware headline totals for the Cost tiles (CTO-240, M1 of the unified Cost explorer).
+ *
+ * WHY THIS EXISTS: the tiles honored the time window but NOT the dimension filters. The FilterBar
+ * writes `?feature=`, `?model=`, `?provider=`, `?layer=`, `?account=`, yet the tiles came off
+ * /api/cost's per-layer series which only ever read the window and the legacy `?tag=`. So a Feature
+ * filter narrowed the breakdown table but left the headline number untouched, which is the page
+ * quietly disagreeing with itself. This reads the same otel_spans slice the explore chart reads,
+ * under the same multi-select filter clauses, so the tiles move with the whole filter set.
+ *
+ * WINDOW: the calendar-aligned `toDate(now()) - INTERVAL (w - 1) DAY` boundary queryCostSeries uses
+ * (never the Node clock, CTO-203), so at the default 30-day / no-filter slice the total is the same
+ * spend queryCostSeries sums. SPLIT: by CostSource, matching querySpendSummary, so estimated /
+ * reconciled read the same on Home and /cost for a given slice. Returns `null` (via tryLive) when
+ * ClickHouse is unreachable, which the tiles render as an honest blank, never a zero.
+ */
+export async function queryCostSliceTotals(
+  windowDays: number,
+  filters?: ExploreFilters,
+): Promise<CostSliceTotals | null> {
+  return tryLive(async (db, tenant) => {
+    const w = clampWindowDays(windowDays);
+    // Same multi-select clauses (bound as Array(String) params, never interpolated) the explore
+    // chart uses, so the tiles and the chart narrow to the exact same slice.
+    const { clause, params } = exploreFilterClauses(filters);
+    const out = await rowsP<{
+      total: string;
+      estimated: string;
+      reconciled: string;
+      recThrough: string | null;
+    }>(
+      db,
+      `SELECT
+         sum(EstimatedCost) AS total,
+         sumIf(EstimatedCost, CostSource = 'estimated') AS estimated,
+         sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
+         toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
+       FROM otel_spans
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${clause}`,
+      { tenant, ...params },
+    );
+    const t = out[0] ?? { total: "0", estimated: "0", reconciled: "0", recThrough: null };
+    return {
+      totalMicroUsd: micro(t.total),
+      estimatedMicroUsd: micro(t.estimated),
+      reconciledMicroUsd: micro(t.reconciled),
+      // null / ClickHouse's `\N` → boundary in the far past so everything reads as estimated,
+      // never a fabricated recent settlement date.
+      reconciledThrough: t.recThrough && t.recThrough !== "\\N" ? t.recThrough : "1970-01-01",
     };
   });
 }

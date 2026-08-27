@@ -11,9 +11,9 @@
 
 import { NextResponse } from "next/server";
 
-import { queryCostExplore } from "@/lib/clickhouse";
+import { queryCostExplore, queryCostSliceTotals } from "@/lib/clickhouse";
 import { exploreParamsFromFilters } from "@/lib/explore";
-import { parseFilters } from "@/lib/filters";
+import { parseFilters, rangeDays } from "@/lib/filters";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -24,9 +24,20 @@ export async function GET(req: Request) {
   const state = parseFilters(sp);
   const params = exploreParamsFromFilters(state);
 
-  const series = await queryCostExplore(params);
-  if (series === null) {
-    return NextResponse.json({ source: "unavailable", groupBy: params.groupBy, series: null });
-  }
-  return NextResponse.json({ source: "live", groupBy: params.groupBy, series });
+  // One filter-aware fetch feeds all three /cost surfaces (CTO-240): the grouped time series and its
+  // breakdown table (queryCostExplore), and the headline tile totals (queryCostSliceTotals). The tile
+  // totals honor the FULL filter set including the group-by dimension (state.filters), while the
+  // series deliberately drops the group-by's own filter (exploreParamsFromFilters) so grouping by a
+  // dimension does not collapse the chart to a single band. Each is independently honest: either can
+  // come back null when ClickHouse is unreachable and the page states so rather than zero-filling.
+  const [series, totals] = await Promise.all([
+    queryCostExplore(params),
+    queryCostSliceTotals(rangeDays(state.range), state.filters),
+  ]);
+  return NextResponse.json({
+    source: series === null ? "unavailable" : "live",
+    groupBy: params.groupBy,
+    series,
+    totals,
+  });
 }
