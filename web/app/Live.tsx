@@ -2,10 +2,12 @@
 // Client-side live wrapper for the home dashboard (CTO-108, restyled onto the D1 design foundation
 // in CTO-222/D2).
 //
-// The visual pass keeps every figure and every honest-blank rule the shipped page had: the four
-// headline numbers (spend, estimated, reconciled, hidden cost) move into SummaryTiles WITHOUT
-// changing what they read, the outlier / ROI / per-provider cards are untouched, and the data-state
-// banners, LiveIndicator and StaleBadge all stay exactly where they were.
+// The visual pass keeps every figure and every honest-blank rule the shipped page had: the headline
+// numbers (spend, reconciled, hidden cost) move into SummaryTiles WITHOUT changing what they read,
+// the ROI / per-provider cards are untouched, and the data-state banners, LiveIndicator and
+// StaleBadge all stay exactly where they were. The standalone "Estimated" tile was dropped (CTO-228):
+// it duplicated Spend whenever nothing had reconciled, so the estimated/reconciled split moved into
+// the Reconciled tile's coverage hint instead of a second identical number.
 //
 // FilterBar sits under the title via PageHeader. The time range now re-parameterises the endpoint
 // (CTO-226): the managed query string rides on /api/home, so 7d/30d/90d re-query SPEND and the ROI
@@ -36,7 +38,7 @@ import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
-import { SummaryTile, TileGrid } from "@/components/SummaryTile";
+import { SummaryTile } from "@/components/SummaryTile";
 import type { ProviderAttribution } from "@/lib/attribution";
 import type { BurndownSection, ForecastPayload } from "@/lib/burndown";
 import { LAYERS, type Layer } from "@/lib/cost";
@@ -108,26 +110,35 @@ export function HomeLive({
   const asOf = asOfLabel(s.reconciledThrough);
   const hasReconciledDate = s.reconciledThrough > "1970-01-01";
 
+  // Spend is the total; estimated + reconciled sum to it. Showing "Estimated" as its own tile
+  // duplicated the Spend headline whenever nothing had reconciled yet (the common state), so the
+  // estimated/reconciled split now lives in the Reconciled tile's coverage hint instead of a second
+  // identical number (CTO-228). "Estimated" is always Spend minus Reconciled, so no figure is lost.
+  const reconciledPct =
+    s.totalMicroUsd === 0 ? 0 : Math.round((s.reconciledMicroUsd / s.totalMicroUsd) * 100);
   const tiles = (
-    <TileGrid>
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <SummaryTile
         label="Spend"
         micro={s.totalMicroUsd}
         hint={`last ${windowDays} days`}
         higherIsBetter={false}
       />
-      <SummaryTile label="Estimated" micro={s.estimatedMicroUsd} hint="not yet reconciled" />
       <SummaryTile
         label="Reconciled"
         micro={s.reconciledMicroUsd}
-        hint={hasReconciledDate ? `through ${s.reconciledThrough}` : "invoiced spend"}
+        hint={
+          hasReconciledDate
+            ? `${reconciledPct}% invoice-confirmed, through ${s.reconciledThrough}`
+            : "not yet invoice-confirmed (all still estimated)"
+        }
       />
       <SummaryTile
         label="Hidden cost"
         micro={hidden}
         hint={`${hiddenPct}% of spend · vector + tools + compute`}
       />
-    </TileGrid>
+    </div>
   );
 
   const grid = (
