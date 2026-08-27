@@ -7,12 +7,13 @@
 // changing what they read, the outlier / ROI / per-provider cards are untouched, and the data-state
 // banners, LiveIndicator and StaleBadge all stay exactly where they were.
 //
-// FilterBar sits under the title via PageHeader. Home has no time-parameterised endpoint (its
-// summary is the fixed 30-day roll-up), so the dimension multi-selects filter the rows the page
-// already holds rather than re-querying: selecting a feature narrows the ROI snapshot, selecting a
-// provider narrows the per-provider conversion table. That is an honest hide of rows, never a
-// fabricated slice. Group-by is hidden here because Home has no grouped chart to re-key (see the
-// interactive chart on /cost for the grouped case).
+// FilterBar sits under the title via PageHeader. The time range now re-parameterises the endpoint
+// (CTO-226): the managed query string rides on /api/home, so 7d/30d/90d re-query SPEND, the cost
+// outliers and the ROI snapshot over the chosen window rather than only restyling a fixed roll-up.
+// The dimension multi-selects still filter the rows the page already holds rather than re-querying:
+// selecting a feature narrows the ROI snapshot, selecting a provider narrows the per-provider
+// conversion table. That is an honest hide of rows, never a fabricated slice. Group-by is hidden
+// here because Home has no grouped chart to re-key (see the interactive chart on /cost).
 
 "use client";
 
@@ -29,6 +30,7 @@ import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import type { ProviderAttribution } from "@/lib/attribution";
 import { LAYERS, type Layer } from "@/lib/cost";
 import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
+import { rangeDays } from "@/lib/filters";
 import type { CostOutlier, FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
@@ -42,19 +44,21 @@ export interface HomePayload {
 }
 
 export function HomeLive({
-  endpoint,
   initialData,
   enabledLayers,
 }: {
-  endpoint: string;
   initialData: HomePayload;
   enabledLayers: readonly Layer[];
 }) {
+  // Same URL-synced filter state the FilterBar writes. Home reads it BOTH to narrow the tables it
+  // holds and, since CTO-226, to drive the time-range window: the endpoint carries the managed query
+  // string, so flipping 7d/30d/90d changes the endpoint and useLivePoll re-fetches the new window.
+  const { state: filterState, queryString } = useFilters();
+  const windowDays = rangeDays(filterState.range);
+  const endpoint = queryString ? `/api/home?${queryString}` : "/api/home";
   const { data, updatedAt } = useLivePoll<HomePayload>(endpoint, initialData);
   const { spend: s, outliers, roi, perProviderConversion } = data;
 
-  // Same URL-synced filter state the FilterBar writes. Home reads it to narrow the tables it holds.
-  const { state: filterState } = useFilters();
   const featureFilter = filterState.filters.feature;
   const providerFilter = filterState.filters.provider;
 
@@ -93,7 +97,12 @@ export function HomeLive({
 
   const tiles = (
     <TileGrid>
-      <SummaryTile label="Spend" micro={s.totalMicroUsd} hint="last 30 days" higherIsBetter={false} />
+      <SummaryTile
+        label="Spend"
+        micro={s.totalMicroUsd}
+        hint={`last ${windowDays} days`}
+        higherIsBetter={false}
+      />
       <SummaryTile label="Estimated" micro={s.estimatedMicroUsd} hint="not yet reconciled" />
       <SummaryTile
         label="Reconciled"
@@ -110,7 +119,7 @@ export function HomeLive({
 
   const grid = (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <Card title="Top cost outliers (30d)">
+      <Card title={`Top cost outliers (${windowDays}d)`}>
         <ul className="space-y-2 text-sm">
           {outliers.map((o) => (
             <li key={o.runId} className="flex items-center justify-between gap-3">

@@ -164,8 +164,12 @@ function quantile(xs: number[], q: number): number {
 
 // --- Home / spend -------------------------------------------------------------------------------
 
-export async function querySpendSummary(): Promise<SpendSummary | null> {
+export async function querySpendSummary(windowDays = 30): Promise<SpendSummary | null> {
   return tryLive(async (db, tenant) => {
+    // User-selectable window (CTO-226): `w` calendar days inclusive, anchored on toDate(now()) so the
+    // window stays ClickHouse-clock derived (CTO-203), never the Node clock. `w - 1` keeps the
+    // historical 29-day-for-30 form so the default view is byte-for-byte unchanged.
+    const w = clampWindowDays(windowDays);
     const totals = await rows<{ total: string; estimated: string; reconciled: string; recThrough: string | null }>(
       db,
       `SELECT
@@ -174,14 +178,14 @@ export async function querySpendSummary(): Promise<SpendSummary | null> {
          sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY`,
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY`,
       tenant,
     );
     const byLayerRows = await rows<{ layer: Layer; cost: string }>(
       db,
       `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
        GROUP BY layer`,
       tenant,
     );
@@ -201,14 +205,17 @@ export async function querySpendSummary(): Promise<SpendSummary | null> {
   });
 }
 
-export async function queryOutliers(): Promise<CostOutlier[] | null> {
+export async function queryOutliers(windowDays = 30): Promise<CostOutlier[] | null> {
   return tryLive(async (db, tenant) => {
+    // User-selectable window (CTO-226): rolling `now() - INTERVAL w DAY`, w a bound-checked int
+    // (injection-safe), anchored on the ClickHouse clock (CTO-203), never the Node clock.
+    const w = clampWindowDays(windowDays);
     const out = await rows<{ runId: string; agent: string; cost: string; mult: string | null }>(
       db,
       `WITH runs AS (
          SELECT TraceId AS runId, any(ServiceName) AS agent, sum(EstimatedCost) AS cost
          FROM otel_spans
-         WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
+         WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY
            AND ServiceName != '' AND ServiceName != 'unknown'
            AND GenAiOperation NOT IN ('compute', 'egress')
          GROUP BY TraceId
@@ -229,13 +236,14 @@ export async function queryOutliers(): Promise<CostOutlier[] | null> {
   });
 }
 
-export async function queryRoi(): Promise<FeatureRoi[] | null> {
+export async function queryRoi(windowDays = 30): Promise<FeatureRoi[] | null> {
   // The Home ROI snapshot is a strict subset of the /features economics table, so it delegates
   // rather than keeping its own copy. It used to hardcode value/payback/attribution to null with a
   // "not wired yet" note; once the attribution stitcher started populating attribution_records
   // (CTO-200) that note was stale and the snapshot silently disagreed with /features. One source of
   // truth now: whatever /features shows per feature, Home shows the same for value and payback.
-  const econ = await queryFeatureEconomics();
+  // The window flows through so the Home range selector reshapes the snapshot too (CTO-226).
+  const econ = await queryFeatureEconomics(windowDays);
   if (econ === null) return null;
   return econ.map((e) => ({
     feature: e.feature,
@@ -268,20 +276,28 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
 
 // --- Cost workflow ------------------------------------------------------------------------------
 
-// The cost chart spans `toDate(now()) - INTERVAL 29 DAY` through today inclusive, i.e. 30 calendar
-// days. The window boundary stays this calendar-aligned form (not a rolling `now() - INTERVAL 30
-// DAY`) so /cost and Home agree to the penny; see CTO-203.
-const COST_SERIES_WINDOW_DAYS = 30;
+// The cost series spans `toDate(now()) - INTERVAL (w - 1) DAY` through today inclusive, i.e. `w`
+// calendar days (default 30). The window boundary stays this calendar-aligned form (not a rolling
+// `now() - INTERVAL w DAY`) so /cost and Home agree to the penny; see CTO-203. `w` is now
+// user-selectable (CTO-226); see queryCostSeries.
 
-export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSeries | null> {
+export async function queryCostSeries(
+  filter?: { tag?: string },
+  windowDays = 30,
+): Promise<CostSeries | null> {
   return tryLive(async (db, tenant) => {
     const tag = filter?.tag ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+    // User-selectable window (CTO-226): `w` calendar days inclusive, `w - 1` back from toDate(now())
+    // so it keeps the calendar-aligned CTO-203 form (never the Node clock). Default 30 leaves the
+    // headline /cost view byte-for-byte unchanged; the day list below reuses `w` so both the SQL
+    // predicate and the pivot buckets stay on the one ClickHouse clock.
+    const w = clampWindowDays(windowDays);
     const out = await rowsP<{ day: string; layer: Layer; cost: string }>(
       db,
       `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY ${tagClause}
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${tagClause}
        GROUP BY day, layer
        ORDER BY day`,
       { tenant, tag },
@@ -297,14 +313,14 @@ export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSe
     // no spend in the window still renders 30 zero days).
     const boundary = await rowsP<{ windowStart: string }>(
       db,
-      `SELECT toString(toDate(now()) - INTERVAL 29 DAY) AS windowStart`,
+      `SELECT toString(toDate(now()) - INTERVAL ${w - 1} DAY) AS windowStart`,
       {},
     );
     const windowStart = boundary[0].windowStart;
     // Pivot into one CostDayPoint per calendar day (fill gaps with zero layers). Both ends of the
     // list now come from the same ClickHouse clock as the window predicate above.
     const byDay = new Map<string, CostDayPoint>();
-    for (const iso of isoDaysFrom(windowStart, COST_SERIES_WINDOW_DAYS)) {
+    for (const iso of isoDaysFrom(windowStart, w)) {
       byDay.set(iso, { date: iso, byLayer: zeroLayers() });
     }
     for (const r of out) {
@@ -320,15 +336,21 @@ export async function queryCostSeries(filter?: { tag?: string }): Promise<CostSe
   });
 }
 
-export async function queryFeatureCostRows(filter?: { tag?: string }): Promise<FeatureCostRow[] | null> {
+export async function queryFeatureCostRows(
+  filter?: { tag?: string },
+  windowDays = 30,
+): Promise<FeatureCostRow[] | null> {
   return tryLive(async (db, tenant) => {
     const tag = filter?.tag ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
+    // Same user-selectable window as queryCostSeries (CTO-226) so the By-feature table matches the
+    // headline tiles at any range. `w - 1` back from toDate(now()) keeps the CTO-203 calendar form.
+    const w = clampWindowDays(windowDays);
     const out = await rowsP<{ feature: string; layer: Layer; cost: string }>(
       db,
       `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL 29 DAY AND FeatureTag != '' ${tagClause}
+       WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY AND FeatureTag != '' ${tagClause}
        GROUP BY feature, layer`,
       { tenant, tag },
     );
@@ -1416,13 +1438,16 @@ const MIN_CONVERSIONS_FOR_ECONOMICS = 5;
 // and add `unmatched` = total-users-with-event minus attributed-users. The four sum to the
 // per-feature user total. Honest-null floor: fewer than MIN_CONVERSIONS_FOR_ECONOMICS attributed
 // conversions ⇒ value/payback/attributionRate are null (rendered `—`), never fabricated.
-export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null> {
+export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEconomics[] | null> {
   return tryLive(async (db, tenant) => {
+    // User-selectable window (CTO-226): bound-checked int (injection-safe), rolling and anchored on
+    // the ClickHouse clock (CTO-203). Default 30 keeps every existing caller byte-for-byte unchanged.
+    const w = clampWindowDays(windowDays);
     const cost = await rows<{ feature: string; cost: string; users: string }>(
       db,
       `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users
        FROM otel_spans
-       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY AND FeatureTag != ''
+       WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY AND FeatureTag != ''
        GROUP BY FeatureTag
        ORDER BY cost DESC`,
       tenant,
@@ -1455,7 +1480,7 @@ export async function queryFeatureEconomics(): Promise<FeatureEconomics[] | null
          WHERE TenantId = {tenant:String}
        ) AS be
          ON ar.TenantId = be.TenantId AND ar.BusinessEventId = be.BusinessEventId
-       WHERE ar.TenantId = {tenant:String} AND ar.AttributedTraceTs >= now() - INTERVAL 30 DAY
+       WHERE ar.TenantId = {tenant:String} AND ar.AttributedTraceTs >= now() - INTERVAL ${w} DAY
        GROUP BY feature`,
       tenant,
     );
@@ -1970,8 +1995,14 @@ function buildRun(agg: RunAgg, spans: RunSpan[], agentMedian: number): AgentRun 
 }
 
 /** Per-agent summaries + the top expensive runs (with span trees), built from otel_spans. */
-export async function queryAgents(filter?: { tag?: string; run?: string }): Promise<{ agents: AgentSummary[]; runs: AgentRun[] } | null> {
+export async function queryAgents(
+  filter?: { tag?: string; run?: string },
+  windowDays = 30,
+): Promise<{ agents: AgentSummary[]; runs: AgentRun[] } | null> {
   return tryLive(async (db, tenant) => {
+    // User-selectable window (CTO-226): bound-checked int (injection-safe), rolling and anchored on
+    // the ClickHouse clock (CTO-203). Default 30 keeps every existing caller byte-for-byte unchanged.
+    const w = clampWindowDays(windowDays);
     const tag = filter?.tag ?? "";
     const run = filter?.run ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
@@ -1989,7 +2020,7 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
               toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
        FROM otel_spans
        WHERE TenantId = {tenant:String}
-         AND Timestamp >= now() - INTERVAL 30 DAY
+         AND Timestamp >= now() - INTERVAL ${w} DAY
          AND ServiceName != ''
          AND ServiceName != 'unknown'
          AND GenAiOperation NOT IN ('compute', 'egress')
@@ -2007,20 +2038,23 @@ export async function queryAgents(filter?: { tag?: string; run?: string }): Prom
       list.push(a);
       byAgent.set(a.agent, list);
     }
-    const nowEpoch = Math.floor(Date.now() / 1000);
-    const dayAgo = nowEpoch - 24 * 3600;
     const agentMedian = new Map<string, number>();
 
     const agents: AgentSummary[] = [...byAgent.entries()].map(([name, list]) => {
       const costs = list.map((r) => micro(r.cost));
       agentMedian.set(name, median(costs));
-      const last24 = list.filter((r) => (parseInt(r.tsEpoch, 10) || 0) >= dayAgo);
       const distribution = new Array(10).fill(0);
       for (const c of costs) distribution[costBucket(c)]++;
+      // Cost/day is a windowed daily average (CTO-226): total spend over the window divided by the
+      // window's day count. The old logic summed only runs in the trailing 24h off the NODE clock
+      // (Date.now()), so it read 0 whenever the freshest span was >24h old (e.g. the demo's newest
+      // agent span is ~77h old) and disagreed with the ClickHouse-derived window everywhere else
+      // (CTO-203). Averaging over the actual window is both honest and clock-consistent.
+      const totalCostOverWindow = costs.reduce((s, c) => s + c, 0);
       return {
         name,
-        runsPerDay: last24.length,
-        costPerDayMicroUsd: last24.reduce((s, r) => s + micro(r.cost), 0),
+        runsPerDay: Math.round(list.length / w),
+        costPerDayMicroUsd: Math.round(totalCostOverWindow / w),
         p50MicroUsd: quantile(costs, 0.5),
         p99MicroUsd: quantile(costs, 0.99),
         distribution,

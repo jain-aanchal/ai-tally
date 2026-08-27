@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { agents, runs } from "@/lib/agents";
 import { queryAgents, queryReconcilerLastRun } from "@/lib/clickhouse";
+import { parseFilters, rangeDays } from "@/lib/filters";
 
 // Read live data per request (never statically cached); fall back to mock when ClickHouse is down.
 export const dynamic = "force-dynamic";
@@ -17,11 +18,14 @@ export async function GET(req: Request) {
   const tag = searchParams.get("tag") ?? "";
   const run = searchParams.get("run") ?? "";
   const hasFilter = Boolean(tag || run);
+  // The time-range selector drives the windowed cost/day average (CTO-226): resolve the URL-synced
+  // filter state to a day count the ClickHouse-derived window clamps and interpolates.
+  const windowDays = rangeDays(parseFilters(searchParams).range);
   // Read agents telemetry and the reconciler's real last-run in parallel. The freshness signal is
   // the real reconciliation_runs value (CTO-169) — or null when the reconciler has never run / the
   // gateway is unavailable, which the page renders as `—` rather than a fabricated constant.
   const [live, reconcilerLastRunMinutesAgo] = await Promise.all([
-    queryAgents({ tag, run }),
+    queryAgents({ tag, run }, windowDays),
     queryReconcilerLastRun(),
   ]);
   return NextResponse.json({
