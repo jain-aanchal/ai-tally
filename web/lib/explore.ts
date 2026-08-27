@@ -190,15 +190,17 @@ export function clampWindowDays(days: number): number {
 }
 
 /**
- * Translate the URL-driven {@link FilterState} into {@link ExploreParams}. The group-by dimension is
- * excluded from its own dimension filter: grouping by provider AND filtering to one provider would
- * collapse the chart to a single band, which is never what a group-by intends. Every other
- * dimension's filter is carried through.
+ * Translate the URL-driven {@link FilterState} into {@link ExploreParams}. EVERY active dimension
+ * filter is carried through, including the group-by dimension's own filter (CTO-239): a filter
+ * narrows everything on the page consistently, so grouping by feature AND filtering to one feature
+ * shows that feature's own series, matching the filter-aware tiles and breakdown. (It used to drop
+ * the group-by dimension's filter for a highlight-one-among-many effect, but that left the chart
+ * disagreeing with the tiles once those became filter-aware; to compare all groups, group by the
+ * dimension with no filter, or use the legend to hide series.)
  */
 export function exploreParamsFromFilters(state: FilterState): ExploreParams {
   const filters: ExploreFilters = {};
   for (const dim of DIMENSIONS) {
-    if (dim === state.groupBy) continue;
     if (state.filters[dim].length > 0) filters[dim] = state.filters[dim];
   }
 

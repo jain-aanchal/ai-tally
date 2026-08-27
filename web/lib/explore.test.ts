@@ -110,14 +110,14 @@ describe("clampWindowDays", () => {
 });
 
 describe("exploreParamsFromFilters", () => {
-  it("maps a preset range and excludes the group-by dimension from its own filter", () => {
+  it("maps a preset range and carries every dimension filter, including the group-by's own (CTO-239)", () => {
     let s = withGroupBy(defaultFilterState(), "provider");
-    s = toggleDimensionValue(s, "provider", "openai"); // filter on the grouped dim -> dropped
+    s = toggleDimensionValue(s, "provider", "openai"); // filter on the grouped dim -> now kept
     s = toggleDimensionValue(s, "model", "gpt-4o"); // filter on another dim -> kept
     const p = exploreParamsFromFilters(s);
     expect(p.groupBy).toBe("provider");
     expect(p.window).toEqual({ kind: "preset", days: 30 });
-    expect(p.filters?.provider).toBeUndefined();
+    expect(p.filters?.provider).toEqual(["openai"]);
     expect(p.filters?.model).toEqual(["gpt-4o"]);
   });
 

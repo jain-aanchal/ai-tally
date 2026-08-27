@@ -152,9 +152,9 @@ export function ExploreChartCard({
             days={series.days}
             groups={series.groups}
             ariaLabel={`cost over time by ${DIMENSION_LABEL[series.groupBy].toLowerCase()}`}
-            // Click a bar segment or legend swatch to filter on the grouped dimension. exploreParams
-            // excludes a dimension's own filter while it is the group-by (see explore.ts), so the
-            // drill lands as a URL filter chip; switching Group by then reveals that slice.
+            // Click a bar segment or legend swatch to filter on the grouped dimension. Filters now
+            // apply to the chart too (CTO-239), so this drills in: the URL filter chip appears and
+            // the chart narrows to that group. Clear the chip (or the search) to widen back out.
             onDrill={(group) => toggleFilter(effectiveGroupBy, group)}
           />
           {series.truncatedGroups > 0 && (

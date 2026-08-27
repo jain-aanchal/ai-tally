@@ -407,9 +407,9 @@ const EXPLORE_GROUP_EXPR: Record<ExploreDimension, string> = {
 
 /**
  * Build the multi-select filter clauses. Each active dimension becomes `AND <expr> IN {key:Array}`
- * with the values bound as an Array(String) parameter (never interpolated). The group-by dimension
- * is expected to be excluded upstream (see exploreParamsFromFilters); if it is not, filtering on the
- * grouped dimension is still a valid, if narrow, query.
+ * with the values bound as an Array(String) parameter (never interpolated). Every active dimension
+ * is applied, the group-by dimension included (CTO-239): filtering on the grouped dimension is a
+ * valid, if narrow, query and keeps the chart consistent with the filter-aware tiles.
  */
 function exploreFilterClauses(filters: ExploreFilters | undefined): {
   clause: string;
