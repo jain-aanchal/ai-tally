@@ -153,6 +153,29 @@ describe("detectPaidForNothing", () => {
     expect(f.reason).toContain("20%");
   });
 
+  // CTO-227 review pass 3 (Fix 1+2): the single-grouped-pass query carries each scope's wasted cost as
+  // a subset of the SAME aggregate's total cost, so a scope can never surface windowSpend < recoverable
+  // (the old scope_totals LEFT JOIN could 0-fill the total on clause drift, yielding windowSpend = 0
+  // with recoverable > 0, a fabricated 0). Lock that invariant at the detector boundary: over a mix of
+  // feature and agent rows where wasted <= total (as the query guarantees), every emitted finding has
+  // windowSpendMicroUsd >= recoverableMicroUsd.
+  it("never emits a scope whose windowSpend is below its recoverable", () => {
+    const findings = detectPaidForNothing([
+      row({ scopeKind: "feature", scopeValue: "search", wastedCost: "0.25", scopeCost: "1.00", failedRuns: "3" }),
+      row({ scopeKind: "agent", scopeValue: "aider", wastedCost: "0.30", scopeCost: "0.60", failedRuns: "2" }),
+      row({ scopeKind: "agent", scopeValue: "loader", wastedCost: "0.05", scopeCost: "0.05", failedRuns: "1" }),
+    ]);
+    expect(findings).toHaveLength(3);
+    for (const f of findings) {
+      // Both are real numbers here (observed spend, observed waste), never the honest-blank null.
+      expect(f.windowSpendMicroUsd).not.toBeNull();
+      expect(f.recoverableMicroUsd).not.toBeNull();
+      const windowSpend = f.windowSpendMicroUsd ?? -1;
+      const recoverable = f.recoverableMicroUsd ?? 0;
+      expect(windowSpend).toBeGreaterThanOrEqual(recoverable);
+    }
+  });
+
   it("counts abandoned runs into the wasted-run tally when present", () => {
     const findings = detectPaidForNothing([
       row({
