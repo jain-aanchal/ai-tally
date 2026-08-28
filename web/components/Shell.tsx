@@ -41,7 +41,7 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
       // Agents folded into the Cost explorer as the `agent` group-by (CTO-241); /agents redirects
       // to /cost?groupBy=agent, so the standalone nav item is retired.
       { label: "Model Comparison", href: "/compare" },
-      { label: "Value", href: "/attribution" },
+      { label: "Conversions", href: "/attribution" },
       { label: "Unit Economics", href: "/unit-economics" },
       { label: "Cost per Customer", href: "/cost-per-customer" },
       { label: "Recoverable Cost", href: "/waste" },
