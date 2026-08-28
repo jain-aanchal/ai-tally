@@ -305,6 +305,19 @@ export function CostLive({
         />
       </Card>
 
+      {/* The values behind the chart, directly under it: one row per group with its cost and share,
+          plus the search box that narrows both the rows and the chart bands above. Sits here rather
+          than at the foot of the page so a reader can read the number for any bar without scrolling
+          past the budget and forecast cards. */}
+      <BreakdownTable
+        groupBy={breakdownGroupBy}
+        rows={breakdownRows}
+        search={search}
+        onSearch={setSearch}
+        matchesSearch={matchesSearch}
+        unavailable={sliceUnavailable}
+      />
+
       {/* Directly under the 30-day headline on purpose (CTO-209): this card's figure is smaller
           than that total, and the two only reconcile once you have read the coverage line saying
           which days it counted. Putting them far apart is how the page starts looking broken. */}
@@ -334,15 +347,6 @@ export function CostLive({
           {a.message}
         </div>
       ))}
-
-      <BreakdownTable
-        groupBy={breakdownGroupBy}
-        rows={breakdownRows}
-        search={search}
-        onSearch={setSearch}
-        matchesSearch={matchesSearch}
-        unavailable={sliceUnavailable}
-      />
 
       {/* The retired /agents view, preserved for one agent (CTO-241): when grouping by agent and
           narrowed to a single agent, its run distribution + pathological runs render here. */}
