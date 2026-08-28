@@ -150,7 +150,7 @@ export default async function ComparePage({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Compare"
+        title="Model Comparison"
         subtitle={
           <>
             Workload: <span className="font-mono text-muted">{workload}</span>
