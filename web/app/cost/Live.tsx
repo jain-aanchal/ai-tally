@@ -35,8 +35,9 @@ import { Card } from "@/components/Card";
 import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { InteractiveStackedChart, type StackedChartDay } from "@/components/InteractiveStackedChart";
 import { LiveIndicator } from "@/components/LiveIndicator";
-import { Money } from "@/components/HonestValue";
+import { Blank, Money, Pct } from "@/components/HonestValue";
 import { PageHeader } from "@/components/PageHeader";
+import { Sparkline } from "@/components/Sparkline";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import {
   LAYER_COLORS,
@@ -51,8 +52,14 @@ import {
   totalRange,
 } from "@/lib/cost";
 import { asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
-import type { CostSliceTotals, ExploreBreakdownRow, ExploreSeries } from "@/lib/explore";
-import { OTHER_GROUP } from "@/lib/explore";
+import type {
+  CostSliceTotals,
+  ExploreBreakdownPrior,
+  ExploreBreakdownRow,
+  ExploreDayPoint,
+  ExploreSeries,
+} from "@/lib/explore";
+import { costTrend, OTHER_GROUP } from "@/lib/explore";
 import {
   DEFAULT_GROUP_BY,
   DEFAULT_RANGE_PRESET,
@@ -88,6 +95,9 @@ interface ExploreState {
   series: ExploreSeries | null;
   /** Filter-aware headline totals for the tiles. null when unreachable (rendered as honest blank). */
   totals: CostSliceTotals | null;
+  /** Prior-window per-group totals for the breakdown trend column (CTO-244). null blanks the trend
+   *  cells (prior read failed or slice idle) while the rest of the table still renders. */
+  breakdownPrior: ExploreBreakdownPrior | null;
 }
 
 /**
@@ -142,6 +152,7 @@ export function CostLive({
     source: null,
     series: null,
     totals: null,
+    breakdownPrior: null,
   });
 
   useEffect(() => {
@@ -156,15 +167,28 @@ export function CostLive({
           source: "live" | "unavailable";
           series: ExploreSeries | null;
           totals: CostSliceTotals | null;
+          breakdownPrior: ExploreBreakdownPrior | null;
         }) => {
-          setExplore({ loading: false, source: j.source, series: j.series, totals: j.totals ?? null });
+          setExplore({
+            loading: false,
+            source: j.source,
+            series: j.series,
+            totals: j.totals ?? null,
+            breakdownPrior: j.breakdownPrior ?? null,
+          });
         },
       )
       .catch((err: unknown) => {
         // An abort is expected on a fast filter change; keep the last state instead of flashing.
         if (err instanceof Error && err.name === "AbortError") return;
         // Honest-under-uncertainty: a failed fetch is "unavailable", never a zero-filled slice.
-        setExplore({ loading: false, source: "unavailable", series: null, totals: null });
+        setExplore({
+          loading: false,
+          source: "unavailable",
+          series: null,
+          totals: null,
+          breakdownPrior: null,
+        });
       });
     return () => ctrl.abort();
   }, [queryString]);
@@ -312,6 +336,8 @@ export function CostLive({
       <BreakdownTable
         groupBy={breakdownGroupBy}
         rows={breakdownRows}
+        prior={explore.breakdownPrior}
+        days={explore.series?.days ?? null}
         search={search}
         onSearch={setSearch}
         matchesSearch={matchesSearch}
@@ -477,14 +503,24 @@ function CostChart({
 }
 
 /**
- * The general "By {dimension}" breakdown table (CTO-240): one row per group value, a single cost
- * column, sortable by cost, with a footer that re-totals exactly the rows on screen. A client-side
- * search box narrows the rows (and, via the shared predicate, the chart bands above). When there is
- * nothing to show the table states why (loading, unavailable, or no match) rather than an empty grid.
+ * The general "By {dimension}" breakdown table (CTO-240, extended in CTO-244): one row per group
+ * value with its cost, its share of the shown total, its trend vs the prior equal-length window, and
+ * a daily-cost sparkline. Cost and % of total are sortable (they share a denominator, so they order
+ * identically, but each header is its own affordance). A footer re-totals exactly the rows on screen.
+ * A client-side search box narrows the rows (and, via the shared predicate, the chart bands above).
+ * When there is nothing to show the table states why (loading, unavailable, or no match).
+ *
+ * Every added column is honest under uncertainty (CTO-244): share blanks when the shown total is
+ * zero; trend renders a "new" marker for a group with no prior spend and blanks when the prior read
+ * was unavailable or the row is the aggregated "other" tail, never a fabricated percent or a
+ * divide-by-zero; the sparkline is omitted for a group with fewer than two days of spend rather than
+ * drawing a degenerate line.
  */
 function BreakdownTable({
   groupBy,
   rows,
+  prior,
+  days,
   search,
   onSearch,
   matchesSearch,
@@ -492,21 +528,41 @@ function BreakdownTable({
 }: {
   groupBy: Dimension;
   rows: ExploreBreakdownRow[];
+  /** Prior-window per-group totals keyed by raw group value; null blanks every trend cell. */
+  prior: ExploreBreakdownPrior | null;
+  /** The chart's own day×group series, reused for the per-row sparkline; null omits sparklines. */
+  days: readonly ExploreDayPoint[] | null;
   search: string;
   onSearch: (value: string) => void;
   matchesSearch: (value: string) => boolean;
   unavailable: boolean;
 }) {
-  // Default sort is cost desc (the big spenders first, like the shipped by-feature table); the
-  // header toggles it. Search is applied before the sort so the footer totals what is shown.
+  // Default sort is cost desc (the big spenders first, like the shipped by-feature table); either
+  // sortable header toggles direction. % of total shares cost's denominator so it orders the same
+  // way, but it is its own column so a reader can sort from the share header directly. Search is
+  // applied before the sort so the footer totals what is shown.
+  const [sortKey, setSortKey] = useState<"cost" | "share">("cost");
   const [dir, setDir] = useState<"desc" | "asc">("desc");
   const visible = rows
     .filter((r) => matchesSearch(r.group))
     .sort((a, b) =>
       dir === "desc" ? b.totalMicroUsd - a.totalMicroUsd : a.totalMicroUsd - b.totalMicroUsd,
     );
+  // The share denominator is the footer total (the rows on screen, CTO-244), so shares always sum to
+  // 100% of what the footer shows; guarded so a zero total renders an honest blank, not a divide.
   const footerTotal = visible.reduce((s, r) => s + r.totalMicroUsd, 0);
   const dimLabel = DIMENSION_LABEL[groupBy].toLowerCase();
+
+  const toggleSort = (key: "cost" | "share") => {
+    if (key === sortKey) {
+      setDir((d) => (d === "desc" ? "asc" : "desc"));
+    } else {
+      setSortKey(key);
+      setDir("desc");
+    }
+  };
+  const sortArrow = (key: "cost" | "share") =>
+    key === sortKey ? (dir === "desc" ? "▼" : "▲") : "";
 
   return (
     <Card title={`By ${dimLabel}`}>
@@ -531,27 +587,40 @@ function BreakdownTable({
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[36rem] text-sm">
           <thead className="text-xs uppercase text-muted">
             <tr>
               <th className="py-1 text-left font-medium">{DIMENSION_LABEL[groupBy]}</th>
               <th className="py-1 text-right font-medium">
                 <button
                   type="button"
-                  onClick={() => setDir((d) => (d === "desc" ? "asc" : "desc"))}
+                  onClick={() => toggleSort("cost")}
                   className="inline-flex items-center gap-1 uppercase hover:text-fg"
-                  aria-label={`Sort by cost ${dir === "desc" ? "ascending" : "descending"}`}
+                  aria-label={`Sort by cost ${sortKey === "cost" && dir === "desc" ? "ascending" : "descending"}`}
                 >
                   Cost
-                  <span aria-hidden>{dir === "desc" ? "▼" : "▲"}</span>
+                  <span aria-hidden>{sortArrow("cost")}</span>
                 </button>
               </th>
+              <th className="py-1 text-right font-medium">
+                <button
+                  type="button"
+                  onClick={() => toggleSort("share")}
+                  className="inline-flex items-center gap-1 uppercase hover:text-fg"
+                  aria-label={`Sort by share of total ${sortKey === "share" && dir === "desc" ? "ascending" : "descending"}`}
+                >
+                  % of total
+                  <span aria-hidden>{sortArrow("share")}</span>
+                </button>
+              </th>
+              <th className="py-1 text-right font-medium">Trend</th>
+              <th className="py-1 text-right font-medium">30d</th>
             </tr>
           </thead>
           <tbody>
             {visible.length === 0 ? (
               <tr className="border-t border-edge">
-                <td colSpan={2} className="py-6 text-center text-muted">
+                <td colSpan={5} className="py-6 text-center text-muted">
                   {unavailable
                     ? "This slice is served live and the telemetry source could not be reached."
                     : search
@@ -565,6 +634,21 @@ function BreakdownTable({
                   <tr key={r.group} className="border-t border-edge">
                     <td className="py-2 font-medium">{groupLabel(groupBy, r.group)}</td>
                     <td className="py-2 text-right tabular-nums">{formatUSD(r.totalMicroUsd)}</td>
+                    <td className="py-2 text-right tabular-nums">
+                      {footerTotal > 0 ? (
+                        <Pct value={r.totalMicroUsd / footerTotal} />
+                      ) : (
+                        <Blank reason="no spend in this slice, so there is no total to take a share of" />
+                      )}
+                    </td>
+                    <td className="py-2 text-right">
+                      <TrendCell group={r.group} current={r.totalMicroUsd} prior={prior} />
+                    </td>
+                    <td className="py-2">
+                      <div className="flex justify-end">
+                        <RowSparkline group={r.group} days={days} />
+                      </div>
+                    </td>
                   </tr>
                 ))}
                 <tr className="border-t border-edge bg-ink/40 font-medium">
@@ -574,6 +658,15 @@ function BreakdownTable({
                   <td className="py-2 text-right tabular-nums">
                     <Money micro={footerTotal} />
                   </td>
+                  <td className="py-2 text-right tabular-nums">
+                    {footerTotal > 0 ? (
+                      <Pct value={1} />
+                    ) : (
+                      <Blank reason="no spend in this slice" />
+                    )}
+                  </td>
+                  <td className="py-2" />
+                  <td className="py-2" />
                 </tr>
               </>
             )}
@@ -582,4 +675,70 @@ function BreakdownTable({
       </div>
     </Card>
   );
+}
+
+/**
+ * The trend cell for one breakdown row (CTO-244): this window's cost for the group vs the prior
+ * equal-length window, as a ▲/▼ + percent. Cost trend colouring is inverted from a value metric: up
+ * is bad, down is good, flat is muted. Honest under uncertainty on three branches: the aggregated
+ * "other" tail has no single prior group to compare, a null prior map means the prior read was
+ * unavailable, and a group with no prior spend is genuinely "new" rather than an up-infinity percent.
+ */
+function TrendCell({
+  group,
+  current,
+  prior,
+}: {
+  group: string;
+  current: number;
+  prior: ExploreBreakdownPrior | null;
+}) {
+  if (group === OTHER_GROUP) {
+    return <Blank reason="aggregated tail, no single prior group to compare" />;
+  }
+  if (prior === null) {
+    return <Blank reason="prior window unavailable, no comparison" />;
+  }
+  const trend = costTrend(current, prior[group]);
+  if (trend.kind === "new") {
+    // A real marker, not a fabricated percent: this group had no spend in the prior window.
+    return (
+      <span
+        title="new this period, no prior window to compare"
+        className="cursor-help rounded-full bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium uppercase text-accent"
+      >
+        new
+      </span>
+    );
+  }
+  const rising = trend.fraction > 0;
+  const flat = trend.fraction === 0;
+  // Cost: up is bad, down is good, flat is muted.
+  const tone = flat ? "text-muted" : rising ? "text-bad" : "text-good";
+  const arrow = flat ? "→" : rising ? "▲" : "▼";
+  return (
+    <span className={`inline-flex items-center justify-end gap-1 tabular-nums ${tone}`}>
+      <span aria-hidden>{arrow}</span>
+      <Pct value={Math.abs(trend.fraction)} />
+    </span>
+  );
+}
+
+/**
+ * A per-row daily-cost sparkline (CTO-244) off the chart's own day×group series, so it adds no query.
+ * A group with fewer than two days of spend has no meaningful line, so it renders a flat dash rather
+ * than a degenerate or broken SVG.
+ */
+function RowSparkline({
+  group,
+  days,
+}: {
+  group: string;
+  days: readonly ExploreDayPoint[] | null;
+}) {
+  if (!days) return <span className="text-muted">{"—"}</span>;
+  const values = days.map((d) => d.byGroup[group] ?? 0);
+  const daysWithSpend = values.filter((v) => v > 0).length;
+  if (daysWithSpend < 2) return <span className="text-muted">{"—"}</span>;
+  return <Sparkline values={values} width={80} height={20} ariaLabel={`daily cost for ${group}`} />;
 }
