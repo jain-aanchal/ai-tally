@@ -1,0 +1,85 @@
+# ai-tally demo-deploy-kit - single-VM production overlay (CTO-243).
+#
+# Layered ON TOP of the base stack, never instead of it:
+#
+#   docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml up -d --build
+#
+# What this overlay does:
+#   - Adds a `web` service (the Next.js dashboard) built from deploy/demo/web.Dockerfile.
+#   - Adds a `caddy` service that terminates TLS and enforces HTTP basic-auth. Caddy is the ONLY
+#     service that publishes host ports (80/443).
+#   - Removes the host port publishing from clickhouse / postgres / redpanda / minio / gateway so
+#     that on a public VM nothing is reachable except through Caddy. They keep talking to each other
+#     over the compose network by service name, exactly as before.
+#
+# `ports: !reset []` uses Compose's override reset so the base file's port list is dropped rather
+# than merged (a plain `ports: []` is ignored by the merge). Requires Docker Compose v2.24.4+; if
+# your Compose is older, replace `!reset []` with `expose:`-only by hand.
+#
+# The demo data this stack serves is SYNTHETIC (see deploy.sh / reseed.sh). No real tenant traffic.
+
+services:
+  # --- Base services: keep them internal-only (no host ports on a public VM) -------------------
+  clickhouse:
+    ports: !reset []
+  postgres:
+    ports: !reset []
+  redpanda:
+    ports: !reset []
+  minio:
+    ports: !reset []
+  gateway:
+    # The gateway carries WRITE endpoints (/v1/batches ingest, control-plane /v1/tenant/*). It must
+    # stay behind Caddy/basic-auth on a public VM; the web service reaches it as http://gateway:8080
+    # over the internal network. To let testers push their OWN telemetry, expose /v1/batches via the
+    # commented block in the Caddyfile instead of publishing a host port here.
+    ports: !reset []
+
+  # --- Dashboard (server-side reads ClickHouse, calls the gateway) -----------------------------
+  web:
+    build:
+      # Relative paths in a compose overlay resolve against the FIRST -f file's directory (infra/),
+      # not this file's location. So `..` is the repo root and the Dockerfile path is repo-relative.
+      # Always invoke as: docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml
+      context: ..
+      dockerfile: deploy/demo/web.Dockerfile
+    container_name: ai-tally-web
+    environment:
+      # EXACT env var names the web reads (web/lib/clickhouse.ts, web/lib/tenant.ts, etc.).
+      TALLY_CLICKHOUSE_URL: http://clickhouse:8123
+      TALLY_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
+      TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
+      TALLY_CLICKHOUSE_DB: default
+      TALLY_GATEWAY_URL: http://gateway:8080
+      TALLY_TENANT_ID: ${TALLY_TENANT_ID:-local-dev}
+    # No host port: the browser reaches the dashboard only through Caddy (caddy -> web:3000).
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- Reverse proxy: automatic TLS + HTTP basic-auth, the only public surface -----------------
+  caddy:
+    image: caddy:2
+    container_name: ai-tally-caddy
+    depends_on:
+      - web
+    ports:
+      - "80:80"    # ACME HTTP-01 challenge + redirect to HTTPS
+      - "443:443"  # the private demo link
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER in .env}
+      # bcrypt hash, generated with: docker run --rm caddy:2 caddy hash-password --plaintext '...'
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH in .env}
+    volumes:
+      - ../deploy/demo/Caddyfile:/etc/caddy/Caddyfile:ro   # path is relative to infra/ (first -f file)
+      - caddy_data:/data    # ACME account + issued certs; persist so restarts do not re-issue
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
