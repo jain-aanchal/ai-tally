@@ -25,6 +25,7 @@ import type {
 import type { CostDayPoint, CostSeries, FeatureCostRow, HiddenCostAlert } from "./cost";
 import { LAYERS, type Layer } from "./cost";
 import {
+  type ExploreBreakdownPrior,
   type ExploreCostRow,
   type ExploreDimension,
   type ExploreFilters,
@@ -559,6 +560,82 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       totalMicroUsd: capped.totalMicroUsd,
       truncatedGroups: capped.truncatedGroups,
     };
+  });
+}
+
+/**
+ * PRIOR-window per-group cost totals for the breakdown table's trend column (CTO-244).
+ *
+ * WHY A COMPANION READ: the trend column compares this window's per-group spend to the equal-length
+ * window immediately before it, but queryCostExplore only scans the current window. Rather than widen
+ * that scan (and pay for double the day×group rows the chart never draws), this does one grouped
+ * SELECT over just the prior window and returns a raw-group→micro map the caller diffs against the
+ * breakdown rows it already has.
+ *
+ * WINDOW (ClickHouse clock only, never the Node clock, per CTO-203): the current window's bounds come
+ * from the same bounds SELECT queryCostExplore uses, then the prior window is the `windowDays` days
+ * ending the day before `windowStart` (`>= toDate(windowStart) - windowDays AND < toDate(windowStart)`).
+ * So if the current slice is `toDate(now()) - INTERVAL (w-1) DAY .. now`, the prior is exactly the w
+ * days before it, on one clock, even across a midnight boundary.
+ *
+ * The group expression, the group-scope predicate (agent's run-shaped exclusions) and the bound
+ * multi-select filter clauses are all identical to queryCostExplore, so a prior total is the same
+ * kind of number as the current one it is compared against. Returns `null` (via tryLive) when
+ * ClickHouse is unreachable; the caller blanks the trend cells and the rest of the table still works.
+ */
+export async function queryCostBreakdownPrior(
+  params: ExploreParams,
+): Promise<ExploreBreakdownPrior | null> {
+  return tryLive(async (db, tenant) => {
+    const groupExpr = EXPLORE_GROUP_EXPR[params.groupBy];
+
+    // Same bounds SELECT as queryCostExplore so the prior window is anchored to the exact current
+    // window, clamped to MAX_WINDOW_DAYS at the SQL boundary.
+    const maxBack = clampWindowDays(Number.MAX_SAFE_INTEGER) - 1; // = MAX_WINDOW_DAYS - 1
+    let boundsRows: { windowStart: string; windowDays: number }[];
+    if (params.window.kind === "range") {
+      boundsRows = await rowsP(
+        db,
+        `WITH toDate({from:String}) AS f0,
+              least(toDate({to:String}), toDate(now())) AS t,
+              greatest(f0, t - {maxBack:UInt32}) AS f
+         SELECT toString(f) AS windowStart,
+                toUInt32(greatest(dateDiff('day', f, t) + 1, 0)) AS windowDays`,
+        { from: params.window.from, to: params.window.to, maxBack },
+      );
+    } else {
+      const back = clampWindowDays(params.window.days) - 1;
+      boundsRows = await rowsP(
+        db,
+        `WITH toDate(now()) AS td
+         SELECT toString(td - {back:UInt32}) AS windowStart,
+                toUInt32({back:UInt32} + 1) AS windowDays`,
+        { back },
+      );
+    }
+    const b = boundsRows[0];
+    const windowDays = b ? Number(b.windowDays) || 0 : 0;
+    if (!b || windowDays <= 0) return null;
+
+    const { clause: filterClause, params: filterParams } = exploreFilterClauses(params.filters);
+    const groupScope = EXPLORE_GROUP_SCOPE[params.groupBy] ?? "";
+    // Prior window: the `windowDays` days ending the day before windowStart. Half-open on the high
+    // end so the boundary day (windowStart itself, the current window's first day) is never counted.
+    const scope = `TenantId = {tenant:String}
+        AND Timestamp >= toDate({windowStart:String}) - {windowDays:UInt32}
+        AND Timestamp < toDate({windowStart:String})
+        ${groupScope}`;
+    const rows = await rowsP<{ grp: string; cost: string }>(
+      db,
+      `SELECT ${groupExpr} AS grp, sum(EstimatedCost) AS cost
+       FROM otel_spans
+       WHERE ${scope} ${filterClause}
+       GROUP BY grp`,
+      { tenant, windowStart: b.windowStart, windowDays, ...filterParams },
+    );
+    const prior: ExploreBreakdownPrior = {};
+    for (const r of rows) prior[r.grp] = micro(r.cost);
+    return prior;
   });
 }
 

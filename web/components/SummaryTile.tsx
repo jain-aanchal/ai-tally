@@ -10,6 +10,7 @@
 import type { ReactNode } from "react";
 
 import { Money, Pct } from "@/components/HonestValue";
+import { Sparkline } from "@/components/Sparkline";
 import type { MicroUSD } from "@/lib/types";
 
 export interface SummaryTileProps {
@@ -90,31 +91,6 @@ function DeltaBadge({
       <span aria-hidden>{arrow}</span>
       <Pct value={Math.abs(delta)} />
     </span>
-  );
-}
-
-/** A tiny inline sparkline. No chart library; a single polyline scaled to its own min/max. */
-function Sparkline({ values }: { values: readonly number[] }) {
-  const w = 72;
-  const h = 24;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  const step = values.length > 1 ? w / (values.length - 1) : w;
-  const points = values
-    .map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`)
-    .join(" ");
-  return (
-    <svg
-      viewBox={`0 0 ${w} ${h}`}
-      width={w}
-      height={h}
-      role="img"
-      aria-label="trend sparkline"
-      className="shrink-0"
-    >
-      <polyline points={points} fill="none" stroke="#5e81ac" strokeWidth="1.5" />
-    </svg>
   );
 }
 

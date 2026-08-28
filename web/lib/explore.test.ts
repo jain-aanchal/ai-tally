@@ -12,6 +12,7 @@ import {
   type ExploreGroupTotal,
   capGroups,
   clampWindowDays,
+  costTrend,
   exploreParamsFromFilters,
   pivotExploreDays,
 } from "./explore";
@@ -106,6 +107,21 @@ describe("clampWindowDays", () => {
     expect(clampWindowDays(10_000)).toBe(MAX_WINDOW_DAYS);
     expect(clampWindowDays(Number.NaN)).toBe(1);
     expect(clampWindowDays(30.9)).toBe(30);
+  });
+});
+
+describe("costTrend (CTO-244)", () => {
+  it("returns a signed fraction when there is prior spend to divide by", () => {
+    expect(costTrend(120, 100)).toEqual({ kind: "delta", fraction: 0.2 });
+    expect(costTrend(80, 100)).toEqual({ kind: "delta", fraction: -0.2 });
+    expect(costTrend(100, 100)).toEqual({ kind: "delta", fraction: 0 });
+  });
+
+  it("is 'new' (never a fabricated percent or divide-by-zero) when there is no prior spend", () => {
+    // Group absent from the prior window map.
+    expect(costTrend(100, undefined)).toEqual({ kind: "new" });
+    // Group present in the prior window but with zero spend: still nothing to divide by.
+    expect(costTrend(100, 0)).toEqual({ kind: "new" });
   });
 });
 

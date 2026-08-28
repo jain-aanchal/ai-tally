@@ -11,7 +11,11 @@
 
 import { NextResponse } from "next/server";
 
-import { queryCostExplore, queryCostSliceTotals } from "@/lib/clickhouse";
+import {
+  queryCostBreakdownPrior,
+  queryCostExplore,
+  queryCostSliceTotals,
+} from "@/lib/clickhouse";
 import { exploreParamsFromFilters } from "@/lib/explore";
 import { parseFilters, rangeDays } from "@/lib/filters";
 
@@ -30,14 +34,19 @@ export async function GET(req: Request) {
   // carries every filter), so a feature filter narrows the tiles, the chart and the breakdown alike
   // instead of the chart disagreeing with the tiles. Each is independently honest: either can come
   // back null when ClickHouse is unreachable and the page states so rather than zero-filling.
-  const [series, totals] = await Promise.all([
+  // The prior-window per-group totals (CTO-244) feed the breakdown table's trend column. It is
+  // independently honest: its own null (prior read failed) blanks only the trend cells while the
+  // series, totals and the rest of the table still render, so it never gates the page.
+  const [series, totals, breakdownPrior] = await Promise.all([
     queryCostExplore(params),
     queryCostSliceTotals(rangeDays(state.range), state.filters),
+    queryCostBreakdownPrior(params),
   ]);
   return NextResponse.json({
     source: series === null ? "unavailable" : "live",
     groupBy: params.groupBy,
     series,
     totals,
+    breakdownPrior,
   });
 }

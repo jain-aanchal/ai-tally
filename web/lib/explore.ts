@@ -94,6 +94,28 @@ export interface CostSliceTotals {
   reconciledThrough: string;
 }
 
+/**
+ * Prior-window per-group cost totals for the trend column (CTO-244), keyed by the SAME raw group
+ * value the breakdown rows carry. The prior window is the equal-length window immediately before the
+ * current one; a group present now but absent here (or here with no spend) has no honest percent to
+ * show, so it is left out of the map and rendered as "new" rather than an invented number. A `null`
+ * map (the prior read failed) blanks every trend cell while the rest of the table still renders.
+ */
+export type ExploreBreakdownPrior = Record<string, MicroUSD>;
+
+/**
+ * Period-over-period trend for one group (CTO-244). PURE so the honest branches are unit-testable
+ * without a database. "new" is the honest answer when there is no prior spend to divide by (group
+ * absent from the prior window, or present with zero): never a fabricated percent, never a
+ * divide-by-zero infinity. Otherwise a signed fraction (-0.2 = down 20%) the caller renders as ▲/▼.
+ */
+export type CostTrend = { kind: "new" } | { kind: "delta"; fraction: number };
+
+export function costTrend(currentMicro: MicroUSD, priorMicro: MicroUSD | undefined): CostTrend {
+  if (priorMicro === undefined || priorMicro <= 0) return { kind: "new" };
+  return { kind: "delta", fraction: (currentMicro - priorMicro) / priorMicro };
+}
+
 /** A raw per-group total row as it comes back from ClickHouse before capping. */
 export interface ExploreGroupTotal {
   group: string;
