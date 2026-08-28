@@ -36,15 +36,15 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
     caption: "Analyze",
     items: [
       { label: "Cost Explorer", href: "/cost" },
-      // Cost per Customer sits directly under the explorer: both answer "where does the spend go",
-      // one by dimension and one by the tenant's own customers.
-      { label: "Cost per Customer", href: "/cost-per-customer" },
+      // Cost per Account sits directly under the explorer: both answer "where does the spend go",
+      // one by dimension and one by the tenant's own accounts.
+      { label: "Cost per Account", href: "/cost-per-customer" },
+      { label: "Conversions", href: "/attribution" },
       // Features folded into the Cost explorer as the `feature` group-by (CTO-242); /features
       // redirects to /cost?groupBy=feature, so the standalone nav item is retired.
       // Agents folded into the Cost explorer as the `agent` group-by (CTO-241); /agents redirects
       // to /cost?groupBy=agent, so the standalone nav item is retired.
       { label: "Model Comparison", href: "/compare" },
-      { label: "Conversions", href: "/attribution" },
       { label: "Unit Economics", href: "/unit-economics" },
       { label: "Recoverable Cost", href: "/waste" },
     ],
