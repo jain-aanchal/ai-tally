@@ -3,6 +3,7 @@
 
 import { useState } from "react";
 import { Card } from "@/components/Card";
+import { Diag } from "@/components/Diag";
 import { pctDelta, type Projection, type WhatIfProjection } from "@/lib/estimate";
 import { formatUSD } from "@/lib/types";
 
@@ -235,14 +236,5 @@ function Kpi({
       )}
       {hint && <div className="mt-2 text-xs text-muted">{hint}</div>}
     </div>
-  );
-}
-
-function Diag({ k, v, good }: { k: string; v: string; good?: boolean }) {
-  return (
-    <>
-      <dt className="text-muted">{k}</dt>
-      <dd className={good ? "text-good" : ""}>{v}</dd>
-    </>
   );
 }

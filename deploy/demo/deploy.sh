@@ -79,13 +79,17 @@ echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # internally as http://gateway:8080/v1/batches. Same generator, same $0 synthetic output.
 # COMPOSE_NETWORK is `<project>_default`; the project name is `ai-tally` (infra/docker-compose.yml
 # `name:`). Override COMPOSE_NETWORK in the environment if you renamed the project.
+#
+# Backfill under the SAME tenant the dashboard renders (TALLY_TENANT_ID). `gateway.seed` creates the
+# demo tenant as `local-dev`, so this is pinned to local-dev in .env.example; passing it here keeps
+# the seeded data and the dashboard's tenant from drifting into an empty dashboard (CTO-243).
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
 docker run --rm \
   --network "${COMPOSE_NETWORK}" \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
   node:22-bookworm-slim \
-  npx --yes tsx /scripts/backfill-spans.ts
+  npx --yes tsx /scripts/backfill-spans.ts --tenant "${TALLY_TENANT_ID:-local-dev}"
 
 # --- Done ---------------------------------------------------------------------------------------
 cat <<EOF

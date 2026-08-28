@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 
 import { Card } from "@/components/Card";
 import { StaleBadge } from "@/components/DataStateBanner";
+import { Diag } from "@/components/Diag";
 import {
   type AttributionDiagnostics,
   type FeatureEconomics,
@@ -156,12 +157,18 @@ export function FeatureDetail({ feature }: { feature: string }) {
               <Diag
                 k="late-arriving events (7d)"
                 v={data.diagnostics.lateArrivalEvents7d.toLocaleString()}
+                row
               />
-              <Diag k="median lag" v={`${data.diagnostics.lateArrivalMedianHours.toFixed(1)}h`} />
+              <Diag
+                k="median lag"
+                v={`${data.diagnostics.lateArrivalMedianHours.toFixed(1)}h`}
+                row
+              />
               <Diag
                 k="reconciler last ran"
                 v={`${data.diagnostics.reconcilerLastRunMinutesAgo} min ago`}
                 good={!reconcilerStale}
+                row
               />
             </dl>
           </div>
@@ -214,14 +221,5 @@ function Legend() {
       <li className="flex items-center gap-1.5">{dot("bg-warn")} identity graph</li>
       <li className="flex items-center gap-1.5">{dot("bg-bad/70")} unmatched</li>
     </ul>
-  );
-}
-
-function Diag({ k, v, good }: { k: string; v: string; good?: boolean }) {
-  return (
-    <div className="flex items-baseline justify-between">
-      <dt className="text-muted">{k}</dt>
-      <dd className={good ? "text-good" : ""}>{v}</dd>
-    </div>
   );
 }

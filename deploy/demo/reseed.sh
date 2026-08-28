@@ -14,6 +14,13 @@
 # WHY truncate first: the backfill dedups by a deterministic batch_id with a 24h TTL. After 24h the
 # dedup cache has expired, so a second run would double-count unless the prior rows are cleared.
 #
+# WHY a fresh --seed on every reseed: the backfill derives its batch_ids deterministically from
+# --seed, so a reseed run within 24h of a prior backfill (deploy or a same-day reseed) would post
+# the SAME batch_ids, the gateway would dedup them, and TRUNCATE-then-repost would leave the
+# dashboard blank. Seeding with a per-run nonce (the wall-clock epoch below) gives fresh batch_ids
+# so the reposted rows always land. The dataset stays the same synthetic ~$52,400/mo story; only
+# the RNG draws (and thus the batch_ids) differ (CTO-243).
+#
 # Cron example (nightly at 03:15, logging to a file) - `crontab -e` on the VM:
 #
 #   15 3 * * * /opt/ai-tally/deploy/demo/reseed.sh >> /var/log/ai-tally-reseed.log 2>&1
@@ -74,12 +81,16 @@ make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${R
 
 echo "==> Re-backfilling 30 days of SYNTHETIC demo spans"
 # Same throwaway-container approach as deploy.sh: no host Node, reaches the gateway internally.
+# --seed: a per-run nonce so batch_ids are fresh and the gateway's 24h dedup never drops a reseed
+#         (see the WHY block above). Override with BACKFILL_SEED if you need a reproducible run.
+# --tenant: pin to the dashboard's tenant so seed data and the rendered tenant cannot drift.
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
+BACKFILL_SEED="${BACKFILL_SEED:-$(date +%s)}"
 docker run --rm \
   --network "${COMPOSE_NETWORK}" \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
   node:22-bookworm-slim \
-  npx --yes tsx /scripts/backfill-spans.ts
+  npx --yes tsx /scripts/backfill-spans.ts --seed "${BACKFILL_SEED}" --tenant "${TALLY_TENANT_ID:-local-dev}"
 
 echo "==> Demo data reset. The dashboard now shows a fresh synthetic 30-day window."

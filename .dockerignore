@@ -1,0 +1,34 @@
+# Root build-context ignore (CTO-243).
+#
+# Both root-context image builds honor this file:
+#   - deploy/demo/web.Dockerfile   (docker build -f deploy/demo/web.Dockerfile .)   -> COPY web/ .
+#   - infra/gateway/Dockerfile     (compose `context: ..`)                           -> COPY sdk/ + infra/gateway/
+#
+# web/.dockerignore only applies when the context is web/, so a root-context build ignored it and
+# dragged web/node_modules (wrong-arch native binaries that break the build) and web/.env* (secret
+# leak) into the image. This file restores those exclusions at the context root. Everything here is
+# either reinstalled from a lockfile inside the image (node_modules), rebuilt (.next), or never
+# needed at build time (.env, .git), so excluding it is safe for BOTH builds. Do NOT add source
+# dirs (sdk, infra, web app source, db) - the gateway build copies sdk/ and infra/gateway/ and the
+# web build copies the web app source.
+
+# Dependencies and build output - reinstalled/rebuilt inside the image.
+**/node_modules
+**/.next
+**/tsconfig.tsbuildinfo
+
+# Local env files must never ship into an image (secret leak). Keep the example, which is safe.
+**/.env
+**/.env.*
+!**/.env.example
+
+# VCS, editor, CI, and agent working trees - not needed by any build.
+.git
+.gitignore
+.github
+.claude
+
+# Logs and OS cruft.
+**/npm-debug.log*
+**/*.log
+.DS_Store

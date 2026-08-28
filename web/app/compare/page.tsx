@@ -12,6 +12,7 @@ import {
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
+import { Diag } from "@/components/Diag";
 import { ExploreChartCard } from "@/components/ExploreChartCard";
 import { FilterBar } from "@/components/FilterBar";
 import { PageHeader } from "@/components/PageHeader";
@@ -293,14 +294,5 @@ function DeltaPp({ v, betterWhenPositive }: { v: number; betterWhenPositive: boo
       {sign}
       {v.toFixed(1)}pp
     </span>
-  );
-}
-
-function Diag({ k, v, good }: { k: string; v: string; good?: boolean }) {
-  return (
-    <>
-      <dt className="text-muted">{k}</dt>
-      <dd className={good ? "text-good" : ""}>{v}</dd>
-    </>
   );
 }
