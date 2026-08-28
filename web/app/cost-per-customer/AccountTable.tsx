@@ -330,7 +330,7 @@ export function AccountTable({
         ) : null}
       </form>
 
-      <p className="max-w-prose text-xs text-muted">
+      <p className="text-xs text-muted">
         Enter an account id or paste a hash from the table. An id is hashed with your tenant&apos;s
         key to find its row, and is never stored, logged, or shown back.
       </p>
@@ -374,7 +374,7 @@ export function AccountTable({
           "the infrastructure part of the cost base is an estimate, and the margin does not subtract
           it at all". What it still does not delegate is the ▲ mark: that flags a per-row reason,
           which no tenant-wide sentence can carry. */}
-      <p className="max-w-prose text-xs text-warn">
+      <p className="text-xs text-warn">
         Gross margin subtracts <em>direct</em> cost only.{" "}
         {allocationRule
           ? "Compute and egress carry no account, so they sit in the Allocated and Total columns rather than in this subtraction, which leaves every margin overstated."
