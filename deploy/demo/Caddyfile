@@ -1,0 +1,43 @@
+# ai-tally demo-deploy-kit - Caddy site config (CTO-243).
+#
+# Caddy is the only public surface. It gets a real Let's Encrypt certificate for ${DOMAIN}
+# automatically (ACME HTTP-01 over port 80), terminates TLS, challenges every request with HTTP
+# basic-auth, and reverse-proxies the dashboard. The DBs and the gateway are never exposed.
+#
+# Env used (set by docker-compose.prod.yml from .env):
+#   ${DOMAIN}           e.g. demo.example.com
+#   ${BASIC_AUTH_USER}  e.g. tester
+#   ${BASIC_AUTH_HASH}  bcrypt hash from: docker run --rm caddy:2 caddy hash-password --plaintext '...'
+
+{$DOMAIN} {
+	# One shared login for all testers. The hash is a bcrypt string, never the plaintext.
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	# The browser only ever talks to the dashboard; the web server reads ClickHouse and calls the
+	# gateway internally over the compose network.
+	reverse_proxy web:3000
+
+	# ---- OPTIONAL: let testers send their OWN telemetry to the gateway ingest ------------------
+	# Uncomment to expose ONLY the ingest endpoint (still behind the same basic-auth). Everything
+	# else on the gateway (control plane, health) stays internal. See README "Exposing the gateway".
+	#
+	# handle /v1/batches* {
+	# 	reverse_proxy gateway:8080
+	# }
+}
+
+# ---- LOCAL SMOKE TEST (no TLS) ------------------------------------------------------------------
+# For a laptop smoke test with no domain and no certificates, run a Caddy container with a config
+# like the block below (http on a spare port, 8088) instead of the site above:
+#
+#   :8088 {
+#   	basic_auth {
+#   		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+#   	}
+#   	reverse_proxy web:3000
+#   }
+#
+# Then: curl -i localhost:8088                     -> 401 (auth required)
+#       curl -i -u tester:secret localhost:8088    -> 200 (reaches the dashboard)
