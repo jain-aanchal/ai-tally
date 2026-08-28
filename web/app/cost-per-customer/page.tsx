@@ -116,7 +116,7 @@ export default async function CostPerCustomerPage({ searchParams }: PageProps) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Cost per customer"
+        title="Cost per User"
         subtitle={
           costs
             ? `Direct spend by account plus each account's allocated share of compute and egress, over the last ${costs.windowDays} days.`
