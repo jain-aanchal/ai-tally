@@ -125,7 +125,7 @@ export default async function CostPerCustomerPage({ searchParams }: PageProps) {
         toolbar={toolbar}
       />
 
-      <p className="max-w-prose text-sm text-muted">
+      <p className="text-sm text-muted">
         Cost per account: measured direct spend (LLM, tools, vector, embeddings), plus each
         account&apos;s estimated share of shared compute and egress. Direct is measured, allocated is
         an estimate, and the two are shown separately.
@@ -214,14 +214,14 @@ function Report({
       </TileGrid>
 
       {filtered ? (
-        <p className="max-w-prose rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-muted">
+        <p className="rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-muted">
           Filtered view: only the selected features and accounts are counted, so every total here is
           a slice of the tenant&apos;s spend rather than the whole bill. The whole-tenant
           reconciliation against the Cost tab is hidden until you clear the filter.
         </p>
       ) : null}
 
-      <p className="max-w-prose text-xs text-muted">
+      <p className="text-xs text-muted">
         Attributed direct spend is <Money micro={attributed} /> of{" "}
         <Money micro={costs.totalDirectMicroUsd} /> across{" "}
         {`${costs.accounts.length.toLocaleString()} ${
@@ -305,7 +305,7 @@ function UnattributedNotice({ costs, share }: { costs: AccountCosts; share: numb
           <Money micro={costs.totalDirectMicroUsd} />) carries no account id.
         </span>
       </div>
-      <p className="mt-2 max-w-prose text-sm text-muted">
+      <p className="mt-2 text-sm text-muted">
         {complete
           ? `Nothing in the last ${costs.windowDays} days is tagged with an account, so there is no per-customer breakdown to rank yet. This is what the page looks like before an account id is emitted, not an error. What the page does once one is, and how to emit it, is below.`
           : `The accounts below cover the remaining spend only. Ranking them as though they were the whole picture would misstate what each customer costs, so read them as a partial view until more spans carry an account id. The snippet under the table tags the rest.`}
@@ -344,7 +344,7 @@ function AllocationNotice({
   if (allocated === null) {
     return (
       <div className="rounded-xl border border-warn/40 bg-warn/5 p-4 text-sm">
-        <p className="max-w-prose">
+        <p>
           Compute and egress could not be read for the last {costs.windowDays} days, so nothing has
           been allocated and every figure here is direct cost only:{" "}
           <Blank reason="the compute and egress total could not be read from the telemetry store, so no allocated share could be computed" />
@@ -358,7 +358,7 @@ function AllocationNotice({
   if (allocated.sharedMicroUsd <= 0) {
     return (
       <div className="rounded-xl border border-edge bg-panel p-4 text-sm text-muted">
-        <p className="max-w-prose">
+        <p>
           No compute or egress was recorded in the last {allocated.windowDays} days, so there is
           nothing to allocate and every total below is measured spend. Allocated cost stays at zero
           until a cloud billing connector lands infrastructure spend for this tenant.
@@ -388,7 +388,7 @@ function AllocationNotice({
           <RuleSource setting={setting} fellBack={fellBack} />.
         </span>
       </div>
-      <p className="mt-2 max-w-prose text-sm text-muted">
+      <p className="mt-2 text-sm text-muted">
         {/* The descriptions read as a clause so a column tooltip can prefix them; this is the one
             place they open a sentence, so the first letter is raised here rather than duplicating
             the text in two cases. */}
@@ -396,7 +396,7 @@ function AllocationNotice({
         {ALLOCATION_RULE_DESCRIPTIONS[rule].slice(1)}. Compute and egress arrive as tenant-level
         totals with no account attached, so this is an estimate, shown in its own column.
       </p>
-      <p className="mt-2 max-w-prose text-sm text-muted">
+      <p className="mt-2 text-sm text-muted">
         {/* The unattributed-bucket decision, stated where the reader meets its consequences. On a
             tenant that has barely instrumented account_id, this paragraph is the difference between
             a page that reads as broken and one that reads as true. */}
@@ -502,7 +502,7 @@ function Reconciliation({ allocated }: { allocated: AllocatedAccountCosts }) {
   const summed = allocatedRowsTotal(allocated);
   const reconciles = summed === allocated.tenantTotalMicroUsd;
   return (
-    <p className="max-w-prose text-xs text-muted">
+    <p className="text-xs text-muted">
       Direct <Money micro={allocated.directTotalMicroUsd} /> plus allocated{" "}
       <Money micro={allocated.allocatedTotalMicroUsd} /> is{" "}
       <Money micro={allocated.tenantTotalMicroUsd} className="font-medium" />, the tenant total for
@@ -527,7 +527,7 @@ function Reconciliation({ allocated }: { allocated: AllocatedAccountCosts }) {
 function Unreachable() {
   return (
     <Card title="Accounts by direct cost">
-      <p className="max-w-prose text-sm text-muted">
+      <p className="text-sm text-muted">
         The telemetry store could not be reached, so there is nothing to report. This page has no
         sample data by design: a made-up list of customer accounts would be impossible to tell from
         a real one.
