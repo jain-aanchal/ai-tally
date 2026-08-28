@@ -66,6 +66,7 @@ import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 import { AgentDetail } from "./AgentDetail";
+import { FeatureDetail } from "./FeatureDetail";
 import { BudgetVsActualCard } from "./BudgetVsActualCard";
 import { BurndownCard, type CostBudgetPayload } from "./BurndownCard";
 
@@ -231,6 +232,15 @@ export function CostLive({
       ? filterState.filters.agent[0]
       : null;
 
+  // The single-feature detail is shown only when the explorer groups by feature AND is narrowed to
+  // exactly one feature (CTO-242, M3): that is the slice for which one feature's unit economics,
+  // value-event config and attribution diagnostics are meaningful. It reuses the /features data +
+  // components (see FeatureDetail) so nothing the retired Features tab showed for a feature is lost.
+  const singleFeature =
+    filterState.groupBy === "feature" && filterState.filters.feature.length === 1
+      ? filterState.filters.feature[0]
+      : null;
+
   // Breakdown rows: from /api/explore when present; else, on the default slice, a per-layer fallback
   // off the /api/cost layer totals so the offline / synthetic-preview view keeps a table.
   const breakdownRows: ExploreBreakdownRow[] = useMemo(() => {
@@ -337,6 +347,11 @@ export function CostLive({
       {/* The retired /agents view, preserved for one agent (CTO-241): when grouping by agent and
           narrowed to a single agent, its run distribution + pathological runs render here. */}
       {singleAgent && <AgentDetail agent={singleAgent} queryString={queryString} />}
+
+      {/* The retired /features view, preserved for one feature (CTO-242): when grouping by feature
+          and narrowed to a single feature, its unit economics, value-event config and attribution
+          diagnostics render here. */}
+      {singleFeature && <FeatureDetail feature={singleFeature} />}
     </div>
   );
 
