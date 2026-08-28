@@ -331,9 +331,8 @@ export function AccountTable({
       </form>
 
       <p className="max-w-prose text-xs text-muted">
-        Enter a plaintext account id or paste an account hash from the table. A plaintext id is
-        hashed with this tenant&apos;s own key to find its row, and is never stored, logged, or shown
-        back to you, which is also why there is no way to search the other direction.
+        Enter an account id or paste a hash from the table. An id is hashed with your tenant&apos;s
+        key to find its row, and is never stored, logged, or shown back.
       </p>
 
       {search ? (

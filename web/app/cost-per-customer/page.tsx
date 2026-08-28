@@ -126,10 +126,9 @@ export default async function CostPerCustomerPage({ searchParams }: PageProps) {
       />
 
       <p className="max-w-prose text-sm text-muted">
-        Directly attributable spend (LLM, tools, vector, embeddings) grouped by the account each span
-        was tagged with, plus each account&apos;s allocated share of compute and egress, which carry
-        no account of their own. Direct cost is measured. Allocated cost is an estimate, and the two
-        are never added into a single number without saying so.
+        Cost per account: measured direct spend (LLM, tools, vector, embeddings), plus each
+        account&apos;s estimated share of shared compute and egress. Direct is measured, allocated is
+        an estimate, and the two are shown separately.
       </p>
 
       {costs === null ? (
@@ -394,21 +393,17 @@ function AllocationNotice({
             place they open a sentence, so the first letter is raised here rather than duplicating
             the text in two cases. */}
         {ALLOCATION_RULE_DESCRIPTIONS[rule].charAt(0).toUpperCase()}
-        {ALLOCATION_RULE_DESCRIPTIONS[rule].slice(1)}. Those spans arrive from the cloud billing
-        connectors as
-        tenant-level daily totals with no account on them, so an allocated figure is an estimate and
-        is shown in its own column rather than folded into direct cost.
+        {ALLOCATION_RULE_DESCRIPTIONS[rule].slice(1)}. Compute and egress arrive as tenant-level
+        totals with no account attached, so this is an estimate, shown in its own column.
       </p>
       <p className="mt-2 max-w-prose text-sm text-muted">
         {/* The unattributed-bucket decision, stated where the reader meets its consequences. On a
             tenant that has barely instrumented account_id, this paragraph is the difference between
             a page that reads as broken and one that reads as true. */}
-        Untagged traffic takes part in the split as one participant, so it carries{" "}
+        Untagged traffic joins the split as one participant, carrying{" "}
         <Money micro={unattributedAllocated} />
-        {bucketShare === null ? "" : ` (${formatShare(bucketShare)})`} of the infrastructure it
-        caused. Excluding it would divide the whole infrastructure bill
-        across only the accounts that happen to be tagged today, which would overstate every one of
-        them and make each newly tagged account look like it cut the others&apos; costs.
+        {bucketShare === null ? "" : ` (${formatShare(bucketShare)})`} of the shared infrastructure
+        it caused. Leaving it out would overstate every tagged account.
       </p>
     </div>
   );

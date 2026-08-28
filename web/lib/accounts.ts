@@ -581,9 +581,8 @@ export const ALLOCATION_RULE_LABELS: Record<AllocationRule, string> = {
 /** One sentence saying what the rule did, for the reader who wants to check the arithmetic. */
 export const ALLOCATION_RULE_DESCRIPTIONS: Record<AllocationRule, string> = {
   pro_rata_direct:
-    "each account carries a share of compute and egress in proportion to its own direct spend, so an account with twice the model bill carries twice the infrastructure",
-  even_split:
-    "compute and egress are divided equally across every account and the untagged bucket, regardless of how much each one used",
+    "each account's share of compute and egress is proportional to its own direct spend",
+  even_split: "compute and egress are split equally across every account and the untagged bucket",
 };
 
 // --- Which of the tab's states to render (CTO-191, plan D5) --------------------------------------
