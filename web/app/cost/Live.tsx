@@ -388,7 +388,7 @@ export function CostLive({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Cost"
+        title="Cost Explorer"
         subtitle="Where the spend goes, by layer and by feature"
         actions={
           <>

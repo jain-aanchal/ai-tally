@@ -218,7 +218,7 @@ export function AttributionLive({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Attribution"
+        title="Conversions"
         subtitle={
           <>
             $/{outcome} per provider, joined from LLM spans and CDP events on{" "}

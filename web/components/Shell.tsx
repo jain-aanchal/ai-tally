@@ -35,15 +35,17 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
   {
     caption: "Analyze",
     items: [
-      { label: "Cost", href: "/cost" },
+      { label: "Cost Explorer", href: "/cost" },
+      // Cost per Account sits directly under the explorer: both answer "where does the spend go",
+      // one by dimension and one by the tenant's own accounts.
+      { label: "Cost per Account", href: "/cost-per-customer" },
+      { label: "Conversions", href: "/attribution" },
       // Features folded into the Cost explorer as the `feature` group-by (CTO-242); /features
       // redirects to /cost?groupBy=feature, so the standalone nav item is retired.
       // Agents folded into the Cost explorer as the `agent` group-by (CTO-241); /agents redirects
       // to /cost?groupBy=agent, so the standalone nav item is retired.
-      { label: "Compare", href: "/compare" },
-      { label: "Attribution", href: "/attribution" },
+      { label: "Model Comparison", href: "/compare" },
       { label: "Unit Economics", href: "/unit-economics" },
-      { label: "Cost per Customer", href: "/cost-per-customer" },
       { label: "Recoverable Cost", href: "/waste" },
     ],
   },
@@ -83,10 +85,15 @@ export function Shell({ children }: { children: ReactNode }) {
           </span>
         </div>
 
-        <nav className="app-scroll flex-1 space-y-6 overflow-y-auto px-3 pb-6" aria-label="Primary">
+        <nav className="app-scroll flex-1 space-y-4 overflow-y-auto px-3 pb-6" aria-label="Primary">
           {NAV_GROUPS.map((group) => (
-            <div key={group.caption} className="space-y-1">
-              <div className="px-3 text-[11px] font-medium uppercase tracking-wider text-muted">
+            // A hairline + top padding sets each section apart so the captions do not read as merged
+            // into one flat list. The first group needs neither (it sits right under the wordmark).
+            <div
+              key={group.caption}
+              className="space-y-1 border-t border-edge pt-4 first:border-t-0 first:pt-0"
+            >
+              <div className="px-3 text-[11px] font-semibold uppercase tracking-wider text-fg/70">
                 {group.caption}
               </div>
               <div className="space-y-0.5">
