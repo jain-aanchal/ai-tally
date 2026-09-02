@@ -24,7 +24,8 @@ THE TWO INVARIANTS THIS MODULE HOLDS.
 
 from __future__ import annotations
 
-import secrets
+import hashlib
+import hmac
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -55,41 +56,124 @@ class KeyMaterialProvider(Protocol):
     Production backs this with Secret Manager / KMS and returns its resource reference; local dev
     uses :class:`LocalDevKeyProvider`. The application never persists raw key material to Postgres:
     only the reference is stored, in ``tenants.hash_salt_kek_ref``.
+
+    ``material`` resolves a reference back to the active key bytes. It is the seam the Initiative 2
+    HMAC bootstrap (``GET /v1/tenant/hmac-key``, spec §3.2) reads through so the SDK can hash account
+    and user ids in the customer process. In prod that is a KMS/Secret Manager fetch; here it is the
+    in-process map below. It returns one tenant's active symmetric key only, never a KEK and never
+    another tenant's material.
     """
 
     def mint(self) -> str: ...
 
     def delete(self, ref: str) -> None: ...
 
+    def material(self, ref: str) -> bytes: ...
+
 
 @dataclass
 class LocalDevKeyProvider:
     """Local-dev HMAC key provider: no cloud KMS, no cloud dependency for ``make up``.
 
-    Generates a 256-bit random key set from a CSPRNG, holds the material in-process keyed by its
-    reference, and returns a reference string that satisfies the ``no_raw_secret`` CHECK. ``delete``
-    removes the material so a lost provision race cleans up its orphaned key set. This is the local
-    analog of Secret Manager / KMS; the raw bytes never touch Postgres or a log.
+    DURABLE ACROSS RESTARTS (Initiative 2 §3.2 review). The material is DERIVED deterministically from
+    the durable reference (``tenants.hash_salt_kek_ref``) and a process root secret, so a tenant
+    provisioned before a restart resolves to the SAME bytes afterwards. The previous version held the
+    bytes in an in-process dict only, so ``GET /v1/tenant/hmac-key`` 404'd for a durably-provisioned
+    tenant after any gateway restart. Deriving from the stored reference removes that failure without
+    persisting raw key material anywhere: the reference is durable, the root secret is config, and the
+    32-byte key set is HMAC-SHA256(root, ref). This is the local analog of Secret Manager / KMS; the
+    raw bytes never touch Postgres or a log.
+
+    ``mint`` still returns a fresh, unique reference, so distinct tenants derive distinct material.
+    ``delete`` / ``has`` track a minted-set purely for the provisioner's orphan-cleanup bookkeeping on
+    a lost race; they do NOT gate ``material``, which derives from the reference alone so it survives a
+    restart that empties the set.
     """
 
-    _material: dict[str, bytes] = field(default_factory=dict)
+    #: Root secret material is derived under. Deterministic across restarts by design (dev-only).
+    root_secret: bytes = b"tally-local-dev-hmac-root-secret-do-not-use-in-prod"
+    _minted: set[str] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def mint(self) -> str:
-        material = secrets.token_bytes(32)  # 256-bit key set from a CSPRNG (§4.1)
         ref = f"{_LOCAL_KEK_SCHEME}://hmac/{uuid.uuid4()}/v1"
         with self._lock:
-            self._material[ref] = material
+            self._minted.add(ref)
         return ref
 
     def delete(self, ref: str) -> None:
         with self._lock:
-            self._material.pop(ref, None)
+            self._minted.discard(ref)
 
     def has(self, ref: str) -> bool:
-        """Whether a reference still resolves to material. For orphan-cleanup tests."""
+        """Whether this process minted ``ref`` and has not deleted it. For orphan-cleanup tests.
+
+        Note this is bookkeeping, NOT material availability: ``material`` derives from the reference
+        and so resolves any well-formed reference, including one minted in a prior process.
+        """
         with self._lock:
-            return ref in self._material
+            return ref in self._minted
+
+    def material(self, ref: str) -> bytes:
+        """Return the active key bytes for ``ref``, derived deterministically from the root secret.
+
+        The bytes are the tenant's own active HMAC key set. They are handed only to the HMAC
+        bootstrap endpoint under the tenant's own ingest key (spec §3.2) and are never logged. Because
+        the material is HMAC-SHA256(root, ref), a durably-stored reference (the seeded ``local-dev``
+        key, or any tenant provisioned in a prior process) resolves to the same 32 bytes after a
+        restart, rather than 404-ing. An empty reference is still a miss (``KeyError``): there is no
+        material to derive from nothing.
+        """
+        if not ref:
+            raise KeyError("no key material for an empty reference")
+        return hmac.new(self.root_secret, ref.encode("utf-8"), hashlib.sha256).digest()
+
+
+class SecretManagerKeyProvider:
+    """Production HMAC key provider seam, backed by KMS / Secret Manager (Initiative 2 §3.2).
+
+    This is the prod path selected by ``TALLY_HMAC_KEY_PROVIDER=kms``. The raw key set lives in the
+    cloud secret store; only its resource reference is persisted to ``tenants.hash_salt_kek_ref``, and
+    ``material`` fetches the active version back through the cloud client. The concrete client is
+    supplied by the deployment (Workload Identity / IAM, never a raw credential in config), so it is
+    injected rather than constructed here; selecting this provider without wiring a client fails fast
+    instead of silently falling back to dev-derived material.
+    """
+
+    def __init__(self, client: object | None = None) -> None:
+        if client is None:
+            raise ProvisionError(
+                "hmac_key_provider='kms' selected but no Secret Manager / KMS client was wired. "
+                "Inject the deployment's client; do not fall back to the local dev provider in prod."
+            )
+        self._client = client
+
+    def mint(self) -> str:  # pragma: no cover - exercised only in a cloud deployment
+        raise NotImplementedError("wire the deployment's Secret Manager / KMS client")
+
+    def delete(self, ref: str) -> None:  # pragma: no cover - cloud-only
+        raise NotImplementedError("wire the deployment's Secret Manager / KMS client")
+
+    def material(self, ref: str) -> bytes:  # pragma: no cover - cloud-only
+        raise NotImplementedError("wire the deployment's Secret Manager / KMS client")
+
+
+def build_key_provider(settings: Settings) -> KeyMaterialProvider:
+    """Select the HMAC key-material provider from settings (Initiative 2 §3.2 review).
+
+    ``local`` (default) returns the restart-durable dev provider; ``kms`` / ``secret-manager`` selects
+    the production seam. An unknown value fails fast rather than guessing, so a typo in a prod
+    deployment cannot silently drop to dev-derived material.
+    """
+    choice = (getattr(settings, "hmac_key_provider", "local") or "local").strip().lower()
+    if choice == "local":
+        root = getattr(settings, "hmac_local_root_secret", "") or ""
+        return LocalDevKeyProvider(root_secret=root.encode("utf-8"))
+    if choice in ("kms", "secret-manager", "secretmanager"):
+        # The concrete client is injected by the deployment (see SecretManagerKeyProvider); this
+        # factory does not construct cloud credentials.
+        return SecretManagerKeyProvider()
+    raise ProvisionError(f"unknown hmac_key_provider {choice!r} (expected 'local' or 'kms')")
 
 
 @dataclass(frozen=True, slots=True)

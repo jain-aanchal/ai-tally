@@ -7,6 +7,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { ConnectPanel } from "./ConnectPanel";
+
 interface KeyMeta {
   id: string;
   name: string | null;
@@ -179,6 +181,10 @@ export function KeyManager({ canManage }: { canManage: boolean }) {
               Dismiss
             </button>
           </div>
+          {/* One-step connect (Initiative 2, §9): snippets with the real key inlined into this
+              one-time view, plus the live first-event indicator. The key is never stored to render
+              this later; it lives only in `minted` until dismissed. */}
+          <ConnectPanel token={minted.token} />
         </div>
       )}
 

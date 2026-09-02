@@ -20,12 +20,16 @@ import uuid
 
 import pytest
 
+from types import SimpleNamespace
+
 from gateway import tenant_provisioning
 from gateway.tenant_lookup import TenantNotFoundError, resolve_tenant_uuid
 from gateway.tenant_provisioning import (
     LocalDevKeyProvider,
     ProvisionError,
+    SecretManagerKeyProvider,
     TenantProvisioner,
+    build_key_provider,
 )
 
 
@@ -194,6 +198,57 @@ def test_local_dev_provider_mint_is_unique_and_check_safe() -> None:
     provider.delete(ref_a)
     assert not provider.has(ref_a)
     assert provider.has(ref_b)
+
+
+def test_local_dev_provider_material_survives_a_restart() -> None:
+    # Initiative 2 §3.2 regression: after a gateway restart the in-memory-only provider lost the
+    # bytes and /v1/tenant/hmac-key 404'd for a durably-provisioned tenant. Material is now derived
+    # from the durable reference + root secret, so a FRESH provider instance (a simulated restart)
+    # resolves the same reference to the same 32 bytes.
+    root = b"root-secret-value"
+    before = LocalDevKeyProvider(root_secret=root)
+    ref = before.mint()
+    material_before = before.material(ref)
+    assert len(material_before) == 32
+
+    after = LocalDevKeyProvider(root_secret=root)  # simulated restart: empty minted set
+    assert not after.has(ref)  # bookkeeping is gone...
+    assert after.material(ref) == material_before  # ...but the material still resolves
+
+    # Distinct references derive distinct material (tenant isolation), and an empty ref is a miss.
+    assert after.material(before.mint()) != material_before
+    with pytest.raises(KeyError):
+        after.material("")
+
+
+def test_build_key_provider_selects_by_setting() -> None:
+    local = build_key_provider(
+        SimpleNamespace(hmac_key_provider="local", hmac_local_root_secret="rs")
+    )
+    assert isinstance(local, LocalDevKeyProvider)
+    # Two local providers built from the same root secret agree on material (restart-durable).
+    other = build_key_provider(
+        SimpleNamespace(hmac_key_provider="local", hmac_local_root_secret="rs")
+    )
+    ref = local.mint()
+    assert local.material(ref) == other.material(ref)
+
+    # The prod seam is selectable but fails fast without a wired client, never silently local.
+    with pytest.raises(ProvisionError):
+        build_key_provider(
+            SimpleNamespace(hmac_key_provider="kms", hmac_local_root_secret="rs")
+        )
+    with pytest.raises(ProvisionError):
+        build_key_provider(
+            SimpleNamespace(hmac_key_provider="bogus", hmac_local_root_secret="rs")
+        )
+
+
+def test_secret_manager_provider_requires_a_client() -> None:
+    with pytest.raises(ProvisionError):
+        SecretManagerKeyProvider()
+    # With a client wired it constructs; the concrete cloud calls are a deployment concern.
+    assert SecretManagerKeyProvider(client=object()) is not None
 
 
 # --- resolver extension ---------------------------------------------------------------------------

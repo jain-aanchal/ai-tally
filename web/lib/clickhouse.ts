@@ -92,6 +92,7 @@ import {
 // module-level `local-dev` constant (Initiative 1, §7/§8). The ClickHouse read filter binds this
 // UUID, so a UUID-scoped read matches UUID-tagged ingest.
 import { resolveTenantId } from "./getTenant";
+import { firstEventStatus, type FirstEventStatus } from "./firstEvent";
 
 let _client: ClickHouseClient | null = null;
 
@@ -125,6 +126,24 @@ export async function tryLive<T>(fn: (db: ClickHouseClient, tenant: string) => P
     console.warn("[clickhouse] live query failed, falling back to mock:", (err as Error).message);
     return null;
   }
+}
+
+// First-data onboarding probe (Initiative 2, §9). A single-row existence check scoped to the tenant
+// UUID from getTenant(): does ANY span exist for this tenant yet? It is the cheapest possible query
+// (LIMIT 1, no scan of history) so the onboarding panel can poll it. `tryLive` returns null when
+// ClickHouse is unreachable, which the caller maps to the honest "unknown" state rather than a
+// fabricated "waiting" (see firstEvent.ts). This is the only place the raw probe lives; the status
+// mapping is the pure `firstEventStatus`.
+export async function queryFirstEventSeen(): Promise<FirstEventStatus> {
+  const seen = await tryLive(async (db, tenant) => {
+    const r = await rows<{ one: number }>(
+      db,
+      "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1",
+      tenant,
+    );
+    return r.length > 0;
+  });
+  return firstEventStatus(seen);
 }
 
 // Decimal string (USD) -> integer micro-USD. Exported so sibling lib modules (e.g. the waste
