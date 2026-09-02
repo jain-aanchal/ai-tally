@@ -27,7 +27,7 @@ vi.mock("@/lib/clickhouse", async (importOriginal) => {
     queryReplayCandidates: vi.fn(),
     queryEvalCandidates: vi.fn(),
     tryLive: vi.fn(),
-    rowsP: vi.fn(),
+    rowsPCached: vi.fn(),
   };
 });
 
@@ -38,7 +38,7 @@ import type { DimensionFilters } from "@/lib/filters";
 const queryReplayCandidates = ch.queryReplayCandidates as unknown as ReturnType<typeof vi.fn>;
 const queryEvalCandidates = ch.queryEvalCandidates as unknown as ReturnType<typeof vi.fn>;
 const tryLive = ch.tryLive as unknown as ReturnType<typeof vi.fn>;
-const rowsP = ch.rowsP as unknown as ReturnType<typeof vi.fn>;
+const rowsP = ch.rowsPCached as unknown as ReturnType<typeof vi.fn>;
 
 function filters(over: Partial<DimensionFilters> = {}): DimensionFilters {
   return { feature: [], model: [], layer: [], provider: [], account: [], agent: [], ...over };

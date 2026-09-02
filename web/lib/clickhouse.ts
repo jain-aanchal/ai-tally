@@ -182,6 +182,52 @@ export async function rowsP<T>(
   return rs.json<T>();
 }
 
+// Cached variant of rowsP for the EXPENSIVE, repeatedly-issued analytical reads (the waste detectors,
+// CTO-234 perf). Several detectors scan the same otel_spans rows in one /api/waste request, and
+// useLivePoll re-issues the whole set every few seconds; this collapses that. An identical IN-FLIGHT
+// query is coalesced to one round-trip, and an identical query within a short TTL is served from
+// memory. It is deliberately SEPARATE from rowsP: the state probes (queryAccountDetailResult /
+// queryExcludedInfraCost) must distinguish "unreachable" from "unknown" on EVERY call, so they stay on
+// the uncached rowsP (this is what a cache on rowsP broke). A failed query is evicted immediately so an
+// error is never cached, each caller gets a copy so an in-place sort can't corrupt the shared array,
+// and resetQueryCache() clears it for test isolation. TTL is short: a cost dashboard tolerates a few
+// seconds of staleness, a slightly delayed real value, never a fabricated one.
+const CACHED_QUERY_TTL_MS = 8_000;
+const _cachedQueries = new Map<string, { at: number; promise: Promise<unknown[]> }>();
+
+/** Clear the rowsPCached cache. Call from test setup so a cached result never leaks across cases. */
+export function resetQueryCache(): void {
+  _cachedQueries.clear();
+}
+
+export async function rowsPCached<T>(
+  db: ClickHouseClient,
+  query: string,
+  params: Record<string, unknown>,
+): Promise<T[]> {
+  const key = `${query} ${JSON.stringify(params)}`;
+  const now = Date.now();
+  const hit = _cachedQueries.get(key);
+  if (hit && now - hit.at < CACHED_QUERY_TTL_MS) {
+    return [...(await (hit.promise as Promise<T[]>))];
+  }
+  const promise = db
+    .query({ query, query_params: params, format: "JSONEachRow" })
+    .then((rs) => rs.json<T>()) as Promise<unknown[]>;
+  _cachedQueries.set(key, { at: now, promise });
+  // Never cache a rejection: evict so the next caller retries rather than replaying the error.
+  promise.catch(() => {
+    if (_cachedQueries.get(key)?.promise === promise) _cachedQueries.delete(key);
+  });
+  // Bound memory: sweep expired entries when the map grows (cheap, amortized).
+  if (_cachedQueries.size > 256) {
+    for (const [k, v] of _cachedQueries) {
+      if (now - v.at >= CACHED_QUERY_TTL_MS) _cachedQueries.delete(k);
+    }
+  }
+  return [...(await (promise as Promise<T[]>))];
+}
+
 function median(xs: number[]): number {
   if (xs.length === 0) return 0;
   const s = [...xs].sort((a, b) => a - b);

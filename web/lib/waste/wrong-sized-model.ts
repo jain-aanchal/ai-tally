@@ -52,7 +52,7 @@ import {
   micro,
   queryEvalCandidates,
   queryReplayCandidates,
-  rowsP,
+  rowsPCached,
   tryLive,
 } from "@/lib/clickhouse";
 
@@ -275,7 +275,7 @@ interface FeatureIncumbent {
 async function queryFeatureIncumbents(windowDays: number): Promise<FeatureIncumbent[] | null> {
   const w = clampWindowDays(windowDays);
   return tryLive(async (db, tenant) => {
-    const out = await rowsP<{ feature: string; model: string; spend: string; calls: string | number }>(
+    const out = await rowsPCached<{ feature: string; model: string; spend: string; calls: string | number }>(
       db,
       `SELECT FeatureTag AS feature,
               if(GenAiResponseModel != '', GenAiResponseModel,

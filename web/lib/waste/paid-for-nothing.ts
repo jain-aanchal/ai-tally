@@ -19,7 +19,7 @@
 
 import type { WasteFinding } from "@/lib/waste";
 import type { DimensionFilters } from "@/lib/filters";
-import { tryLive, rowsP, micro } from "@/lib/clickhouse";
+import { tryLive, rowsPCached, micro } from "@/lib/clickhouse";
 import { clampWindowDays } from "@/lib/explore";
 
 /**
@@ -241,7 +241,7 @@ export async function collectPaidForNothing(
       GROUP BY scopeKind, scopeValue
       HAVING sum(m.5) > 0`;
 
-    const raw = await rowsP<PaidForNothingRow>(db, sql, { tenant, ...params });
+    const raw = await rowsPCached<PaidForNothingRow>(db, sql, { tenant, ...params });
     return detectPaidForNothing(raw);
   });
 
