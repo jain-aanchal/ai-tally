@@ -51,8 +51,14 @@ export class NoActiveOrgError extends Error {
 /**
  * The pinned dev tenant, or null when the escape hatch is off.
  *
- * A UUID or the name `local-dev`. When set, the product skips Clerk entirely. When unset, the
- * product path refuses to serve tenant data without a resolved org, by design.
+ * When set, the product skips Clerk entirely. When unset, the product path refuses to serve tenant
+ * data without a resolved org, by design.
+ *
+ * Use the tenant UUID, not the name `local-dev`: this value is bound directly into the ClickHouse
+ * read filter (TenantId = ...), and the demo backfill tags spans with the tenant UUID, so a bare
+ * name matches no rows and renders an empty dashboard. `make seed` prints the UUID to use. A name
+ * still resolves for gateway control-plane calls (the gateway folds name onto UUID), but reads need
+ * the UUID.
  */
 export function devTenant(): string | null {
   const v = process.env.TALLY_DEV_TENANT;
