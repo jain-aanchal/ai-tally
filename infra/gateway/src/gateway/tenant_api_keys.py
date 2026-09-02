@@ -237,12 +237,12 @@ class TenantApiKeyStore:
         whatever the old key was for. The old token stops authenticating immediately (ingest filters
         ``revoked_at IS NULL``).
         """
-        created_by = normalize_created_by(created_by)
+        supplied_created_by = normalize_created_by(created_by)
         token, token_prefix, key_hash = _mint_token()
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             resolved = resolve_tenant_uuid(cur, tenant_id)
             cur.execute(
-                "SELECT name, scope FROM api_keys "
+                "SELECT name, scope, created_by FROM api_keys "
                 "WHERE id = %s AND tenant_id = %s AND revoked_at IS NULL",
                 (key_id, resolved),
             )
@@ -251,9 +251,10 @@ class TenantApiKeyStore:
                 # Either the key is not this tenant's, does not exist, or is already revoked. A
                 # revoked key has nothing to rotate.
                 raise ApiKeyNotFoundError(f"no live key '{key_id}' for this tenant")
-            old_name, old_scope = old[0], str(old[1])
-            # Carry the minter forward when the caller does not supply one, so created_by is never
-            # silently blanked on rotate.
+            old_name, old_scope, old_created_by = old[0], str(old[1]), old[2]
+            # Carry the ORIGINAL minter forward when the caller does not supply one, so created_by is
+            # never silently blanked on rotate. The SELECT must fetch created_by for this to work.
+            created_by = supplied_created_by if supplied_created_by is not None else old_created_by
             cur.execute(
                 """
                 INSERT INTO api_keys (tenant_id, key_hash, scope, name, token_prefix, created_by)

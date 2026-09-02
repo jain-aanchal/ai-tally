@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
 from gateway.app import app
+from gateway.config import get_settings
 from gateway.tenant_api_keys import ApiKeyMeta, MintedKey
 from gateway.tenant_provisioning import ProvisionResult
 
@@ -79,6 +80,13 @@ class FakeKeyStore:
 
 @contextmanager
 def _client(*, auth_on: bool, token: str = SERVICE_TOKEN) -> Iterator[TestClient]:
+    # Boot with a VALID config (auth off) so the fail-closed boot guard (require_api_key on + no
+    # service token) never trips on leftover singleton state from a prior test. The per-test auth
+    # state is applied AFTER startup below, which is what the request-time gate reads. get_settings()
+    # returns the same object the lifespan assigns to app.state.settings.
+    boot = get_settings()
+    boot.require_api_key = False
+    boot.gateway_service_token = ""
     with TestClient(app) as client:
         app.state.settings.require_api_key = auth_on
         app.state.settings.gateway_service_token = token if auth_on else ""
@@ -117,6 +125,20 @@ def test_gate_is_noop_when_auth_off() -> None:
     with _client(auth_on=False) as c:
         r = c.get("/v1/tenant/keys", headers={"X-Tenant-Id": TENANT_UUID})
         assert r.status_code == 200
+
+
+def test_gate_fails_closed_when_auth_on_but_token_unset() -> None:
+    # Initiative 1 §6 regression: auth is required but NO service token is configured. The gate must
+    # reject (fail CLOSED), never return early and leave every /v1/tenant/* endpoint unauthenticated.
+    with _client(auth_on=True, token="") as c:
+        r = c.get(
+            "/v1/tenant/keys",
+            headers={"Authorization": "Bearer anything", "X-Tenant-Id": TENANT_UUID},
+        )
+        assert r.status_code == 503
+        # And an unauthenticated caller is likewise refused, never served.
+        r2 = c.get("/v1/tenant/keys", headers={"X-Tenant-Id": TENANT_UUID})
+        assert r2.status_code == 503
 
 
 def test_keys_require_tenant_header() -> None:
