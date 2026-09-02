@@ -32,7 +32,7 @@ import type { MicroUSD } from "@/lib/types";
 import type { WasteFinding } from "@/lib/waste";
 import type { DimensionFilters } from "@/lib/filters";
 import { clampWindowDays } from "@/lib/explore";
-import { tryLive, rowsP, micro } from "@/lib/clickhouse";
+import { tryLive, rowsPCached, micro } from "@/lib/clickhouse";
 
 /**
  * One run reduced to the shape signals this detector judges. The SQL below produces exactly these
@@ -349,7 +349,7 @@ export async function collectStructuralInefficiency(
     // is judged in the cohort of the model that actually did the work. steps = span count, exactly
     // what queryAgents reports. Compute/egress spans are excluded: they are tenant infrastructure, not
     // agent steps, and would inflate both signals. `w` is a clamped int (injection-safe).
-    const raw = await rowsP<StructuralRunRaw>(
+    const raw = await rowsPCached<StructuralRunRaw>(
       db,
       `SELECT TraceId AS runId,
               any(ServiceName) AS agent,
