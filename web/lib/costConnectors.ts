@@ -8,32 +8,16 @@ import { resolveTenantId } from "./getTenant";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
-/** Connector ids the config endpoints understand. Matches config_admin.ALL_CONNECTORS. */
-export const CONFIGURABLE = [
-  "aws_cost_explorer",
-  "gcp_billing",
-  "vercel",
-  "cloudflare",
-  "aws_egress",
-  "vercel_egress",
-] as const;
-export type ConfigurableConnector = (typeof CONFIGURABLE)[number];
-
-export function isConfigurable(id: string): id is ConfigurableConnector {
-  return (CONFIGURABLE as readonly string[]).includes(id);
-}
-
-export interface CostConnectorConfig {
-  connector: string;
-  configured: boolean;
-  credentialsRef: string | null;
-  /** Whether the stored ref matches a known secret-manager shape. Advisory, drives a hint only. */
-  isReference: boolean;
-  details: Record<string, unknown>;
-  lastRunAt: string | null;
-  lastStatus: string | null;
-  connectedAt: string | null;
-}
+// Client-safe constants, types and pure helpers moved to costConnectorsShared.ts (CTO-259) so the
+// client table can import them without reaching this server-only module. Re-exported so existing
+// server call sites keep importing from "@/lib/costConnectors".
+export {
+  CONFIGURABLE,
+  type ConfigurableConnector,
+  isConfigurable,
+  type CostConnectorConfig,
+} from "./costConnectorsShared";
+import type { ConfigurableConnector, CostConnectorConfig } from "./costConnectorsShared";
 
 interface ConfigWire {
   connector: string;
