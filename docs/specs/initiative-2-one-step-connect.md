@@ -159,6 +159,16 @@ body claiming a different tenant with `TENANT_MISMATCH`
 returned once by the bootstrap (§3.2) and used only as a local hash-registry key,
 never sent on the wire.
 
+`tally.init` also installs **module-level convenience functions** that delegate to
+the process-global client: `tally.record_tool_call`, `tally.record_vector_call`,
+`tally.record_embedding_call`, and `tally.record_llm_call`, mirroring the
+`TallyClient` methods of the same names (`sdk/python/src/tally/client.py`). This is
+what lets the non-LLM layers and the onboarding recipes (see the Onboarding agent
+initiative) be true one-liners, `tally.record_vector_call(...)` at a call site, with
+no client object threaded through the app. Before `init` runs they are safe no-ops
+with a one-time warning, never a raise, per the SDK's core invariant. `with_account`
+and `start_trace` are already module-level in `tally.context`.
+
 ### 3.2 HMAC key bootstrap (new endpoint)
 
 To hash account and user ids client-side (so raw ids never leave the process),
@@ -820,7 +830,10 @@ SDK (`sdk/python/src/tally/`):
 - `instrumentation/openai.py`: add Responses API and embeddings extraction.
 - `hmac_keys.py`: add a `KeyMaterialProvider` that loads material from the
   `/v1/tenant/hmac-key` response and caches with a TTL.
-- `__init__.py`: export `init`, `flush`, `hash_account`.
+- `__init__.py`: export `init`, `flush`, `hash_account`, and the module-level
+  convenience `record_tool_call` / `record_vector_call` / `record_embedding_call` /
+  `record_llm_call` (each delegating to the process-global client; safe no-ops before
+  `init`).
 - `README.md`: document the one-line path; keep the manual path.
 - `tests/`: `test_init.py`, `test_patch_openai.py`, `test_patch_anthropic.py`,
   `test_transport.py`, `test_hmac_bootstrap.py`, streaming + async + never-raise
