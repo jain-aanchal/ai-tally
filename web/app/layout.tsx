@@ -16,12 +16,17 @@ export const metadata: Metadata = {
 // entirely (mounting it with no keys would throw) and hide the org controls in the shell. On the
 // product path ClerkProvider wraps the tree and the shell shows the org switcher.
 export default function RootLayout({ children }: { children: ReactNode }) {
-  const dev = devTenant() !== null;
+  const devLabel = devTenant();
+  const dev = devLabel !== null;
 
   const body = (
     <html lang="en">
       <body>
-        <Shell showOrgControls={!dev}>{children}</Shell>
+        {/* On the dev escape hatch the shell names the pinned tenant (no Clerk org exists to read);
+            on the product path it reads the active org name from Clerk (Initiative 1, §7/§10). */}
+        <Shell showOrgControls={!dev} devTenantLabel={devLabel}>
+          {children}
+        </Shell>
       </body>
     </html>
   );
