@@ -81,4 +81,10 @@ jobs:
       - name: Test
         run: npm run test
       - name: Build
+        # Build via the dev escape hatch (Initiative 1, §10), the same keyless mode `make up` and the
+        # vitest suite run in: with TALLY_DEV_TENANT set the app mounts no ClerkProvider and needs no
+        # Clerk publishableKey, so the static prerender does not require a Clerk account. CI holds no
+        # Clerk keys by design (CTO-259).
         run: npm run build
+        env:
+          TALLY_DEV_TENANT: local-dev

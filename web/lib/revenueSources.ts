@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Which business events count as revenue, per tenant (CTO-194).
 //
 // The attribution revenue sum used to be gated on a hardcoded `business_events.Source = 'stripe'`.
@@ -87,7 +88,6 @@ export function revenueSourceFilter(
 }
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 /**
  * Fetch the tenant's revenue policy. Never throws and never returns null: a tenant with no row or
@@ -97,7 +97,7 @@ const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 export async function queryRevenuePolicy(): Promise<RevenuePolicy> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/revenue-sources/config`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });

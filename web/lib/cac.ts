@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // CAC period type + gateway-backed fetch (CTO-111).
 //
 // Shapes match the gateway's /v1/tenant/cac response. Money is micro-USD on the wire (matching
 // business_events). The TS types use ``MicroUsd = number`` for clarity at call sites.
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 export interface CacPeriod {
   /** ISO date — first day of the month, e.g. "2026-01-01". */
@@ -73,7 +73,7 @@ export interface CacQueryResult {
 export async function queryCacPeriods(): Promise<CacQueryResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cac`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });

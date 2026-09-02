@@ -20,7 +20,7 @@ import {
   type UploadRowError,
   deriveUploadFreshness,
   formatSnapshotAmount,
-} from "@/lib/revenueUpload";
+} from "@/lib/revenueUploadShared";
 import { deleteRevenueUploadAction, uploadRevenueCsvAction } from "./revenueUploadActions";
 
 interface Props {

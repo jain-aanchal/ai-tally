@@ -16,7 +16,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Blank } from "@/components/HonestValue";
 import type { ConnectorStatus } from "@/lib/connectors";
 import { relativeAge } from "@/lib/dataState";
-import { type CostConnectorConfig, isConfigurable } from "@/lib/costConnectors";
+import { type CostConnectorConfig, isConfigurable } from "@/lib/costConnectorsShared";
 import { ConnectForm } from "./ConnectForm";
 import { ConnectorToggle } from "./ConnectorToggle";
 
