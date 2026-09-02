@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-260 §3 — tally.init: idempotent, env fallback, never-raise, module-level delegation."""
+"""CTO-260 §3 - tally.init: idempotent, env fallback, never-raise, module-level delegation."""
 
 from __future__ import annotations
 

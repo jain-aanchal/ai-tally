@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-260 §4 — patch_anthropic over fake Anthropic classes (create + stream, sync/async)."""
+"""CTO-260 §4 - patch_anthropic over fake Anthropic classes (create + stream, sync/async)."""
 
 from __future__ import annotations
 
@@ -66,7 +66,10 @@ class _StreamManager:
 
 
 class FakeMessages:
-    def create(self, *, model, input_tokens=100, output_tokens=50, cached=0):
+    def create(self, *, model, input_tokens=100, output_tokens=50, cached=0, stream=False):
+        if stream:
+            # The supported streamed form of create(): returns an iterator of events.
+            return iter([_start_event(model, input_tokens), _delta_event(output_tokens)])
         return _Resp(model, _U(input_tokens, output_tokens, cached))
 
     def stream(self, *, model, input_tokens=100, output_tokens=50, iterate=True):
@@ -103,13 +106,57 @@ class _AsyncStreamManager:
 
 
 class FakeAsyncMessages:
-    async def create(self, *, model, input_tokens=100, output_tokens=50):
+    async def create(self, *, model, input_tokens=100, output_tokens=50, stream=False):
+        if stream:
+            return _AsyncStream([_start_event(model, input_tokens), _delta_event(output_tokens)])
         return _Resp(model, _U(input_tokens, output_tokens))
 
     def stream(self, *, model, input_tokens=100, output_tokens=50):
         events = [_start_event(model, input_tokens), _delta_event(output_tokens)]
         final = _final_message(model, input_tokens, output_tokens)
         return _AsyncStreamManager(events, final)
+
+
+class _AsyncFinalStream:
+    """Entered async stream whose get_final_message is a coroutine, as the real client's is.
+
+    Crucially the coroutine lives here, on the entered stream, not on the manager (finding #5).
+    """
+
+    def __init__(self, events, final):
+        self._events = events
+        self._final = final
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for e in self._events:
+            yield e
+
+    async def get_final_message(self):
+        return self._final
+
+
+class _AsyncFinalStreamManager:
+    def __init__(self, events, final):
+        self._events = events
+        self._final = final
+
+    async def __aenter__(self):
+        return _AsyncFinalStream(self._events, self._final)
+
+    async def __aexit__(self, *exc):
+        return False
+
+    # Deliberately NO get_final_message here: it belongs on the entered stream object.
+
+
+class FakeAsyncFinalMessages:
+    def stream(self, *, model, input_tokens=100, output_tokens=50):
+        # Empty events so the caller never iterates and the final-message path is exercised.
+        final = _final_message(model, input_tokens, output_tokens)
+        return _AsyncFinalStreamManager([], final)
 
 
 @pytest.fixture(autouse=True)
@@ -168,6 +215,59 @@ def test_stream_without_iteration_uses_final_message():
         pass  # caller never iterates the events
     assert len(spans) == 1
     # Seeded from get_final_message() rather than fabricated.
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 42
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 7
+
+
+def test_create_stream_true_accumulates_usage():
+    # messages.create(stream=True) is a supported streamed form; before the fix it was wrapped
+    # non-streaming and emitted null tokens with no cost (CTO-260 §4.3, finding #2).
+    spans: list[dict] = []
+    _patch(spans)
+    stream = FakeMessages().create(model=_MODEL, stream=True, input_tokens=250, output_tokens=75)
+    collected = list(stream)  # events pass through untouched
+    assert len(collected) == 2
+    assert len(spans) == 1
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 250
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 75
+    assert spans[0][GenAI.COST_ESTIMATED_MICRO_USD] > 0
+
+
+def test_async_create_stream_true_accumulates_usage():
+    spans: list[dict] = []
+    _patch(spans)
+
+    async def _run():
+        agen = await FakeAsyncMessages().create(
+            model=_MODEL, stream=True, input_tokens=120, output_tokens=30
+        )
+        return [e async for e in agen]
+
+    collected = asyncio.run(_run())
+    assert len(collected) == 2
+    assert len(spans) == 1
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 120
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 30
+
+
+def test_async_stream_awaits_final_message_coroutine():
+    # On the async client get_final_message is a coroutine on the entered stream. The emit path must
+    # look it up there (not on the manager) and await it, else usage is null (finding #5).
+    spans: list[dict] = []
+    patch_anthropic(
+        on_span=spans.append,
+        catalog=seed_catalog(),
+        targets={"messages_async": FakeAsyncFinalMessages},
+    )
+
+    async def _run():
+        async with FakeAsyncFinalMessages().stream(
+            model=_MODEL, input_tokens=42, output_tokens=7
+        ):
+            pass  # never iterate, forcing the final-message fallback
+
+    asyncio.run(_run())
+    assert len(spans) == 1
     assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 42
     assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 7
 

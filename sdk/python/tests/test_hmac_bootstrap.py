@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-260 §3.2/§3.3 — HMAC bootstrap: fetch/parse, TTL cache, registry hashing, fallback."""
+"""CTO-260 §3.2/§3.3 - HMAC bootstrap: fetch/parse, TTL cache, registry hashing, fallback."""
 
 from __future__ import annotations
 

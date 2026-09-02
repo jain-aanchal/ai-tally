@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``tally.init`` — one-line connect (CTO-260 §3).
+"""``tally.init`` - one-line connect (CTO-260 §3).
 
 ``tally.init(key)`` installs one process-global :class:`~tally.client.TallyClient`, wires a
 background batching transport (CTO-260 §5), boots the per-tenant HMAC key off-thread (CTO-260 §3.2),
@@ -151,7 +151,7 @@ def _bootstrap_hmac(
 ) -> None:
     """Fetch the tenant's active HMAC material once and install a cached registry. Never raises.
 
-    On any failure the account dimension stays unattributed (CTO-260 §3.3) — the raw id is never
+    On any failure the account dimension stays unattributed (CTO-260 §3.3) - the raw id is never
     substituted, cost/model spans keep flowing, and only the per-customer tag waits for the key.
     """
     global _warned_bootstrap

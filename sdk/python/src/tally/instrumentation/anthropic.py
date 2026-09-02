@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Anthropic instrumentor — Messages API, sync/async/streaming (CTO-260 §4.1/§4.2/§4.3).
+"""Anthropic instrumentor - Messages API, sync/async/streaming (CTO-260 §4.1/§4.2/§4.3).
 
 Mirrors :mod:`tally.instrumentation.openai`. A pure function over a provider response object,
 testable with fakes and no network. Reads only ``usage`` / ``model`` metadata:

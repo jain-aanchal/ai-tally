@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,7 +86,7 @@ def _apply(cls: type | None, attr: str, builder: Callable[[object], object]) -> 
     if original is None:
         return
     if getattr(original, _SENTINEL, False):
-        return  # already patched — idempotent
+        return  # already patched - idempotent
     wrapped = builder(original)
     try:
         setattr(wrapped, _SENTINEL, True)
@@ -142,6 +143,42 @@ def _plain_builder(common: _Common, instrumentor, *, is_async: bool):
     return builder
 
 
+def _create_stream_builder(common: _Common, instrumentor, *, is_async: bool):
+    """A ``create``-style builder that routes ``stream=True`` to the streaming wrapper.
+
+    The supported streamed form of ``Anthropic.messages.create`` and ``OpenAI.responses.create``
+    passes ``stream=True`` and returns an iterator, so wrapping it with the non-streaming wrapper
+    emitted a null-token, no-cost span (CTO-260 §4.3, review finding). This dispatches to
+    ``wrap_stream`` so usage is accumulated from the stream, without buffering or altering it.
+    """
+
+    def builder(original):
+        if is_async:
+            nonstream = wrap_create_async(original, instrumentor, **common.kw())
+            streamed = wrap_stream_async(original, instrumentor, **common.kw())
+
+            @functools.wraps(original)
+            async def wrapper(*args, **kwargs):
+                if kwargs.get("stream"):
+                    return await streamed(*args, **kwargs)
+                return await nonstream(*args, **kwargs)
+
+            return wrapper
+
+        nonstream = wrap_create(original, instrumentor, **common.kw())
+        streamed = wrap_stream(original, instrumentor, **common.kw())
+
+        @functools.wraps(original)
+        def wrapper(*args, **kwargs):
+            if kwargs.get("stream"):
+                return streamed(*args, **kwargs)
+            return nonstream(*args, **kwargs)
+
+        return wrapper
+
+    return builder
+
+
 def patch_openai(
     *,
     on_span: Callable[[dict[str, object]], None],
@@ -180,7 +217,9 @@ def patch_openai(
             _apply(
                 roles.get(role),
                 "create",
-                _plain_builder(common, OpenAIResponsesInstrumentor(), is_async=is_async),
+                _create_stream_builder(
+                    common, OpenAIResponsesInstrumentor(), is_async=is_async
+                ),
             )
         for role, is_async in (("embeddings", False), ("embeddings_async", True)):
             _apply(
@@ -260,37 +299,50 @@ class _StreamManagerProxy:
         self._kwargs = kwargs
         self._common = common
         self._state: dict = {}
+        # The stream object the manager yields on enter. get_final_message lives here, not on the
+        # manager, on the real client (CTO-260 §4.3, review finding).
+        self._entered: object | None = None
 
     def __enter__(self):
         inner = self._manager.__enter__()
+        self._entered = inner
         return _StreamProxy(inner, self._instr, self._state)
 
     def __exit__(self, *exc):
         result = self._manager.__exit__(*exc)
-        self._emit()
+        self._emit_sync()
         return result
 
     async def __aenter__(self):
         inner = await self._manager.__aenter__()
+        self._entered = inner
         return _StreamProxy(inner, self._instr, self._state)
 
     async def __aexit__(self, *exc):
         result = await self._manager.__aexit__(*exc)
-        self._emit()
+        await self._emit_async()
         return result
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_manager"), name)
 
-    def _emit(self) -> None:
+    def _needs_final(self) -> bool:
+        return "input_tokens" not in self._state and "output_tokens" not in self._state
+
+    def _final_message_getter(self) -> Callable[[], object] | None:
+        # Prefer the entered stream object (where the real client exposes it); fall back to the
+        # manager for shapes that expose it there.
+        for target in (self._entered, self._manager):
+            if target is None:
+                continue
+            getter = getattr(target, "get_final_message", None)
+            if callable(getter):
+                return getter
+        return None
+
+    def _emit_span(self) -> None:
         from tally.instrumentation.base import _emit_stream_span
 
-        # If the caller never iterated events, try the authoritative final message for usage.
-        if "input_tokens" not in self._state and "output_tokens" not in self._state:
-            with safe_block(self._common.obs, where="instrument.anthropic.stream.final"):
-                get_final = getattr(self._manager, "get_final_message", None)
-                if callable(get_final):
-                    _safe_accumulate(self._instr, self._state, {"message": get_final()})
         _emit_stream_span(
             self._instr,
             args=self._args,
@@ -303,6 +355,30 @@ class _StreamManagerProxy:
             account_resolver=self._common.account_resolver,
         )
 
+    def _emit_sync(self) -> None:
+        # If the caller never iterated events, seed usage from the authoritative final message.
+        if self._needs_final():
+            with safe_block(self._common.obs, where="instrument.anthropic.stream.final"):
+                getter = self._final_message_getter()
+                if getter is not None:
+                    msg = getter()
+                    if not inspect.isawaitable(msg):
+                        _safe_accumulate(self._instr, self._state, {"message": msg})
+        self._emit_span()
+
+    async def _emit_async(self) -> None:
+        # On the async client get_final_message is a coroutine; await it rather than stamping the
+        # unawaited coroutine as usage (which yielded null tokens and a "never awaited" warning).
+        if self._needs_final():
+            with safe_block(self._common.obs, where="instrument.anthropic.stream.final"):
+                getter = self._final_message_getter()
+                if getter is not None:
+                    msg = getter()
+                    if inspect.isawaitable(msg):
+                        msg = await msg
+                    _safe_accumulate(self._instr, self._state, {"message": msg})
+        self._emit_span()
+
 
 def _anthropic_stream_builder(common: _Common):
     instr = AnthropicInstrumentor()
@@ -310,7 +386,7 @@ def _anthropic_stream_builder(common: _Common):
     def builder(original):
         @functools.wraps(original)
         def wrapper(*args, **kwargs):
-            manager = original(*args, **kwargs)  # provider errors propagate — by design
+            manager = original(*args, **kwargs)  # provider errors propagate - by design
             return _StreamManagerProxy(manager, instr, args, kwargs, common)
 
         return wrapper
@@ -343,11 +419,15 @@ def patch_anthropic(
             _log.debug("tally: anthropic not installed; skipping instrumentation")
             return
 
-        _apply(roles.get("messages"), "create", _plain_builder(common, instr, is_async=False))
+        _apply(
+            roles.get("messages"),
+            "create",
+            _create_stream_builder(common, instr, is_async=False),
+        )
         _apply(
             roles.get("messages_async"),
             "create",
-            _plain_builder(common, instr, is_async=True),
+            _create_stream_builder(common, instr, is_async=True),
         )
         _apply(roles.get("messages"), "stream", _anthropic_stream_builder(common))
         _apply(roles.get("messages_async"), "stream", _anthropic_stream_builder(common))

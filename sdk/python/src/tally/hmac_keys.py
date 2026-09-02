@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-tenant HMAC versioned-key scheme — Option B rotation (CTO-74 / spec §14.2, §10).
+"""Per-tenant HMAC versioned-key scheme - Option B rotation (CTO-74 / spec §14.2, §10).
 
-User IDs are never stored raw — they're HMAC-SHA256'd under a **per-tenant** key so a hash can't be
+User IDs are never stored raw - they're HMAC-SHA256'd under a **per-tenant** key so a hash can't be
 correlated across tenants and a leaked digest can't be reversed. Two hard requirements drive this
 module:
 
@@ -15,7 +15,7 @@ module:
    attribution still bridges the boundary. A ~90d active-user re-hash backfill migrates the live
    population forward; cold users age out naturally.
 
-The raw key material lives in cloud KMS/Vault in production — never in Postgres or code. That fetch
+The raw key material lives in cloud KMS/Vault in production - never in Postgres or code. That fetch
 is abstracted behind :class:`KeyMaterialProvider`; :class:`InMemoryKeyMaterialProvider` derives
 deterministic material from a root secret so dev/test needs no KMS. (Encrypted volumes, TLS 1.3, and
 the real KMS wiring are the infra half of CTO-74 and are out of scope for this module.)
@@ -72,7 +72,7 @@ class KeyMaterialProvider(Protocol):
     """Fetches raw HMAC key material for ``(tenant_id, key_version)``.
 
     Backed by KMS/Vault in prod; the returned bytes are used transiently and never persisted by the
-    application (spec §14.2 — no secrets in Postgres or code).
+    application (spec §14.2 - no secrets in Postgres or code).
     """
 
     def material(self, tenant_id: str, key_version: str) -> bytes: ...
@@ -82,7 +82,7 @@ class KeyMaterialProvider(Protocol):
 class InMemoryKeyMaterialProvider:
     """Deterministically derives per-(tenant, version) key material from a root secret.
 
-    Reproducible for tests and dev with no KMS. NOT for production — the root secret would itself
+    Reproducible for tests and dev with no KMS. NOT for production - the root secret would itself
     need to live in KMS.
     """
 
@@ -126,7 +126,7 @@ class RemoteKeyMaterialProvider:
         entry = self._cache.get(key_version)
         if entry is not None and self._fresh(entry):
             return entry[1]
-        # Stale or missing — re-fetch. The response is authoritative for the *active* version.
+        # Stale or missing - re-fetch. The response is authoritative for the *active* version.
         boot = self.fetch()
         self._cache[boot.key_version] = (self._clock(), boot.material)
         if boot.key_version == key_version:
@@ -200,7 +200,7 @@ class HmacKeyRegistry:
         return self.hash_with(tenant_id, user_id, version)
 
     def hash_with(self, tenant_id: str, user_id: str, key_version: str) -> StampedHash:
-        """Hash under a specific version — used for re-hash backfill and historical verification."""
+        """Hash under a specific version - used for re-hash backfill and historical verification."""
         self._require_provisioned(tenant_id)
         if key_version not in self._versions[tenant_id]:
             raise ValueError(f"unknown key_version {key_version!r} for tenant {tenant_id!r}")
