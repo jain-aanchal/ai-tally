@@ -264,8 +264,9 @@ title: "Pinecone index.query -> record_vector_call"
 detect:                            # how the agent knows this recipe applies
   imports: ["pinecone"]
   call_patterns: ["*.query(", "*.upsert("]
-sdk_surface:                       # the exact SDK method this recipe wires
-  method: "tally.client.TallyClient.record_vector_call"
+sdk_surface:                       # the exact SDK symbol this recipe wires
+  call: "tally.record_vector_call" # module-level convenience (Initiative 2 3.1), the one-liner form
+  delegates_to: "tally.client.TallyClient.record_vector_call"  # the instance method it wraps
   required_args: [provider, index, operation]
   layer: vector                    # gateway cost-layer bucket this lands in
 edit:
@@ -281,39 +282,48 @@ edit:
   placement: after_call            # where relative to the detected call
 verify:
   layer: vector                    # the coverage layer that must light up (§7)
-  operation_name: "vector"         # gen_ai.operation.name the gateway buckets on
-notes: "record_count is API-symmetry only today; cost resolves from the catalog."
+  operation_name: "vector"         # value of the GenAiOperation column the gateway buckets on
+notes: "record_count is accepted by record_vector_call for API symmetry; cost resolves from the catalog."
 ```
 
 Key fields:
 
 - **`detect`** grounds stack detection (§3 step 1): the imports and call patterns
   that mean this recipe applies.
-- **`sdk_surface`** pins the recipe to a real method (`record_tool_call`,
-  `record_vector_call`, `record_embedding_call`, `with_account`, `start_trace`).
-  A validation step checks that `method` and `required_args` exist in the current
-  SDK, so a recipe cannot reference an API that is not there. This is the concrete
-  anti-hallucination guard.
+- **`sdk_surface`** pins the recipe to a real symbol. Recipes emit the module-level
+  convenience form (`tally.record_tool_call`, `tally.record_vector_call`,
+  `tally.record_embedding_call`, `tally.record_llm_call`, plus `with_account` /
+  `start_trace`), which Initiative 2 §3.1 installs over the process-global client;
+  `delegates_to` records the `TallyClient` method it wraps. The anti-hallucination
+  guard must validate the recipe's actual emitted call, not just that a named method
+  exists: it parses `edit.template`, resolves the `call` symbol against the SDK's
+  public surface, and checks the passed kwargs against the real signature. Checking
+  only that `TallyClient.record_vector_call` exists would still pass a template that
+  called a nonexistent `tally.record_vector_call`, so resolving the emitted call is
+  the guard that actually holds.
 - **`edit`** is the adaptable template: imports to add, the code template with
   named holes the agent fills from the call site, and placement.
-- **`verify`** names the coverage layer and the `gen_ai.operation.name` the gateway
-  buckets on (`tool`, `vector`, `embeddings`, and the LLM operation), which the
-  verification loop (§7) reads back.
+- **`verify`** names the coverage layer and the value of the `GenAiOperation` column
+  the gateway buckets on (`tool`, `vector`, `embeddings`, and `chat` for LLM), which
+  the verification loop (§7) reads back.
 
 ### 5.3 Grounding on the real SDK surface
 
-The recipes' `sdk_surface` entries reference the real methods, verified against the
-code in this repo:
+The recipes emit the module-level convenience functions (Initiative 2 §3.1), which
+delegate to the `TallyClient` methods verified against the code in this repo. Each
+`sdk_surface.delegates_to` pins the instance method, and each lands its span in the
+`GenAiOperation` column value shown:
 
-- `record_tool_call(*, provider, tool, cost_micro_usd=None, ...)`, buckets on
-  `gen_ai.operation.name == 'tool'` (`sdk/python/src/tally/client.py`).
-- `record_vector_call(*, provider, index, operation, cost_micro_usd=None, ...)`,
-  buckets on `gen_ai.operation.name == 'vector'`, tool-name slot encodes
+- `TallyClient.record_tool_call(*, provider, tool, cost_micro_usd=None, ...)`, lands
+  with `GenAiOperation = 'tool'` (`sdk/python/src/tally/client.py`).
+- `TallyClient.record_vector_call(*, provider, index, operation, cost_micro_usd=None, record_count=None, ...)`,
+  lands with `GenAiOperation = 'vector'`; the tool-name slot encodes
   `{provider}.{index}.{operation}` (`sdk/python/src/tally/client.py`).
-- `record_embedding_call(*, provider, model, input_tokens, ...)`, buckets on
-  `gen_ai.operation.name == 'embeddings'` (`sdk/python/src/tally/client.py`).
-- `record_llm_call(*, provider, model, usage, ...)` for call sites not covered by
-  Initiative 2 auto-instrumentation (`sdk/python/src/tally/client.py`).
+- `TallyClient.record_embedding_call(*, provider, model, input_tokens, ...)`, lands
+  with `GenAiOperation = 'embeddings'` (`sdk/python/src/tally/client.py`).
+- `TallyClient.record_llm_call(*, provider, model, usage, ...)` for call sites not
+  covered by Initiative 2 auto-instrumentation, lands with `GenAiOperation = 'chat'`
+  for chat completions (`sdk/python/src/tally/client.py`).
 - `context.with_account(account_id, *, label=None)` and
   `context.start_trace(*, feature_tag=None, session_id=None, account_id=None, ...)`
   for the middleware recipes (`sdk/python/src/tally/context.py`).
@@ -360,17 +370,26 @@ first-data / coverage check rather than a fresh mechanism.
 
 - **The signal.** Initiative 2 §9 defines a ClickHouse existence probe scoped to
   the tenant UUID (`SELECT 1 FROM otel_spans WHERE TenantId = {tenant:String}
-  LIMIT 1`). This initiative extends the same probe per layer, keying on the
-  `gen_ai.operation.name` the gateway buckets on, so each recipe's `verify.layer`
-  (§5.2) maps to one existence check:
+  LIMIT 1`). This initiative extends the same probe per layer. In `otel_spans`,
+  `gen_ai.operation.name` is promoted to the typed column `GenAiOperation`
+  (LowCardinality(String)) and the account hash to the `AccountIdHash` column
+  (`db/clickhouse/otel_spans.sql`), so each recipe's `verify.layer` (§5.2) maps to
+  one existence check on a real column:
 
-  | Layer | Existence signal |
+  | Layer | Existence signal (ClickHouse) |
   | --- | --- |
-  | LLM | a span with the LLM operation for the tenant |
-  | tools | a span with `gen_ai.operation.name == 'tool'` |
-  | vector | a span with `gen_ai.operation.name == 'vector'` |
-  | embeddings | a span with `gen_ai.operation.name == 'embeddings'` |
-  | account attribution | a span carrying a non-empty `AccountIdHash` |
+  | LLM | `GenAiOperation = 'chat'` for the tenant |
+  | tools | `GenAiOperation = 'tool'` |
+  | vector | `GenAiOperation = 'vector'` |
+  | embeddings | `GenAiOperation = 'embeddings'` |
+  | account attribution | `AccountIdHash != ''` |
+
+  Concretely, per layer:
+  `SELECT 1 FROM otel_spans WHERE TenantId = {tenant:String} AND GenAiOperation = {op:String} LIMIT 1`.
+  The per-account rollup table `account_rollups` is keyed on
+  `(TenantId, AccountIdHash, Day, FeatureTag, GenAiOperation)`
+  (`db/clickhouse/account_rollups.sql`), so the coverage check can read the rollup
+  instead of scanning raw spans where that is cheaper.
 
 - **Per-layer report, honest.** After the reviewed change runs, the agent reads
   each layer's signal and reports flowing vs. still dark. It never marks a layer
@@ -534,9 +553,11 @@ Recipe catalog (`sdk/python/`):
 - `recipes/` (new): one recipe file per framework / provider (§5.1), plus
   `recipes/index.yaml` (or `.json`) enumerating them.
 - `recipes/schema.json` (new): the recipe schema (§5.2) recipes validate against.
-- `tests/test_recipes.py` (new): validates every recipe against the schema and
-  checks each `sdk_surface.method` / `required_args` exists in the current SDK
-  (`tally.client`, `tally.context`), the anti-hallucination guard (§5.3).
+- `tests/test_recipes.py` (new): validates every recipe against the schema, resolves
+  each `edit.template`'s emitted `call` against the SDK's public surface (the
+  module-level convenience plus its `delegates_to` method) and checks the passed
+  kwargs against the real signature, so a template that calls a nonexistent function
+  or passes an unknown kwarg fails CI. This is the anti-hallucination guard (§5.2, §5.3).
 
 MCP server (new top-level component, e.g. `infra/onboarding-mcp/` or
 `sdk/python/onboarding_mcp/`):
