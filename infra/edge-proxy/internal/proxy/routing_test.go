@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
@@ -22,25 +23,43 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-// staticResolver is a fixed key-hash -> tenant map for proxy tests.
+// staticResolver is a fixed key-hash -> tenant map for proxy tests. Present keys resolve with a
+// write scope so they pass the proxy's ingest scope gate; scope-specific behavior is exercised by
+// scopeResolver.
 type staticResolver map[string]string
 
-func (s staticResolver) Resolve(keyHash string) (string, bool) {
+func (s staticResolver) Resolve(keyHash string) (string, string, bool) {
 	id, ok := s[keyHash]
-	return id, ok
+	return id, "write", ok
+}
+
+// scopeResolver resolves a single key hash to a fixed tenant and scope, for exercising the proxy's
+// read/write/admin ingest scope gate.
+type scopeResolver struct {
+	keyHash string
+	tenant  string
+	scope   string
+}
+
+func (s scopeResolver) Resolve(keyHash string) (string, string, bool) {
+	if keyHash == s.keyHash {
+		return s.tenant, s.scope, true
+	}
+	return "", "", false
 }
 
 // TestHostRoutingSelectsOrigin verifies host-based routing forwards each hostname to its own
 // upstream, byte-for-byte, and tags the trace with that route's provider metadata.
 func TestHostRoutingSelectsOrigin(t *testing.T) {
-	var openaiHit, anthropicHit bool
+	// atomic: written in the upstream handler goroutines, read in the test goroutine (go test -race).
+	var openaiHit, anthropicHit atomic.Bool
 	openai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		openaiHit = true
+		openaiHit.Store(true)
 		_, _ = io.WriteString(w, `{"model":"gpt-5","usage":{"prompt_tokens":11,"completion_tokens":7}}`)
 	}))
 	defer openai.Close()
 	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		anthropicHit = true
+		anthropicHit.Store(true)
 		_, _ = io.WriteString(w, `{"model":"claude","usage":{"input_tokens":3,"output_tokens":9}}`)
 	}))
 	defer anthropic.Close()
@@ -65,8 +84,8 @@ func TestHostRoutingSelectsOrigin(t *testing.T) {
 		t.Fatalf("openai request: %v", err)
 	}
 	_ = resp.Body.Close()
-	if !openaiHit || anthropicHit {
-		t.Fatalf("host routing wrong: openaiHit=%v anthropicHit=%v", openaiHit, anthropicHit)
+	if !openaiHit.Load() || anthropicHit.Load() {
+		t.Fatalf("host routing wrong: openaiHit=%v anthropicHit=%v", openaiHit.Load(), anthropicHit.Load())
 	}
 	sink.waitFor(t, 1)
 	if got := sink.last(); got.Model != "gpt-5" || got.PromptTokens != 11 || got.CompletionTokens != 7 {
@@ -74,7 +93,8 @@ func TestHostRoutingSelectsOrigin(t *testing.T) {
 	}
 
 	// Route to Anthropic by Host header; provider metadata comes from the Anthropic extractor.
-	openaiHit, anthropicHit = false, false
+	openaiHit.Store(false)
+	anthropicHit.Store(false)
 	req2, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/messages", strings.NewReader(`{}`))
 	req2.Host = "anthropic.proxy.test"
 	resp2, err := http.DefaultClient.Do(req2)
@@ -82,8 +102,8 @@ func TestHostRoutingSelectsOrigin(t *testing.T) {
 		t.Fatalf("anthropic request: %v", err)
 	}
 	_ = resp2.Body.Close()
-	if openaiHit || !anthropicHit {
-		t.Fatalf("host routing wrong on 2nd: openaiHit=%v anthropicHit=%v", openaiHit, anthropicHit)
+	if openaiHit.Load() || !anthropicHit.Load() {
+		t.Fatalf("host routing wrong on 2nd: openaiHit=%v anthropicHit=%v", openaiHit.Load(), anthropicHit.Load())
 	}
 	sink.waitFor(t, 2)
 	if got := sink.last(); got.Model != "claude" || got.PromptTokens != 3 || got.CompletionTokens != 9 {
@@ -144,6 +164,76 @@ func TestPathRoutingStripsPrefix(t *testing.T) {
 	_ = resp.Body.Close()
 	if gotPath != "/v1/chat/completions" {
 		t.Errorf("upstream path = %q, want /v1/chat/completions (prefix stripped)", gotPath)
+	}
+}
+
+// TestPathRoutingPreservesEncodedSegment verifies that stripping the routing prefix keeps a
+// percent-encoded path segment escaped byte-for-byte, so the upstream receives /v1/foo%2Fbar (not
+// the re-encoded /v1/foo/bar). This is the byte-for-byte forwarding invariant on the path-mode hot
+// path, matching host mode and single-origin.
+func TestPathRoutingPreservesEncodedSegment(t *testing.T) {
+	var gotEscaped, gotDecoded string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		gotDecoded = r.URL.Path
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		TenantHeader: "X-Tenant-Key",
+		RouteMode:    config.RouteModePath,
+		Routes:       []config.Route{{Match: "/openai", Upstream: mustURL(t, upstream.URL), Provider: config.ProviderOpenAI}},
+	}
+	front := httptest.NewServer(New(cfg))
+	defer front.Close()
+
+	// Build the request URL with the encoded segment preserved (http.NewRequest would otherwise not
+	// re-encode, but set both Path and RawPath explicitly to be certain the escaped form travels).
+	u := mustURL(t, front.URL)
+	u.Path = "/openai/v1/foo/bar"
+	u.RawPath = "/openai/v1/foo%2Fbar"
+	resp, err := http.Post(u.String(), "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if gotEscaped != "/v1/foo%2Fbar" {
+		t.Errorf("upstream escaped path = %q, want /v1/foo%%2Fbar (encoded segment preserved)", gotEscaped)
+	}
+	if gotDecoded != "/v1/foo/bar" {
+		t.Errorf("upstream decoded path = %q, want /v1/foo/bar", gotDecoded)
+	}
+}
+
+// TestPathRoutingNoMatchReturns404WithPathMessage confirms the 404 body names the path-prefix match
+// mode rather than always claiming "no route for host".
+func TestPathRoutingNoMatchReturns404WithPathMessage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be reached for an unmatched path")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		TenantHeader: "X-Tenant-Key",
+		RouteMode:    config.RouteModePath,
+		Routes:       []config.Route{{Match: "/openai", Upstream: mustURL(t, upstream.URL), Provider: config.ProviderOpenAI}},
+	}
+	front := httptest.NewServer(New(cfg))
+	defer front.Close()
+
+	resp, err := http.Get(front.URL + "/unknown/v1/models")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "no route for path") {
+		t.Errorf("404 body = %q, want it to mention \"no route for path\"", string(body))
 	}
 }
 

@@ -65,10 +65,10 @@ func TestRefreshColdStartHitAndMiss(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 
-	if id, ok := c.Resolve(acme); !ok || id != "uuid-acme" {
+	if id, _, ok := c.Resolve(acme); !ok || id != "uuid-acme" {
 		t.Errorf("hit: got (%q,%v), want (uuid-acme,true)", id, ok)
 	}
-	if _, ok := c.Resolve(hashOf("tally_sk_live_unknown")); ok {
+	if _, _, ok := c.Resolve(hashOf("tally_sk_live_unknown")); ok {
 		t.Error("miss: unknown key should not resolve")
 	}
 	if feed.lastAuth != "Bearer svc-tok" {
@@ -100,7 +100,7 @@ func TestRefreshAppliesDeltaAndRevocation(t *testing.T) {
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	if _, ok := c.Resolve(acme); !ok {
+	if _, _, ok := c.Resolve(acme); !ok {
 		t.Fatal("acme should resolve after first refresh")
 	}
 
@@ -108,10 +108,10 @@ func TestRefreshAppliesDeltaAndRevocation(t *testing.T) {
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatalf("second refresh: %v", err)
 	}
-	if _, ok := c.Resolve(acme); ok {
+	if _, _, ok := c.Resolve(acme); ok {
 		t.Error("revoked key acme should be dropped from the cache")
 	}
-	if id, ok := c.Resolve(globex); !ok || id != "uuid-globex" {
+	if id, _, ok := c.Resolve(globex); !ok || id != "uuid-globex" {
 		t.Errorf("globex: got (%q,%v), want (uuid-globex,true)", id, ok)
 	}
 	if c.Len() != 1 {
@@ -149,8 +149,85 @@ func TestRefreshErrorKeepsLastGoodMap(t *testing.T) {
 	if err := c.Refresh(context.Background()); err == nil {
 		t.Error("expected error on failing feed")
 	}
-	if _, ok := c.Resolve(acme); !ok {
+	if _, _, ok := c.Resolve(acme); !ok {
 		t.Error("cache must keep the last good map after a failed refresh")
+	}
+}
+
+// TestResolveReturnsScope confirms Resolve surfaces the key scope so the proxy can apply the ingest
+// scope gate, and CanWrite matches the gateway's write/admin set.
+func TestResolveReturnsScope(t *testing.T) {
+	writeKey := hashOf("tally_sk_live_write")
+	readKey := hashOf("tally_sk_live_read")
+	feed := &fakeFeed{responses: map[string]feedResponse{
+		"": {
+			Changes: []change{
+				{KeyHash: writeKey, TenantID: "uuid-w", Scope: "write"},
+				{KeyHash: readKey, TenantID: "uuid-r", Scope: "read"},
+			},
+			Cursor: "c1",
+		},
+	}}
+	srv := httptest.NewServer(feed)
+	defer srv.Close()
+
+	c := New(Options{URL: srv.URL, ServiceToken: "t", Interval: time.Minute})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, scope, ok := c.Resolve(writeKey); !ok || scope != "write" || !CanWrite(scope) {
+		t.Errorf("write key: got scope=%q ok=%v canWrite=%v, want write/true/true", scope, ok, CanWrite(scope))
+	}
+	if _, scope, ok := c.Resolve(readKey); !ok || scope != "read" || CanWrite(scope) {
+		t.Errorf("read key: got scope=%q ok=%v canWrite=%v, want read/true/false", scope, ok, CanWrite(scope))
+	}
+	if CanWrite("read") || !CanWrite("write") || !CanWrite("admin") || CanWrite("") {
+		t.Error("CanWrite must permit only write/admin, matching gateway WRITE_SCOPES")
+	}
+}
+
+// TestInitialSyncRetriesThenSucceeds confirms a transient boot-time feed error is retried within the
+// bounded initial sync, so the cache is warm before serving and does not reject all traffic.
+func TestInitialSyncRetriesThenSucceeds(t *testing.T) {
+	acme := hashOf("tally_sk_live_acme")
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n < 3 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(feedResponse{
+			Changes: []change{{KeyHash: acme, TenantID: "uuid-acme", Scope: "write"}},
+			Cursor:  "c1",
+		})
+	}))
+	defer srv.Close()
+
+	c := New(Options{URL: srv.URL, ServiceToken: "t", Interval: time.Minute})
+	if err := c.InitialSync(context.Background(), 5, time.Millisecond); err != nil {
+		t.Fatalf("InitialSync should have succeeded after transient failures: %v", err)
+	}
+	if _, _, ok := c.Resolve(acme); !ok {
+		t.Error("cache must be warm after InitialSync")
+	}
+}
+
+// TestInitialSyncReturnsErrorAfterExhaustion confirms InitialSync gives up (returning the error) when
+// every bounded attempt fails, so the caller can decide whether to fail closed.
+func TestInitialSyncReturnsErrorAfterExhaustion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(Options{URL: srv.URL, ServiceToken: "t", Interval: time.Minute})
+	if err := c.InitialSync(context.Background(), 3, time.Millisecond); err == nil {
+		t.Error("InitialSync should return an error when all attempts fail")
 	}
 }
 
@@ -169,12 +246,12 @@ func TestRunRefreshesUntilContextCancelled(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := c.Resolve(acme); ok {
+		if _, _, ok := c.Resolve(acme); ok {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, ok := c.Resolve(acme); !ok {
+	if _, _, ok := c.Resolve(acme); !ok {
 		t.Fatal("Run should have warmed the cache")
 	}
 	cancel()

@@ -28,19 +28,36 @@ type resolvedRoute struct {
 	stripPrefix string
 }
 
+// compiledRoute is a config.Route with per-route matching data computed once at construction so the
+// hot path stays cheap. In host mode host is the normalized (port-stripped) hostname to compare
+// against; recomputing it per candidate on every request would burn cycles in the p99 budget.
+type compiledRoute struct {
+	config.Route
+	host string
+}
+
 // router selects a resolvedRoute per request.
 type router struct {
 	mode     config.RouteMode
-	routes   []config.Route
+	routes   []compiledRoute
 	fallback resolvedRoute // single-origin target when routes is empty
 }
 
 // newRouter compiles the config route table. When cfg.Routes is empty the router serves only the
 // single-origin fallback, matching every request.
 func newRouter(cfg config.Config) *router {
+	compiled := make([]compiledRoute, len(cfg.Routes))
+	for i, rt := range cfg.Routes {
+		compiled[i] = compiledRoute{Route: rt}
+		// Precompute the normalized host once so resolve does not call hostname() per candidate route
+		// per request on the hot path.
+		if cfg.RouteMode == config.RouteModeHost {
+			compiled[i].host = hostname(rt.Match)
+		}
+	}
 	r := &router{
 		mode:   cfg.RouteMode,
-		routes: cfg.Routes,
+		routes: compiled,
 		fallback: resolvedRoute{
 			upstream: cfg.Upstream,
 			provider: cfg.Provider,
@@ -49,12 +66,9 @@ func newRouter(cfg config.Config) *router {
 	// Path mode matches by longest prefix, so order routes longest-match-first once at startup and
 	// keep the hot path a simple linear scan with no per-request sorting.
 	if r.mode == config.RouteModePath {
-		sorted := make([]config.Route, len(r.routes))
-		copy(sorted, r.routes)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			return len(sorted[i].Match) > len(sorted[j].Match)
+		sort.SliceStable(r.routes, func(i, j int) bool {
+			return len(r.routes[i].Match) > len(r.routes[j].Match)
 		})
-		r.routes = sorted
 	}
 	return r
 }
@@ -80,12 +94,31 @@ func (rt *router) resolve(r *http.Request) (resolvedRoute, bool) {
 	default: // host mode
 		host := hostname(r.Host)
 		for _, route := range rt.routes {
-			if strings.EqualFold(host, hostname(route.Match)) {
+			if strings.EqualFold(host, route.host) {
 				return resolvedRoute{upstream: route.Upstream, provider: route.Provider}, true
 			}
 		}
 	}
 	return resolvedRoute{}, false
+}
+
+// noRouteMessage is the 404 body for a request that matched no configured route. It names what the
+// router matched on (host vs path prefix) so the error is not misleading in path mode.
+func (rt *router) noRouteMessage() string {
+	if rt.mode == config.RouteModePath {
+		return `{"error":"no route for path"}` + "\n"
+	}
+	return `{"error":"no route for host"}` + "\n"
+}
+
+// ensureLeadingSlash guarantees a path (or escaped path) begins with a single slash after the
+// routing prefix is stripped, so the join onto the upstream origin cannot produce a scheme-relative
+// or bare path.
+func ensureLeadingSlash(p string) string {
+	if !strings.HasPrefix(p, "/") {
+		return "/" + p
+	}
+	return p
 }
 
 // hostname strips an optional :port from a Host header value so host-mode matching compares only

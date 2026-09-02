@@ -35,9 +35,11 @@ import (
 // TenantResolver maps the sha256 hash of a presented X-Tenant-Key to the canonical tenant UUID
 // (Initiative 2 sec 6.2). It is consulted once per request off a local in-memory map, never with a
 // gateway round-trip. ok is false for an unknown or revoked key, which the proxy fails closed on
-// when RequireTenant is set. *edgekeys.Cache satisfies this.
+// when RequireTenant is set. It also returns the key's scope (read/write/admin) so the proxy can
+// apply the same ingest scope gate the gateway does (gateway/auth.py, CTO-33): metering a call is a
+// write, so a read-only key must not be attributed. *edgekeys.Cache satisfies this.
 type TenantResolver interface {
-	Resolve(keyHash string) (tenantID string, ok bool)
+	Resolve(keyHash string) (tenantID string, scope string, ok bool)
 }
 
 // Proxy is an http.Handler that forwards to a configured upstream and emits telemetry copies.
@@ -125,13 +127,15 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 			// sees its own path (/v1/chat/completions), not the routing prefix. SetURL joins onto
 			// pr.Out, so strip pr.Out's path (a clone of the inbound path) before the join.
 			if rt.stripPrefix != "" {
-				stripped := strings.TrimPrefix(pr.Out.URL.Path, rt.stripPrefix)
-				if !strings.HasPrefix(stripped, "/") {
-					stripped = "/" + stripped
+				pr.Out.URL.Path = ensureLeadingSlash(strings.TrimPrefix(pr.Out.URL.Path, rt.stripPrefix))
+				// Trim the prefix from the escaped form too, and keep it, so a percent-encoded segment
+				// (e.g. /openai/v1/foo%2Fbar) forwards byte-for-byte instead of being re-encoded from the
+				// decoded Path. RawPath is only set by net/url when it differs from the default encoding
+				// of Path; when it is empty the plain Path has no escaped segments and SetURL's recompute
+				// is already byte-identical, so leave it empty. This matches host mode and single-origin.
+				if pr.Out.URL.RawPath != "" {
+					pr.Out.URL.RawPath = ensureLeadingSlash(strings.TrimPrefix(pr.Out.URL.RawPath, rt.stripPrefix))
 				}
-				pr.Out.URL.Path = stripped
-				// Drop the escaped form so SetURL recomputes it from the stripped Path.
-				pr.Out.URL.RawPath = ""
 			}
 			// SetURL joins the (possibly prefix-stripped) path/query onto the origin.
 			pr.SetURL(rt.upstream)
@@ -201,7 +205,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// nothing is a 404 rather than a forward to a wrong (or fallback) origin.
 	route, ok := p.router.resolve(r)
 	if !ok {
-		http.Error(w, `{"error":"no route for host"}`+"\n", http.StatusNotFound)
+		http.Error(w, p.router.noRouteMessage(), http.StatusNotFound)
 		return
 	}
 
@@ -216,13 +220,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// unknown or revoked key when RequireTenant is set, never forwarding an unauthenticated call.
 	var tenantID string
 	if p.resolver != nil && tenant != "" {
-		id, found := p.resolver.Resolve(edgekeys.HashKey(tenant))
-		if !found {
+		id, scope, found := p.resolver.Resolve(edgekeys.HashKey(tenant))
+		switch {
+		case !found:
 			if p.cfg.RequireTenant {
 				http.Error(w, `{"error":"unknown tenant key"}`+"\n", http.StatusForbidden)
 				return
 			}
-		} else {
+		case !edgekeys.CanWrite(scope):
+			// Known key, but its scope may not write ingest data. Metering a call through the proxy is
+			// a write, so a read-only key is rejected the same way the gateway rejects it (CTO-33). Fail
+			// closed only when RequireTenant is set; in open mode the call still forwards but carries no
+			// TenantId (an honest blank, never a fabricated tag for a key that may not be attributed).
+			if p.cfg.RequireTenant {
+				http.Error(w, `{"error":"tenant key lacks write scope"}`+"\n", http.StatusForbidden)
+				return
+			}
+		default:
 			tenantID = id
 		}
 	}

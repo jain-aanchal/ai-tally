@@ -100,17 +100,53 @@ func New(opts Options) *Cache {
 	}
 }
 
-// Resolve returns the tenant UUID for a key hash and whether it is present (and not revoked). A
-// revoked key is absent, so Resolve returns ("", false) and the proxy fails closed. This is the
-// only method on the request hot path; it takes a read lock and does an O(1) map lookup.
-func (c *Cache) Resolve(keyHash string) (string, bool) {
+// Resolve returns the tenant UUID and scope for a key hash and whether it is present (and not
+// revoked). A revoked key is absent, so Resolve returns ("", "", false) and the proxy fails closed.
+// The scope lets the caller apply the gateway's ingest scope gate (CTO-33). This is the only method
+// on the request hot path; it takes a read lock and does an O(1) map lookup.
+func (c *Cache) Resolve(keyHash string) (tenantID string, scope string, ok bool) {
 	c.mu.RLock()
-	e, ok := c.m[keyHash]
+	e, found := c.m[keyHash]
 	c.mu.RUnlock()
-	if !ok {
-		return "", false
+	if !found {
+		return "", "", false
 	}
-	return e.tenantID, true
+	return e.tenantID, e.scope, true
+}
+
+// writeScopes mirrors the gateway's WRITE_SCOPES (gateway/auth.py): the scopes permitted to write
+// ingest data. Kept identical so the proxy and gateway agree on who may write (CTO-33).
+var writeScopes = map[string]bool{"write": true, "admin": true}
+
+// CanWrite reports whether a key scope may write ingest data. Metering a call through the proxy is
+// ingest, so a read-only key authenticates but is not sufficient to be attributed.
+func CanWrite(scope string) bool { return writeScopes[scope] }
+
+// InitialSync performs the first feed sync before the proxy starts serving, retrying a bounded
+// number of times on a transient error. Without a warm cache a boot-time feed blip would leave the
+// map empty and, with RequireTenant set, the proxy fails closed on every request (403) for up to a
+// full refresh interval, and the "keep the last good map" guarantee cannot help because there is no
+// last-good map yet. attempts is clamped to at least 1; between tries it waits backoff (or returns
+// early if ctx is cancelled). Returns nil on the first success, else the last error.
+func (c *Cache) InitialSync(ctx context.Context, attempts int, backoff time.Duration) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = c.Refresh(ctx); err == nil {
+			return nil
+		}
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return err
 }
 
 // Run polls the feed every interval until ctx is cancelled. It refreshes once immediately so the

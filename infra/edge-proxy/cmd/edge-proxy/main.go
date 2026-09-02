@@ -80,6 +80,17 @@ func main() {
 			ServiceToken: cfg.ServiceToken,
 			Interval:     cfg.KeysRefreshInterval,
 		})
+		// Block on the first sync (bounded retry) before serving so a transient boot-time feed error
+		// does not leave the cache empty and reject all traffic. With RequireTenant set an empty cache
+		// fails every request closed, so a persistent failure is fatal rather than silently 403-ing
+		// everything; in open mode we log and proceed (Run keeps retrying), since an empty cache there
+		// only means requests carry no TenantId.
+		if err := cache.InitialSync(rootCtx, 5, 2*time.Second); err != nil {
+			if cfg.RequireTenant {
+				log.Fatalf("edge-proxy: edge key cache initial sync failed with RequireTenant set: %v", err)
+			}
+			log.Printf("edge-proxy: edge key cache initial sync failed, continuing in open mode: %v", err)
+		}
 		go cache.Run(rootCtx)
 		opts = append(opts, proxy.WithKeyResolver(cache))
 		log.Printf("edge-proxy: edge key cache <- %s (refresh=%s)", cfg.KeysURL, cfg.KeysRefreshInterval)

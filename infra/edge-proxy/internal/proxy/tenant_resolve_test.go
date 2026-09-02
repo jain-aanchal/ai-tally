@@ -111,6 +111,56 @@ func TestKeyResolveMissOpenWhenNotRequired(t *testing.T) {
 	}
 }
 
+// TestKeyResolveReadScopeFailsClosed: a known key whose scope cannot write ingest data (read) is
+// rejected with 403 when RequireTenant is set and never forwarded, matching the gateway's ingest
+// scope gate (CTO-33).
+func TestKeyResolveReadScopeFailsClosed(t *testing.T) {
+	var forwarded bool
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = true
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	resolver := scopeResolver{keyHash: edgekeys.HashKey("tally_sk_live_readonly"), tenant: "uuid-acme", scope: "read"}
+	front, _ := resolverProxy(t, true, resolver, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
+	req.Header.Set("X-Tenant-Key", "tally_sk_live_readonly")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for a read-only key", resp.StatusCode)
+	}
+	if forwarded {
+		t.Error("a read-only key must not be forwarded upstream (fail closed on scope)")
+	}
+}
+
+// TestKeyResolveReadScopeOpenCarriesNoTenantId: with RequireTenant false, a read-only key still
+// forwards but is not attributed (no TenantId), an honest blank rather than a tag for a key that may
+// not write.
+func TestKeyResolveReadScopeOpenCarriesNoTenantId(t *testing.T) {
+	resolver := scopeResolver{keyHash: edgekeys.HashKey("tally_sk_live_readonly"), tenant: "uuid-acme", scope: "read"}
+	front, sink := resolverProxy(t, false, resolver, echoUpstream())
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
+	req.Header.Set("X-Tenant-Key", "tally_sk_live_readonly")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (open when tenant not required)", resp.StatusCode)
+	}
+	sink.waitFor(t, 1)
+	if got := sink.last(); got.TenantId != "" {
+		t.Errorf("TenantId = %q, want empty for a read-only key", got.TenantId)
+	}
+}
+
 // TestByteForByteUnderRouting: routing and key resolution never touch the body. A 1 MiB payload is
 // echoed back exactly, proving the streaming/no-mutation invariants hold on the routed path.
 func TestByteForByteUnderRouting(t *testing.T) {
