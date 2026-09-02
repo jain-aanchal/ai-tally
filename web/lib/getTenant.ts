@@ -21,20 +21,24 @@
 // Server-only. Imported by Route Handlers and server components; Clerk is loaded lazily so this
 // module (and the dev path) never pulls Clerk into a context that has no keys, including the vitest
 // suite, which sets `TALLY_DEV_TENANT` so the short-circuit is taken.
+//
+// The `server-only` guard makes the boundary fail loudly at the source: a client module that reaches
+// this file (directly or transitively) breaks the build here instead of surfacing as an opaque Clerk
+// `server-only` error several imports away (CTO-259). Client-safe constants, types and pure helpers
+// that a client legitimately needs live in `tenantShared.ts` and are re-exported below for server
+// callers, so a client never has to import this module to get them.
+import "server-only";
+
+import { ORG_ADMIN_ROLE, type ResolvedTenant } from "./tenantShared";
+
+// Re-exported so server callers keep a single import site (`@/lib/getTenant`). Clients import these
+// from `@/lib/tenantShared` directly, never from here.
+export { ORG_ADMIN_ROLE, type ResolvedTenant };
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 /** Short TTL so switching orgs re-scopes within a minute without a per-request gateway round-trip. */
 const CACHE_TTL_MS = 60_000;
-
-export interface ResolvedTenant {
-  /** The canonical `tenants.id` UUID that scopes every read and write. */
-  tenantId: string;
-  /** The active Clerk org id, or null on the dev escape hatch. */
-  orgId: string | null;
-  /** The caller's Clerk role in the active org (`org:admin` / `org:member`), or null in dev. */
-  orgRole: string | null;
-}
 
 /** No active organization on the Clerk session. Callers redirect to select-or-create-org (§7). */
 export class NoActiveOrgError extends Error {
@@ -120,9 +124,6 @@ export async function getTenant(): Promise<ResolvedTenant> {
 export async function resolveTenantId(): Promise<string> {
   return (await getTenant()).tenantId;
 }
-
-/** Clerk's admin role in an org. Key and member writes require it (§9). */
-export const ORG_ADMIN_ROLE = "org:admin";
 
 /**
  * Whether a resolved tenant may perform admin-only control-plane writes (mint/rotate/revoke keys,

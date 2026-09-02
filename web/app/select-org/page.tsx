@@ -5,6 +5,11 @@
 // personal workspace, so both paths lead into the dashboard scoped to the chosen org.
 import { OrganizationList } from "@clerk/nextjs";
 
+// Clerk's OrganizationList needs a ClerkProvider and a publishableKey. Rendering per request keeps
+// this off the keyless build prerender (dev escape hatch / CI have no Clerk keys) and resolves Clerk
+// at request time on the product path (CTO-259). The dev middleware never routes here.
+export const dynamic = "force-dynamic";
+
 export default function SelectOrgPage() {
   return (
     <div className="flex min-h-[70vh] flex-col items-center justify-center gap-6">

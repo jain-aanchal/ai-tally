@@ -24,7 +24,7 @@ import { useState, useTransition } from "react";
 
 import { DataTable, type Column } from "@/components/DataTable";
 import { Money } from "@/components/HonestValue";
-import { type Budget, microToDollarInput, scopeLabel } from "@/lib/budgets";
+import { type Budget, microToDollarInput, scopeLabel } from "@/lib/budgetsShared";
 
 import { type BudgetFormValues, deleteBudgetAction, saveBudgetAction } from "./actions";
 

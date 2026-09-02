@@ -6,7 +6,15 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: { "@": resolve(__dirname, ".") },
+    alias: {
+      "@": resolve(__dirname, "."),
+      // `getTenant.ts` imports `server-only` (CTO-259), whose default export throws by design so a
+      // client bundle cannot pull in a server module. Vitest runs in Node, not the RSC/client
+      // bundler, and legitimately imports server modules under test (getTenant, route handlers), so
+      // point the marker at its empty build to make it a no-op here. This is exactly the shim Next's
+      // bundler applies via the `react-server` export condition.
+      "server-only": resolve(__dirname, "node_modules/server-only/empty.js"),
+    },
   },
   test: {
     environment: "jsdom",
