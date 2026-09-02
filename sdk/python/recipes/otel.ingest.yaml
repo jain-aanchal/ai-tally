@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5.3 (lever 2): a team already emitting gen_ai.* OTel spans points
+# its exporter at the gateway's OTLP endpoint; no ai-tally-specific code is needed.
+id: otel.ingest.gen_ai
+kind: otel
+title: "Point an existing OTLP exporter at the ai-tally gateway"
+detect:
+  imports: ["opentelemetry", "opentelemetry-sdk", "opentelemetry-exporter-otlp"]
+  call_patterns: ["OTLPSpanExporter(", "TracerProvider(", "gen_ai."]
+sdk_surface:
+  # No SDK call: this recipe emits config, so call / delegates_to are null and the
+  # resolve-the-call guard skips it (tests/test_recipes.py). It still validates
+  # against the schema like every other recipe.
+  call: null
+  delegates_to: null
+  required_args: []
+  layer: otel
+edit:
+  imports_to_add: []
+  template: |
+    # If the app already emits OpenTelemetry gen_ai.* spans, point the OTLP exporter
+    # at the ai-tally gateway instead of adding SDK calls. The gateway ingests OTLP
+    # traces at ingest_otlp_traces (infra/gateway/src/gateway/app.py).
+    export OTEL_EXPORTER_OTLP_ENDPOINT="{gateway_otlp_endpoint}"
+    export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer {tally_key}"
+  placement: config
+verify:
+  layer: otel
+  operation_name: ""
+notes: "The gateway buckets each span by gen_ai.operation.name into the same coverage layers (chat / tool / vector / embeddings), so an OTel-native app needs no record_* calls."

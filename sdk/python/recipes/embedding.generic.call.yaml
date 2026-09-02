@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: an embedding call not made through the patched client -> record_embedding_call.
+id: embedding.generic.call
+kind: embedding
+title: "Embedding call (unpatched path) -> tally.record_embedding_call"
+detect:
+  imports: ["openai", "cohere", "sentence_transformers", "voyageai"]
+  call_patterns: [".embeddings.create(", ".embed(", ".encode("]
+sdk_surface:
+  call: "tally.record_embedding_call"
+  delegates_to: "tally.client.TallyClient.record_embedding_call"
+  required_args: [provider, model, input_tokens]
+  layer: embedding
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After the embedding call returns. Use this only for embedding calls the
+    # patched openai / anthropic client does not already capture (CTO-260 auto-instrument).
+    tally.record_embedding_call(
+        provider={embedding_provider},
+        model={embedding_model},
+        input_tokens={input_tokens},
+    )
+  placement: after_call
+verify:
+  layer: embeddings
+  operation_name: "embeddings"
+notes: "Cost is estimated input-side only, under PriceType.EMBEDDING. Unknown (provider, model) keeps cost None/0 with a one-time WARN."

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 sections 5 and 6: Django account + feature middleware bound to the developer's answer.
+id: middleware.django.account
+kind: middleware
+title: "Django middleware class -> with_account / start_trace"
+detect:
+  imports: ["django"]
+  call_patterns: ["MIDDLEWARE", "get_response", "django.urls"]
+  web_framework: django
+sdk_surface:
+  call: "tally.with_account"
+  delegates_to: "tally.context.with_account"
+  required_args: [account_id]
+  layer: account
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # Add "myapp.tally_mw.TallyAccountMiddleware" to settings.MIDDLEWARE.
+    # {account_source} is the header / resolver you confirmed (section 6).
+    class TallyAccountMiddleware:
+        def __init__(self, get_response):
+            self.get_response = get_response
+
+        def __call__(self, request):
+            account_id = {account_source}
+            with tally.start_trace(feature_tag={feature_tag}):
+                with tally.with_account(account_id):
+                    return self.get_response(request)
+  placement: wrap_handler
+verify:
+  layer: account
+  operation_name: ""
+notes: "account attribution lights up when AccountIdHash != '' for the tenant (section 7)."

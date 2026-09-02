@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 sections 5 and 6: FastAPI account + feature middleware bound to the developer's answer.
+id: middleware.fastapi.account
+kind: middleware
+title: "FastAPI request middleware -> with_account / start_trace"
+detect:
+  imports: ["fastapi"]
+  call_patterns: ["FastAPI(", "@app.get(", "@app.post(", "APIRouter("]
+  web_framework: fastapi
+sdk_surface:
+  # The account floor (section 6): with_account is the pinned symbol; start_trace
+  # adds the feature dimension in the same scope.
+  call: "tally.with_account"
+  delegates_to: "tally.context.with_account"
+  required_args: [account_id]
+  layer: account
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # Resolve the customer once per request and scope every span to it.
+    # {account_source} is the header / resolver you confirmed (section 6): the agent
+    # never guesses it. The raw id is HMAC'd in-process and never travels raw.
+    @app.middleware("http")
+    async def tally_account_middleware(request, call_next):
+        account_id = {account_source}
+        with tally.start_trace(feature_tag={feature_tag}):
+            with tally.with_account(account_id):
+                return await call_next(request)
+  placement: wrap_handler
+verify:
+  layer: account
+  operation_name: ""
+notes: "account attribution lights up when AccountIdHash != '' for the tenant (section 7). If the developer cannot answer the account question, this recipe is not wired and the account layer stays UNATTRIBUTED, reported as still dark."

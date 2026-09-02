@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: pgvector similarity query -> record_vector_call.
+id: vector.pgvector.query
+kind: vector
+title: "pgvector ORDER BY embedding <-> query -> tally.record_vector_call"
+detect:
+  # pgvector rides on the Postgres driver; the operator in the SQL is the real signal.
+  imports: ["pgvector", "psycopg", "psycopg2", "sqlalchemy"]
+  call_patterns: ["<->", "<=>", "<#>", "l2_distance(", "cosine_distance("]
+sdk_surface:
+  call: "tally.record_vector_call"
+  delegates_to: "tally.client.TallyClient.record_vector_call"
+  required_args: [provider, index, operation]
+  layer: vector
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After executing the pgvector similarity query. The table (or index) name maps to index.
+    tally.record_vector_call(
+        provider="pgvector",
+        index={table_name},
+        operation="query",
+        record_count={row_count},
+    )
+  placement: after_call
+verify:
+  layer: vector
+  operation_name: "vector"
+notes: "pgvector has no per-call vendor price; cost resolves to 0 with a one-time WARN unless the tenant seeds a (pgvector, query) rate. The layer still lights up in coverage."

@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-tally.dev/schemas/onboarding-recipe.json",
+  "title": "ai-tally onboarding instrumentation recipe",
+  "description": "CTO-261 section 5.2. One machine-readable recipe per framework / provider. The recipe catalog is the reliability mechanism: the onboarding agent retrieves and adapts a known-good recipe rather than hand-writing the SDK API. Every recipe with an sdk_surface.call is additionally checked by tests/test_recipes.py, which resolves the emitted call against the real SDK surface.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "title", "detect", "sdk_surface", "edit", "verify"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable dotted-namespace id, e.g. vector.pinecone.query.",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9_]+)+$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["vector", "tool", "embedding", "llm", "middleware", "otel"]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "detect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the agent knows this recipe applies (section 3 step 1).",
+      "properties": {
+        "imports": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Import names or dependency-manifest tokens that signal this component."
+        },
+        "call_patterns": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Call-site substrings that mark a candidate edit point."
+        },
+        "web_framework": {
+          "type": "string",
+          "description": "For middleware recipes: the web framework this middleware targets."
+        }
+      }
+    },
+    "sdk_surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pins the recipe to a real SDK symbol. Recipes emit the module-level convenience form; delegates_to records the instance method it wraps (section 5.2, 5.3).",
+      "required": ["layer"],
+      "properties": {
+        "call": {
+          "type": ["string", "null"],
+          "description": "The module-level convenience form the edit.template emits, e.g. tally.record_vector_call. Null only for the otel-ingest recipe, which emits config, not an SDK call."
+        },
+        "delegates_to": {
+          "type": ["string", "null"],
+          "description": "Fully-qualified instance method the module-level convenience wraps, e.g. tally.client.TallyClient.record_vector_call."
+        },
+        "required_args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Arguments the emitted call must carry. Validated to be real parameters of delegates_to."
+        },
+        "layer": {
+          "type": "string",
+          "enum": ["vector", "tool", "embedding", "llm", "account", "otel"],
+          "description": "Gateway cost-layer / coverage bucket this recipe lands in."
+        }
+      }
+    },
+    "edit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imports_to_add", "template", "placement"],
+      "properties": {
+        "imports_to_add": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "template": {
+          "type": "string",
+          "description": "The adaptable code template. Named holes are {snake_case} and are filled from the concrete call site by the agent.",
+          "minLength": 1
+        },
+        "placement": {
+          "type": "string",
+          "enum": ["after_call", "before_call", "replace_call", "wrap_handler", "startup", "config"]
+        }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer"],
+      "description": "Names the coverage layer that must light up (section 7).",
+      "properties": {
+        "layer": {
+          "type": "string",
+          "enum": ["vector", "tool", "embeddings", "llm", "account", "otel"]
+        },
+        "operation_name": {
+          "type": "string",
+          "description": "Value of the GenAiOperation column the gateway buckets on (tool, vector, embeddings, chat)."
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

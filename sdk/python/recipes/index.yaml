@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5.1: the recipe catalog index. Single source of truth all three
+# delivery forms read (dashboard Q&A, MCP server, hosted PR bot). Each entry names
+# a recipe file in this directory; the file is validated against recipes/schema.json
+# and, where it emits an SDK call, against the real SDK surface (tests/test_recipes.py).
+version: 1
+recipes:
+  - id: middleware.fastapi.account
+    file: middleware.fastapi.account.yaml
+    kind: middleware
+  - id: middleware.flask.account
+    file: middleware.flask.account.yaml
+    kind: middleware
+  - id: middleware.django.account
+    file: middleware.django.account.yaml
+    kind: middleware
+  - id: vector.pinecone.query
+    file: vector.pinecone.query.yaml
+    kind: vector
+  - id: vector.weaviate.query
+    file: vector.weaviate.query.yaml
+    kind: vector
+  - id: vector.qdrant.search
+    file: vector.qdrant.search.yaml
+    kind: vector
+  - id: vector.pgvector.query
+    file: vector.pgvector.query.yaml
+    kind: vector
+  - id: tool.generic.call
+    file: tool.generic.call.yaml
+    kind: tool
+  - id: embedding.generic.call
+    file: embedding.generic.call.yaml
+    kind: embedding
+  - id: otel.ingest.gen_ai
+    file: otel.ingest.yaml
+    kind: otel
