@@ -358,6 +358,38 @@ the original result through. A bug in extraction, pricing, or transport can neve
 change the value the caller receives or raise into their code. This is the SDK's
 non-negotiable invariant.
 
+### 4.6 Coverage: what is automatic, what needs app code
+
+The one-line connect is a ramp, not a switch. State the boundary so the "one step"
+is not oversold.
+
+Automatic from the one-liner (proxy base-URL swap, or `tally.init`):
+
+- **LLM provider calls only.** Model, token counts, and cost for the patched
+  `openai` and `anthropic` clients (§4.1), or for calls that flow through the hosted
+  proxy (§6). Nothing else is captured by the base-URL swap or by `init` alone.
+
+Still requires a small amount of app-side code (or a connector):
+
+- **The other cost layers ai-tally meters.** Vector search (`record_vector_call`),
+  your own tool calls (`record_tool_call`), embeddings when not made through the
+  patched client (`record_embedding_call`), and the compute / egress layers. These
+  are explicit SDK records or server-side connectors; the LLM auto-instrumentation
+  does not see them.
+- **The attribution dimensions.** Cost per customer needs `with_account("acct_...")`
+  once at request start; cost per feature needs `start_trace(feature_tag=...)`;
+  per-agent needs the agent tag. Without them the LLM cost still lands, but in the
+  unattributed / untagged bucket.
+- **The value side.** Conversions and revenue events arrive through the CDP and
+  revenue connectors (other initiatives), not the SDK connect path.
+
+So the honest onboarding story: line one gives total LLM cost in minutes; a few
+one-line context calls unlock cost per customer and per feature; the full
+multi-layer cost-and-value picture needs the layer-specific records or connectors.
+The onboarding surface (§9) should reflect this ramp, for example by prompting for
+a feature tag or an account scope once LLM spend is flowing, rather than implying
+the base-URL swap captures everything.
+
 ## 5. SDK ingest transport
 
 `init` installs a background batching exporter as the client's `Exporter`
@@ -492,6 +524,40 @@ telemetry to `EDGE_PROXY_TELEMETRY_URL`, the resolved UUID is what lands in
 `otel_spans.TenantId`, so proxy traffic and SDK traffic for the same org share
 one `TenantId` and one Cost Explorer view. Add the resolved `TenantId` field to
 the emitted record (still metadata only; a UUID is not customer content).
+
+### 6.4 Per-provider base URL, path, and credential header
+
+The base-URL swap is not uniform across providers: the credential header and the
+request path differ, so each proxy route forwards a different credential untouched.
+The proxy strips only its own `X-Tenant-Key` (and the optional Tally control
+headers); it passes through whatever credential the provider expects.
+
+| Provider | Client base URL to set | Upstream + path | Credential header (passed through) |
+| --- | --- | --- | --- |
+| OpenAI | `OPENAI_BASE_URL` = `https://openai.proxy.ai-tally.com/v1` | `https://api.openai.com`, `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings` | `Authorization: Bearer sk-...` |
+| Anthropic | `ANTHROPIC_BASE_URL` = `https://anthropic.proxy.ai-tally.com` | `https://api.anthropic.com`, `/v1/messages` | `x-api-key: sk-ant-...` plus `anthropic-version` |
+| Gemini (recommended) | `OPENAI_BASE_URL` = `https://gemini.proxy.ai-tally.com/v1beta/openai` | `https://generativelanguage.googleapis.com/v1beta/openai/` (OpenAI-compatible) | `Authorization: Bearer <gemini key>` |
+| Gemini (native, fast-follow) | Gemini SDK base URL | `https://generativelanguage.googleapis.com`, `.../models/*:generateContent` | key in query (`?key=`) or `x-goog-api-key` |
+
+Notes:
+
+- **Anthropic uses `x-api-key`, not `Authorization`.** The proxy today forwards
+  `Authorization` and strips `X-Tenant-Key` (`infra/edge-proxy/README.md`); the
+  Anthropic route must forward `x-api-key` and `anthropic-version` untouched. This
+  is a concrete proxy change, not just config. The route's `provider` selects the
+  existing `ProviderAnthropic` extractor (§6.1).
+- **Gemini: prefer the OpenAI-compatible endpoint.** Google exposes an OpenAI-shaped
+  endpoint at `https://generativelanguage.googleapis.com/v1beta/openai/` that takes
+  `Authorization: Bearer <gemini key>` and OpenAI-style requests. Pointed as the
+  upstream on an OpenAI-shaped route, Gemini rides the existing OpenAI extractor and
+  the existing `openai`-client SDK instrumentation with no new parser and no new SDK
+  instrumentor. This is the recommended path.
+- **Native Gemini is the fast-follow.** The native API puts the key in the query
+  string (awkward for a metering proxy and at odds with keeping credentials out of
+  URLs) and uses `:generateContent` with a different response shape. `ProviderGemini`
+  extraction already exists in the proxy, but wiring native routing, query-string
+  credential handling, and a `google-generativeai` SDK instrumentor is deferred
+  (Non-goals, §1; §12 Q6).
 
 ## 7. Account attribution without the pre-hash burden
 
@@ -662,9 +728,10 @@ Cross-checked against CLAUDE.md:
 3. **Streamed proxy pricing timeline.** Full proxy pricing for streamed calls
    depends on CTO-40 / CTO-41. Do we ship P1 proxy pricing for non-streaming only
    and mark streamed calls as token-unknown until those land?
-4. **Anthropic base-URL ergonomics.** The Anthropic SDK's base-URL override and
-   header conventions differ from OpenAI's; confirm the exact one-line env the
-   snippet generator emits for the Anthropic proxy route.
+4. **Anthropic base-URL ergonomics.** The base URL, path, and `x-api-key` /
+   `anthropic-version` credential handling are specified in §6.4; the remaining
+   detail is the exact one-line env the snippet generator emits (§9) for the
+   Anthropic route.
 5. **Async transport under serverless.** A daemon thread + `atexit` flush may not
    drain reliably in short-lived serverless invocations. Do we add an explicit
    `tally.flush()` requirement (or a sync-on-exit mode) for that audience?
