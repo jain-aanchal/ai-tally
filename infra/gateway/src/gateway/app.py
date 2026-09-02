@@ -263,6 +263,14 @@ async def lifespan(app: FastAPI):
     # Configure logging first so the startup INFO line below (and every other gateway logger.info)
     # is captured rather than dropped by uvicorn's WARNING-only root (CTO-218).
     _configure_logging(settings.log_level)
+    # Fail CLOSED at boot (Initiative 1 §6): if auth is required but no control-plane service token is
+    # configured, the /v1/tenant/* gate would have nothing to check and every control-plane endpoint
+    # would be unauthenticated. Refuse to start rather than come up wide open.
+    if settings.require_api_key and not settings.gateway_service_token:
+        raise RuntimeError(
+            "TALLY_REQUIRE_API_KEY is on but TALLY_GATEWAY_SERVICE_TOKEN is empty: "
+            "the control-plane service-token gate cannot be enforced. Refusing to start."
+        )
     app.state.settings = settings
     app.state.store = ClickHouseStore(settings)
     app.state.auth = ApiKeyAuth(settings)
@@ -929,15 +937,23 @@ def _require_service_token(authorization: str | None) -> None:
     server-only shared secret and passes the resolved tenant in ``x-tenant-id``. This gate verifies
     the bearer token equals that secret and rejects with 401 otherwise.
 
-    Gated on the dev escape hatch (§10): the check is ACTIVE only when ``require_api_key`` is on AND a
-    token is configured. With auth off (the ``make up`` / CI default) it is a no-op, so local dev is
-    unaffected. A production deployment sets both, and unauthenticated control-plane calls are
-    rejected.
+    Gated on the dev escape hatch (§10): with auth off (the ``make up`` / CI default) the gate is a
+    no-op, so local dev is unaffected. When auth is ON the gate is ALWAYS enforced: if no service
+    token is configured the request is REFUSED (fail closed), never allowed through unauthenticated.
+    Boot also refuses to start in that misconfiguration (see ``lifespan``), so this request-time
+    branch is a defence in depth. A production deployment sets both, and unauthenticated
+    control-plane calls are rejected.
     """
     settings = app.state.settings
     token = settings.gateway_service_token
-    if not settings.require_api_key or not token:
+    if not settings.require_api_key:
         return
+    if not token:
+        # Fail CLOSED: auth is required but no service token is configured, so we cannot authenticate
+        # the web server. Refuse rather than leave every /v1/tenant/* endpoint open (Initiative 1 §6).
+        raise HTTPException(
+            status_code=503, detail="control-plane service token not configured"
+        )
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing control-plane service token")
     presented = authorization.split(" ", 1)[1].strip()

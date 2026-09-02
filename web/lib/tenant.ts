@@ -11,7 +11,9 @@ import { resolveTenantId } from "./getTenant";
 // config — we never read Postgres directly from the dashboard. Failures fall back to ["llm"] so
 // demos and CI (where the gateway may be unreachable) keep working and the banner stays quiet.
 //
-// Tenant scoping mirrors web/lib/clickhouse.ts: TALLY_TENANT_ID || "local-dev".
+// Tenant scoping mirrors web/lib/clickhouse.ts: the active tenant is resolved per call via
+// resolveTenantId() (the Clerk org, or the TALLY_DEV_TENANT escape hatch), never a module-level
+// constant.
 import { LAYERS, type Layer } from "./cost";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
