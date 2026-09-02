@@ -15,6 +15,57 @@ uv run pytest
 Zero runtime dependencies today (the schema + safety + sampling + guardrail primitives are
 pure-Python). OTel/OpenLLMetry integration lands in later tickets.
 
+## One-line connect (CTO-260)
+
+The fastest path. `tally.init(key)` needs no `tenant_id` (the ingest key is tenant-bound at the
+gateway), auto-instruments the official `openai` and `anthropic` clients, boots the per-tenant
+HMAC key off-thread, and installs a background batching transport to `/v1/batches`.
+
+```python
+import tally
+
+tally.init("tally_sk_live_...")   # falls back to TALLY_KEY / TALLY_ENDPOINT env
+
+# From here, unmodified provider calls are metered automatically - no record_* calls:
+client.chat.completions.create(model="gpt-4o-mini", messages=[...])   # openai
+client.messages.create(model="claude-sonnet-4-5", messages=[...])     # anthropic
+```
+
+`init` is idempotent, never blocks the calling thread, and never raises: a bad key, an unreachable
+gateway, or a missing provider library degrades to unattributed or disabled instrumentation with a
+one-time warning. Sync, async (`AsyncOpenAI` / `AsyncAnthropic`), and streaming are all covered.
+
+- **Streaming tokens.** OpenAI reports usage only when `stream_options={"include_usage": True}` is
+  set. By default a stream without it emits a span with **null** token counts (honest blank, never
+  a fabricated zero). Pass `tally.init(..., instrument_stream_usage=True)` to have the OpenAI
+  wrapper add `include_usage` when the caller did not, so streamed calls price fully.
+- **Accounts.** Set the customer once with `with_account("acct_...")`; every auto-instrumented span
+  in the scope carries the HMAC'd account hash, computed in-process under the bootstrapped tenant
+  key. Until the bootstrap completes (or if it fails), accounts land unattributed - never a raw id.
+- **What is automatic vs. app-side.** The one-liner captures LLM provider calls only. Vector search
+  (`tally.record_vector_call`), your own tool calls (`tally.record_tool_call`), and embeddings not
+  made through the patched client (`tally.record_embedding_call`) remain explicit one-liners that
+  delegate to the process-global client. These are safe no-ops before `init`.
+- **Lifecycle.** `tally.flush()` drains buffered spans (also drained at `atexit`); `tally.uninstrument()`
+  reverses all patches and tears the client down (used by tests).
+
+### Hashing an account for the proxy path
+
+The zero-code proxy holds no HMAC key. To send a pre-hashed `X-Tally-Account-Id-Hash`, compute it
+on your own machine with the same key the SDK uses:
+
+```python
+from tally import hash_account
+h = hash_account("acct_northwind")          # uses the bootstrapped tenant key
+```
+
+```bash
+python -m tally.hash_account acct_northwind  # CLI form, reads TALLY_KEY / TALLY_ENDPOINT
+```
+
+> The gateway endpoint `GET /v1/tenant/hmac-key` that the bootstrap fetches is delivered in a
+> separate PR; the SDK codes against its contract (spec §3.2).
+
 ## Tagging spend with a customer account
 
 An `account_id` says which of *your* customers a call belongs to. It is what turns a cost total

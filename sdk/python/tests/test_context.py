@@ -5,10 +5,46 @@ import threading
 from tally.context import (
     current_context,
     note_context_drop,
+    set_default_feature_tag,
     start_trace,
     with_trace_context,
 )
 from tally.safety import SelfObservability
+
+
+def test_process_default_feature_tag_reaches_worker_threads():
+    # set_default_feature_tag sets a contextvar in the calling thread; a gunicorn/Flask worker
+    # thread starts fresh and never copies it, so its spans used to carry feature_tag=None despite
+    # the docstring (CTO-260 §3, finding #4). The module-global default must reach any thread.
+    set_default_feature_tag("research")
+    try:
+        assert current_context().feature_tag == "research"  # calling thread
+        seen: dict[str, str | None] = {}
+
+        def _worker() -> None:
+            seen["tag"] = current_context().feature_tag
+
+        th = threading.Thread(target=_worker)
+        th.start()
+        th.join()
+        assert seen["tag"] == "research"  # a fresh worker thread inherits the process default
+
+        # An explicit trace context still overrides the process default within its scope.
+        with with_trace_context(trace_id="t1", feature_tag="checkout"):
+            assert current_context().feature_tag == "checkout"
+    finally:
+        set_default_feature_tag(None)  # do not leak the default into other tests
+
+
+def test_explicit_none_feature_tag_beats_process_default():
+    # An explicit start_trace with no tag reads back as None, not the process default, because the
+    # contextvar was set (to None) in this context; the default only fills a genuinely-unset slot.
+    set_default_feature_tag("research")
+    try:
+        with start_trace():
+            assert current_context().feature_tag is None
+    finally:
+        set_default_feature_tag(None)
 
 
 def test_inactive_by_default():
