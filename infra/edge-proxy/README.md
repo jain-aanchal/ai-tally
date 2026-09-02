@@ -56,8 +56,66 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_BROKER_TTL` | `5m` | how long a minted credential is reused before re-minting |
 | `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
 | `EDGE_PROXY_TELEMETRY_URL` | — | collector endpoint for metadata-only `TraceRecord`s; empty disables shipping |
+| `EDGE_PROXY_ROUTES` | — | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
+| `EDGE_PROXY_ROUTE_MODE` | `host` | `host` (match on hostname, hosted default) or `path` (match+strip a leading prefix) |
+| `EDGE_PROXY_KEYS_URL` | — | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
+| `EDGE_PROXY_SERVICE_TOKEN` | — | server-only bearer token the proxy sends to `EDGE_PROXY_KEYS_URL` (required when it is set) |
+| `EDGE_PROXY_KEYS_REFRESH_INTERVAL` | `45s` | how often the key cache polls the feed; also the proxy-path revocation SLA |
 
 `/healthz` is the one path the proxy owns (liveness); everything else is forwarded.
+
+## Hosted multi-provider routing (Initiative 2)
+
+One hosted deployment can serve several providers behind distinct hostnames (or path
+prefixes), resolve the real `X-Tenant-Key` to a tenant UUID with no per-request gateway call,
+and tag telemetry with that canonical UUID. This is layered on top of the CTO-39 core: when
+`EDGE_PROXY_ROUTES` and `EDGE_PROXY_KEYS_URL` are unset the proxy behaves exactly as before
+(single origin, no resolution), so self-host and the existing tests are unaffected.
+
+### Per-request routing (sec 6.1 / 6.4)
+
+`EDGE_PROXY_ROUTES` maps a match key to `{upstream, provider}`. Two wire forms:
+
+```bash
+# comma list: match=upstream[:provider]
+EDGE_PROXY_ROUTES="openai.proxy.ai-tally.com=https://api.openai.com:openai,\
+anthropic.proxy.ai-tally.com=https://api.anthropic.com:anthropic"
+
+# or JSON
+EDGE_PROXY_ROUTES='{"anthropic.proxy.ai-tally.com":{"upstream":"https://api.anthropic.com","provider":"anthropic"}}'
+```
+
+In the comma form the trailing token after the last colon is the provider only when it names a
+known one (`openai` / `anthropic` / `gemini`); otherwise the whole value is the upstream, so an
+origin with a port (`https://host:8443`) is not misread. `host` mode matches on the request
+hostname; `path` mode matches a leading prefix (`/openai/...`) and strips it before forwarding.
+Routing is a pre-forward origin selection only: bodies, headers, and the provider credential
+pass through byte-for-byte, `FlushInterval = -1` streaming is unchanged, and the route's
+`provider` picks the existing `extractMeta` branch, so there is no new parser. A configured
+route table that matches nothing returns `404` rather than forwarding to a wrong origin.
+
+**Per-provider credential (sec 6.4).** Each provider expects a different credential header, and
+the proxy forwards whatever the client sent untouched, stripping only `X-Tenant-Key` and the
+Tally control headers. The Anthropic route therefore forwards `x-api-key` and `anthropic-version`
+(not `Authorization`); the OpenAI/Gemini-OpenAI routes forward `Authorization: Bearer ...`.
+
+### Fast key-to-tenant resolution (sec 6.2 / 6.3)
+
+With `EDGE_PROXY_KEYS_URL` set, the proxy keeps an in-memory map of `sha256(key) ->
+{tenant_uuid, scope}`, built from the gateway's read-only delta feed
+`GET /v1/edge/keys?since={cursor}` (authenticated with `EDGE_PROXY_SERVICE_TOKEN`) and refreshed
+every `EDGE_PROXY_KEYS_REFRESH_INTERVAL`. It computes the same SHA-256 transform the gateway uses
+(`gateway/auth.py hash_key`) on the presented `X-Tenant-Key` and looks the tenant up locally, so
+no Postgres or gateway call sits in the request path. The feed ships only creations and
+revocations since the persisted cursor; a revoked key arrives with `revoked_at` set and is
+dropped, so revocation propagates within one refresh interval (the documented proxy-path
+revocation SLA). The resolved UUID is stamped on `TraceRecord.TenantId` (a UUID is metadata, not
+content), so proxy and SDK traffic for one org share a single `TenantId` and one Cost Explorer
+view. An unknown or revoked key is rejected with `403` when `EDGE_PROXY_REQUIRE_TENANT=true`,
+never forwarded unauthenticated; a brand-new key can miss the cache until the next refresh, which
+is honest and bounded, not a fabricated success. A transient feed error keeps the last good map:
+resolution never fails open. `GET /v1/edge/keys` is delivered by a separate gateway PR; only the
+SHA-256 hash is ever sent over it, never a raw or reversible token.
 
 ## Account attribution (CTO-182)
 
