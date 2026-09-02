@@ -63,6 +63,17 @@ def new_trace_id() -> str:
     return uuid.uuid4().hex
 
 
+def set_default_feature_tag(feature_tag: str | None) -> None:
+    """Set a process default feature tag for the current context (CTO-260 §3).
+
+    ``tally.init(feature_tag=...)`` calls this so auto-instrumented spans carry a default tag when
+    the caller has not opened an explicit :func:`start_trace`. It sets the contextvar in the calling
+    thread's context, which asyncio tasks spawned from it then copy; an explicit ``start_trace`` /
+    ``with_trace_context`` still overrides it for its scope.
+    """
+    _feature_tag.set(feature_tag)
+
+
 def current_context() -> TraceContext:
     """Snapshot the active context (may be inactive)."""
     return TraceContext(
