@@ -13,7 +13,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { OrganizationSwitcher, UserButton } from "@clerk/nextjs";
+import { OrganizationSwitcher, UserButton, useOrganization } from "@clerk/nextjs";
 
 interface NavItem {
   label: string;
@@ -76,15 +76,38 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+// The active-org name that reads from Clerk. Rendered ONLY on the product path (under
+// ClerkProvider), so `useOrganization` never runs in the dev escape hatch where there is no provider
+// (Initiative 1, §7). A signed-in user with no active org is redirected to select/create-org before
+// the shell mounts, so `organization` is present here; while Clerk hydrates it can still be briefly
+// null, so we render a neutral placeholder rather than a blank to keep the header stable (CTO-225).
+function OrgName() {
+  const { organization, isLoaded } = useOrganization();
+  const name = organization?.name;
+  return (
+    <div
+      className="truncate text-sm font-medium text-fg"
+      title={name ?? undefined}
+      aria-live="polite"
+    >
+      {isLoaded ? (name ?? "No organization") : "…"}
+    </div>
+  );
+}
+
 export function Shell({
   children,
   // Clerk org controls (switcher + user button) render only on the product path. In the dev escape
   // hatch (TALLY_DEV_TENANT set) there is no ClerkProvider, so mounting them would throw; the layout
   // passes false and the chrome simply omits them.
   showOrgControls = false,
+  // The pinned dev tenant (TALLY_DEV_TENANT) on the escape-hatch path, else null. Shown as a static
+  // label so the header names the active workspace even with Clerk absent (Initiative 1, §10).
+  devTenantLabel = null,
 }: {
   children: ReactNode;
   showOrgControls?: boolean;
+  devTenantLabel?: string | null;
 }) {
   const pathname = usePathname() ?? "/";
 
@@ -102,6 +125,29 @@ export function Shell({
           <span>
             ai-<span className="text-accent">tally</span>
           </span>
+        </div>
+
+        {/* Active-organization name so a logged-in user always knows which company they are viewing
+            (CTO-262). The ORGANIZATION caption labels the row: on the product path it is the Clerk
+            org name; on the dev escape hatch it is a static "Local dev" badge naming the pinned
+            tenant, so the header is never blank when TALLY_DEV_TENANT is set. */}
+        <div className="mx-3 mb-2 rounded-md border border-edge bg-ink px-3 py-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-fg/70">
+            Organization
+          </div>
+          {showOrgControls ? (
+            <OrgName />
+          ) : (
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-hidden />
+              <span className="truncate text-sm font-medium text-fg" title={devTenantLabel ?? undefined}>
+                {devTenantLabel ?? "Local dev"}
+              </span>
+              <span className="ml-auto shrink-0 rounded bg-edge px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+                Dev
+              </span>
+            </div>
+          )}
         </div>
 
         <nav className="app-scroll flex-1 space-y-4 overflow-y-auto px-3 pb-6" aria-label="Primary">
