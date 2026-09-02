@@ -108,10 +108,19 @@ function client(): ClickHouseClient {
   return _client;
 }
 
-/** Run `fn` against ClickHouse; return null on any failure so callers can fall back to mock. */
+/**
+ * Run `fn` against ClickHouse; return null on a ClickHouse failure so callers can fall back to mock.
+ *
+ * Tenant resolution runs OUTSIDE the mock-fallback try (Initiative 1 review). A NoActiveOrgError or
+ * a gateway 404/outage is a failure to identify WHO is asking, NOT "ClickHouse is unreachable", and
+ * must never be swallowed into mock demo data: doing so would render one party's demo numbers for a
+ * real, unresolved tenant. So a resolution error propagates to the route (an honest error state),
+ * and only a query error against a known tenant falls back to mock.
+ */
 export async function tryLive<T>(fn: (db: ClickHouseClient, tenant: string) => Promise<T>): Promise<T | null> {
+  const tenant = await resolveTenantId();
   try {
-    return await fn(client(), await resolveTenantId());
+    return await fn(client(), tenant);
   } catch (err) {
     console.warn("[clickhouse] live query failed, falling back to mock:", (err as Error).message);
     return null;

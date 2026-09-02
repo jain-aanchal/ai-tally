@@ -27,18 +27,26 @@ def resolve_tenant_uuid(cur: Any, tenant_id: str) -> str:
     A caller may address a tenant three ways: the ``tenants.id`` UUID (the canonical form), the
     tenant NAME (``local-dev``, the dev/dashboard spelling), or the Clerk organization id
     (``org_...``, Initiative 1). The UUID fast-path parses first so the common case never touches
-    Postgres to parse. The single lookup matches either ``name`` or ``clerk_org_id`` so a Clerk org
-    id resolves to the tenant provisioned for it. Raises :class:`TenantNotFoundError` when nothing
-    matches.
+    Postgres to parse.
+
+    The name and clerk_org_id lookups are DELIBERATELY separate and ordered, not a single
+    ``WHERE name = %s OR clerk_org_id = %s`` (Initiative 1 review). A combined OR can match two
+    different rows at once, so a tenant whose NAME happens to look like another tenant's Clerk org id
+    (``org_xxxx``) could resolve to the wrong tenant nondeterministically. Clerk org ids are the
+    machine identifier and are checked first; the human-facing name is the fallback. Raises
+    :class:`TenantNotFoundError` when nothing matches.
     """
     try:
         return str(uuid.UUID(tenant_id))
     except (ValueError, AttributeError, TypeError):
         pass
-    cur.execute(
-        "SELECT id FROM tenants WHERE name = %s OR clerk_org_id = %s",
-        (tenant_id, tenant_id),
-    )
+    # Exact Clerk org-id match first (the machine identifier), then the human name. Two ordered
+    # single-column lookups can never straddle two rows the way a combined OR can.
+    cur.execute("SELECT id FROM tenants WHERE clerk_org_id = %s", (tenant_id,))
+    row = cur.fetchone()
+    if row is not None:
+        return str(row[0])
+    cur.execute("SELECT id FROM tenants WHERE name = %s", (tenant_id,))
     row = cur.fetchone()
     if row is None:
         raise TenantNotFoundError(f"no tenant named '{tenant_id}'")
