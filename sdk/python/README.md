@@ -26,7 +26,7 @@ import tally
 
 tally.init("tally_sk_live_...")   # falls back to TALLY_KEY / TALLY_ENDPOINT env
 
-# From here, unmodified provider calls are metered automatically — no record_* calls:
+# From here, unmodified provider calls are metered automatically - no record_* calls:
 client.chat.completions.create(model="gpt-4o-mini", messages=[...])   # openai
 client.messages.create(model="claude-sonnet-4-5", messages=[...])     # anthropic
 ```
@@ -41,7 +41,7 @@ one-time warning. Sync, async (`AsyncOpenAI` / `AsyncAnthropic`), and streaming 
   wrapper add `include_usage` when the caller did not, so streamed calls price fully.
 - **Accounts.** Set the customer once with `with_account("acct_...")`; every auto-instrumented span
   in the scope carries the HMAC'd account hash, computed in-process under the bootstrapped tenant
-  key. Until the bootstrap completes (or if it fails), accounts land unattributed — never a raw id.
+  key. Until the bootstrap completes (or if it fails), accounts land unattributed - never a raw id.
 - **What is automatic vs. app-side.** The one-liner captures LLM provider calls only. Vector search
   (`tally.record_vector_call`), your own tool calls (`tally.record_tool_call`), and embeddings not
   made through the patched client (`tally.record_embedding_call`) remain explicit one-liners that

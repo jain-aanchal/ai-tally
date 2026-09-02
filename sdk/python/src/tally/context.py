@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Context propagation — trace_id + feature_tag that survive async boundaries.
+"""Context propagation - trace_id + feature_tag that survive async boundaries.
 
 The make-or-break piece (CTO-46): if context is lost across an ``await`` / thread / background
 task, attribution and agent trees break. We use :mod:`contextvars`, which propagate correctly
@@ -7,16 +7,16 @@ across ``asyncio`` tasks (each task copies the current context) and stay isolate
 
 Public surface:
 
-- :func:`start_trace` — begin a new trace context (generates a trace_id).
-- :func:`with_trace_context` — context manager to set/restore explicitly (the escape hatch for
+- :func:`start_trace` - begin a new trace context (generates a trace_id).
+- :func:`with_trace_context` - context manager to set/restore explicitly (the escape hatch for
   places where automatic propagation fails: Celery, Temporal, Lambda cold starts, etc.).
-- :func:`current_context` — read the active context.
+- :func:`current_context` - read the active context.
 - :func:`with_account` sets the tenant's own customer (``account_id``) for a block (CTO-181).
-- :func:`note_context_drop` — two modes (CTO-118):
+- :func:`note_context_drop` - two modes (CTO-118):
     (a) record that an expected trace context was missing (feeds
         ``SelfObservability.context_drop_count``); or
     (b) emit ``gen_ai.context.*`` span attributes describing how many messages /
-        tokens were trimmed to fit the model's context window. Counts only — never
+        tokens were trimmed to fit the model's context window. Counts only - never
         the dropped message text.
 
 The account dimension (CTO-181) rides here rather than on every call site. A web app knows which
@@ -36,9 +36,21 @@ from dataclasses import dataclass
 
 from tally.safety import SelfObservability
 
+#: Sentinel for "the feature-tag contextvar was never set in this context", distinct from an
+#: explicit ``None``. Lets a process default fill in for a thread that never ran ``init`` code while
+#: an explicit ``start_trace(feature_tag=None)`` still reads back as ``None`` (CTO-260 §3).
+_UNSET_FEATURE_TAG = "\x00__tally_unset__"
+
 _trace_id: ContextVar[str | None] = ContextVar("tally_trace_id", default=None)
-_feature_tag: ContextVar[str | None] = ContextVar("tally_feature_tag", default=None)
+_feature_tag: ContextVar[str | None] = ContextVar("tally_feature_tag", default=_UNSET_FEATURE_TAG)
 _session_id: ContextVar[str | None] = ContextVar("tally_session_id", default=None)
+
+# Process-wide default feature tag set by ``tally.init(feature_tag=...)``. A ContextVar set in
+# init's calling thread does not reach a gunicorn/Flask worker thread that started fresh, so the
+# spans it emits carried feature_tag=None despite the docstring (review finding). This module-global
+# is consulted at span build when the contextvar is unset, so the default reaches spans emitted from
+# any thread. The contextvar still wins wherever it is set (explicit trace context overrides).
+_process_default_feature_tag: str | None = None
 # Raw account id + optional label (CTO-181). Never emitted raw; see the module docstring.
 _account_id: ContextVar[str | None] = ContextVar("tally_account_id", default=None)
 _account_label: ContextVar[str | None] = ContextVar("tally_account_label", default=None)
@@ -67,18 +79,30 @@ def set_default_feature_tag(feature_tag: str | None) -> None:
     """Set a process default feature tag for the current context (CTO-260 §3).
 
     ``tally.init(feature_tag=...)`` calls this so auto-instrumented spans carry a default tag when
-    the caller has not opened an explicit :func:`start_trace`. It sets the contextvar in the calling
-    thread's context, which asyncio tasks spawned from it then copy; an explicit ``start_trace`` /
-    ``with_trace_context`` still overrides it for its scope.
+    the caller has not opened an explicit :func:`start_trace`. It records a module-global process
+    default (consulted at span build from any thread, including gunicorn/Flask workers that started
+    after ``init``) and also sets the contextvar in the calling thread so asyncio tasks spawned from
+    it copy it directly. An explicit ``start_trace`` / ``with_trace_context`` still overrides it for
+    its scope.
     """
+    global _process_default_feature_tag
+    _process_default_feature_tag = feature_tag
     _feature_tag.set(feature_tag)
+
+
+def _resolve_feature_tag() -> str | None:
+    """The contextvar when it was set in this context, else the process default (CTO-260 §3)."""
+    tag = _feature_tag.get()
+    if tag is _UNSET_FEATURE_TAG:
+        return _process_default_feature_tag
+    return tag
 
 
 def current_context() -> TraceContext:
     """Snapshot the active context (may be inactive)."""
     return TraceContext(
         _trace_id.get(),
-        _feature_tag.get(),
+        _resolve_feature_tag(),
         _session_id.get(),
         _account_id.get(),
         _account_label.get(),
@@ -98,7 +122,7 @@ def with_trace_context(
     """Set the trace context for the duration of the block, then restore prior values.
 
     This is both the normal entrypoint and the manual escape hatch when automatic propagation
-    can't carry context (e.g. across a process/queue boundary — re-establish it on the far side).
+    can't carry context (e.g. across a process/queue boundary - re-establish it on the far side).
 
     Args:
         trace_id: explicit id; if ``None`` and no active trace, a new one is generated.
@@ -204,20 +228,20 @@ def note_context_drop(
 
     Two related signals share this entrypoint (CTO-118):
 
-    1. **Trace-context drop** — no active ``trace_id`` where one was expected. The existing
+    1. **Trace-context drop** - no active ``trace_id`` where one was expected. The existing
        no-arg call path (``note_context_drop(obs, where="record_llm_call")``) keeps working
        and bumps :attr:`SelfObservability.context_drop_count`.
 
-    2. **Context-window drop** — caller trimmed messages before sending to the model to
+    2. **Context-window drop** - caller trimmed messages before sending to the model to
        fit the context window. Pass ``dropped_messages`` (count), ``dropped_tokens``
-       (total tokens of trimmed content), and ``window_used_pct`` (0..1 — how close the
+       (total tokens of trimmed content), and ``window_used_pct`` (0..1 - how close the
        request got to the window). These are promoted to three span attributes:
 
        - ``gen_ai.context.dropped_messages`` (int)
        - ``gen_ai.context.dropped_tokens`` (int)
        - ``gen_ai.context.window_used_pct`` (float)
 
-       Counts only — never the dropped message text. This is the contract.
+       Counts only - never the dropped message text. This is the contract.
 
     Args:
         obs: self-observability sink for the trace-drop counter.
@@ -233,7 +257,7 @@ def note_context_drop(
     """
     out = attrs if attrs is not None else {}
     if dropped_messages is None and dropped_tokens is None and window_used_pct is None:
-        # Legacy trace-context drop path — unchanged behaviour.
+        # Legacy trace-context drop path - unchanged behaviour.
         obs.context_drop_count += 1
         obs.last_errors.append(f"{where}: context drop (no active trace_id)")
         if len(obs.last_errors) > obs._max_errors:

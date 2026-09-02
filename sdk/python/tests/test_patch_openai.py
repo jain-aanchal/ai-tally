@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-260 §4 — patch_openai over fake OpenAI classes (sync/async/streaming, no network)."""
+"""CTO-260 §4 - patch_openai over fake OpenAI classes (sync/async/streaming, no network)."""
 
 from __future__ import annotations
 
@@ -88,6 +88,59 @@ class FakeAsyncCompletions:
 class FakeEmbeddings:
     def create(self, *, model, tokens=1000):
         return _EmbResp(model, _EmbUsage(tokens))
+
+
+# --- Responses API fakes (usage named input_tokens / output_tokens; terminal event nests it) ---
+@dataclass
+class _RespUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class _RespObj:
+    model: str
+    usage: _RespUsage
+
+
+@dataclass
+class _RespEvent:
+    response: _RespObj | None = None
+    model: str | None = None
+
+
+class FakeResponses:
+    def create(self, *, model, stream=False, input_tokens=100, output_tokens=50):
+        if stream:
+            terminal = _RespEvent(response=_RespObj(model, _RespUsage(input_tokens, output_tokens)))
+            return _OpenAIStream([_RespEvent(model=model), terminal])
+        return _RespObj(model, _RespUsage(input_tokens, output_tokens))
+
+
+class _OpenAIStream:
+    """Mimics an ``openai`` ``Stream``: iterable, a context manager, with ``.response``/``.close``.
+
+    This is the object ``create(stream=True)`` returns; the instrumentation must preserve it rather
+    than replace it with a bare generator (CTO-260 §4.3, review finding #6).
+    """
+
+    def __init__(self, chunks, response="HTTP-RESP"):
+        self._chunks = chunks
+        self.response = response
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self._chunks)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture(autouse=True)
@@ -217,3 +270,58 @@ def test_async_chat_and_stream():
     assert len(chunks) == 1  # no usage without include_usage
     # Two spans: one from the non-stream call, one from the exhausted stream.
     assert len(spans) == 2
+
+
+def test_responses_nonstream_emits_span():
+    spans: list[dict] = []
+    patch_openai(
+        on_span=spans.append, catalog=seed_catalog(), targets={"responses": FakeResponses}
+    )
+    FakeResponses().create(model="gpt-4o-mini", input_tokens=10, output_tokens=5)
+    assert len(spans) == 1
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 10
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 5
+
+
+def test_responses_stream_accumulates_usage():
+    # Before the fix responses.create(stream=True) was wrapped non-streaming and emitted null
+    # tokens with no cost. It must now accumulate usage from the stream (CTO-260 §4.2, finding #3).
+    spans: list[dict] = []
+    patch_openai(
+        on_span=spans.append, catalog=seed_catalog(), targets={"responses": FakeResponses}
+    )
+    stream = FakeResponses().create(
+        model="gpt-4o-mini", stream=True, input_tokens=1000, output_tokens=500
+    )
+    chunks = list(stream)
+    assert len(chunks) == 2  # events passed through untouched
+    assert len(spans) == 1
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 1000
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 500
+    assert spans[0][GenAI.COST_ESTIMATED_MICRO_USD] > 0
+
+
+def test_openai_stream_preserves_context_manager_and_attributes():
+    # The OpenAI streaming wrapper must preserve the provider Stream object: attribute delegation
+    # (.response), close(), and the with-statement protocol (CTO-260 §4.3, finding #6).
+    spans: list[dict] = []
+
+    class FakeStreamChat:
+        def create(self, *, model, stream=False, stream_options=None):
+            chunks = [_Chunk(model=model), _Chunk(model=model, usage=_U(100, 50))]
+            return _OpenAIStream(chunks)
+
+    patch_openai(
+        on_span=spans.append, catalog=seed_catalog(), targets={"chat": FakeStreamChat}
+    )
+    client = FakeStreamChat()
+    collected = []
+    with client.create(model="gpt-4o-mini", stream=True) as s:
+        assert s.response == "HTTP-RESP"  # attribute delegated to the real Stream
+        for chunk in s:
+            collected.append(chunk)
+    assert len(collected) == 2
+    assert s.closed is True  # __exit__ delegated to the real Stream.close()
+    assert len(spans) == 1  # span emitted exactly once
+    assert spans[0][GenAI.USAGE_INPUT_TOKENS] == 100
+    assert spans[0][GenAI.USAGE_OUTPUT_TOKENS] == 50

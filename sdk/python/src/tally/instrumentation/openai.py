@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""OpenAI instrumentors — Chat Completions (CTO-48), Responses, and Embeddings (CTO-260 §4.1/§4.2).
+"""OpenAI instrumentors - Chat Completions (CTO-48), Responses, and Embeddings (CTO-260 §4.1/§4.2).
 
 Every instrumentor is a pure function over a provider response object and works with both the SDK's
 object responses and plain dicts, so it can be tested with a fake client and no network. Nothing
-here reads message content or secrets — only ``usage`` / ``model`` metadata.
+here reads message content or secrets - only ``usage`` / ``model`` metadata.
 """
 
 from __future__ import annotations
@@ -102,6 +102,24 @@ class OpenAIResponsesInstrumentor:
         return Usage(
             input_tokens=input_tokens, output_tokens=output_tokens, cached_input_tokens=cached
         )
+
+    # --- streaming (CTO-260 §4.3) ---
+    def accumulate(self, state: dict, chunk: object) -> None:
+        # The Responses stream carries terminal usage on the completed event's nested ``response``
+        # payload (response.completed); intermediate events may name model/usage directly.
+        response = _get(chunk, "response")
+        source = response if response is not None else chunk
+        model = _get(source, "model")
+        if isinstance(model, str) and model:
+            state["model"] = model
+        usage = _get(source, "usage")
+        if usage is not None:
+            state["usage"] = usage
+
+    def finalize(self, state: dict) -> tuple[str | None, Usage | None]:
+        usage_obj = state.get("usage")
+        usage = self.extract_usage({"usage": usage_obj}) if usage_obj is not None else None
+        return state.get("model"), usage
 
 
 class OpenAIEmbeddingsInstrumentor:

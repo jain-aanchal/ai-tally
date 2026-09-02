@@ -22,7 +22,8 @@ Two invariants ride through every wrapper here and are not negotiable (CLAUDE.md
 from __future__ import annotations
 
 import functools
-from collections.abc import AsyncIterator, Callable, Iterator
+import inspect
+from collections.abc import Callable
 from datetime import date
 from typing import Protocol
 
@@ -136,7 +137,7 @@ def wrap_create(
 ) -> Callable[..., object]:
     """Wrap a sync provider ``create``-style callable so each successful call emits a span.
 
-    The provider call itself is NOT guarded — its exceptions propagate to the caller unchanged.
+    The provider call itself is NOT guarded - its exceptions propagate to the caller unchanged.
     Only span building + ``on_span`` run inside the safety boundary, so instrumentation can never
     break the customer's call.
     """
@@ -144,7 +145,7 @@ def wrap_create(
 
     @functools.wraps(create_fn)
     def wrapper(*args, **kwargs):
-        response = create_fn(*args, **kwargs)  # provider errors propagate — by design
+        response = create_fn(*args, **kwargs)  # provider errors propagate - by design
         with safe_block(observ, where=f"instrument.{instrumentor.system}"):
             attrs = build_span(
                 instrumentor,
@@ -180,7 +181,7 @@ def wrap_create_async(
 
     @functools.wraps(create_fn)
     async def wrapper(*args, **kwargs):
-        response = await create_fn(*args, **kwargs)  # provider errors propagate — by design
+        response = await create_fn(*args, **kwargs)  # provider errors propagate - by design
         with safe_block(observ, where=f"instrument.{instrumentor.system}"):
             attrs = build_span(
                 instrumentor,
@@ -202,7 +203,7 @@ class StreamInstrumentor(Protocol):
 
     ``accumulate`` folds one chunk/event into an opaque per-stream ``state`` dict (never shared,
     so concurrent streams cannot cross-contaminate). ``finalize`` reads the accumulated state and
-    returns ``(model, usage)`` — ``usage`` is ``None`` when the stream carried no terminal usage
+    returns ``(model, usage)`` - ``usage`` is ``None`` when the stream carried no terminal usage
     event, which yields an honest null-token span rather than a fabricated zero (CTO-260 §4.3).
     """
 
@@ -273,6 +274,120 @@ def _emit_stream_span(
         on_span(build_span_attributes(fields))
 
 
+class _InstrumentedStream:
+    """Pass-through wrapper over a provider sync ``Stream`` object (CTO-260 §4.3, review finding).
+
+    Yields each chunk untouched while folding usage/model, and emits the terminal span exactly once
+    (when iteration is exhausted or the ``with`` block exits, whichever comes first). Crucially it
+    preserves the underlying object: attribute access is delegated (``.response``, ``.close()``) and
+    the context-manager protocol is honored, so ``with client.chat.completions.create(stream=True)
+    as s:`` and ``s.response`` keep working instead of breaking on a bare generator.
+    """
+
+    def __init__(self, raw, instrumentor, emit):
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_instr", instrumentor)
+        object.__setattr__(self, "_emit", emit)
+        object.__setattr__(self, "_state", {})
+        object.__setattr__(self, "_emitted", False)
+
+    def _emit_once(self):
+        if not object.__getattribute__(self, "_emitted"):
+            object.__setattr__(self, "_emitted", True)
+            object.__getattribute__(self, "_emit")(object.__getattribute__(self, "_state"))
+
+    def __iter__(self):
+        instr = object.__getattribute__(self, "_instr")
+        state = object.__getattribute__(self, "_state")
+        try:
+            for chunk in object.__getattribute__(self, "_raw"):
+                _safe_accumulate(instr, state, chunk)
+                yield chunk
+        finally:
+            self._emit_once()
+
+    def __enter__(self):
+        enter = getattr(object.__getattribute__(self, "_raw"), "__enter__", None)
+        if callable(enter):
+            enter()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            raw = object.__getattribute__(self, "_raw")
+            exit_ = getattr(raw, "__exit__", None)
+            if callable(exit_):
+                return exit_(*exc)
+            close = getattr(raw, "close", None)
+            if callable(close):
+                close()
+            return False
+        finally:
+            self._emit_once()
+
+    def __getattr__(self, name):
+        # Delegate everything else (response, close, ...) to the real Stream object.
+        return getattr(object.__getattribute__(self, "_raw"), name)
+
+
+class _InstrumentedAsyncStream:
+    """Async counterpart of :class:`_InstrumentedStream`, preserving the async ``Stream`` object."""
+
+    def __init__(self, raw, instrumentor, emit):
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_instr", instrumentor)
+        object.__setattr__(self, "_emit", emit)
+        object.__setattr__(self, "_state", {})
+        object.__setattr__(self, "_emitted", False)
+
+    def _emit_once(self):
+        if not object.__getattribute__(self, "_emitted"):
+            object.__setattr__(self, "_emitted", True)
+            object.__getattribute__(self, "_emit")(object.__getattribute__(self, "_state"))
+
+    async def __aiter__(self):
+        instr = object.__getattribute__(self, "_instr")
+        state = object.__getattribute__(self, "_state")
+        try:
+            async for chunk in object.__getattribute__(self, "_raw"):
+                _safe_accumulate(instr, state, chunk)
+                yield chunk
+        finally:
+            self._emit_once()
+
+    async def __aenter__(self):
+        aenter = getattr(object.__getattribute__(self, "_raw"), "__aenter__", None)
+        if callable(aenter):
+            await aenter()
+        return self
+
+    async def __aexit__(self, *exc):
+        try:
+            raw = object.__getattribute__(self, "_raw")
+            aexit = getattr(raw, "__aexit__", None)
+            if callable(aexit):
+                return await aexit(*exc)
+            aclose = getattr(raw, "aclose", None) or getattr(raw, "close", None)
+            if callable(aclose):
+                result = aclose()
+                if inspect.isawaitable(result):
+                    await result
+            return False
+        finally:
+            self._emit_once()
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_raw"), name)
+
+
+def _safe_accumulate(instrumentor: StreamInstrumentor, state: dict, chunk: object) -> None:
+    """Fold one chunk into per-stream state. Must never break the caller's iteration."""
+    try:
+        instrumentor.accumulate(state, chunk)
+    except Exception:  # noqa: BLE001 - a bad chunk must never raise into the customer's loop
+        pass
+
+
 def wrap_stream(
     stream_fn: Callable[..., object],
     instrumentor: StreamInstrumentor,
@@ -285,37 +400,31 @@ def wrap_stream(
 ) -> Callable[..., object]:
     """Wrap a sync streaming ``create(stream=True)`` call (CTO-260 §4.3).
 
-    Returns a thin pass-through iterator that yields each chunk untouched and folds usage/model
-    from the terminal event; the span is emitted once, when the stream is exhausted. The stream is
-    never buffered or altered.
+    Returns a pass-through proxy that yields each chunk untouched and folds usage/model from the
+    terminal event; the span is emitted once, when the stream is exhausted or its ``with`` block
+    exits. The stream is never buffered or altered, and the underlying provider ``Stream`` object's
+    attributes and context-manager protocol are preserved.
     """
     observ = obs or SelfObservability()
 
     @functools.wraps(stream_fn)
     def wrapper(*args, **kwargs):
-        raw = stream_fn(*args, **kwargs)  # provider errors propagate — by design
-        state: dict = {}
+        raw = stream_fn(*args, **kwargs)  # provider errors propagate - by design
 
-        def _gen() -> Iterator[object]:
-            try:
-                for chunk in raw:
-                    with safe_block(observ, where=f"instrument.{instrumentor.system}.chunk"):
-                        instrumentor.accumulate(state, chunk)
-                    yield chunk
-            finally:
-                _emit_stream_span(
-                    instrumentor,
-                    args=args,
-                    kwargs=kwargs,
-                    state=state,
-                    on_span=on_span,
-                    obs=observ,
-                    catalog=catalog,
-                    tenant_id=tenant_id,
-                    account_resolver=account_resolver,
-                )
+        def _emit(state: dict) -> None:
+            _emit_stream_span(
+                instrumentor,
+                args=args,
+                kwargs=kwargs,
+                state=state,
+                on_span=on_span,
+                obs=observ,
+                catalog=catalog,
+                tenant_id=tenant_id,
+                account_resolver=account_resolver,
+            )
 
-        return _gen()
+        return _InstrumentedStream(raw, instrumentor, _emit)
 
     return wrapper
 
@@ -332,35 +441,29 @@ def wrap_stream_async(
 ) -> Callable[..., object]:
     """Async variant of :func:`wrap_stream` for an async streamed ``create(stream=True)``.
 
-    The wrapped coroutine returns an async iterator; each chunk is yielded untouched and the span
-    is emitted once the async stream is exhausted.
+    The wrapped coroutine returns a pass-through proxy that yields each chunk untouched and emits
+    the span once the async stream is exhausted or its ``async with`` block exits, preserving the
+    underlying async ``Stream`` object's attributes and context-manager protocol.
     """
     observ = obs or SelfObservability()
 
     @functools.wraps(stream_fn)
     async def wrapper(*args, **kwargs):
-        raw = await stream_fn(*args, **kwargs)  # provider errors propagate — by design
-        state: dict = {}
+        raw = await stream_fn(*args, **kwargs)  # provider errors propagate - by design
 
-        async def _agen() -> AsyncIterator[object]:
-            try:
-                async for chunk in raw:
-                    with safe_block(observ, where=f"instrument.{instrumentor.system}.chunk"):
-                        instrumentor.accumulate(state, chunk)
-                    yield chunk
-            finally:
-                _emit_stream_span(
-                    instrumentor,
-                    args=args,
-                    kwargs=kwargs,
-                    state=state,
-                    on_span=on_span,
-                    obs=observ,
-                    catalog=catalog,
-                    tenant_id=tenant_id,
-                    account_resolver=account_resolver,
-                )
+        def _emit(state: dict) -> None:
+            _emit_stream_span(
+                instrumentor,
+                args=args,
+                kwargs=kwargs,
+                state=state,
+                on_span=on_span,
+                obs=observ,
+                catalog=catalog,
+                tenant_id=tenant_id,
+                account_resolver=account_resolver,
+            )
 
-        return _agen()
+        return _InstrumentedAsyncStream(raw, instrumentor, _emit)
 
     return wrapper

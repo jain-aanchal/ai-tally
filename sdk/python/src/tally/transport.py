@@ -124,7 +124,14 @@ class BatchingTransport:
         self.retry_max = retry_max
 
         self._buf: deque[dict[str, object]] = deque()
+        # _lock guards every read and write of _buf, _pending and _consecutive_failures. It is held
+        # only for brief state transitions, never across the network send, so export() on the hot
+        # path is never blocked by an in-flight flush (CTO-260 §5).
         self._lock = threading.Lock()
+        # _flush_lock serializes flush_once so the daemon worker and a concurrent flush() cannot run
+        # two sends at once. Without it they race on _pending and either double-send a batch or drop
+        # an already-dequeued batch's spans (CTO-260 §5, review finding).
+        self._flush_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._consecutive_failures = 0
@@ -143,66 +150,77 @@ class BatchingTransport:
                 self._buf.append(attributes)
 
     def pending(self) -> int:
+        # Both reads are under the lock, and every write to _pending is too, so the ternary cannot
+        # observe _pending flip to None between the check and the subscript (the TOCTOU that used to
+        # raise TypeError and kill the daemon worker outside safe_block).
         with self._lock:
             extra = 0 if self._pending is None else len(self._pending[0].resource_spans)
             return len(self._buf) + extra
 
     # --- envelope ---
     def _build_batch(self, spans: list[dict[str, object]]) -> BatchRequest:
-        # tenant_id="" — the bearer key decides the tenant at the gateway (CTO-260 §3.1).
+        # tenant_id="" - the bearer key decides the tenant at the gateway (CTO-260 §3.1).
         return BatchRequest(tenant_id="", sdk_version=self._sdk_version, resource_spans=spans)
 
-    def _take_batch(self) -> BatchRequest | None:
-        """Return the in-flight batch if one is pinned, else assemble a fresh one. None if empty."""
-        if self._pending is not None:
-            return self._pending[0]
-        with self._lock:
-            if not self._buf:
-                return None
-            n = min(self.max_batch_size, len(self._buf))
-            spans = [self._buf.popleft() for _ in range(n)]
-        return self._build_batch(spans)
-
     def flush_once(self) -> bool:
-        """Flush a single batch. Returns True on delivery, False on empty/failure. Never raises."""
-        batch = self._take_batch()
-        if batch is None:
+        """Flush a single batch. Returns True on delivery, False on empty/failure. Never raises.
+
+        Serialized by _flush_lock so a concurrent daemon flush and a caller flush() never send two
+        batches at once or race on _pending; the buffer pop and every _pending/_consecutive_failures
+        transition happen under _lock, so no span is lost and no batch is double-sent (CTO-260 §5).
+        """
+        with self._flush_lock:
+            # Assemble or reclaim the in-flight batch, then pin it before the send so a mid-send
+            # failure (even a thread death) can never lose the already-dequeued spans.
+            with self._lock:
+                if self._pending is not None:
+                    batch, attempts = self._pending
+                else:
+                    if not self._buf:
+                        return False
+                    n = min(self.max_batch_size, len(self._buf))
+                    spans = [self._buf.popleft() for _ in range(n)]
+                    batch = self._build_batch(spans)
+                    attempts = 0
+                    self._pending = (batch, attempts)
+
+            headers = {
+                "Authorization": f"Bearer {self._key}",
+                "Content-Type": "application/json",
+            }
+            body = encode_request(batch).encode("utf-8")
+            try:
+                status = self._sender(self._url, headers, body)
+                ok = 200 <= status < 300
+            except Exception as exc:  # noqa: BLE001 - transport errors must never escape
+                self.obs.record_error(exc, "BatchingTransport.flush")
+                ok = False
+
+            with self._lock:
+                if ok:
+                    self._pending = None
+                    self._consecutive_failures = 0
+                    return True
+
+                # Failure: keep the batch pinned for retry, bounded by retry_max (idempotent resend
+                # by batch_id).
+                attempts += 1
+                self._consecutive_failures += 1
+                if attempts >= self.retry_max:
+                    self.obs.dropped_span_count += len(batch.resource_spans)
+                    self.obs.record_error(
+                        RuntimeError(f"batch dropped after {attempts} attempts"),
+                        "BatchingTransport.flush",
+                    )
+                    self._pending = None
+                else:
+                    self._pending = (batch, attempts)
             return False
-        attempts = 0 if self._pending is None else self._pending[1]
-
-        headers = {
-            "Authorization": f"Bearer {self._key}",
-            "Content-Type": "application/json",
-        }
-        body = encode_request(batch).encode("utf-8")
-        try:
-            status = self._sender(self._url, headers, body)
-            ok = 200 <= status < 300
-        except Exception as exc:  # noqa: BLE001 - transport errors must never escape
-            self.obs.record_error(exc, "BatchingTransport.flush")
-            ok = False
-
-        if ok:
-            self._pending = None
-            self._consecutive_failures = 0
-            return True
-
-        # Failure: pin the batch for retry, bounded by retry_max (idempotent resend by batch_id).
-        attempts += 1
-        self._consecutive_failures += 1
-        if attempts >= self.retry_max:
-            self.obs.dropped_span_count += len(batch.resource_spans)
-            self.obs.record_error(
-                RuntimeError(f"batch dropped after {attempts} attempts"),
-                "BatchingTransport.flush",
-            )
-            self._pending = None
-        else:
-            self._pending = (batch, attempts)
-        return False
 
     def current_backoff_ms(self) -> float:
-        return self.backoff.delay_ms(self._consecutive_failures)
+        with self._lock:
+            failures = self._consecutive_failures
+        return self.backoff.delay_ms(failures)
 
     # --- background loop ---
     def start(self) -> None:
