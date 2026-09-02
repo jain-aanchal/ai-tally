@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Dashboard client for the account control plane (CTO-188, plan D2).
 //
 // Two gateway endpoints, one module, because they answer the two halves of the same question "which
@@ -17,7 +18,6 @@
 // dropped. It is never cached, never returned in an error message, and never logged. Every warning
 // below reports the transport failure only.
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 /** A slow gateway must not hold a page render open. Same budget lib/tenant.ts uses. */
@@ -52,7 +52,7 @@ interface AccountLookupResponse {
 export async function queryAccountLabels(): Promise<Map<string, string> | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/account-labels`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -101,7 +101,7 @@ export async function lookupAccountHashes(accountId: string): Promise<AccountLoo
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/account-lookup`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify({ account_id: trimmed }),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Per-tenant cost-layer connector declarations (CTO-107).
 //
 // The "Partial data" banner used to fire whenever any cost layer reported zero, which made it
@@ -10,10 +11,11 @@
 // config — we never read Postgres directly from the dashboard. Failures fall back to ["llm"] so
 // demos and CI (where the gateway may be unreachable) keep working and the banner stays quiet.
 //
-// Tenant scoping mirrors web/lib/clickhouse.ts: TALLY_TENANT_ID || "local-dev".
+// Tenant scoping mirrors web/lib/clickhouse.ts: the active tenant is resolved per call via
+// resolveTenantId() (the Clerk org, or the TALLY_DEV_TENANT escape hatch), never a module-level
+// constant.
 import { LAYERS, type Layer } from "./cost";
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 interface TenantConnectorsResponse {
@@ -48,7 +50,7 @@ function asLayer(s: string): Layer | null {
 export async function queryEnabledConnectors(): Promise<Layer[]> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/connectors`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       // Short timeout: a slow gateway shouldn't block every page render.
       signal: AbortSignal.timeout(2000),
@@ -93,7 +95,7 @@ export async function setConnectorEnabled(
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-tenant-id": TENANT,
+        "x-tenant-id": await resolveTenantId(),
       },
       body: JSON.stringify({ layer, enabled }),
       cache: "no-store",

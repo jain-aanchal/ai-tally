@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # must carry `Authorization: Bearer <key>` whose SHA-256 is registered in api_keys.
     require_api_key: bool = False
 
+    # Control-plane service token (Initiative 1, §6). The web server is the ONLY legitimate caller of
+    # the control-plane endpoints (`/v1/tenant/*`); it authenticates with this server-only shared
+    # secret as `Authorization: Bearer <token>` and passes the resolved tenant UUID in `x-tenant-id`.
+    # The token authenticates the WEB SERVER, not the tenant, and never rides in a client bundle. The
+    # gate is active only when auth is on (``require_api_key``) AND a token is configured, so local
+    # dev with auth off is unaffected. Empty means "no service-token gate" (the dev default).
+    gateway_service_token: str = ""
+
     # Idempotency window (seconds) for (tenant_id, batch_id) dedup.
     idempotency_ttl_s: int = 24 * 3600
 

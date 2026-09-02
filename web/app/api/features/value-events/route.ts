@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import { queryDistinctBusinessEventNames, queryFeatureValueEvents } from "@/lib/clickhouse";
@@ -10,7 +11,6 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 // GET /api/features/value-events — the modal's data source: distinct business events observed over
 // the last 30 days (for the picker) + the tenant's already-configured feature -> event mappings.
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
@@ -94,7 +94,7 @@ export async function DELETE(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
       method: "DELETE",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify({ feature_tag: feature, change_id: changeId }),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

@@ -88,7 +88,10 @@ import {
   type AccountRevenueSqlRow,
 } from "./accountRevenue";
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
+// The active tenant is resolved per call from the Clerk org (or the dev escape hatch), not a
+// module-level `local-dev` constant (Initiative 1, §7/§8). The ClickHouse read filter binds this
+// UUID, so a UUID-scoped read matches UUID-tagged ingest.
+import { resolveTenantId } from "./getTenant";
 
 let _client: ClickHouseClient | null = null;
 
@@ -105,10 +108,19 @@ function client(): ClickHouseClient {
   return _client;
 }
 
-/** Run `fn` against ClickHouse; return null on any failure so callers can fall back to mock. */
+/**
+ * Run `fn` against ClickHouse; return null on a ClickHouse failure so callers can fall back to mock.
+ *
+ * Tenant resolution runs OUTSIDE the mock-fallback try (Initiative 1 review). A NoActiveOrgError or
+ * a gateway 404/outage is a failure to identify WHO is asking, NOT "ClickHouse is unreachable", and
+ * must never be swallowed into mock demo data: doing so would render one party's demo numbers for a
+ * real, unresolved tenant. So a resolution error propagates to the route (an honest error state),
+ * and only a query error against a known tenant falls back to mock.
+ */
 export async function tryLive<T>(fn: (db: ClickHouseClient, tenant: string) => Promise<T>): Promise<T | null> {
+  const tenant = await resolveTenantId();
   try {
-    return await fn(client(), TENANT);
+    return await fn(client(), tenant);
   } catch (err) {
     console.warn("[clickhouse] live query failed, falling back to mock:", (err as Error).message);
     return null;
@@ -1763,7 +1775,7 @@ interface ReconciliationRun {
 async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/reconciliation/status`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2288,7 +2300,7 @@ export interface IntegrationStatusRow {
 export async function queryIntegrationStatus(): Promise<IntegrationStatusRow[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/integrations/status`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2415,7 +2427,7 @@ export async function queryGuardrailActivity(): Promise<Map<string, GuardrailAct
 export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2460,7 +2472,7 @@ export interface FeatureValueEventConfig {
 export async function queryFeatureValueEvents(): Promise<FeatureValueEventConfig[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -3003,7 +3015,7 @@ export async function queryReplayCandidates(
   featureTag?: string,
   candidates: Array<{ provider: string; model: string }> = DEFAULT_CANDIDATES,
 ): Promise<ReplayProjection | null> {
-  const tenant = TENANT;
+  const tenant = await resolveTenantId();
   const cacheKey = `${tenant}:${featureTag ?? ""}`;
   const cached = _replayCache.get(cacheKey);
   if (cached && Date.now() - cached.at < REPLAY_CACHE_TTL_MS) {
@@ -3062,7 +3074,7 @@ export interface ReplayEstimateRequest {
 export async function queryReplayEstimate(
   req: ReplayEstimateRequest,
 ): Promise<ReplayProjection | null> {
-  const tenant = TENANT;
+  const tenant = await resolveTenantId();
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/replay/estimate`, {
       method: "POST",
@@ -3134,7 +3146,7 @@ export async function queryEvalCandidates(
   featureTag?: string,
   candidates: Array<{ provider: string; model: string }> = DEFAULT_CANDIDATES,
 ): Promise<EvalProjection | null> {
-  const tenant = TENANT;
+  const tenant = await resolveTenantId();
   const cacheKey = `${tenant}:${featureTag ?? ""}`;
   const cached = _evalCache.get(cacheKey);
   if (cached && Date.now() - cached.at < EVAL_CACHE_TTL_MS) {

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -15,7 +16,6 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 export interface ThresholdConfigPayload {
   /** The tenant's resolved thresholds (overrides layered on defaults, or defaults when no row). */
@@ -87,7 +87,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/unit-economics/config`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
