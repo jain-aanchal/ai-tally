@@ -3,7 +3,7 @@
 
 Reads dependency-manifest contents (and optional import-site excerpts the developer's
 agent chooses to pass, section 4.2) and reports the detected providers, frameworks,
-vector DBs, and web framework, plus the recipe ids that match. Detection is grounded
+vector DBs, and web frameworks, plus the recipe ids that match. Detection is grounded
 on the catalog's ``detect`` blocks: a component with no recipe is reported as a gap,
 never filled by guessing (section 2 decision 2).
 """
@@ -71,12 +71,29 @@ def detect_stack(
     # A gap is a detected component category that surfaced no matching recipe.
     gaps: list[str] = []
     matched_kinds = {cat.get(rid).kind for rid in matched}
-    if vector and not any(cat.get(rid).kind == "vector" for rid in matched):
+    if vector and "vector" not in matched_kinds:
         gaps.append("vector: detected a vector DB but no recipe matched")
-    if web and "middleware" not in matched_kinds:
-        gaps.append("account: detected a web framework but no middleware recipe matched")
+
+    # Check each detected web framework against a matched middleware recipe for that framework, not
+    # just whether *some* middleware matched: with two frameworks present (e.g. flask + fastapi) a
+    # blanket "middleware in matched_kinds" check would report the whole stack handled while the
+    # framework with no recipe was silently dropped (CTO-261 §4.2, review finding).
+    matched_web_frameworks = {
+        str(cat.get(rid).detect.get("web_framework", "")).lower()
+        for rid in matched
+        if cat.get(rid).kind == "middleware"
+    }
+    unhandled_web = [f for f in web if f not in matched_web_frameworks]
+    if unhandled_web:
+        gaps.append(
+            "account: detected web framework(s) "
+            f"{', '.join(unhandled_web)} but no middleware recipe matched"
+        )
 
     return {
+        # All detected web frameworks, so a second framework is never dropped. web_framework keeps
+        # the single-framework field prior callers read (the first, alphabetically).
+        "web_frameworks": web,
         "web_framework": web[0] if web else None,
         "llm_providers": llm,
         "agent_frameworks": agents,

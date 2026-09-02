@@ -52,6 +52,42 @@ def test_detect_stack_manifest_only_still_matches():
     assert "middleware.fastapi.account" in result["matched_recipes"]
 
 
+def test_detect_stack_reports_all_web_frameworks():
+    # Two web frameworks in one stack: both must be reported, not just the alphabetically-first,
+    # and web_framework (singular) stays the first for prior callers (finding #8).
+    manifest = "django==5.0\nfastapi==0.115.0\nuvicorn==0.30.0\n"
+    result = detect_stack(manifest)
+    assert result["web_frameworks"] == ["django", "fastapi"]
+    assert result["web_framework"] == "django"
+
+
+def test_detect_stack_no_gap_when_every_web_framework_is_handled():
+    result = detect_stack(SAMPLE_MANIFEST, SAMPLE_IMPORTS)
+    assert not [g for g in result["gaps"] if g.startswith("account:")]
+
+
+def test_detect_stack_gap_names_the_unhandled_web_framework():
+    # The account gap is checked per detected framework, not "did any middleware match", so a
+    # framework whose middleware recipe was dropped is named rather than masked by another that
+    # matched (CTO-261 §4.2, finding #8). Use a catalog with only the fastapi middleware recipe so
+    # a detected flask has no recipe to match.
+    from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+
+    full = get_catalog()
+    only_fastapi = RecipeCatalog(
+        [r for r in full.recipes if r.detect.get("web_framework") != "flask"],
+        full.schema,
+    )
+    manifest = "fastapi==0.115.0\nflask==3.0.0\n"
+    imports = "from fastapi import FastAPI\nfrom flask import Flask\n"
+    result = detect_stack(manifest, imports, catalog=only_fastapi)
+    assert result["web_frameworks"] == ["fastapi", "flask"]
+    account_gaps = [g for g in result["gaps"] if g.startswith("account:")]
+    # flask is detected but unhandled and named; fastapi matched so is not in the gap.
+    assert account_gaps and "flask" in account_gaps[0]
+    assert "fastapi" not in account_gaps[0]
+
+
 def test_get_recipe_by_id_and_by_alias():
     by_id = get_recipe("vector.pinecone.query")
     assert by_id["id"] == "vector.pinecone.query"
