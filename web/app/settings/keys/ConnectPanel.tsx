@@ -9,7 +9,7 @@
 //      reports the honest state only (connected / waiting / unknown), never a fabricated success.
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { connectSnippets, type ConnectPath, type Snippet } from "@/lib/connectSnippets";
 import type { FirstEventPayload } from "@/app/api/onboarding/first-event/route";
@@ -21,7 +21,24 @@ const PATH_LABELS: Record<ConnectPath, string> = {
 };
 
 function CodeBlock({ snippet }: { snippet: Snippet }) {
-  const [copied, setCopied] = useState(false);
+  // "idle" until a copy actually resolves. We report "Copied" ONLY on a real success and "Copy failed"
+  // when the Clipboard API is missing (insecure context / older browser) or writeText() rejects
+  // (permission denied), never an unconditional success (Initiative 2 §9 review).
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copy() {
+    try {
+      const clipboard = navigator.clipboard;
+      if (!clipboard?.writeText) throw new Error("clipboard unavailable");
+      await clipboard.writeText(snippet.code);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 1500);
+  }
+
+  const label = state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy";
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between">
@@ -29,13 +46,11 @@ function CodeBlock({ snippet }: { snippet: Snippet }) {
         <button
           type="button"
           onClick={() => {
-            void navigator.clipboard?.writeText(snippet.code);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
+            void copy();
           }}
           className="rounded border border-edge px-2 py-0.5 text-xs text-fg"
         >
-          {copied ? "Copied" : "Copy"}
+          {label}
         </button>
       </div>
       <pre className="overflow-x-auto rounded border border-edge bg-transparent p-3 text-xs text-fg">
@@ -49,12 +64,21 @@ function CodeBlock({ snippet }: { snippet: Snippet }) {
 function FirstEventBadge() {
   // Poll the tenant-scoped probe. Start from "unknown" so the first paint makes no claim before the
   // first fetch resolves.
+  //
+  // The first event only ever arrives ONCE, so once we see "connected" we stop polling: continuing
+  // to hit the ClickHouse probe every 4s forever is pure waste (Initiative 2 §9 review). "connected"
+  // is terminal, so `done` latches and the interval never restarts, even if a later reset were to
+  // momentarily blank the data.
+  const [done, setDone] = useState(false);
   const { data } = useLivePoll<FirstEventPayload>(
     "/api/onboarding/first-event",
     { status: "unknown" },
-    { intervalMs: 4000 },
+    { intervalMs: 4000, enabled: !done },
   );
   const status = data.status;
+  useEffect(() => {
+    if (status === "connected") setDone(true);
+  }, [status]);
   if (status === "connected") {
     return (
       <div className="rounded-md border border-accent bg-panel px-3 py-2 text-sm text-fg">

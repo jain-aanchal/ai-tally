@@ -138,7 +138,7 @@ from gateway.tenant_api_keys import (
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.edge_keys import EdgeKeyStore
 from gateway.tenant_hmac_key import HmacKeyUnavailableError, TenantHmacKeyStore
-from gateway.tenant_provisioning import LocalDevKeyProvider, ProvisionError, TenantProvisioner
+from gateway.tenant_provisioning import ProvisionError, TenantProvisioner, build_key_provider
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
 from gateway.tenant_identity import TenantIdentityResolver
@@ -362,8 +362,10 @@ async def lifespan(app: FastAPI):
     # One key provider shared by the provisioner and the HMAC bootstrap store (Initiative 2, §3.2):
     # the provisioner mints a per-org HMAC key set into tenants.hash_salt_kek_ref and the bootstrap
     # store reads the active material back through the SAME provider, so a tenant provisioned in this
-    # process resolves to the very bytes minted for it. Prod backs this with KMS/Secret Manager.
-    hmac_key_provider = LocalDevKeyProvider()
+    # process resolves to the very bytes minted for it. Settings-selectable (TALLY_HMAC_KEY_PROVIDER):
+    # the default 'local' provider derives material deterministically from the durable reference, so a
+    # provisioned tenant's hmac-key survives a gateway restart; prod selects KMS / Secret Manager.
+    hmac_key_provider = build_key_provider(settings)
     app.state.tenant_provisioner = TenantProvisioner(settings, key_provider=hmac_key_provider)
     app.state.tenant_api_keys = TenantApiKeyStore(settings)
     # Initiative 2: the SDK's in-process HMAC bootstrap (GET /v1/tenant/hmac-key, §3.2) and the edge

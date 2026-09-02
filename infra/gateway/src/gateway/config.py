@@ -31,6 +31,21 @@ class Settings(BaseSettings):
     # must carry `Authorization: Bearer <key>` whose SHA-256 is registered in api_keys.
     require_api_key: bool = False
 
+    # Per-org HMAC key-material provider (Initiative 2, §3.2). Selects HOW the provisioner mints, and
+    # the /v1/tenant/hmac-key bootstrap reads back, a tenant's active HMAC key set:
+    #   * ``local`` (default): dev provider with NO cloud dependency. The material is DERIVED
+    #     deterministically from the durable reference stored in ``tenants.hash_salt_kek_ref`` and the
+    #     root secret below, so a tenant provisioned before a gateway restart still resolves to the
+    #     same bytes afterwards (the old in-memory-only provider 404'd the hmac-key after a restart).
+    #   * ``kms`` / ``secret-manager``: the production seam, backed by KMS / Secret Manager. Selectable
+    #     here so a deployment can turn it on; the concrete client is wired by the deployment (the raw
+    #     key set is never persisted to Postgres, only its reference is).
+    hmac_key_provider: str = "local"
+    # Dev-only root secret the ``local`` provider derives per-tenant HMAC material from. Deterministic
+    # across restarts (that is the point), so it must be overridden in any shared/staging environment
+    # and is NEVER used by the ``kms`` provider. Not a production key.
+    hmac_local_root_secret: str = "tally-local-dev-hmac-root-secret-do-not-use-in-prod"
+
     # Control-plane service token (Initiative 1, §6). The web server is the ONLY legitimate caller of
     # the control-plane endpoints (`/v1/tenant/*`); it authenticates with this server-only shared
     # secret as `Authorization: Bearer <token>` and passes the resolved tenant UUID in `x-tenant-id`.
@@ -41,6 +56,17 @@ class Settings(BaseSettings):
 
     # Idempotency window (seconds) for (tenant_id, batch_id) dedup.
     idempotency_ttl_s: int = 24 * 3600
+
+    # Edge-key delta feed safe-lag window, in seconds (Initiative 2 §6.2 review). The /v1/edge/keys
+    # cursor is a keyset watermark over (GREATEST(created_at, revoked_at), id). created_at/revoked_at
+    # are stamped at statement time, not commit time, so a slow transaction can commit a row whose
+    # watermark is BELOW a cursor a later-but-faster commit already advanced past, and that row would
+    # be skipped forever. The feed therefore refuses to advance the cursor past `now() - this margin`,
+    # so any transaction that commits within the margin is still picked up on a later poll. Size it
+    # above the longest expected api_keys write transaction plus app<->DB clock skew; a few seconds is
+    # ample for single-row inserts/revokes. The cost is that a brand-new key takes up to this long to
+    # appear in the feed, which is well within the proxy's refresh budget.
+    edge_key_safe_lag_seconds: float = 5.0
 
     # Per-tenant rate limit (token bucket) + monthly span quota (CTO-33). Process-local enforcement;
     # cluster-wide fairness is a later concern (CTO-30). Defaults are generous for local dev.

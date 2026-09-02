@@ -16,6 +16,16 @@ within one refresh interval, the proxy-path revocation SLA (spec §6.2). Keyset 
 compound ``(watermark, id)`` means no row is skipped when two share a watermark, and delta
 application at the proxy is idempotent, so a boundary re-send is harmless.
 
+SAFE-LAG WINDOW (Initiative 2 §6.2 review). ``created_at`` / ``revoked_at`` are stamped at statement
+time, NOT commit time, so a slow transaction can commit a row whose watermark is BELOW a cursor that
+a later-but-faster commit already advanced past. Under plain keyset pagination that row is invisible
+forever (its watermark is not ``> cursor``), so the proxy never caches the key and the customer's
+first proxy events never land. A monotonic sequence would not help: a sequence value is also assigned
+before commit, so it can commit out of order the same way. The fix is time-based: the feed never
+returns (and so never advances the cursor past) a row whose watermark is newer than ``now() - lag``.
+Any transaction that commits within ``lag`` is therefore still ahead of the cursor on the next poll
+and gets picked up. See ``Settings.edge_key_safe_lag_seconds`` for how the margin is sized.
+
 METADATA ONLY. Every change carries ``key_hash`` (the SHA-256 hex already stored, never reversible),
 ``tenant_id``, ``scope`` and ``revoked_at``. Never a raw or reversible token, never ``token_prefix``
 (Initiative 1 §11). The proxy computes ``sha256`` of the presented key with the same transform
@@ -87,6 +97,10 @@ class EdgeKeyStore:
     def __init__(self, settings, *, limit: int = DEFAULT_LIMIT) -> None:
         self._dsn = settings.postgres_dsn
         self._limit = limit
+        # Safe-lag margin (seconds): the feed never advances the cursor past ``now() - this``, so a
+        # row committed out of watermark order (a slow transaction) is still picked up on a later
+        # poll. See the module docstring and Settings.edge_key_safe_lag_seconds.
+        self._safe_lag_seconds = float(getattr(settings, "edge_key_safe_lag_seconds", 5.0))
 
     def changes_since(self, cursor: str | None) -> tuple[list[KeyChange], str]:
         """Return ``(changes, next_cursor)`` for key rows changed since ``cursor``.
@@ -94,6 +108,10 @@ class EdgeKeyStore:
         ``next_cursor`` advances to the last row's watermark when anything is returned, and is the
         input cursor unchanged when nothing changed (so a steady-state poll ships an empty list and
         the same cursor).
+
+        Only rows whose watermark is at least ``edge_key_safe_lag_seconds`` old (per the DATABASE
+        clock, not the app's) are eligible, so a row that commits out of watermark order within the
+        lag window is never stranded below an already-advanced cursor.
         """
         after_wm, after_id = _decode_cursor(cursor)
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -102,10 +120,11 @@ class EdgeKeyStore:
                 SELECT key_hash, tenant_id, scope, revoked_at, {_WATERMARK_SQL} AS wm, id
                 FROM api_keys
                 WHERE ({_WATERMARK_SQL}, id) > (%s, %s)
+                  AND {_WATERMARK_SQL} <= now() - make_interval(secs => %s)
                 ORDER BY wm, id
                 LIMIT %s
                 """,
-                (after_wm, after_id, self._limit),
+                (after_wm, after_id, self._safe_lag_seconds, self._limit),
             )
             rows = cur.fetchall()
         if not rows:
