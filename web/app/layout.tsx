@@ -16,8 +16,12 @@ export const metadata: Metadata = {
 // entirely (mounting it with no keys would throw) and hide the org controls in the shell. On the
 // product path ClerkProvider wraps the tree and the shell shows the org switcher.
 export default function RootLayout({ children }: { children: ReactNode }) {
-  const devLabel = devTenant();
-  const dev = devLabel !== null;
+  const devTenantId = devTenant();
+  const dev = devTenantId !== null;
+  // In the dev escape hatch there is no Clerk org to read, so the shell names the tenant. Let a demo
+  // or local deployment show a friendly organization name instead of the raw tenant id via
+  // TALLY_DEV_ORG_NAME (CTO-262); falls back to the tenant value when unset.
+  const devLabel = process.env.TALLY_DEV_ORG_NAME ?? devTenantId;
 
   const body = (
     <html lang="en">
