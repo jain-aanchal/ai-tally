@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Per-tenant shared-cost allocation rule, read via the gateway (CTO-193, plan C2).
 //
 // The rule decides how compute and egress are split across accounts on /cost-per-customer, which on
@@ -18,7 +19,6 @@
 import { DEFAULT_ALLOCATION_RULE, type AllocationRule, ALLOCATION_RULES } from "./allocation";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 /** A slow gateway must not hold a page render open. Same budget lib/accountLabels.ts uses. */
 const TIMEOUT_MS = 2000;
@@ -91,7 +91,7 @@ export function settingFromApi(body: AllocationConfigApi | null): AllocationRule
 export async function queryAllocationRule(): Promise<AllocationRuleSetting> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/allocation-config`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

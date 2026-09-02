@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Per-tenant Stripe connector config (CTO-110).
 //
 // Mirrors lib/tenant.ts: the dashboard never talks to Postgres directly — it goes through the
 // gateway's /v1/tenant/stripe + /v1/tenant/stripe/connect endpoints. Failure modes fall back
 // gracefully so a /connectors page render never breaks because the gateway is briefly down.
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 export interface StripeConfigView {
@@ -33,7 +33,7 @@ interface StripeGetResponse {
 export async function queryStripeConfig(): Promise<StripeConfigView | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/stripe`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -64,7 +64,7 @@ export async function connectStripe(
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-tenant-id": TENANT,
+        "x-tenant-id": await resolveTenantId(),
       },
       body: JSON.stringify({
         webhook_secret: webhookSecret,
@@ -87,8 +87,8 @@ export async function connectStripe(
 }
 
 /** Public URL the tenant configures in their Stripe dashboard. */
-export function webhookUrl(): string {
-  const tenant = TENANT;
+export async function webhookUrl(): Promise<string> {
+  const tenant = await resolveTenantId();
   // The gateway is reachable at the same URL we use server-side; the tenant runs the curl
   // documented in RUNNING.md → `stripe listen --forward-to <this URL>` for local testing.
   return `${GATEWAY_URL}/v1/stripe/webhook?tenant=${encodeURIComponent(tenant)}`;

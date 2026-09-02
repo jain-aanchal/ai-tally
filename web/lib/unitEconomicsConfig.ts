@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Per-tenant LTV/CAC band threshold overrides, read via the gateway (CTO-126).
 //
 // The band cutoffs used to be hardcoded B2B-SaaS defaults inline in unitEconomics.ts. They are now
@@ -10,7 +11,6 @@
 import type { UnitEconomicsThresholdOverrides } from "./unitEconomics";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 /** Wire shape of the gateway's config object (snake_case, matching the Postgres columns). */
 export interface UnitEconomicsConfigApi {
@@ -43,7 +43,7 @@ export function overridesFromApi(
 export async function queryUnitEconomicsConfig(): Promise<UnitEconomicsThresholdOverrides | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/unit-economics/config`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });

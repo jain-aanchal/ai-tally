@@ -6,6 +6,12 @@ GATEWAY := ai-tally-gateway
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
+# Canonical TenantId is the tenant UUID (Initiative 1, §8). Resolve the seeded local-dev tenant's
+# UUID from Postgres so the demo backfill tags spans with the UUID the dashboard reads, not the
+# name `local-dev`. Lazily expanded (`=`, not `:=`) so it runs when a target uses it, after the
+# stack is up and `make seed` has created the row; empty before then.
+TENANT_UUID = $(shell $(COMPOSE) exec -T postgres psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" 2>/dev/null | tr -d '[:space:]')
+
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
@@ -50,6 +56,10 @@ ps: ## Show stack status
 
 seed: ## Create a local tenant + API key + feature tags in Postgres
 	$(COMPOSE) exec gateway python -m gateway.seed
+	@echo ""
+	@echo "Canonical TenantId is the tenant UUID (Initiative 1, §8). To run the dashboard against"
+	@echo "this tenant with NO Clerk account, set the dev escape hatch (§10):"
+	@echo "  export TALLY_DEV_TENANT=$(TENANT_UUID)"
 
 demo: ## Send a sample batch through the gateway into ClickHouse
 	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py
@@ -83,7 +93,7 @@ chatbot-demo-backfill: ## $0 backfill — POST 30 days of backdated synthetic sp
 	  { [ -d node_modules ] || pnpm install --silent --prefer-offline || \
 	    npm install --silent --no-audit --no-fund; } && \
 	  TALLY_GATEWAY_URL="$${TALLY_GATEWAY_URL:-http://localhost:8080/v1/batches}" \
-	  pnpm --silent exec tsx ../scripts/backfill-spans.ts $(BACKFILL_ARGS)
+	  pnpm --silent exec tsx ../scripts/backfill-spans.ts $(if $(strip $(TENANT_UUID)),--tenant $(TENANT_UUID),) $(BACKFILL_ARGS)
 
 chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-demo
 	@if [ -f $(CHATBOT_PID) ]; then \

@@ -11,6 +11,7 @@ pure logic — this module is just the HTTP + storage shell.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -128,7 +129,14 @@ from gateway.tenant_budgets import (
     TenantNotFound as BudgetTenantNotFound,
     normalize_budget_id,
 )
+from gateway.tenant_api_keys import (
+    ApiKeyError,
+    ApiKeyNotFoundError,
+    TenantApiKeyStore,
+    TenantNotFound as ApiKeyTenantNotFound,
+)
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
+from gateway.tenant_provisioning import ProvisionError, TenantProvisioner
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
 from gateway.tenant_identity import TenantIdentityResolver
@@ -338,6 +346,11 @@ async def lifespan(app: FastAPI):
     # customer's intent rather than our own metering, and every "versus budget" number in the
     # forecasting epic reads from it. No row is the normal state and means "no budget set".
     app.state.tenant_budgets = TenantBudgetStore(settings)
+    # Organizations, users & access (Initiative 1). Provisioning turns a Clerk org into a tenant with
+    # its own per-org HMAC key reference; the keys store is self-serve ingest-key management. Both go
+    # through the service-token-authed control plane; the web server is their only caller.
+    app.state.tenant_provisioner = TenantProvisioner(settings)
+    app.state.tenant_api_keys = TenantApiKeyStore(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -895,6 +908,42 @@ def _resolve_tenant_for_control_plane(
         return tenant_id
     if not x_tenant_id:
         raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
+    return x_tenant_id
+
+
+def _require_service_token(authorization: str | None) -> None:
+    """Gate a control-plane endpoint on the ``GATEWAY_SERVICE_TOKEN`` (Initiative 1, §6).
+
+    The web server is the only legitimate caller of the control plane; it authenticates with a
+    server-only shared secret and passes the resolved tenant in ``x-tenant-id``. This gate verifies
+    the bearer token equals that secret and rejects with 401 otherwise.
+
+    Gated on the dev escape hatch (§10): the check is ACTIVE only when ``require_api_key`` is on AND a
+    token is configured. With auth off (the ``make up`` / CI default) it is a no-op, so local dev is
+    unaffected. A production deployment sets both, and unauthenticated control-plane calls are
+    rejected.
+    """
+    settings = app.state.settings
+    token = settings.gateway_service_token
+    if not settings.require_api_key or not token:
+        return
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing control-plane service token")
+    presented = authorization.split(" ", 1)[1].strip()
+    # Constant-time compare so a wrong token cannot be discovered a byte at a time by timing.
+    if not secrets.compare_digest(presented, token):
+        raise HTTPException(status_code=401, detail="invalid control-plane service token")
+
+
+def _service_token_tenant(x_tenant_id: str | None) -> str:
+    """Tenant identifier for a service-token-authed endpoint.
+
+    The service token authenticates the WEB SERVER, not the tenant, so the tenant always comes from
+    ``x-tenant-id`` (the UUID the web server resolved from the Clerk org). Refuses an absent header
+    rather than guessing a tenant.
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=422, detail="X-Tenant-Id required")
     return x_tenant_id
 
 
@@ -1793,6 +1842,165 @@ async def delete_tenant_budget(
         {"tenant_id": tenant_id, "budget_id": target, "removed": removed},
         status_code=200,
     )
+
+
+# --- Organizations, users & access (Initiative 1) ------------------------------------------------
+#
+# All endpoints below are service-token authed (§6): the web server is their only caller. The svix
+# signature on the Clerk webhook is verified once, at the public web route, before it forwards the
+# verified event here.
+
+
+@app.post("/v1/tenant/provision")
+async def provision_tenant(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Provision a tenant from a verified ``organization.created`` event (Initiative 1, §4).
+
+    Called by the web ``/api/webhooks/clerk`` route after it verifies the svix signature. The body
+    carries the Clerk org id and name. Idempotent and race-safe: a redelivery returns the existing
+    tenant and mints no new key material; two concurrent first-deliveries settle on one tenant.
+    """
+    _require_service_token(authorization)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001 - a non-JSON body is a client error, not a 500
+        raise HTTPException(status_code=422, detail="request body must be JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    # Accept either the flattened fields or a raw Clerk event ({"data": {"id", "name"}}), so the web
+    # route can forward the verified event without reshaping it.
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    clerk_org_id = body.get("clerk_org_id") or data.get("id")
+    name = body.get("name") or data.get("name")
+
+    provisioner: TenantProvisioner = app.state.tenant_provisioner
+    try:
+        result = provisioner.provision(clerk_org_id=clerk_org_id, name=name)
+    except ProvisionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(result.as_dict(), status_code=200)
+
+
+@app.get("/v1/tenant/by-clerk-org/{org_id}")
+def tenant_by_clerk_org(
+    org_id: str,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Resolve a Clerk org id to ``{tenant_id, plan}`` (Initiative 1, §5).
+
+    The web app calls this once per session to map the active org to its tenant UUID (``getTenant``,
+    cached per-org). Read-only. A 404 when the org has no tenant, never a silent fallback.
+    """
+    _require_service_token(authorization)
+    provisioner: TenantProvisioner = app.state.tenant_provisioner
+    try:
+        result = provisioner.tenant_for_clerk_org(org_id)
+    except ProvisionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no tenant for clerk org '{org_id}'")
+    return JSONResponse({"tenant_id": result.tenant_id, "plan": result.plan}, status_code=200)
+
+
+@app.get("/v1/tenant/keys")
+def list_tenant_keys(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """List ingest-key metadata for the tenant (Initiative 1, §5). Never returns a secret."""
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    store: TenantApiKeyStore = app.state.tenant_api_keys
+    try:
+        keys = store.list(tenant_id)
+    except ApiKeyTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(
+        {"tenant_id": tenant_id, "keys": [k.as_dict() for k in keys]}, status_code=200
+    )
+
+
+@app.post("/v1/tenant/keys")
+async def create_tenant_key(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+    x_clerk_user_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Mint a new ingest key (Initiative 1, §5). Returns the raw token EXACTLY ONCE.
+
+    The web server has already checked the caller is an org admin (§9) before reaching here; the
+    gateway sees only the service token and the resolved tenant. ``created_by`` (the Clerk user id)
+    is passed for audit in ``x-clerk-user-id`` or the body.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - an empty body is fine; name/scope are optional
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    store: TenantApiKeyStore = app.state.tenant_api_keys
+    try:
+        minted = store.create(
+            tenant_id,
+            name=body.get("name"),
+            scope=body.get("scope", "write"),
+            created_by=x_clerk_user_id or body.get("created_by"),
+        )
+    except ApiKeyTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApiKeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(minted.as_dict(), status_code=201)
+
+
+@app.post("/v1/tenant/keys/{key_id}/rotate")
+async def rotate_tenant_key(
+    key_id: str,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+    x_clerk_user_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Rotate a key: mint a replacement and revoke the old row in one transaction (§5).
+
+    Returns the new raw token once. The old token stops authenticating immediately.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    store: TenantApiKeyStore = app.state.tenant_api_keys
+    try:
+        minted = store.rotate(tenant_id, key_id, created_by=x_clerk_user_id)
+    except ApiKeyTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApiKeyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApiKeyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(minted.as_dict(), status_code=201)
+
+
+@app.delete("/v1/tenant/keys/{key_id}")
+def revoke_tenant_key(
+    key_id: str,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> Response:
+    """Revoke a key (``revoked_at = now()``), returning 204 (Initiative 1, §5).
+
+    A real revoke, not a delete, so the audit trail survives. Double-revoke is not an error.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    store: TenantApiKeyStore = app.state.tenant_api_keys
+    try:
+        store.revoke(tenant_id, key_id)
+    except ApiKeyTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @app.post("/v1/stripe/webhook")

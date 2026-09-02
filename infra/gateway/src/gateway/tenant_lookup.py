@@ -22,12 +22,23 @@ class TenantNotFoundError(ValueError):
 
 
 def resolve_tenant_uuid(cur: Any, tenant_id: str) -> str:
-    """Pass a UUID through untouched; look a name up. Raises :class:`TenantNotFoundError`."""
+    """Pass a UUID through untouched; look a name or Clerk org id up.
+
+    A caller may address a tenant three ways: the ``tenants.id`` UUID (the canonical form), the
+    tenant NAME (``local-dev``, the dev/dashboard spelling), or the Clerk organization id
+    (``org_...``, Initiative 1). The UUID fast-path parses first so the common case never touches
+    Postgres to parse. The single lookup matches either ``name`` or ``clerk_org_id`` so a Clerk org
+    id resolves to the tenant provisioned for it. Raises :class:`TenantNotFoundError` when nothing
+    matches.
+    """
     try:
         return str(uuid.UUID(tenant_id))
     except (ValueError, AttributeError, TypeError):
         pass
-    cur.execute("SELECT id FROM tenants WHERE name = %s", (tenant_id,))
+    cur.execute(
+        "SELECT id FROM tenants WHERE name = %s OR clerk_org_id = %s",
+        (tenant_id, tenant_id),
+    )
     row = cur.fetchone()
     if row is None:
         raise TenantNotFoundError(f"no tenant named '{tenant_id}'")
