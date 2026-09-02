@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Uploaded revenue snapshots (CTO-198, plan item E5).
 //
 // For tenants whose revenue lives in Chargebee, Recurly, Zuora, NetSuite or a spreadsheet rather
@@ -19,7 +20,6 @@
 
 import { asOfLabel, isStale, relativeAge } from "./dataState";
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 /** business_events.Source stamped on uploaded rows. Matches gateway.revenue_upload.UPLOAD_SOURCE. */
@@ -184,7 +184,7 @@ export function formatSnapshotAmount(micro: number, currency: string): string {
 export async function queryRevenueUploads(): Promise<RevenueSnapshot[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/revenue-uploads`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -217,7 +217,7 @@ export async function uploadRevenueCsv(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/revenue-uploads`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify({
         csv,
         filename: opts.filename,
@@ -256,7 +256,7 @@ export async function deleteRevenueUpload(
       `${GATEWAY_URL}/v1/tenant/revenue-uploads/${encodeURIComponent(period)}`,
       {
         method: "DELETE",
-        headers: { "x-tenant-id": TENANT },
+        headers: { "x-tenant-id": await resolveTenantId() },
         cache: "no-store",
         signal: AbortSignal.timeout(4000),
       },

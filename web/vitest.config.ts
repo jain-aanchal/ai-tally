@@ -11,5 +11,10 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    // The dev escape hatch (Initiative 1, §10). Tests run with no Clerk account, so `getTenant()`
+    // short-circuits to a pinned tenant instead of consulting Clerk. This mirrors how `make up` and
+    // CI run the product with no Clerk keys, and keeps the tenant scoping in the fetch-shaped tests
+    // exactly what it was before Clerk (`local-dev`).
+    env: { TALLY_DEV_TENANT: "local-dev" },
   },
 });

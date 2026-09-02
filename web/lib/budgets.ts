@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Typed client for the tenant budget control plane (CTO-208, F4).
 //
 // CTO-205 built the storage and the rules (`db/postgres/0026_tenant_budgets.sql`,
@@ -21,7 +22,6 @@
 
 import type { MicroUSD } from "./types";
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 /** Mirrors gateway.tenant_budgets.BUDGET_PERIODS. The gateway echoes its own list; this is the
@@ -210,7 +210,7 @@ export async function queryBudgets(): Promise<BudgetList> {
   };
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
     });
@@ -258,7 +258,7 @@ export async function saveBudget(input: BudgetInput): Promise<SaveResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify({
         budget_id: input.budgetId,
         period: input.period,
@@ -289,7 +289,7 @@ export async function deleteBudget(budgetId: string): Promise<DeleteResult> {
       `${GATEWAY_URL}/v1/tenant/budgets?budget_id=${encodeURIComponent(budgetId)}`,
       {
         method: "DELETE",
-        headers: { "x-tenant-id": TENANT },
+        headers: { "x-tenant-id": await resolveTenantId() },
         cache: "no-store",
         signal: AbortSignal.timeout(5000),
       },
