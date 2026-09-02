@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
+	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/edgekeys"
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/keybroker"
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/proxy"
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/telemetry"
@@ -57,6 +58,31 @@ func main() {
 	// Empty is pure pass-through (CTO-39), the byte-identical default.
 	if cfg.Provider != "" {
 		log.Printf("edge-proxy: provider protocol = %s (response metadata extraction on)", cfg.Provider)
+	}
+
+	// Root context for background workers (the edge-key refresher); cancelled on shutdown.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	// Multi-provider routing (Initiative 2 sec 6.1): log the route table when configured.
+	if len(cfg.Routes) > 0 {
+		log.Printf("edge-proxy: multi-provider routing (mode=%s, %d routes)", cfg.RouteMode, len(cfg.Routes))
+		for _, rt := range cfg.Routes {
+			log.Printf("edge-proxy:   route %s -> %s (provider=%q)", rt.Match, rt.Upstream, rt.Provider)
+		}
+	}
+
+	// Fast key-to-tenant resolution (Initiative 2 sec 6.2): build the in-memory key cache and start
+	// its delta-sync refresher. Empty KeysURL keeps the CTO-39 core (no resolution, no 403).
+	if cfg.KeysURL != "" {
+		cache := edgekeys.New(edgekeys.Options{
+			URL:          cfg.KeysURL,
+			ServiceToken: cfg.ServiceToken,
+			Interval:     cfg.KeysRefreshInterval,
+		})
+		go cache.Run(rootCtx)
+		opts = append(opts, proxy.WithKeyResolver(cache))
+		log.Printf("edge-proxy: edge key cache <- %s (refresh=%s)", cfg.KeysURL, cfg.KeysRefreshInterval)
 	}
 
 	p := proxy.New(cfg, opts...)

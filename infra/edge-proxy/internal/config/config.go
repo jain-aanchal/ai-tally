@@ -8,12 +8,41 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// RouteMode selects how EDGE_PROXY_ROUTES entries are matched against an inbound request when the
+// hosted multi-provider deployment serves several providers behind one binary (Initiative 2 sec 6.1).
+type RouteMode string
+
+const (
+	// RouteModeHost matches on the request's hostname (the hosted default). Distinct hostnames map
+	// to providers, e.g. openai.proxy.ai-tally.com -> https://api.openai.com. Routing is a
+	// hostname-to-origin lookup with no body inspection, so the hot path stays byte-identical.
+	RouteModeHost RouteMode = "host"
+	// RouteModePath matches on a leading path prefix (fallback for customers who cannot set distinct
+	// hostnames), e.g. /openai/... . The matched prefix is stripped before forwarding.
+	RouteModePath RouteMode = "path"
+)
+
+// Route pins one match key (a hostname in host mode, or a leading path segment in path mode) to an
+// upstream origin and the provider protocol used to read response metadata for that origin. It is a
+// pre-forward origin selection only: bodies, headers, and credentials are still forwarded
+// byte-for-byte (Initiative 2 sec 6.1 / 6.4).
+type Route struct {
+	// Match is the hostname (host mode) or leading path prefix (path mode) this route serves.
+	Match string
+	// Upstream is the provider origin requests on this route are forwarded to.
+	Upstream *url.URL
+	// Provider selects the extractMeta branch for this route's responses (may be empty for pure
+	// pass-through with no metadata extraction).
+	Provider Provider
+}
 
 // Mode selects how the customer's provider key reaches the upstream.
 type Mode string
@@ -103,6 +132,27 @@ type Config struct {
 	// TelemetryURL, if set, is the collector endpoint the proxy POSTs metadata-only TraceRecords
 	// to. Empty disables telemetry shipping (NopSink), as in the CTO-39 core.
 	TelemetryURL string
+
+	// --- Hosted multi-provider routing (Initiative 2 sec 6.1) ---
+
+	// Routes is the per-request route table for the hosted deployment. Empty means single-origin
+	// mode: forward everything to Upstream with Provider, preserving self-host and CTO-39 behavior.
+	Routes []Route
+	// RouteMode selects host- or path-based matching for Routes. Defaults to host.
+	RouteMode RouteMode
+
+	// --- Fast key-to-tenant resolution (Initiative 2 sec 6.2) ---
+
+	// KeysURL is the gateway's read-only edge-keys delta endpoint (GET /v1/edge/keys?since=cursor)
+	// the proxy polls to build its in-memory sha256(key)->tenant-UUID map. Empty disables edge key
+	// resolution, so self-host and the CTO-39 core are unaffected.
+	KeysURL string
+	// ServiceToken authenticates the proxy to KeysURL (server-only bearer token, never a human
+	// session). Sent as Authorization: Bearer <token>.
+	ServiceToken string
+	// KeysRefreshInterval bounds how often the proxy polls KeysURL for changes; it is also the
+	// revocation-propagation SLA on the proxy path.
+	KeysRefreshInterval time.Duration
 }
 
 // Defaults applied when the corresponding env var is unset.
@@ -122,6 +172,9 @@ const (
 	DefaultUpstreamTimeout = 10 * time.Minute
 	// DefaultBrokerTTL bounds minted-token reuse in broker mode.
 	DefaultBrokerTTL = 5 * time.Minute
+	// DefaultKeysRefreshInterval is how often the proxy polls the edge-keys delta feed. The spec
+	// suggests 30 to 60s; 45s keeps the revocation window bounded without hammering the gateway.
+	DefaultKeysRefreshInterval = 45 * time.Second
 )
 
 // Env is a minimal indirection over os.Getenv so tests can supply a fixed environment.
@@ -223,7 +276,151 @@ func FromEnv(lookup Env) (Config, error) {
 		return Config{}, fmt.Errorf("EDGE_PROXY_MODE=broker requires EDGE_PROXY_BROKER_FILE")
 	}
 
+	// Hosted multi-provider routing (sec 6.1). RouteMode is parsed regardless so an operator can set
+	// it explicitly; it only takes effect once EDGE_PROXY_ROUTES is non-empty.
+	cfg.RouteMode = RouteModeHost
+	if v := lookup("EDGE_PROXY_ROUTE_MODE"); v != "" {
+		switch RouteMode(v) {
+		case RouteModeHost, RouteModePath:
+			cfg.RouteMode = RouteMode(v)
+		default:
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_ROUTE_MODE %q (want host|path)", v)
+		}
+	}
+	if v := lookup("EDGE_PROXY_ROUTES"); strings.TrimSpace(v) != "" {
+		routes, err := parseRoutes(v, cfg.RouteMode)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Routes = routes
+	}
+
+	// Fast key-to-tenant resolution (sec 6.2). Empty KeysURL keeps the CTO-39 core: no edge key
+	// cache, no per-request resolution.
+	cfg.KeysURL = lookup("EDGE_PROXY_KEYS_URL")
+	cfg.ServiceToken = lookup("EDGE_PROXY_SERVICE_TOKEN")
+	cfg.KeysRefreshInterval = DefaultKeysRefreshInterval
+	if v := lookup("EDGE_PROXY_KEYS_REFRESH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid EDGE_PROXY_KEYS_REFRESH_INTERVAL %q: %w", v, err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("EDGE_PROXY_KEYS_REFRESH_INTERVAL must be > 0, got %s", d)
+		}
+		cfg.KeysRefreshInterval = d
+	}
+	if cfg.KeysURL != "" && cfg.ServiceToken == "" {
+		return Config{}, fmt.Errorf("EDGE_PROXY_KEYS_URL requires EDGE_PROXY_SERVICE_TOKEN")
+	}
+
 	return cfg, nil
+}
+
+// parseRoutes builds the route table from EDGE_PROXY_ROUTES. Two wire forms are accepted:
+//
+//   - JSON object: {"openai.proxy.ai-tally.com": {"upstream": "https://api.openai.com",
+//     "provider": "openai"}}
+//   - comma list:  openai.proxy.ai-tally.com=https://api.openai.com:openai,anthropic...=...:anthropic
+//
+// In the comma form the provider is the token after the LAST colon when it names a known provider;
+// otherwise the whole value is treated as the upstream with an empty (pure pass-through) provider,
+// so an origin carrying a port (https://host:8443) is not misread as a provider.
+func parseRoutes(raw string, mode RouteMode) ([]Route, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "{") {
+		return parseRoutesJSON(raw, mode)
+	}
+	var routes []Route
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		eq := strings.IndexByte(entry, '=')
+		if eq < 0 {
+			return nil, fmt.Errorf("invalid EDGE_PROXY_ROUTES entry %q (want match=upstream[:provider])", entry)
+		}
+		match := strings.TrimSpace(entry[:eq])
+		value := strings.TrimSpace(entry[eq+1:])
+		rawUpstream, prov := value, Provider("")
+		if colon := strings.LastIndexByte(value, ':'); colon >= 0 {
+			if p, ok := parseProvider(value[colon+1:]); ok {
+				rawUpstream, prov = value[:colon], p
+			}
+		}
+		route, err := buildRoute(match, rawUpstream, prov, mode)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, route)
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("EDGE_PROXY_ROUTES is set but parsed to no routes")
+	}
+	return routes, nil
+}
+
+func parseRoutesJSON(raw string, mode RouteMode) ([]Route, error) {
+	var m map[string]struct {
+		Upstream string `json:"upstream"`
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, fmt.Errorf("invalid EDGE_PROXY_ROUTES JSON: %w", err)
+	}
+	var routes []Route
+	for match, spec := range m {
+		prov := Provider("")
+		if spec.Provider != "" {
+			p, ok := parseProvider(spec.Provider)
+			if !ok {
+				return nil, fmt.Errorf("invalid provider %q for route %q", spec.Provider, match)
+			}
+			prov = p
+		}
+		route, err := buildRoute(match, spec.Upstream, prov, mode)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, route)
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("EDGE_PROXY_ROUTES is set but parsed to no routes")
+	}
+	return routes, nil
+}
+
+func parseProvider(s string) (Provider, bool) {
+	switch Provider(s) {
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini:
+		return Provider(s), true
+	default:
+		return "", false
+	}
+}
+
+func buildRoute(match, rawUpstream string, prov Provider, mode RouteMode) (Route, error) {
+	if match == "" {
+		return Route{}, fmt.Errorf("EDGE_PROXY_ROUTES entry has an empty match key")
+	}
+	// In path mode the match is a leading path prefix; normalize to a single leading slash and no
+	// trailing slash so prefix stripping is unambiguous.
+	if mode == RouteModePath {
+		match = "/" + strings.Trim(match, "/")
+	}
+	u, err := url.Parse(strings.TrimSpace(rawUpstream))
+	if err != nil {
+		return Route{}, fmt.Errorf("invalid upstream %q for route %q: %w", rawUpstream, match, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return Route{}, fmt.Errorf("upstream for route %q must be http(s), got %q", match, rawUpstream)
+	}
+	if u.Host == "" {
+		return Route{}, fmt.Errorf("upstream %q for route %q has no host", rawUpstream, match)
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	return Route{Match: match, Upstream: u, Provider: prov}, nil
 }
 
 func firstNonEmpty(vals ...string) string {
