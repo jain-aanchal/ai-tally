@@ -120,3 +120,29 @@ export async function getTenant(): Promise<ResolvedTenant> {
 export async function resolveTenantId(): Promise<string> {
   return (await getTenant()).tenantId;
 }
+
+/** Clerk's admin role in an org. Key and member writes require it (§9). */
+export const ORG_ADMIN_ROLE = "org:admin";
+
+/**
+ * Whether a resolved tenant may perform admin-only control-plane writes (mint/rotate/revoke keys,
+ * manage members). On the dev escape hatch there is no Clerk role, so local dev is treated as admin;
+ * on the product path only ``org:admin`` qualifies (§9). This is the single web-side policy point
+ * the gateway trusts (§6): the gateway sees only the service token and the resolved tenant.
+ */
+export function canManage(tenant: ResolvedTenant): boolean {
+  if (devTenant() !== null) {
+    return true;
+  }
+  return tenant.orgRole === ORG_ADMIN_ROLE;
+}
+
+/** The active Clerk user id (for key `created_by` audit), or null on the dev escape hatch. */
+export async function currentUserId(): Promise<string | null> {
+  if (devTenant() !== null) {
+    return null;
+  }
+  const { auth } = await import("@clerk/nextjs/server");
+  const { userId } = await auth();
+  return userId ?? null;
+}
