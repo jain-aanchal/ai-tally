@@ -395,55 +395,64 @@ export async function collectWrongSizedModel(
     )
     .slice(0, MAX_FEATURES);
 
-  const scopes: WrongSizedModelScope[] = [];
-  for (const f of ranked) {
-    // (1) No incumbent traffic to rescale against -> no finding for this feature (skip before the
-    // replay/eval reads, which each burn real provider/judge spend).
-    if (f.incumbentPerCallMicroUsd <= 0 || f.windowSpendMicroUsd <= 0) continue;
+  // Fan the per-feature Compare-path reads out CONCURRENTLY (CTO-234 perf). This was a sequential
+  // await loop over the top-K features, so it cost ~2K serial gateway round-trips (replay + eval) on
+  // the /api/waste hot path and dominated the page's latency. Promise.all dispatches all features at
+  // once; the array order is preserved, so the resulting scope order (and thus the findings) is
+  // identical to the old loop. Replay stays sequenced BEFORE eval WITHIN a feature so a feature with
+  // no replay corpus still never burns judge spend on an eval it would discard.
+  const built = await Promise.all(
+    ranked.map(async (f): Promise<WrongSizedModelScope | null> => {
+      // (1) No incumbent traffic to rescale against -> nothing to flag (skip before any replay/eval read).
+      if (f.incumbentPerCallMicroUsd <= 0 || f.windowSpendMicroUsd <= 0) return null;
 
-    // (2) Replay corpus for THIS feature. No corpus -> skip.
-    const replay = await queryReplayCandidates(f.feature);
-    if (!replay || replay.samples_available <= 0) continue;
-    const samplesAvailable = replay.samples_available;
+      // (2) Replay corpus for THIS feature. No corpus -> skip (and never reach the eval read).
+      const replay = await queryReplayCandidates(f.feature);
+      if (!replay || replay.samples_available <= 0) return null;
+      const samplesAvailable = replay.samples_available;
 
-    // (3) Eval quality signal for THIS feature. No candidate cleared the judged floor (or eval null) ->
-    // no honest quality number, skip (the same rule /compare enforces).
-    const evalProj = await queryEvalCandidates(f.feature);
-    if (!evalProj) continue;
-    const hasJudged = evalProj.per_candidate.some((e) => e.samples_judged >= MIN_JUDGED_SAMPLES);
-    if (!hasJudged) continue;
+      // (3) Eval quality signal for THIS feature. No candidate cleared the judged floor (or eval null)
+      // -> no honest quality number, skip (the same rule /compare enforces).
+      const evalProj = await queryEvalCandidates(f.feature);
+      if (!evalProj) return null;
+      const hasJudged = evalProj.per_candidate.some((e) => e.samples_judged >= MIN_JUDGED_SAMPLES);
+      if (!hasJudged) return null;
 
-    // (4) Build per-call candidates: join replay (cost) and eval (quality) by provider+model. Each
-    // candidate's per-call cost is `projected_monthly_cost_micro_usd / samples_available` (the gateway
-    // built the projection as `round(avg_per_call * samples_available)`, so this recovers avg per call).
-    const candidates: WrongSizedModelCandidate[] = [];
-    for (const r of replay.per_candidate) {
-      const e = evalProj.per_candidate.find((x) => x.provider === r.provider && x.model === r.model);
-      if (!e) continue;
-      candidates.push({
-        candidateModel: r.model,
-        provider: r.provider,
-        perCallMicroUsd: Math.round(r.projected_monthly_cost_micro_usd / samplesAvailable),
-        winRate: e.win_rate,
-        ciLow: e.win_rate_ci_lo,
-        ciHigh: e.win_rate_ci_hi,
-        samplesJudged: e.samples_judged,
-        samplesReplayed: r.samples_replayed,
-      });
-    }
-    if (candidates.length === 0) continue;
+      // (4) Build per-call candidates: join replay (cost) and eval (quality) by provider+model. Each
+      // candidate's per-call cost is `projected_monthly_cost_micro_usd / samples_available` (the gateway
+      // built the projection as `round(avg_per_call * samples_available)`, so this recovers avg per call).
+      const candidates: WrongSizedModelCandidate[] = [];
+      for (const r of replay.per_candidate) {
+        const e = evalProj.per_candidate.find((x) => x.provider === r.provider && x.model === r.model);
+        if (!e) continue;
+        candidates.push({
+          candidateModel: r.model,
+          provider: r.provider,
+          perCallMicroUsd: Math.round(r.projected_monthly_cost_micro_usd / samplesAvailable),
+          winRate: e.win_rate,
+          ciLow: e.win_rate_ci_lo,
+          ciHigh: e.win_rate_ci_hi,
+          samplesJudged: e.samples_judged,
+          samplesReplayed: r.samples_replayed,
+        });
+      }
+      if (candidates.length === 0) return null;
 
-    // (5) One scope per qualifying feature, carrying THAT feature's incumbent + spend + per-call basis.
-    scopes.push({
-      scopeKind: "feature",
-      scopeValue: f.feature,
-      feature: f.feature,
-      incumbentModel: f.incumbentModel,
-      windowSpendMicroUsd: f.windowSpendMicroUsd,
-      incumbentPerCallMicroUsd: f.incumbentPerCallMicroUsd,
-      candidates,
-    });
-  }
+      // (5) One scope per qualifying feature, carrying THAT feature's incumbent + spend + per-call basis.
+      return {
+        scopeKind: "feature",
+        scopeValue: f.feature,
+        feature: f.feature,
+        incumbentModel: f.incumbentModel,
+        windowSpendMicroUsd: f.windowSpendMicroUsd,
+        incumbentPerCallMicroUsd: f.incumbentPerCallMicroUsd,
+        candidates,
+      };
+    }),
+  );
+  const scopes: WrongSizedModelScope[] = built.filter(
+    (s): s is WrongSizedModelScope => s !== null,
+  );
   if (scopes.length === 0) return [];
 
   // One call, all per-feature scopes: the pure detector already emits one finding per scope with the
