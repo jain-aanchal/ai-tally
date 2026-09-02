@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: Pinecone index.query -> record_vector_call.
+id: vector.pinecone.query
+kind: vector
+title: "Pinecone index.query / upsert -> tally.record_vector_call"
+detect:
+  imports: ["pinecone"]
+  call_patterns: [".query(", ".upsert("]
+sdk_surface:
+  call: "tally.record_vector_call"
+  delegates_to: "tally.client.TallyClient.record_vector_call"
+  required_args: [provider, index, operation]
+  layer: vector
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After the Pinecone call returns, record the vector-search cost layer.
+    # index / operation / record_count are filled from the concrete call site.
+    tally.record_vector_call(
+        provider="pinecone",
+        index={index_name},
+        operation="query",
+        record_count={n_results},
+    )
+  placement: after_call
+verify:
+  layer: vector
+  operation_name: "vector"
+notes: "record_count is accepted by record_vector_call for API symmetry; cost resolves from the versioned catalog under PriceType.VECTOR_CALL keyed by (provider, operation)."

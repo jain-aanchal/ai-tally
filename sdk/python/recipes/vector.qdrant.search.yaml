@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: Qdrant search -> record_vector_call.
+id: vector.qdrant.search
+kind: vector
+title: "Qdrant search / query_points -> tally.record_vector_call"
+detect:
+  imports: ["qdrant_client"]
+  call_patterns: [".search(", ".query_points(", ".upsert("]
+sdk_surface:
+  call: "tally.record_vector_call"
+  delegates_to: "tally.client.TallyClient.record_vector_call"
+  required_args: [provider, index, operation]
+  layer: vector
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After the Qdrant search returns. The Qdrant "collection_name" maps to index.
+    tally.record_vector_call(
+        provider="qdrant",
+        index={collection_name},
+        operation="search",
+        record_count={n_results},
+    )
+  placement: after_call
+verify:
+  layer: vector
+  operation_name: "vector"
+notes: "operation is the Qdrant method name (search / query_points / upsert); cost resolves per (provider, operation)."

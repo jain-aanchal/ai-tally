@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: Weaviate collection query -> record_vector_call.
+id: vector.weaviate.query
+kind: vector
+title: "Weaviate near_text / query -> tally.record_vector_call"
+detect:
+  imports: ["weaviate"]
+  call_patterns: [".query.near_text(", ".query.near_vector(", ".query.fetch_objects("]
+sdk_surface:
+  call: "tally.record_vector_call"
+  delegates_to: "tally.client.TallyClient.record_vector_call"
+  required_args: [provider, index, operation]
+  layer: vector
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After the Weaviate query returns. The Weaviate "collection" maps to index.
+    tally.record_vector_call(
+        provider="weaviate",
+        index={collection_name},
+        operation="query",
+        record_count={n_results},
+    )
+  placement: after_call
+verify:
+  layer: vector
+  operation_name: "vector"
+notes: "Weaviate collections are the index slot; the tool-name slot encodes {provider}.{index}.{operation}."

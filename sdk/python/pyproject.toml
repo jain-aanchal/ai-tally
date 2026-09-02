@@ -8,9 +8,14 @@ license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.optional-dependencies]
+# CTO-261: the onboarding-agent recipe catalog is YAML; jsonschema backs the
+# schema-validation guard in tests/test_recipes.py. Kept dev-only so the SDK
+# runtime stays dependency-free (see `dependencies = []` above).
 dev = [
     "pytest>=8.0",
     "ruff>=0.12,<0.16",
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
 ]
 
 [build-system]
@@ -29,5 +34,6 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." makes the onboarding_mcp component (CTO-261) importable alongside the SDK's src tree.
+pythonpath = ["src", "."]
 addopts = "-q"

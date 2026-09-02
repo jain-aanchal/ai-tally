@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5: an app's own billable tool call -> record_tool_call.
+id: tool.generic.call
+kind: tool
+title: "App tool / function call -> tally.record_tool_call"
+detect:
+  # No single import marks "a tool": the agent surfaces candidate functions the
+  # developer confirms. LangChain / Agents-SDK tool decorators are strong hints.
+  imports: ["langchain", "langchain_core", "agents"]
+  call_patterns: ["@tool", "Tool(", "function_call", "tool_call"]
+sdk_surface:
+  call: "tally.record_tool_call"
+  delegates_to: "tally.client.TallyClient.record_tool_call"
+  required_args: [provider, tool]
+  layer: tool
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # After the tool runs. provider identifies the tool's vendor / backend;
+    # tool is the tool's name. Pass cost_micro_usd only when you know it;
+    # otherwise the versioned catalog resolves the rate under PriceType.TOOL_CALL.
+    tally.record_tool_call(
+        provider={tool_provider},
+        tool={tool_name},
+    )
+  placement: after_call
+verify:
+  layer: tool
+  operation_name: "tool"
+notes: "cost_micro_usd is optional; when omitted, an unknown (provider, tool) pair defaults to 0 with a one-time WARN. A caller-supplied cost always overrides."
