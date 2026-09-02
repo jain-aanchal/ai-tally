@@ -136,7 +136,9 @@ from gateway.tenant_api_keys import (
     TenantNotFound as ApiKeyTenantNotFound,
 )
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
-from gateway.tenant_provisioning import ProvisionError, TenantProvisioner
+from gateway.edge_keys import EdgeKeyStore
+from gateway.tenant_hmac_key import HmacKeyUnavailableError, TenantHmacKeyStore
+from gateway.tenant_provisioning import LocalDevKeyProvider, ProvisionError, TenantProvisioner
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
 from gateway.tenant_identity import TenantIdentityResolver
@@ -349,8 +351,17 @@ async def lifespan(app: FastAPI):
     # Organizations, users & access (Initiative 1). Provisioning turns a Clerk org into a tenant with
     # its own per-org HMAC key reference; the keys store is self-serve ingest-key management. Both go
     # through the service-token-authed control plane; the web server is their only caller.
-    app.state.tenant_provisioner = TenantProvisioner(settings)
+    # One key provider shared by the provisioner and the HMAC bootstrap store (Initiative 2, §3.2):
+    # the provisioner mints a per-org HMAC key set into tenants.hash_salt_kek_ref and the bootstrap
+    # store reads the active material back through the SAME provider, so a tenant provisioned in this
+    # process resolves to the very bytes minted for it. Prod backs this with KMS/Secret Manager.
+    hmac_key_provider = LocalDevKeyProvider()
+    app.state.tenant_provisioner = TenantProvisioner(settings, key_provider=hmac_key_provider)
     app.state.tenant_api_keys = TenantApiKeyStore(settings)
+    # Initiative 2: the SDK's in-process HMAC bootstrap (GET /v1/tenant/hmac-key, §3.2) and the edge
+    # proxy's key-cache delta feed (GET /v1/edge/keys, §6.2).
+    app.state.tenant_hmac_keys = TenantHmacKeyStore(settings, hmac_key_provider)
+    app.state.edge_keys = EdgeKeyStore(settings)
     # In-process dedup set for Stripe webhook redeliveries. ClickHouse's ReplacingMergeTree
     # will collapse late duplicates at merge time, but this short-circuits the second insert
     # so the 200 stays well under Stripe's 30s timeout window.
@@ -2001,6 +2012,74 @@ def revoke_tenant_key(
     except ApiKeyTenantNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(status_code=204)
+
+
+@app.get("/v1/tenant/hmac-key")
+def get_tenant_hmac_key(
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Return the caller tenant's active HMAC key material + version (Initiative 2, §3.2).
+
+    Authenticated by the INGEST KEY itself (``ApiKeyAuth.authenticate``), not the service token: the
+    SDK holds no service token, and the key is tenant-bound, so one org can never fetch another's key
+    material (the tenant is the key's tenant, there is no ``x-tenant-id`` input). A ``write`` or
+    ``admin`` scope is REQUIRED, never ``read``: this hands back hashing key material, so a read-only
+    key (which may be handed to less-trusted readers) must not unlock it. Auth runs independent of
+    ``require_api_key``: this endpoint always demands a valid key, because there is no other way to
+    know the tenant and the material is sensitive.
+
+    The response body carries the tenant's active symmetric HMAC key. It is TREATED AS A SECRET: the
+    gateway logs no response bodies, it is never placed on a span, and it is served TLS-only in the
+    hosted deployment. It is the tenant's own key, delivered only to a process already holding that
+    tenant's ingest key, used only to hash that tenant's own account/user ids in that process. It is
+    never a KEK, never a raw provider credential, never another tenant's key (§3.2).
+    """
+    auth: ApiKeyAuth = app.state.auth
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise _error(401, ErrorCode.UNAUTHENTICATED, "missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    result = auth.authenticate(token)
+    if result is None:
+        raise _error(401, ErrorCode.UNAUTHENTICATED, "invalid or revoked api key")
+    if not result.can_write:
+        # A read-only key authenticates but must not unlock key material (spec §3.2, WRITE_SCOPES).
+        raise _error(403, ErrorCode.FORBIDDEN_SCOPE, f"scope '{result.scope}' cannot fetch hmac key material")
+    store: TenantHmacKeyStore = app.state.tenant_hmac_keys
+    if store.export_disabled(result.tenant_id):
+        # Per-tenant kill switch (spec §12 Q1). Default-on today; the check is wired so a
+        # high-security tenant can be pinned proxy-only without an endpoint change.
+        raise _error(403, ErrorCode.HMAC_EXPORT_DISABLED, "hmac key export is disabled for this tenant")
+    try:
+        material = store.active_key(result.tenant_id)
+    except HmacKeyUnavailableError as exc:
+        # Honest under uncertainty: no fabricated bytes. The SDK degrades to unattributed (§3.3).
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # No log line here: the only interesting thing to report is the material, which must not be
+    # recorded. The access log may keep the request line; the body never appears in a log.
+    return JSONResponse(material.as_dict(), status_code=200)
+
+
+@app.get("/v1/edge/keys")
+def get_edge_keys(
+    since: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Delta feed of api-key changes for the edge proxy's key cache (Initiative 2, §6.2).
+
+    Authenticated by the ``GATEWAY_SERVICE_TOKEN`` gate (Initiative 1, §6): the proxy is a server,
+    not a tenant, and holds no human session. Returns ``{changes, cursor}`` where each change is
+    ``{key_hash, tenant_id, scope, revoked_at}`` (metadata only, never a raw or reversible token) and
+    ``cursor`` is a monotonic watermark the proxy persists and passes back as ``?since=`` next tick.
+    An empty cursor pages the full active set once (cold start); the steady state ships only what
+    changed. Revoked keys arrive with ``revoked_at`` set so the proxy drops them within one refresh
+    interval.
+    """
+    _require_service_token(authorization)
+    store: EdgeKeyStore = app.state.edge_keys
+    changes, cursor = store.changes_since(since)
+    return JSONResponse(
+        {"changes": [c.as_dict() for c in changes], "cursor": cursor}, status_code=200
+    )
 
 
 @app.post("/v1/stripe/webhook")

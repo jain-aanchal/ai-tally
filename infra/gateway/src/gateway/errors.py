@@ -15,6 +15,7 @@ class ErrorCode(str, Enum):
     UNAUTHENTICATED = "UNAUTHENTICATED"        # missing/invalid/revoked bearer key
     FORBIDDEN_SCOPE = "FORBIDDEN_SCOPE"        # key lacks the scope for this operation
     TENANT_MISMATCH = "TENANT_MISMATCH"        # body claims a tenant the key isn't bound to
+    HMAC_EXPORT_DISABLED = "HMAC_EXPORT_DISABLED"  # per-tenant policy forbids HMAC key export (Init 2 §3.2)
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"          # monthly tenant quota spent
     RATE_LIMITED = "RATE_LIMITED"              # short-term per-tenant rate cap hit
 

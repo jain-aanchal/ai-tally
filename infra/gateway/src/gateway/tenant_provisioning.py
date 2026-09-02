@@ -55,11 +55,19 @@ class KeyMaterialProvider(Protocol):
     Production backs this with Secret Manager / KMS and returns its resource reference; local dev
     uses :class:`LocalDevKeyProvider`. The application never persists raw key material to Postgres:
     only the reference is stored, in ``tenants.hash_salt_kek_ref``.
+
+    ``material`` resolves a reference back to the active key bytes. It is the seam the Initiative 2
+    HMAC bootstrap (``GET /v1/tenant/hmac-key``, spec §3.2) reads through so the SDK can hash account
+    and user ids in the customer process. In prod that is a KMS/Secret Manager fetch; here it is the
+    in-process map below. It returns one tenant's active symmetric key only, never a KEK and never
+    another tenant's material.
     """
 
     def mint(self) -> str: ...
 
     def delete(self, ref: str) -> None: ...
+
+    def material(self, ref: str) -> bytes: ...
 
 
 @dataclass
@@ -90,6 +98,21 @@ class LocalDevKeyProvider:
         """Whether a reference still resolves to material. For orphan-cleanup tests."""
         with self._lock:
             return ref in self._material
+
+    def material(self, ref: str) -> bytes:
+        """Return the active key bytes for ``ref``, or raise ``KeyError`` when it is not held.
+
+        The bytes are the tenant's own active HMAC key set. They are handed only to the HMAC
+        bootstrap endpoint under the tenant's own ingest key (spec §3.2) and are never logged. A ref
+        this process never minted (for example the seeded ``local-dev`` key, or any tenant minted in
+        a prior process) is a miss, not a fabricated key: the endpoint turns that into an honest
+        "material unavailable" rather than returning bytes that would hash to nothing real.
+        """
+        with self._lock:
+            material = self._material.get(ref)
+        if material is None:
+            raise KeyError(f"no key material held for reference {ref!r}")
+        return material
 
 
 @dataclass(frozen=True, slots=True)
