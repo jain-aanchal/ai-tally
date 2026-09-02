@@ -1,12 +1,12 @@
 # Initiative 2: Real one-step connect
 
-Status: draft spec, build-ready. Owner: platform. Ticket: CTO-261 (umbrella).
+Status: draft spec, build-ready. Owner: platform. Ticket: TODO (file the umbrella ticket in Linear before implementation).
 
 This is a design spec. It defines the decisions, endpoints, wrapped-method list,
 config changes, and file-level change list. It does not contain the
 implementation.
 
-Depends on Initiative 1 (Organizations, users & access, CTO-260,
+Depends on Initiative 1 (Organizations, users & access, see
 `docs/specs/initiative-1-orgs-and-access.md`). This spec reuses Initiative 1's
 decisions verbatim and does not re-litigate them: Clerk owns dashboard identity;
 ai-tally owns per-org ingest API keys in its own control plane (the `api_keys`
@@ -132,13 +132,17 @@ def init(
     endpoint: str | None = None,     # ingest base URL; default the hosted gateway, env TALLY_ENDPOINT
     feature_tag: str | None = None,  # optional default feature tag for the process
     instrument: bool = True,         # monkeypatch openai/anthropic if installed
+    instrument_stream_usage: bool = False,  # opt-in: add include_usage to streamed OpenAI calls (§4.3)
     flush_interval_s: float = 1.0,   # background batcher cadence (§5)
     catalog: PriceCatalog | None = None,  # default: bundled seed_catalog (§8)
 ) -> TallyClient: ...
 ```
 
 `init` is idempotent (a second call returns the same process-global client and
-does not double-patch). It **never raises into the caller**: a bad key, an
+does not double-patch). The SDK is single-tenant per process by design: `init`
+installs one process-global client and key, so one key serves one org per process
+(the hosted proxy, §6, is the multi-tenant path). It **never raises into the
+caller**: a bad key, an
 unreachable gateway, or a missing provider library degrades to unattributed or
 disabled instrumentation with a one-time warning, per the SDK's core invariant
 (`sdk/python/README.md`). `init` does no blocking network I/O on the calling
@@ -172,8 +176,10 @@ Behavior:
 
 - Auth reuses `ApiKeyAuth.authenticate` (SHA-256 of the bearer). The tenant is
   the key's tenant; there is no `x-tenant-id` input, so one org can never fetch
-  another's key material. A `read`, `write`, or `admin` scope may fetch it (it is
-  the tenant's own key, used only to hash the tenant's own data).
+  another's key material. Fetching requires a `write` or `admin` scope, NOT
+  `read`: this endpoint hands back hashing key material, so a read-only key (which
+  may be handed to less-trusted readers) must not unlock it. Reuse the same
+  `WRITE_SCOPES` set ingest already enforces (`infra/gateway/src/gateway/auth.py`).
 - Response `200`:
   ```json
   {
@@ -200,6 +206,16 @@ material locally via `InMemoryKeyMaterialProvider`. The endpoint is not a genera
 KMS proxy: it returns one tenant's one active symmetric key, never a KEK, never
 another tenant's key, never raw provider credentials.
 
+Blast radius, stated plainly: this endpoint enlarges what a leaked ingest key can
+do. Before it, a stolen `write` key lets an attacker write junk spans. After it, a
+stolen `write` / `admin` key can also fetch the tenant's active HMAC key and
+thereby compute and confirm that tenant's account/user hashes given candidate raw
+ids. The mitigations are the `write` / `admin` scope gate above, TLS-only
+transport, an optional per-tenant flag to disable the endpoint for high-security
+tenants (§12 Q1), and treating the ingest key itself as a secret with prompt
+revocation (§6.2). This is a deliberate trade of a larger key blast radius for
+client-side hashing that keeps raw ids in the customer process.
+
 Handling and caching rules:
 
 - **Sensitive in memory.** The material is held only in the process
@@ -212,6 +228,9 @@ Handling and caching rules:
   version so history is not orphaned.
 - **Transport is TLS only.** The endpoint is refused over plaintext by the hosted
   gateway.
+- **Never logged, either side.** The response body is excluded from gateway
+  request/response logging and from the SDK's self-observability. An access log may
+  record the request line, never the key material.
 
 ### 3.3 Fallback: unattributed, never a raw id
 
@@ -305,9 +324,17 @@ not force options onto the caller's request. Approach:
   usage/model from the terminal usage event. The span is emitted once, when the
   stream is exhausted or the context manager exits.
 - If the caller did not enable usage on an OpenAI stream, there is no usage to
-  accumulate: emit the span with token counts null (not zero) and a reason, per
-  "honest under uncertainty". Do not fabricate counts. The proxy path has the
-  same limitation, tracked as CTO-40 (§6, §8).
+  accumulate. By default the span is emitted with token counts null (not zero) and
+  a reason, per "honest under uncertainty"; counts are never fabricated. This is
+  not a rare edge: many apps stream without `include_usage`, so a large share of
+  streamed SDK calls would land token-unknown by default. As an opt-in,
+  `init(instrument_stream_usage=True)` makes the OpenAI wrapper add
+  `stream_options={"include_usage": True}` when the caller did not set it, so those
+  streams carry usage and price fully. Why it is opt-in and off by default: this
+  appends a terminal usage chunk to the stream, which a caller iterating raw chunks
+  and asserting on their shape could notice, so the SDK does not mutate the request
+  silently. The proxy path has the same underlying limitation, tracked as CTO-40
+  (§6, §8).
 - Accumulation state is per-stream and never shared, so concurrent streams do not
   cross-contaminate.
 
@@ -421,18 +448,29 @@ without a per-request gateway round-trip, to hold p99 < 3ms.
   computes `sha256` of the presented key (the same `hash_key` transform as
   `infra/gateway/src/gateway/auth.py`) and looks up locally. No Postgres or
   gateway call sits in the request path.
-- **Refresh source.** A new read-only gateway endpoint the proxy polls:
+- **Refresh source (incremental).** A new read-only gateway endpoint the proxy
+  polls, designed for delta sync rather than a full dump so it scales as tenants
+  and keys grow:
 
   | Method | Path | Purpose | Auth |
   | --- | --- | --- | --- |
-  | GET | `/v1/edge/keys` | Return active key hashes to tenant-UUID/scope mappings for the edge cache. Metadata only, never raw keys. | proxy service token |
+  | GET | `/v1/edge/keys?since={cursor}` | Return key-hash to tenant-UUID/scope changes since `cursor` (creations, revocations). Metadata only, never raw keys. | proxy service token |
 
-  The response is a list of `{key_hash, tenant_id, scope, revoked_at}` (only the
-  SHA-256 hash, never a raw or reversible token, consistent with Initiative 1
-  §11). The proxy caches it and diffs on refresh. Revoked keys (`revoked_at`
-  set) are removed from the cache on the next refresh, so revocation propagates
-  within the refresh interval; document that bounded window as the revocation SLA
-  for the proxy path.
+  The response is `{ changes: [{key_hash, tenant_id, scope, revoked_at}], cursor }`,
+  where `cursor` is a monotonic watermark (for example the max `api_keys` row
+  version, or `greatest(created_at, revoked_at)`). The proxy applies the delta to
+  its in-memory map and persists the cursor, so the steady state ships only what
+  changed; a cold start (empty cursor) pages the full active set once. Only the
+  SHA-256 hash is ever sent, never a raw or reversible token (Initiative 1 §11).
+  Revoked keys arrive as a change with `revoked_at` set and are dropped from the
+  cache, so revocation propagates within one refresh interval; document that
+  bounded window as the proxy-path revocation SLA.
+
+  Blast radius: the proxy holds a system-wide map of key hashes. The hashes are
+  not reversible, but a compromised proxy could use them for offline
+  guess-validation, so the map is treated as sensitive (memory-only, never logged)
+  and the delta feed avoids re-shipping the whole table on every tick. A tighter
+  push channel is an open question (§12 Q2).
 - **Fail-closed on unknown key.** A key not in the cache is rejected (`403`) when
   `EDGE_PROXY_REQUIRE_TENANT=true` (the hosted default), never forwarded
   unauthenticated. A brand-new key created seconds ago may miss the cache until
