@@ -27,7 +27,7 @@
 import type { WasteFinding } from "../waste";
 import type { DimensionFilters } from "../filters";
 import { clampWindowDays } from "../explore";
-import { tryLive, rowsP, micro } from "../clickhouse";
+import { tryLive, rowsPCached, micro } from "../clickhouse";
 
 // --- Named thresholds (WHY, not magic numbers) --------------------------------------------------
 
@@ -281,7 +281,7 @@ export async function collectDuplicatedWork(
     // change feature/agent/model/user mid-trace); its timestamp is the last span's, its cost the
     // trace sum, and its outcome the worst StatusCode (2 == error => failed). compute/egress spans
     // are tenant-level infra rows, not agent runs, so they are excluded exactly as queryAgents does.
-    const rows = await rowsP<RunRow>(
+    const rows = await rowsPCached<RunRow>(
       db,
       `SELECT TraceId AS traceId,
               any(FeatureTag) AS feature,

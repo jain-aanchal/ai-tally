@@ -22,7 +22,7 @@ import type { MicroUSD } from "@/lib/types";
 import type { WasteConfidence, WasteFinding, WasteScopeKind } from "@/lib/waste";
 import { clampWindowDays } from "@/lib/explore";
 import type { DimensionFilters } from "@/lib/filters";
-import { micro, queryFeatureEconomics, rowsP, tryLive } from "@/lib/clickhouse";
+import { micro, queryFeatureEconomics, rowsPCached, tryLive } from "@/lib/clickhouse";
 
 // At or below this attribution rate a scope has, for our purposes, NO measured return: in practice
 // `queryFeatureEconomics` returns either ~1.0 (conversions attributed) or null (none), but a small
@@ -166,7 +166,7 @@ export async function collectNoMeasuredReturn(
   const live = await tryLive(async (db, tenant) => {
     // Per-feature windowed spend. `w` is a clamped int, so interpolating it is injection-safe (same
     // pattern as the sibling queries in lib/clickhouse.ts). `filters.feature` binds as an array param.
-    const spendRows = await rowsP<FeatureSpendRow>(
+    const spendRows = await rowsPCached<FeatureSpendRow>(
       db,
       `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost
        FROM otel_spans
@@ -181,7 +181,7 @@ export async function collectNoMeasuredReturn(
     // Tenant-wide attribution rate: distinct business events that got an attribution record over the
     // window / all business events over the window. This is the honesty discriminator -- 0 (or no
     // events at all) means the tenant has no revenue source wired, and the detector then emits [].
-    const [attrRow] = await rowsP<TenantAttributionRow>(
+    const [attrRow] = await rowsPCached<TenantAttributionRow>(
       db,
       `SELECT
          uniqExact(BusinessEventId) AS total_events,
