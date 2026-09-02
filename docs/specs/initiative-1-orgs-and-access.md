@@ -1,6 +1,6 @@
 # Initiative 1: Organizations, users & access (Clerk)
 
-Status: draft spec, build-ready. Owner: platform. Ticket: CTO-260 (umbrella).
+Status: draft spec, build-ready. Owner: platform. Ticket: TODO (file the umbrella ticket in Linear before implementation).
 
 This is a design spec. It defines the data model, endpoints, and file-level change
 list. It does not contain the implementation.
@@ -89,7 +89,7 @@ and its keys survive the migration untouched.
 
 ```sql
 -- 0029_orgs_and_access.sql
--- Organizations, users & access (Initiative 1, CTO-260).
+-- Organizations, users & access (Initiative 1). Ticket: TODO (umbrella).
 --
 -- Clerk is the system of record for identity (users, orgs, memberships, roles,
 -- invitations). ai-tally stores only the org-to-tenant mapping plus display-only
@@ -161,30 +161,55 @@ A new Clerk organization becomes an ai-tally tenant via a Clerk webhook.
 
 - Clerk emits `organization.created`, signed with an [svix](https://docs.svix.com)
   signature (`svix-id`, `svix-timestamp`, `svix-signature` headers).
-- The gateway exposes `POST /v1/tenant/provision` as the webhook target.
+- The webhook targets a thin Next.js route in the web app,
+  `web/app/api/webhooks/clerk/route.ts`, NOT the gateway directly. The gateway is
+  private in the hosted topology (only `web` is publicly exposed, see the deploy
+  kit), so an external caller like Clerk cannot reach it. The web route verifies
+  the svix signature, then forwards the verified event to the gateway's
+  `POST /v1/tenant/provision` with the `GATEWAY_SERVICE_TOKEN` (§6). This keeps the
+  gateway off the public internet and folds the webhook into the one public surface.
 
-Steps inside the handler:
+Steps in the web webhook route (`web/app/api/webhooks/clerk/route.ts`):
 
 1. Verify the svix signature against the configured webhook signing secret. Reject
-   with 401 on failure. Never trust the body before the signature verifies.
-2. Idempotent upsert keyed on `clerk_org_id`. If a tenant already maps to this
-   org (webhook redelivery), return the existing tenant UUID and do nothing else.
-   The partial unique index `uq_tenants_clerk_org_id` backs this.
-3. Mint a per-org HMAC key set in Secret Manager (or KMS) and store ONLY its
-   reference in `tenants.hash_salt_kek_ref`. The reference must satisfy the
-   `no_raw_secret` CHECK (not `sk-%`, length < 512). This is the per-tenant key
-   under which user and account ids are HMAC-SHA256'd; it must be distinct per
-   tenant so a hash cannot be joined across tenants.
-4. `INSERT INTO tenants (name, region, plan, hash_salt_kek_ref, clerk_org_id)`
-   with `name` = the Clerk org name, `region` = the configured default,
-   `plan = 'free'`.
-5. `INSERT INTO usage_limits (tenant_id, plan)` with `plan = 'free'` (references
-   `plan_tiers`), so downstream limit checks find a row.
-6. Return the tenant UUID (200).
+   with 401 on failure. Never trust the body before the signature verifies. This
+   route is public (no Clerk session) but svix-authenticated (§7).
+2. On a verified `organization.created`, POST the event to the gateway
+   `POST /v1/tenant/provision` with the service token. Return the gateway's result
+   to Clerk (200 on success) so Clerk's own retry/backoff applies on a 5xx.
 
-The webhook route is public (no Clerk session, no service token) but is
-authenticated by the svix signature. It is the one control-plane endpoint that is
-not behind the service token (§6).
+Steps inside the gateway `POST /v1/tenant/provision` handler (service-token authed):
+
+1. Fast path: `SELECT id FROM tenants WHERE clerk_org_id = %s`. If a tenant already
+   maps to this org (webhook redelivery), return its UUID and stop. No new key
+   material is minted and nothing is inserted.
+2. On a miss, mint a per-org HMAC key set in Secret Manager (or KMS) and store ONLY
+   its reference in `tenants.hash_salt_kek_ref` (see §4.1). The reference must
+   satisfy the `no_raw_secret` CHECK (not `sk-%`, length < 512). This is the
+   per-tenant key under which user and account ids are HMAC-SHA256'd; it must be
+   distinct per tenant so a hash cannot be joined across tenants.
+3. Insert race-safely, because two concurrent deliveries can both miss step 1:
+
+   ```sql
+   INSERT INTO tenants (name, region, plan, hash_salt_kek_ref, clerk_org_id)
+   VALUES (%s, %s, 'free', %s, %s)
+   ON CONFLICT (clerk_org_id) WHERE clerk_org_id IS NOT NULL
+   DO NOTHING
+   RETURNING id;
+   ```
+
+   The `ON CONFLICT` arbiter must repeat the partial index predicate
+   (`WHERE clerk_org_id IS NOT NULL`) so Postgres infers `uq_tenants_clerk_org_id`.
+4. If the INSERT returned a row, `INSERT INTO usage_limits (tenant_id, plan)` with
+   `plan = 'free'` (references `plan_tiers`) and return the new UUID (200).
+5. If the INSERT returned NO row, a concurrent delivery won the race:
+   `SELECT id FROM tenants WHERE clerk_org_id = %s`, return that UUID, and clean up
+   the HMAC key just minted in step 2 (it is now orphaned). Do not leave orphaned
+   key material behind.
+
+The gateway provision endpoint is authenticated by the service token like every
+other control-plane endpoint (§6); the svix signature is verified once, at the
+public web route.
 
 ### Sequence
 
@@ -193,29 +218,73 @@ sequenceDiagram
     autonumber
     participant User
     participant Clerk
+    participant Web as Web /api/webhooks/clerk
     participant GW as Gateway /v1/tenant/provision
     participant SM as Secret Manager / KMS
     participant PG as Postgres control plane
 
     User->>Clerk: Create organization
-    Clerk->>Clerk: Create org, owner membership
-    Clerk-->>GW: POST organization.created (svix-signed)
-    GW->>GW: Verify svix signature
+    Clerk->>Clerk: Create org, admin membership
+    Clerk-->>Web: POST organization.created (svix-signed)
+    Web->>Web: Verify svix signature
     alt signature invalid
-        GW-->>Clerk: 401 reject
+        Web-->>Clerk: 401 reject
     else valid
-        GW->>PG: SELECT tenant WHERE clerk_org_id = org.id
+        Web->>GW: POST /v1/tenant/provision (service token)
+        GW->>PG: SELECT id WHERE clerk_org_id = org.id
         alt already provisioned
-            GW-->>Clerk: 200 { tenant_id } (idempotent)
+            GW-->>Web: 200 { tenant_id } (idempotent)
         else new org
             GW->>SM: Create per-org HMAC key set
             SM-->>GW: secret reference (kek_ref)
-            GW->>PG: INSERT tenants (name, region, plan=free, hash_salt_kek_ref, clerk_org_id)
-            GW->>PG: INSERT usage_limits (tenant_id, plan=free)
-            GW-->>Clerk: 200 { tenant_id }
+            GW->>PG: INSERT tenants ... ON CONFLICT (clerk_org_id) DO NOTHING RETURNING id
+            alt inserted
+                GW->>PG: INSERT usage_limits (tenant_id, plan=free)
+            else lost race
+                GW->>PG: SELECT existing tenant id
+                GW->>SM: Delete orphaned key set
+            end
+            GW-->>Web: 200 { tenant_id }
         end
+        Web-->>Clerk: 200
     end
 ```
+
+### 4.1 Per-org HMAC key set
+
+This is the riskiest new piece of infrastructure in the initiative, so it gets its
+own contract rather than a single line. The per-org HMAC key set is the secret
+under which user and account ids are HMAC-SHA256'd, one distinct set per tenant so
+hashes cannot be joined across tenants. It already has a home: `tenants.hash_salt_kek_ref`,
+a KMS / Secret Manager reference (never raw material), bounded by the `no_raw_secret`
+CHECK.
+
+Contract:
+
+- **Production.** On provision, mint a new random key set (at least 256 bits from a
+  CSPRNG), store it in Secret Manager (or a KMS-wrapped secret), and write ONLY the
+  resource reference into `hash_salt_kek_ref`. The reference is opaque and must pass
+  the CHECK (not `sk-%`, length < 512).
+- **Versioning.** The key set is versioned so rotation does not orphan existing
+  hashes (the SDK already emits a `*_hash_key_version` alongside each hash). A
+  rotation adds a new active version; old versions stay resolvable for historical
+  hashes. Rotation itself is out of P1 scope, but the reference format must leave
+  room for a version selector.
+- **Local / dev.** `make up` has no real KMS. Provisioning in dev generates the key
+  set and stores it wherever the local `KeyMaterialProvider` reads from (the same
+  place `HmacKeyRegistry.provision(...)` uses today for `local-dev`), with a local
+  reference string that still satisfies the CHECK. No cloud dependency for local
+  development.
+- **Consumption / handoff to Initiative 2.** The SDK hashes client-side, so it must
+  obtain the active key set. That is the ingest-key-authenticated
+  `GET /v1/tenant/hmac-key` bootstrap specified in Initiative 2 (returns the active
+  version only, treated as sensitive, cached in-process). Initiative 1 only has to
+  guarantee the key set exists and is referenced; Initiative 2 defines how it is
+  fetched. The two must agree on the reference format and the version field.
+
+Provisioning must never store raw key material in Postgres, and must never log it.
+A failure to mint the key set fails the provision (no tenant row without a usable
+`hash_salt_kek_ref`), rather than creating a tenant that cannot hash.
 
 ## 5. Gateway endpoints
 
@@ -249,7 +318,7 @@ matches.
 
 | Method | Path | Purpose | Auth |
 | --- | --- | --- | --- |
-| POST | `/v1/tenant/provision` | Clerk `organization.created` webhook. Provisions a tenant (§4). Returns `{ tenant_id }`. | svix signature |
+| POST | `/v1/tenant/provision` | Provision a tenant from a verified `organization.created` event. Called by the web webhook route after svix verify (§4). Returns `{ tenant_id }`. | service token (§6) |
 | GET | `/v1/tenant/by-clerk-org/{org_id}` | Resolve a Clerk org id to `{ tenant_id, plan }`. The web app calls this once per session to map the active org to its UUID. | service token (§6) |
 | GET | `/v1/tenant/keys` | List key metadata for the tenant. Never returns secrets. Returns `id, name, token_prefix, scope, created_by, created_at, last_used_at, revoked_at`. | service token |
 | POST | `/v1/tenant/keys` | Mint a new ingest key. Returns the raw token exactly ONCE. | service token |
@@ -309,11 +378,12 @@ Design:
   bearer header (for example `Authorization: Bearer <token>`) on every
   control-plane call. The token lives only in the web server's server-side env,
   never in client bundles.
-- The gateway rejects control-plane requests (except the svix-signed
-  `/v1/tenant/provision` webhook and health) that lack a valid service token with
-  `401`. Behavior is gated by a new setting, defaulting on when
-  `settings.require_api_key` is on, so local dev with auth off is unaffected
-  (§10).
+- The gateway rejects control-plane requests (except health) that lack a valid
+  service token with `401`. This includes `/v1/tenant/provision`: the svix
+  signature is verified once at the public web webhook route (§4), and the gateway
+  endpoint behind it is authenticated by the service token like every other
+  control-plane call. Behavior is gated by a new setting, defaulting on when
+  `settings.require_api_key` is on, so local dev with auth off is unaffected (§10).
 - The service token authenticates the WEB SERVER to the gateway. It does not
   identify the tenant. The web server still passes the resolved tenant (the UUID)
   in `x-tenant-id`, and is trusted to have already checked the Clerk session and
@@ -335,9 +405,10 @@ Add `@clerk/nextjs` to `web/`.
 
 1. **Provider.** Wrap the root layout (`web/app/layout.tsx`) in `<ClerkProvider>`.
 2. **Middleware.** Add `web/middleware.ts` using `clerkMiddleware()`. Protect all
-   app routes. Public routes: sign-in, sign-up, and the provision webhook path if
-   proxied through the web app (it is not; the webhook targets the gateway
-   directly, so the public list is just sign-in and sign-up).
+   app routes. Public routes: sign-in, sign-up, and `POST /api/webhooks/clerk`
+   (the Clerk provisioning webhook, which carries no Clerk session and is
+   authenticated by its svix signature inside the route, §4). Everything else
+   requires a session.
 3. **Org requirement.** Require an active organization. When the Clerk session has
    no active org (`orgId` is null), redirect to a select-or-create-org screen.
    The product has no "personal workspace" concept; a user must be in an org to
@@ -536,8 +607,9 @@ reachability cases).
 
 ### P2: migration 0029, provisioning webhook, resolver, canonical TenantId, service-token auth
 
-Scope: ship `0029_orgs_and_access.sql` with its compose mount; the
-`POST /v1/tenant/provision` svix-signed webhook and per-org HMAC minting;
+Scope: ship `0029_orgs_and_access.sql` with its compose mount; the web
+`/api/webhooks/clerk` route (svix verify) forwarding to the service-token-authed
+`POST /v1/tenant/provision` with race-safe upsert and per-org HMAC minting;
 `GET /v1/tenant/by-clerk-org/{org_id}`; extend `resolve_tenant_uuid` to match
 `clerk_org_id`; standardize canonical `TenantId = UUID` across ingest, edge-proxy
 telemetry, seed, and demo backfill; and the `GATEWAY_SERVICE_TOKEN` control-plane
