@@ -390,6 +390,27 @@ The onboarding surface (§9) should reflect this ramp, for example by prompting 
 a feature tag or an account scope once LLM spend is flowing, rather than implying
 the base-URL swap captures everything.
 
+**Automating the app-side layers.** Most of the "needs app code" list can be
+reduced with three levers, tracked as a follow-on (see the roadmap's Onboarding
+agent initiative):
+
+1. **Patch the frameworks, not just the LLM clients.** The same instrumentor seam
+   (§4.1) applied to agent frameworks (LangChain, the Agents SDK, MCP clients) and
+   vector DB clients, so tool, vector, and embedding spans emit automatically and
+   the agent tag comes from the framework's own run name.
+2. **Ingest OpenTelemetry the app already emits.** The gateway's OTLP endpoint
+   (`ingest_otlp_traces`, `infra/gateway/src/gateway/app.py`) accepts standard
+   `gen_ai.*` spans from existing auto-instrumentation, so a team already running
+   OpenLLMetry / OpenInference sends those with no ai-tally-specific code.
+3. **Config, not code, for attribution and value.** Drop-in web-framework
+   middleware sets the account and feature for the request scope from a configured
+   header or resolver (propagated via contextvars), and value / compute / egress
+   arrive through the CDP, revenue, and cloud-cost connectors server-side.
+
+The irreducible floor is account identity: only the app knows which customer a
+request serves, so the middleware still needs one configured header or resolver.
+Everything else can be genuinely zero-code.
+
 ## 5. SDK ingest transport
 
 `init` installs a background batching exporter as the client's `Exporter`
