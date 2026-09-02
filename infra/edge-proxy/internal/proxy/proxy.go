@@ -122,14 +122,18 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 			// the rest of the request (method, headers, body, credential) is untouched.
 			rt := routeFromContext(pr.In.Context())
 			// Path mode strips the provider prefix (e.g. /openai) before forwarding so the upstream
-			// sees its own path (/v1/chat/completions), not the routing prefix.
+			// sees its own path (/v1/chat/completions), not the routing prefix. SetURL joins onto
+			// pr.Out, so strip pr.Out's path (a clone of the inbound path) before the join.
 			if rt.stripPrefix != "" {
-				pr.In.URL.Path = strings.TrimPrefix(pr.In.URL.Path, rt.stripPrefix)
-				if !strings.HasPrefix(pr.In.URL.Path, "/") {
-					pr.In.URL.Path = "/" + pr.In.URL.Path
+				stripped := strings.TrimPrefix(pr.Out.URL.Path, rt.stripPrefix)
+				if !strings.HasPrefix(stripped, "/") {
+					stripped = "/" + stripped
 				}
+				pr.Out.URL.Path = stripped
+				// Drop the escaped form so SetURL recomputes it from the stripped Path.
+				pr.Out.URL.RawPath = ""
 			}
-			// SetURL joins the (possibly prefix-stripped) inbound path/query onto the origin.
+			// SetURL joins the (possibly prefix-stripped) path/query onto the origin.
 			pr.SetURL(rt.upstream)
 			// Send the upstream's own Host so TLS SNI and provider routing are correct.
 			pr.Out.Host = rt.upstream.Host
