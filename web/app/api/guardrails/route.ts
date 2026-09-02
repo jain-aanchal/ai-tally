@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -16,7 +17,6 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 
 // Map the web mode back onto the control-plane state for the upsert. Only `enabled` actually alters
 // the agent; observe maps to `shadow` (recording-only). The precise mode is preserved in params.mode
@@ -42,7 +42,7 @@ export async function GET(req: Request) {
     try {
       const qs = ruleId ? `?rule_id=${encodeURIComponent(ruleId)}` : "";
       const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails/audit${qs}`, {
-        headers: { "x-tenant-id": TENANT },
+        headers: { "x-tenant-id": await resolveTenantId() },
         cache: "no-store",
         signal: AbortSignal.timeout(2000),
       });
@@ -102,7 +102,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

@@ -1,39 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Cloud cost-connector configuration (CTO-176).
 //
 // Mirrors lib/stripeConnector.ts: the dashboard never talks to Postgres directly, it goes through
 // the gateway's /v1/tenant/cost-connectors endpoints. Every credential field here is a secret
 // manager REFERENCE, never a raw key, which is all the underlying columns are allowed to hold.
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
-/** Connector ids the config endpoints understand. Matches config_admin.ALL_CONNECTORS. */
-export const CONFIGURABLE = [
-  "aws_cost_explorer",
-  "gcp_billing",
-  "vercel",
-  "cloudflare",
-  "aws_egress",
-  "vercel_egress",
-] as const;
-export type ConfigurableConnector = (typeof CONFIGURABLE)[number];
-
-export function isConfigurable(id: string): id is ConfigurableConnector {
-  return (CONFIGURABLE as readonly string[]).includes(id);
-}
-
-export interface CostConnectorConfig {
-  connector: string;
-  configured: boolean;
-  credentialsRef: string | null;
-  /** Whether the stored ref matches a known secret-manager shape. Advisory, drives a hint only. */
-  isReference: boolean;
-  details: Record<string, unknown>;
-  lastRunAt: string | null;
-  lastStatus: string | null;
-  connectedAt: string | null;
-}
+// Client-safe constants, types and pure helpers moved to costConnectorsShared.ts (CTO-259) so the
+// client table can import them without reaching this server-only module. Re-exported so existing
+// server call sites keep importing from "@/lib/costConnectors".
+export {
+  CONFIGURABLE,
+  type ConfigurableConnector,
+  isConfigurable,
+  type CostConnectorConfig,
+} from "./costConnectorsShared";
+import type { ConfigurableConnector, CostConnectorConfig } from "./costConnectorsShared";
 
 interface ConfigWire {
   connector: string;
@@ -50,7 +34,7 @@ interface ConfigWire {
 export async function queryCostConnectorConfigs(): Promise<CostConnectorConfig[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -83,7 +67,7 @@ export async function connectCostConnector(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
       body: JSON.stringify({ connector, ...fields }),
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
@@ -111,7 +95,7 @@ export async function disconnectCostConnector(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors/${connector}`, {
       method: "DELETE",
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
     });

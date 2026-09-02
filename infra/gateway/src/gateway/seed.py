@@ -88,7 +88,10 @@ def seed() -> None:
     print("Seeded local tenant.")
     print(f"  tenant_id : {tenant_id}")
     print(f"  api_key   : {token}")
-    print("  (only its SHA-256 is stored; copy this key now — it is not recoverable.)")
+    print("  (only its SHA-256 is stored; copy this key now, it is not recoverable.)")
+    # Canonical TenantId is the tenant UUID (Initiative 1, §8). The dashboard reads spans by UUID,
+    # so point the dev escape hatch (§10) at this tenant to run the web app with no Clerk account.
+    print(f"  dashboard : export TALLY_DEV_TENANT={tenant_id}")
 
 
 if __name__ == "__main__":

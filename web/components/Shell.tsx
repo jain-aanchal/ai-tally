@@ -13,6 +13,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { OrganizationSwitcher, UserButton } from "@clerk/nextjs";
 
 interface NavItem {
   label: string;
@@ -57,6 +58,15 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
       { label: "Budgets", href: "/settings/budgets" },
     ],
   },
+  {
+    caption: "Organization",
+    items: [
+      // Per-org ingest keys and member management (Initiative 1, §7). Both are org-scoped and, for
+      // writes, admin-only; the pages enforce the role.
+      { label: "API Keys", href: "/settings/keys" },
+      { label: "Members", href: "/settings/members" },
+    ],
+  },
 ];
 
 // Active when the path is the link or nested under it. "/" matches only itself so it does not light
@@ -66,7 +76,16 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-export function Shell({ children }: { children: ReactNode }) {
+export function Shell({
+  children,
+  // Clerk org controls (switcher + user button) render only on the product path. In the dev escape
+  // hatch (TALLY_DEV_TENANT set) there is no ClerkProvider, so mounting them would throw; the layout
+  // passes false and the chrome simply omits them.
+  showOrgControls = false,
+}: {
+  children: ReactNode;
+  showOrgControls?: boolean;
+}) {
   const pathname = usePathname() ?? "/";
 
   return (
@@ -127,6 +146,16 @@ export function Shell({ children }: { children: ReactNode }) {
           ))}
         </nav>
 
+        {showOrgControls && (
+          <div className="flex items-center justify-between gap-2 border-t border-edge px-4 py-3">
+            <OrganizationSwitcher
+              hidePersonal
+              afterSelectOrganizationUrl="/"
+              afterCreateOrganizationUrl="/"
+            />
+            <UserButton />
+          </div>
+        )}
         <div className="border-t border-edge px-5 py-3 text-[11px] text-muted">
           Cost-and-value observability
         </div>

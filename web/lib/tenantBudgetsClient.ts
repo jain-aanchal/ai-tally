@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { resolveTenantId } from "./getTenant";
 // Read this tenant's budgets from the gateway (CTO-209, F5; endpoint from CTO-205, F1).
 //
 // Server-only, imported by Route Handlers. The dashboard never touches Postgres directly, same rule
@@ -14,7 +15,6 @@
 
 import type { TenantBudget } from "./budgetVsActual";
 
-const TENANT = process.env.TALLY_TENANT_ID ?? "local-dev";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 /** A slow control plane must not hold a page render open. Matches `lib/tenant.ts`. */
@@ -35,7 +35,7 @@ export type TenantBudgetsResult =
 export async function fetchTenantBudgets(): Promise<TenantBudgetsResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
-      headers: { "x-tenant-id": TENANT },
+      headers: { "x-tenant-id": await resolveTenantId() },
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
