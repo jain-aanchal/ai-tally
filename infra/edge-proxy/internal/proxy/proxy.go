@@ -24,19 +24,33 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"time"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
+	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/edgekeys"
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/keybroker"
 )
 
+// TenantResolver maps the sha256 hash of a presented X-Tenant-Key to the canonical tenant UUID
+// (Initiative 2 sec 6.2). It is consulted once per request off a local in-memory map, never with a
+// gateway round-trip. ok is false for an unknown or revoked key, which the proxy fails closed on
+// when RequireTenant is set. It also returns the key's scope (read/write/admin) so the proxy can
+// apply the same ingest scope gate the gateway does (gateway/auth.py, CTO-33): metering a call is a
+// write, so a read-only key must not be attributed. *edgekeys.Cache satisfies this.
+type TenantResolver interface {
+	Resolve(keyHash string) (tenantID string, scope string, ok bool)
+}
+
 // Proxy is an http.Handler that forwards to a configured upstream and emits telemetry copies.
 type Proxy struct {
-	cfg    config.Config
-	rp     *httputil.ReverseProxy
-	sink   Sink
-	broker keybroker.Broker
-	now    func() time.Time
+	cfg      config.Config
+	rp       *httputil.ReverseProxy
+	sink     Sink
+	broker   keybroker.Broker
+	router   *router
+	resolver TenantResolver
+	now      func() time.Time
 }
 
 // Option customizes a Proxy at construction.
@@ -73,6 +87,18 @@ func WithBroker(b keybroker.Broker) Option {
 	}
 }
 
+// WithKeyResolver enables fast key-to-tenant resolution (Initiative 2 sec 6.2). With a resolver set
+// the proxy hashes the presented X-Tenant-Key, looks up the tenant UUID locally, stamps it on the
+// TraceRecord (sec 6.3), and (when RequireTenant is set) fails closed with 403 on an unknown or
+// revoked key. Without a resolver the proxy behaves as the CTO-39 core: no resolution, no 403.
+func WithKeyResolver(r TenantResolver) Option {
+	return func(p *Proxy) {
+		if r != nil {
+			p.resolver = r
+		}
+	}
+}
+
 // withClock overrides the time source (tests only).
 func withClock(now func() time.Time) Option {
 	return func(p *Proxy) {
@@ -85,18 +111,36 @@ func withClock(now func() time.Time) Option {
 // New builds a Proxy for the given config.
 func New(cfg config.Config, opts ...Option) *Proxy {
 	p := &Proxy{
-		cfg:  cfg,
-		sink: NopSink{},
-		now:  time.Now,
+		cfg:    cfg,
+		sink:   NopSink{},
+		router: newRouter(cfg),
+		now:    time.Now,
 	}
 
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// SetURL joins the inbound path/query onto the upstream origin, leaving the rest of
-			// the request (method, headers, body) untouched.
-			pr.SetURL(cfg.Upstream)
+			// The per-request route was resolved in ServeHTTP and stashed on the context. In
+			// single-origin mode it is simply cfg.Upstream. Routing is a pre-forward origin swap;
+			// the rest of the request (method, headers, body, credential) is untouched.
+			rt := routeFromContext(pr.In.Context())
+			// Path mode strips the provider prefix (e.g. /openai) before forwarding so the upstream
+			// sees its own path (/v1/chat/completions), not the routing prefix. SetURL joins onto
+			// pr.Out, so strip pr.Out's path (a clone of the inbound path) before the join.
+			if rt.stripPrefix != "" {
+				pr.Out.URL.Path = ensureLeadingSlash(strings.TrimPrefix(pr.Out.URL.Path, rt.stripPrefix))
+				// Trim the prefix from the escaped form too, and keep it, so a percent-encoded segment
+				// (e.g. /openai/v1/foo%2Fbar) forwards byte-for-byte instead of being re-encoded from the
+				// decoded Path. RawPath is only set by net/url when it differs from the default encoding
+				// of Path; when it is empty the plain Path has no escaped segments and SetURL's recompute
+				// is already byte-identical, so leave it empty. This matches host mode and single-origin.
+				if pr.Out.URL.RawPath != "" {
+					pr.Out.URL.RawPath = ensureLeadingSlash(strings.TrimPrefix(pr.Out.URL.RawPath, rt.stripPrefix))
+				}
+			}
+			// SetURL joins the (possibly prefix-stripped) path/query onto the origin.
+			pr.SetURL(rt.upstream)
 			// Send the upstream's own Host so TLS SNI and provider routing are correct.
-			pr.Out.Host = cfg.Upstream.Host
+			pr.Out.Host = rt.upstream.Host
 		},
 		// Stream every write straight to the client — critical for SSE completions.
 		FlushInterval: -1,
@@ -104,17 +148,26 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 		ErrorHandler:  errorHandler,
 	}
 
-	// CTO-167: when a provider protocol is configured, tee each response through a bounded scanner
-	// that extracts scalar model/usage metadata. Left nil in pure pass-through mode so the hot path
-	// never inspects a response body.
-	if cfg.Provider != "" {
-		p.rp.ModifyResponse = p.captureMeta
-	}
+	// CTO-167 / sec 6.1: tee each response through a bounded scanner that extracts scalar
+	// model/usage metadata, using the per-route provider. captureMeta no-ops when the resolved
+	// route has no provider, so pure pass-through routes never inspect a response body.
+	p.rp.ModifyResponse = p.captureMeta
 
 	for _, opt := range opts {
 		opt(p)
 	}
 	return p
+}
+
+// routeCtxKey is the request-context key under which ServeHTTP stashes the resolved route so the
+// ReverseProxy's Rewrite and captureMeta can read it.
+type routeCtxKey struct{}
+
+func routeFromContext(ctx context.Context) resolvedRoute {
+	if rt, ok := ctx.Value(routeCtxKey{}).(resolvedRoute); ok {
+		return rt
+	}
+	return resolvedRoute{}
 }
 
 // metaKey is the request-context key under which ServeHTTP stashes the responseMeta holder that
@@ -128,13 +181,18 @@ func (p *Proxy) captureMeta(resp *http.Response) error {
 	if resp.Body == nil || resp.Request == nil {
 		return nil
 	}
+	rt := routeFromContext(resp.Request.Context())
+	// Pure pass-through route: no provider protocol, so never inspect the response body.
+	if rt.provider == "" {
+		return nil
+	}
 	holder, _ := resp.Request.Context().Value(metaKey{}).(*responseMeta)
 	if holder == nil {
 		return nil
 	}
 	resp.Body = &metaCapture{
 		inner:    resp.Body,
-		provider: p.cfg.Provider,
+		provider: rt.provider,
 		path:     resp.Request.URL.Path,
 		out:      holder,
 	}
@@ -143,10 +201,44 @@ func (p *Proxy) captureMeta(resp *http.Response) error {
 
 // ServeHTTP forwards the request and records a telemetry copy.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Select the forwarding origin before anything else. A configured route table that matches
+	// nothing is a 404 rather than a forward to a wrong (or fallback) origin.
+	route, ok := p.router.resolve(r)
+	if !ok {
+		http.Error(w, p.router.noRouteMessage(), http.StatusNotFound)
+		return
+	}
+
 	tenant := r.Header.Get(p.cfg.TenantHeader)
 	if p.cfg.RequireTenant && tenant == "" {
 		http.Error(w, `{"error":"missing tenant key"}`+"\n", http.StatusBadRequest)
 		return
+	}
+
+	// Fast key-to-tenant resolution (sec 6.2): hash the presented key and look it up in the local
+	// cache. The resolved UUID becomes the canonical TenantId tag (sec 6.3). Fail closed on an
+	// unknown or revoked key when RequireTenant is set, never forwarding an unauthenticated call.
+	var tenantID string
+	if p.resolver != nil && tenant != "" {
+		id, scope, found := p.resolver.Resolve(edgekeys.HashKey(tenant))
+		switch {
+		case !found:
+			if p.cfg.RequireTenant {
+				http.Error(w, `{"error":"unknown tenant key"}`+"\n", http.StatusForbidden)
+				return
+			}
+		case !edgekeys.CanWrite(scope):
+			// Known key, but its scope may not write ingest data. Metering a call through the proxy is
+			// a write, so a read-only key is rejected the same way the gateway rejects it (CTO-33). Fail
+			// closed only when RequireTenant is set; in open mode the call still forwards but carries no
+			// TenantId (an honest blank, never a fabricated tag for a key that may not be attributed).
+			if p.cfg.RequireTenant {
+				http.Error(w, `{"error":"tenant key lacks write scope"}`+"\n", http.StatusForbidden)
+				return
+			}
+		default:
+			tenantID = id
+		}
 	}
 	// Feature tag is optional: capture if present, never reject when absent.
 	var featureTag string
@@ -201,15 +293,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Mark whether the upstream was reachable so the telemetry copy can distinguish a real 502
 	// from us synthesizing one.
 	ctx := context.WithValue(r.Context(), failedKey{}, &rec.failed)
-	// In provider-protocol mode, hand captureMeta a holder to fill as the response streams (CTO-167).
+	// Hand the resolved route to the ReverseProxy's Rewrite (origin/path) and captureMeta (provider).
+	ctx = context.WithValue(ctx, routeCtxKey{}, route)
+	// When this route has a provider protocol, hand captureMeta a holder to fill as the response
+	// streams (CTO-167).
 	var meta responseMeta
-	if p.cfg.Provider != "" {
+	if route.provider != "" {
 		ctx = context.WithValue(ctx, metaKey{}, &meta)
 	}
 	p.rp.ServeHTTP(rec, r.WithContext(ctx))
 
 	p.sink.Record(TraceRecord{
 		TenantKey:        tenant,
+		TenantId:         tenantID,
 		FeatureTag:       featureTag,
 		AccountIdHash:    accountIdHash,
 		Method:           r.Method,

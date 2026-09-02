@@ -14,6 +14,14 @@ import (
 type TraceRecord struct {
 	// TenantKey is the ai-tally tenant identifier from the control header (X-Tenant-Key).
 	TenantKey string
+	// TenantId is the canonical tenant UUID the edge key cache resolved from the presented
+	// X-Tenant-Key (Initiative 2 sec 6.3). It is the join key that makes proxy traffic and SDK
+	// traffic for the same org share one TenantId and one Cost Explorer view: when telemetry ships
+	// to EDGE_PROXY_TELEMETRY_URL this UUID lands in otel_spans.TenantId. Empty when no key
+	// resolver is configured (self-host / pass-through) or the key did not resolve. A UUID is not
+	// customer content, so this preserves the metadata-only guarantee; the raw key string is never
+	// emitted as the canonical tag.
+	TenantId string
 	// FeatureTag is the per-request feature/agent identifier from the control header
 	// (X-Tally-Feature-Tag). Optional and informational only — empty when the caller didn't tag
 	// the request. Downstream telemetry uses this to segment cost and traces by feature (CTO-104).
