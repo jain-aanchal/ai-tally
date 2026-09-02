@@ -53,6 +53,55 @@ This is the foundation the one-step connect and the Goose demo both build on.
   the existing demo rows is an open question (§12).
 - No data-residency routing on `region`. The column stays, defaulting as today.
 
+### User flow
+
+The end-to-end journey the mechanics in this spec produce.
+
+**First user of a new org (self-serve).**
+
+1. They hit the app and land on Clerk sign-up (email or social). Clerk creates the
+   user identity; no ai-tally tenant exists yet.
+2. Signed in but in no organization, so the app redirects them to a
+   "Create your organization" screen (Clerk `<CreateOrganization>`). They name it.
+3. Clerk creates the org, makes the creator an `admin`, and sets it as the active
+   org on the session.
+4. Behind the scenes, `organization.created` fires the provisioning webhook (§4):
+   the web `/api/webhooks/clerk` route verifies svix and forwards to the gateway,
+   which provisions the tenant (UUID, per-org HMAC key, free plan) mapped to the
+   Clerk `orgId`, idempotently.
+5. They land in the dashboard scoped to their org (`getTenant()` resolves `orgId`
+   to the tenant UUID, §7). It is empty until they connect a source, which is
+   Initiative 2.
+
+**Inviting teammates (enabling more users).**
+
+- An admin invites by email with a role from Clerk's `<OrganizationProfile>` (§7).
+- The invitee signs up or signs in, accepts, and joins the existing org with that
+  role. No new tenant is created; they share the org's tenant and data.
+- Members get a read-only dashboard; admins can mint keys and manage members (§9).
+
+**Returning user.**
+
+- Sign in, Clerk restores the session and the active org, and the dashboard loads
+  scoped to it. A user in multiple orgs switches with the `<OrganizationSwitcher>`
+  (§7), which re-scopes every read and write.
+
+**Signup access mode: open vs invite-only (decision).**
+
+Enabling a user means a Clerk identity plus membership in an org that has a
+provisioned tenant. Who is allowed to self-enable is a real product choice, and
+Clerk supports both:
+
+- **Open self-serve.** Anyone can sign up and create their own org (and tenant).
+  Simplest funnel, but anyone with the link gets a tenant.
+- **Invite-only / allowlist.** Clerk restricts sign-ups to invited emails or an
+  allowlist, so you approve who gets a tenant.
+
+Recommendation for the beta: start invite-only (allowlist the testers) and flip to
+open self-serve later. It keeps the tester group controlled and avoids provisioning
+tenants for unknown sign-ups while the product is still in beta. This is a Clerk
+setting plus, optionally, gating the create-org step, not new ai-tally code (§12 Q6).
+
 ## 2. Decisions
 
 1. **Clerk is the system of record for identity.** Users, organizations,
@@ -586,6 +635,9 @@ Cross-checked against the CLAUDE.md invariants:
    currently tagged `local-dev` (name) once canonical `TenantId` is the UUID? The
    recommended path is re-seed (§8), but a shared demo environment may want an
    in-place mutation instead.
+6. **Signup access mode.** Open self-serve vs invite-only for the beta (see §1,
+   "User flow"). Recommendation: invite-only for the beta, open later. This is a
+   Clerk setting, not ai-tally code.
 
 ## 13. Phasing
 
