@@ -83,6 +83,8 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
     expect(out!.latencyP95Ms).toBe(2401);
     expect(out!.errorRate).toBeCloseTo(0.004, 6);
     expect(out!.sampleCount).toBe(500);
+    // CTO-231: the 7-day call count projected to a 30-day month, same basis as the cost.
+    expect(out!.monthlyCalls).toBe(Math.round((500 * 30) / 7));
   });
 
   it("handles ClickHouse string-encoded numerics", async () => {
@@ -99,6 +101,8 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
     expect(out!.latencyP95Ms).toBe(1800);
     expect(out!.errorRate).toBeCloseTo(0.01, 6);
     expect(out!.sampleCount).toBe(75);
+    // CTO-231: string-encoded sampleCount still yields an integer monthly call projection.
+    expect(out!.monthlyCalls).toBe(Math.round((75 * 30) / 7));
   });
 });
 

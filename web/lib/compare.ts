@@ -100,6 +100,35 @@ export function deltaPct(current: number, candidate: number): number {
   return (candidate - current) / current;
 }
 
+/**
+ * Rescale a candidate's replayed-corpus cost onto the current model's full-traffic monthly basis
+ * (CTO-231). The gateway's `projected_monthly_cost_micro_usd` is the candidate's cost over the
+ * REPLAYED CORPUS (per-candidate average cost × matched corpus size), NOT a full month of traffic.
+ * Comparing that raw corpus figure against the incumbent's real full-month spend made a ~150-trace
+ * replay look like ~$8/mo against a ~$72K/mo incumbent, so the page reported a bogus "100%
+ * reduction". Here we recover the candidate's per-call cost (corpus cost / samples replayed) and
+ * multiply by the current model's full-traffic monthly call count, so both sides of the comparison
+ * sit on one basis and the savings % is believable (e.g. ~89%, not 100%).
+ *
+ * Money stays integer micro-USD: the multiply/divide runs in BigInt and rounds half-up at the end,
+ * so no float dollars enter the math. Returns `null` when `samplesReplayed <= 0`: a per-call cost
+ * is undefined without a replayed sample, so we emit nothing rather than divide by zero or
+ * fabricate a figure (honest-under-uncertainty). Callers drop the null candidate.
+ */
+export function scaleCandidateMonthlyCost(
+  projectedCorpusCostMicroUsd: MicroUSD,
+  samplesReplayed: number,
+  currentMonthlyCalls: number,
+): MicroUSD | null {
+  if (samplesReplayed <= 0) return null;
+  const numer =
+    BigInt(Math.round(projectedCorpusCostMicroUsd)) * BigInt(Math.round(currentMonthlyCalls));
+  const denom = BigInt(Math.round(samplesReplayed));
+  // Round half-up in integer space (denom/2n truncates toward zero, matching non-negative money).
+  const scaled = (numer + denom / 2n) / denom;
+  return Number(scaled);
+}
+
 // Compare fixture for the research_agent workload — the dominant cost driver from cost.ts
 // ($19.1K LLM spend on this workload alone over 30 days, ≈ $4.5K/week).
 //

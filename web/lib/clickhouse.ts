@@ -2927,6 +2927,12 @@ export async function queryCurrentModel(): Promise<{
   model: string;
   provider: string;
   monthlyCostMicroUsd: number;
+  // CTO-231: the current model's full-traffic call count over the same window, projected to a
+  // 30-day month exactly like monthlyCostMicroUsd. The /api/compare route needs a full-traffic
+  // call volume to rescale each candidate's replayed-corpus cost onto the incumbent's basis
+  // (candidate per-call cost × this figure). Without it the route could only weigh a ~150-trace
+  // replay corpus against a full month of incumbent spend, which reported a bogus ~100% reduction.
+  monthlyCalls: number;
   // null when sampleCount < MIN_SPANS_FOR_LATENCY_ERROR — the route surfaces these as "—" on the
   // page rather than fabricating numbers off a too-small window.
   latencyP95Ms: number | null;
@@ -2983,6 +2989,10 @@ export async function queryCurrentModel(): Promise<{
       typeof out[0].sampleCount === "number"
         ? out[0].sampleCount
         : parseInt(out[0].sampleCount, 10) || 0;
+    // CTO-231: project the 7-day call count to a 30-day month on the SAME basis as the cost sum
+    // above, so the /api/compare route can put candidate costs on the incumbent's full-traffic
+    // basis. Rounded to an integer call count.
+    const monthlyCalls = Math.round((sampleCount * 30) / 7);
     const enoughSamples = sampleCount >= MIN_SPANS_FOR_LATENCY_ERROR;
     const p95Raw = out[0].p95Ms;
     const errRaw = out[0].errRate;
@@ -3008,6 +3018,7 @@ export async function queryCurrentModel(): Promise<{
       model: out[0].model,
       provider: out[0].provider || "unknown",
       monthlyCostMicroUsd,
+      monthlyCalls,
       latencyP95Ms,
       errorRate,
       sampleCount,
