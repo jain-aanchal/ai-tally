@@ -39,6 +39,7 @@ import { Blank, Money, Pct } from "@/components/HonestValue";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile } from "@/components/SummaryTile";
+import { isDemoMode } from "@/lib/demoMode";
 import type { ProviderAttribution } from "@/lib/attribution";
 import type { BurndownSection, ForecastPayload } from "@/lib/burndown";
 import { LAYERS, type Layer } from "@/lib/cost";
@@ -238,7 +239,7 @@ export function HomeLive({
     <div className="space-y-6">
       <PageHeader
         title="Home"
-        subtitle="What your AI costs, and whether it pays for itself"
+        subtitle={isDemoMode() ? undefined : "What your AI costs, and whether it pays for itself"}
         actions={
           <>
             <LiveIndicator updatedAt={updatedAt} />
@@ -324,8 +325,8 @@ function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
         <Money micro={f.projectedMicroUsd} reason="nothing was projected" />
       </div>
       <div className="mt-1 text-sm text-muted">
-        all-in AI spend for {month} (LLM, vector, tools, compute, embeddings, egress), a forecast and
-        not a commitment
+        all-in AI spend for {month} (LLM, vector, tools, compute, embeddings, egress)
+        {isDemoMode() ? "" : ", a forecast and not a commitment"}
       </div>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
@@ -386,9 +387,17 @@ function ForecastStanding({ section }: { section: BurndownSection }) {
             </>
           )}
           )
-        </span>{" "}
-        by {period.end} against the{" "}
-        <Money micro={budget?.amountMicroUsd ?? null} reason="no budget set" /> budget.
+        </span>
+        {/* Demo presentation mode hides the "by <end> against the <budget> budget" explanatory tail,
+            keeping the breach date and the variance numbers. Full sentence renders when the flag is
+            off, so the shipped honesty copy is unchanged for real use. */}
+        {isDemoMode() ? null : (
+          <>
+            {" "}
+            by {period.end} against the{" "}
+            <Money micro={budget?.amountMicroUsd ?? null} reason="no budget set" /> budget.
+          </>
+        )}
       </p>
     );
   }

@@ -20,6 +20,7 @@ import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import { apiGet } from "@/lib/api";
 import { type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
+import { isDemoMode } from "@/lib/demoMode";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 
 export default async function ComparePage({
@@ -141,7 +142,12 @@ export default async function ComparePage({
           <Diag k="samples replayed" v={`${diagnostics.samplesReplayed.toLocaleString()} of ${diagnostics.samplesAvailable.toLocaleString()} prod traces`} />
           <Diag k="excluded (rate limits)" v={diagnostics.excludedRateLimited.toLocaleString()} />
           <Diag k="replay cost" v={formatUSD(diagnostics.replayCostMicroUsd)} />
-          <Diag k="context fidelity" v={diagnostics.contextFidelity} good />
+          {/* Demo presentation mode hides the "context fidelity" caption: its value is a pure
+              methodology hedge ("resolved-context replay (no live retrieval)"), not a number. The
+              counted diagnostics above stay. */}
+          {isDemoMode() ? null : (
+            <Diag k="context fidelity" v={diagnostics.contextFidelity} good />
+          )}
         </dl>
       </Card>
     </div>

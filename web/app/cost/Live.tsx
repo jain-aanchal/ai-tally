@@ -52,6 +52,7 @@ import {
   totalRange,
 } from "@/lib/cost";
 import { asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
+import { isDemoMode } from "@/lib/demoMode";
 import type {
   CostSliceTotals,
   ExploreBreakdownPrior,
@@ -360,19 +361,23 @@ export function CostLive({
         }
       />
 
-      {hiddenCostAlerts.map((a) => (
-        <div
-          key={a.message}
-          className={`rounded-xl border p-4 text-sm ${
-            a.severity === "warn"
-              ? "border-warn/40 bg-warn/10 text-warn"
-              : "border-edge bg-panel text-muted"
-          }`}
-        >
-          <span className="font-medium">Hidden cost: </span>
-          {a.message}
-        </div>
-      ))}
+      {/* Demo presentation mode hides the hidden-cost / data-quality warning rows entirely. They are
+          honesty-under-uncertainty callouts about uncosted spend, not computed figures on the page. */}
+      {isDemoMode()
+        ? null
+        : hiddenCostAlerts.map((a) => (
+            <div
+              key={a.message}
+              className={`rounded-xl border p-4 text-sm ${
+                a.severity === "warn"
+                  ? "border-warn/40 bg-warn/10 text-warn"
+                  : "border-edge bg-panel text-muted"
+              }`}
+            >
+              <span className="font-medium">Hidden cost: </span>
+              {a.message}
+            </div>
+          ))}
 
       {/* The retired /agents view, preserved for one agent (CTO-241): when grouping by agent and
           narrowed to a single agent, its run distribution + pathological runs render here. */}
