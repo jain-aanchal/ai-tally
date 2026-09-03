@@ -32,6 +32,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import type { BudgetVsActual, LayerLine } from "@/lib/budgetVsActual";
 import { LAYER_LABEL } from "@/lib/cost";
+import { isDemoMode } from "@/lib/demoMode";
 
 /** What `/api/cost/budget` returns. Exactly one of the two fields is non-null. */
 export interface BudgetPayload {
@@ -212,6 +213,10 @@ function Provenance({ comparison }: { comparison: BudgetVsActual }) {
   const { coverage, excluded, period } = comparison;
   const waiting = coverage.waitsOn.length > 0 ? coverage.waitsOn.join(" and ") : null;
   const gapDays = excluded.days.filter((d) => !d.inProgress);
+  // Demo presentation mode hides the whole coverage/settlement audit trail (settled-day count,
+  // exclusion note and observed-total line). It is all explanatory copy: the figures it cites are
+  // shown by the tiles and headline above, so nothing computed lives only here.
+  if (isDemoMode()) return null;
   return (
     <div className="mt-4 space-y-1 border-t border-edge pt-3 text-xs text-muted">
       <p>

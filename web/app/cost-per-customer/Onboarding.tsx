@@ -20,6 +20,8 @@
 
 import { useState } from "react";
 
+import { isDemoMode } from "@/lib/demoMode";
+
 /**
  * The snippet, kept in one place so the copy button and the rendered block cannot drift.
  *
@@ -64,6 +66,10 @@ const COLUMNS: readonly { name: string; body: string }[] = [
  * honest number first and the explanation second.
  */
 export function OnboardingEmptyState({ windowDays }: { windowDays: number }) {
+  // Demo presentation mode hides the entire empty-state explainer (what the page is for, the column
+  // preview and the "how to turn it on" snippet). It is all onboarding prose; the page heading and
+  // the honest headline figures above it are rendered by page.tsx and stay put.
+  if (isDemoMode()) return null;
   return (
     <section className="rounded-xl border border-edge bg-panel p-5">
       <h2 className="text-sm font-medium uppercase tracking-wide text-muted">

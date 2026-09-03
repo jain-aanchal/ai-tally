@@ -59,6 +59,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import type { BurndownSection, ForecastPayload, LayerProjection } from "@/lib/burndown";
 import { LAYER_LABEL } from "@/lib/cost";
+import { isDemoMode } from "@/lib/demoMode";
 import type {
   ScopedForecast,
   ScopedForecastPayload,
@@ -226,7 +227,8 @@ function Headline({ section }: { section: BurndownSection }) {
           <Money micro={section.forecast.projectedMicroUsd} reason="nothing was projected" />
         </div>
         <div className="mt-1 text-sm text-muted">
-          projected for {period.start.slice(0, 7)}, a forecast and not a commitment
+          projected for {period.start.slice(0, 7)}
+          {isDemoMode() ? "" : ", a forecast and not a commitment"}
         </div>
         <p className="mt-3 max-w-prose text-sm text-muted">
           <Blank reason={section.noBudgetReason ?? "no budget set"} /> No budget is set
@@ -264,11 +266,18 @@ function Headline({ section }: { section: BurndownSection }) {
               (<Pct value={variancePct} />)
             </>
           )}{" "}
-          by {period.end}, on day {breach.dayIndex} of {section.forecast.daysInPeriod}. This is a
-          forecast, not a commitment: it is what the last {section.window.dayCount} settled days
-          imply, not a number anyone has agreed to.
+          by {period.end}, on day {breach.dayIndex} of {section.forecast.daysInPeriod}.
+          {/* Demo presentation mode drops the "this is a forecast, not a commitment" hedge; the
+              breach date and variance numbers above stay. Full copy renders when the flag is off. */}
+          {isDemoMode() ? null : (
+            <>
+              {" "}
+              This is a forecast, not a commitment: it is what the last {section.window.dayCount}{" "}
+              settled days imply, not a number anyone has agreed to.
+            </>
+          )}
         </p>
-        {breach.earliestDate !== null && breach.earliestDate !== breach.date ? (
+        {!isDemoMode() && breach.earliestDate !== null && breach.earliestDate !== breach.date ? (
           <p className="mt-2 max-w-prose text-sm text-muted">
             The high edge of the band crosses as early as {breach.earliestDate}. That is the bad
             case, not the likely one.
@@ -296,10 +305,11 @@ function Headline({ section }: { section: BurndownSection }) {
           </>
         )}{" "}
         the <Money micro={budget?.amountMicroUsd ?? null} reason="no budget set" /> budget by{" "}
-        {period.end}. The projection stays under budget for every remaining day. This is a forecast,
-        not a commitment.
+        {period.end}. The projection stays under budget for every remaining day.
+        {/* Demo presentation mode drops the "this is a forecast, not a commitment" hedge here too. */}
+        {isDemoMode() ? null : " This is a forecast, not a commitment."}
       </p>
-      {breach.earliestDate !== null ? (
+      {!isDemoMode() && breach.earliestDate !== null ? (
         <p className="mt-2 max-w-prose text-sm text-warn">
           The high edge of the band does cross, on {breach.earliestDate}. The likely path stays
           under; the bad case does not.
@@ -398,21 +408,25 @@ function LayerSplit({ section }: { section: BurndownSection }) {
         pageSize={0}
         empty="No layer spend in this period."
       />
-      <p className="mt-2 max-w-prose text-xs text-muted">
-        Each layer is projected from its own settled history with its own day-of-week profile, so
-        these rows are six independent projections rather than a split of the headline. Independent
-        medians do not add: they sum to{" "}
-        <Money micro={layerSumMicroUsd} reason="no layer could be projected" />
-        {gap === null || gap === 0 ? (
-          ", which happens to match the projection above exactly."
-        ) : (
-          <>
-            , <Money micro={Math.abs(gap)} /> {gap > 0 ? "more" : "less"} than the{" "}
-            <Money micro={forecast.projectedMicroUsd} reason="nothing was projected" /> projected
-            above. That difference is the method, not a bug.
-          </>
-        )}
-      </p>
+      {/* Demo presentation mode hides the "independent medians do not add" methodology note. The
+          layer table and its numbers stay; only this explanatory caption is dropped. */}
+      {isDemoMode() ? null : (
+        <p className="mt-2 max-w-prose text-xs text-muted">
+          Each layer is projected from its own settled history with its own day-of-week profile, so
+          these rows are six independent projections rather than a split of the headline. Independent
+          medians do not add: they sum to{" "}
+          <Money micro={layerSumMicroUsd} reason="no layer could be projected" />
+          {gap === null || gap === 0 ? (
+            ", which happens to match the projection above exactly."
+          ) : (
+            <>
+              , <Money micro={Math.abs(gap)} /> {gap > 0 ? "more" : "less"} than the{" "}
+              <Money micro={forecast.projectedMicroUsd} reason="nothing was projected" /> projected
+              above. That difference is the method, not a bug.
+            </>
+          )}
+        </p>
+      )}
       {section.layerBudgetReason === null ? null : (
         <p className="mt-2 max-w-prose text-xs text-muted">
           <Blank reason={section.layerBudgetReason} /> No layer-budget column here:{" "}
@@ -491,7 +505,8 @@ function ScopeSelector({
           </Link>
         ))}
       </div>
-      {roster.lines.length === 1 ? (
+      {/* Demo presentation mode hides the "set a scoped budget" nudge; the scope pills stay. */}
+      {!isDemoMode() && roster.lines.length === 1 ? (
         <p className="mt-2 max-w-prose text-xs text-muted">
           Only the tenant-wide forecast is offered because no scoped monthly budget covers today. A
           budget is what says somebody owns a slice, so{" "}
@@ -789,6 +804,10 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
 function Provenance({ section }: { section: BurndownSection }) {
   const { window, period, forecast } = section;
   const waiting = window.waitsOn.length > 0 ? window.waitsOn.join(" and ") : null;
+  // Demo presentation mode hides the entire provenance audit trail (settled-window prose, exclusion
+  // note, warehouse-clock caption and the chart/budget reconciliation warnings). It is all
+  // explanatory copy: no figure the section computes lives only here.
+  if (isDemoMode()) return null;
   return (
     <div className="mt-4 space-y-1 border-t border-edge pt-3 text-xs text-muted">
       <p>
