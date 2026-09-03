@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
-import { comparison, deriveRecommendation, deriveWorkload } from "@/lib/compare";
+import {
+  comparison,
+  deriveRecommendation,
+  deriveWorkload,
+  scaleCandidateMonthlyCost,
+} from "@/lib/compare";
 import {
   queryCurrentModel,
   queryEvalCandidates,
@@ -85,12 +90,26 @@ export async function GET(req: Request) {
 
   if (replay) {
     // Real replay data — drop the mock rescaling entirely. Each candidate row is built from
-    // the gateway's projection (per-candidate average cost × matched corpus size). The current
-    // model still comes from queryCurrentModel because v1 replay doesn't re-replay the current
-    // model against itself.
+    // the gateway's projection. The current model still comes from queryCurrentModel because v1
+    // replay doesn't re-replay the current model against itself.
     const candidates = replay.per_candidate
       .filter((c) => c.model !== live.model)
-      .map((c) => {
+      .flatMap((c) => {
+        // CTO-231: the gateway's projected_monthly_cost_micro_usd is the candidate's cost over the
+        // REPLAYED CORPUS (per-candidate average cost × matched corpus size), NOT a full month of
+        // traffic. Shipping it as-is against the incumbent's real full-month spend made the
+        // candidate look ~$8/mo next to a ~$72K/mo current model, so deriveRecommendation reported
+        // a nonsense "100% reduction". Rescale it onto the SAME full-traffic monthly basis as
+        // `current`: per-call cost (corpus cost / samples replayed) × the current model's
+        // full-traffic monthly call count. A candidate with no replayed responses has no per-call
+        // cost, so scaleCandidateMonthlyCost returns null and we emit nothing for it (honest-null)
+        // rather than divide by zero; its absence surfaces as the insufficient-data verdict below.
+        const monthlyCostMicroUsd = scaleCandidateMonthlyCost(
+          c.projected_monthly_cost_micro_usd,
+          c.samples_replayed,
+          live.monthlyCalls,
+        );
+        if (monthlyCostMicroUsd === null) return [];
         // CTO-114: real pairwise-LLM-judge win-rate when ≥10 samples have been judged for this
         // candidate. Below the floor, qualityScore is null — the page renders "—". We never
         // fall back to a mock number; that would have been the previous workaround and the
@@ -101,15 +120,17 @@ export async function GET(req: Request) {
         // rate computed from fewer than 50 replayed responses is too noisy to present, so we emit
         // null and the page renders "—" rather than a number or a borrowed mock.
         const enoughReplayed = c.samples_replayed >= MIN_REPLAYED_SAMPLES;
-        return {
-          model: c.model,
-          provider: c.provider,
-          monthlyCostMicroUsd: c.projected_monthly_cost_micro_usd,
-          qualityScore: quality?.qualityScore ?? null,
-          ...(quality ? { qualityCi: quality.qualityCi } : {}),
-          latencyP95Ms: enoughReplayed ? c.p95_latency_ms : null,
-          errorRate: enoughReplayed ? c.error_rate : null,
-        };
+        return [
+          {
+            model: c.model,
+            provider: c.provider,
+            monthlyCostMicroUsd,
+            qualityScore: quality?.qualityScore ?? null,
+            ...(quality ? { qualityCi: quality.qualityCi } : {}),
+            latencyP95Ms: enoughReplayed ? c.p95_latency_ms : null,
+            errorRate: enoughReplayed ? c.error_rate : null,
+          },
+        ];
       });
     // CTO-168: verdict + summary + projected savings are all generated from the REAL replayed
     // deltas here — cost savings %, pairwise-judge quality, latency — never the fixture prose.

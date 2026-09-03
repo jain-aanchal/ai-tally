@@ -6,6 +6,7 @@ import {
   deriveRecommendation,
   deriveWorkload,
   MIN_SAMPLES_TO_RECOMMEND,
+  scaleCandidateMonthlyCost,
   type RecommendationCandidate,
 } from "./compare";
 
@@ -31,6 +32,30 @@ describe("compare", () => {
   it("diagnostics excludes throttled samples from headline metrics (modeled)", () => {
     expect(comparison.diagnostics.excludedRateLimited).toBeGreaterThan(0);
     expect(comparison.diagnostics.contextFidelity).toMatch(/resolved-context/);
+  });
+});
+
+// CTO-231: the rescale that puts a candidate's replayed-corpus cost on the incumbent's
+// full-traffic monthly basis, killing the bogus "100% reduction".
+describe("scaleCandidateMonthlyCost", () => {
+  it("scales the replayed-corpus cost by full monthly calls / samples replayed", () => {
+    // Corpus cost $0.075 over 50 replayed traces = $0.0015/call; at 2000 monthly calls that is
+    // $3.00/mo full-traffic (3_000_000 micro-USD), NOT the raw 75_000 corpus projection.
+    expect(scaleCandidateMonthlyCost(75_000, 50, 2000)).toBe(3_000_000);
+  });
+
+  it("is the identity when monthly calls equals samples replayed", () => {
+    expect(scaleCandidateMonthlyCost(4_000_000, 150, 150)).toBe(4_000_000);
+  });
+
+  it("keeps money integer micro-USD (rounds half-up, no float dollars)", () => {
+    // 1_000_000 * 3 / 7 = 428571.42... → rounds to 428_571.
+    expect(scaleCandidateMonthlyCost(1_000_000, 7, 3)).toBe(428_571);
+  });
+
+  it("returns null (never divides by zero or fabricates) when no samples were replayed", () => {
+    expect(scaleCandidateMonthlyCost(3_000_000, 0, 2000)).toBeNull();
+    expect(scaleCandidateMonthlyCost(3_000_000, -5, 2000)).toBeNull();
   });
 });
 

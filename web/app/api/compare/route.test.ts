@@ -88,6 +88,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -98,7 +99,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: corpus cost over 50 replayed traces. $0.0015/call → $3.00/mo at 2000 calls.
+          projected_monthly_cost_micro_usd: 75_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -108,7 +110,8 @@ describe("/api/compare", () => {
         {
           provider: "openai",
           model: "gpt-5-mini",
-          projected_monthly_cost_micro_usd: 4_000_000,
+          // $0.002/call → $4.00/mo at 2000 calls.
+          projected_monthly_cost_micro_usd: 100_000,
           p50_latency_ms: 900,
           p95_latency_ms: 1700,
           error_rate: 0.02,
@@ -127,10 +130,13 @@ describe("/api/compare", () => {
     expect(body.replay_source).toBe("replay");
     expect(body.current.model).toBe("claude-sonnet-4-5");
     expect(body.candidates).toHaveLength(2);
-    // Costs come straight from the projection, not the rescaled mock.
+    // CTO-231: cost is rescaled onto the current model's full-traffic basis (per-call cost ×
+    // 2000 monthly calls), NOT the raw 75_000 corpus projection. This is what stops the bogus
+    // "100% reduction": $3.00/mo candidate vs $10.00/mo current is a believable 70% cut.
     const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
     expect(haiku.monthlyCostMicroUsd).toBe(3_000_000);
-    // Savings recomputed off the cheapest candidate.
+    expect(haiku.monthlyCostMicroUsd).not.toBe(75_000);
+    // Savings recomputed off the cheapest candidate on the corrected basis.
     expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
     // Diagnostics reflect the real samples_available + replay cost.
     expect(body.diagnostics.samplesAvailable).toBe(50);
@@ -144,6 +150,102 @@ describe("/api/compare", () => {
     expect(haiku.errorRate).toBeCloseTo(0.01, 6);
   });
 
+  // CTO-231: the candidate's reported monthly cost is the replayed-corpus cost rescaled to the
+  // current model's FULL-TRAFFIC monthly call volume, not the raw corpus projection. This is the
+  // fix for the bogus "100% reduction": before, a ~150-trace corpus cost was compared against a
+  // full month of incumbent spend, so the candidate looked ~$8/mo against a ~$72K/mo current and
+  // deriveRecommendation reported a nonsense ~100% cut. Here the current model runs 300_000
+  // monthly calls, so a $0.088/call candidate projects to ~$26.4K/mo (about 63% cheaper), NOT the
+  // 13_200 corpus figure.
+  it("CTO-231: scales candidate cost to the current model's full call volume, not the raw corpus projection", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 72_000_000_000, // $72K/mo real full-traffic incumbent spend
+      monthlyCalls: 300_000, // real full-traffic monthly call volume
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 70_000,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 150,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          // Corpus cost of $13.20 over 150 replayed traces = $0.088/call.
+          projected_monthly_cost_micro_usd: 13_200_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 150,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 13_200_000,
+      },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
+    // $0.088/call × 300_000 monthly calls = $26,400/mo full-traffic, on the SAME basis as current.
+    expect(haiku.monthlyCostMicroUsd).toBe(26_400_000_000);
+    // NOT the raw corpus projection the gateway returned.
+    expect(haiku.monthlyCostMicroUsd).not.toBe(13_200_000);
+    // Savings are believable (~63%), never the bogus ~100% the un-rescaled corpus cost produced.
+    expect(body.recommendation.projectedSavingsMicroUsd).toBe(45_600_000_000);
+    expect(body.recommendation.projectedSavingsPct).toBeCloseTo(0.6333, 3);
+    expect(body.recommendation.projectedSavingsPct).toBeLessThan(1);
+  });
+
+  // CTO-231: a candidate with zero replayed responses has no per-call cost to scale. We must not
+  // divide by zero or fabricate a figure; the candidate is dropped (honest-null) and, with no
+  // alternative clearing replay, the recommendation is the honest insufficient-data result.
+  it("CTO-231: samples_replayed === 0 yields the honest insufficient-data result (no divide-by-zero)", async () => {
+    queryCurrentModel.mockResolvedValueOnce({
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 72_000_000_000,
+      monthlyCalls: 300_000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 70_000,
+    });
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 0,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 13_200_000,
+          p50_latency_ms: null,
+          p95_latency_ms: null,
+          error_rate: null,
+          samples_replayed: 0, // nothing replayed → no per-call cost to scale
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 0,
+      },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare") as never);
+    const body = await res.json();
+    expect(body.replay_source).toBe("replay");
+    // The zero-sample candidate is dropped rather than shown with a fabricated / NaN cost.
+    expect(body.candidates).toHaveLength(0);
+    // No candidate cleared replay → honest insufficient-data recommendation, never the fixture prose.
+    expect(body.recommendation.summary).toMatch(/no alternative candidate cleared replay/i);
+    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    // Savings default to 0 when there is no candidate to project (never a fabricated figure).
+    expect(body.recommendation.projectedSavingsMicroUsd).toBe(0);
+  });
+
   // CTO-123: a candidate with fewer than 50 replayed responses gets null latency/error —
   // the same honest-null floor the `current` row uses (CTO-115) — so the page renders "—"
   // rather than a noisy number or a borrowed mock.
@@ -152,6 +254,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -162,7 +265,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 73_500 over 49 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 73_500,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -172,7 +276,7 @@ describe("/api/compare", () => {
         {
           provider: "openai",
           model: "gpt-5-mini",
-          projected_monthly_cost_micro_usd: 4_000_000,
+          projected_monthly_cost_micro_usd: 100_000,
           p50_latency_ms: 900,
           p95_latency_ms: 1700,
           error_rate: 0.02,
@@ -204,6 +308,7 @@ describe("/api/compare", () => {
       model: "claude-haiku-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 1_000_000,
+      monthlyCalls: 400,
       latencyP95Ms: 1500,
       errorRate: 0.005,
       sampleCount: 100,
@@ -247,6 +352,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
     });
     queryReplayCandidates.mockResolvedValueOnce({
       samples_available: 50,
@@ -254,7 +360,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 75_000 over 50 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 75_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -301,6 +408,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
     });
     queryReplayCandidates.mockResolvedValueOnce({
       samples_available: 50,
@@ -308,7 +416,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 75_000 over 50 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 75_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -353,6 +462,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
     });
     queryReplayCandidates.mockResolvedValueOnce({
       samples_available: 50,
@@ -360,7 +470,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 75_000 over 50 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 75_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -388,6 +499,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -398,7 +510,8 @@ describe("/api/compare", () => {
         {
           provider: "google",
           model: "gemini-3-flash",
-          projected_monthly_cost_micro_usd: 2_400_000,
+          // CTO-231: 72_000 over 60 replayed traces → $2.40/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 72_000,
           p50_latency_ms: 700,
           p95_latency_ms: 1400,
           error_rate: 0.012,
@@ -451,6 +564,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -461,7 +575,8 @@ describe("/api/compare", () => {
         {
           provider: "google",
           model: "gemini-3-flash",
-          projected_monthly_cost_micro_usd: 2_400_000,
+          // CTO-231: 36_000 over 30 replayed traces → $2.40/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 36_000,
           p50_latency_ms: 700,
           p95_latency_ms: 1400,
           error_rate: 0.012,
@@ -514,6 +629,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -524,7 +640,9 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000, // 70% cheaper than current
+          // CTO-231: 90_000 over 60 replayed traces → $3.00/mo scaled to 2000 monthly calls,
+          // i.e. 70% cheaper than the $10.00/mo current model.
+          projected_monthly_cost_micro_usd: 90_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -585,6 +703,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -595,7 +714,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 90_000 over 60 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 90_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
@@ -622,6 +742,7 @@ describe("/api/compare", () => {
       model: "claude-sonnet-4-5",
       provider: "anthropic",
       monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
       latencyP95Ms: 2400,
       errorRate: 0.004,
       sampleCount: 500,
@@ -632,7 +753,8 @@ describe("/api/compare", () => {
         {
           provider: "anthropic",
           model: "claude-haiku-4-5",
-          projected_monthly_cost_micro_usd: 3_000_000,
+          // CTO-231: 30_000 over 20 replayed traces → $3.00/mo scaled to 2000 monthly calls.
+          projected_monthly_cost_micro_usd: 30_000,
           p50_latency_ms: 800,
           p95_latency_ms: 1500,
           error_rate: 0.01,
