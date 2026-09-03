@@ -182,6 +182,63 @@ def test_replay_projection_returns_per_candidate_rows(client: TestClient) -> Non
     assert diag["replay_cost_micro_usd"] >= 0
 
 
+def test_replay_projection_skips_missing_bodies_thinner(client: TestClient) -> None:
+    """CTO-241: some bodies gone (index rows survive), the rest present. /v1/replay must return a
+    valid projection over the bodies that ARE present, never a 500, and report the skip count."""
+    _seed_samples(client, n=10)
+    index = app.state.replay_sample_index
+    blob_store = app.state.replay_blob_store
+    # Simulate a partial body loss: drop 4 of the 10 bodies while their index rows remain.
+    for row in index[:4]:
+        blob_store._objects.pop(row.s3_object_key, None)
+
+    r = client.post(
+        "/v1/replay",
+        headers={"X-Tenant-Id": T},
+        json={
+            "tenant_id": T,
+            "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}],
+            "sample_size": 10,  # >= n so every sample is selected -> deterministic 6 present / 4 gone
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["samples_available"] == 10
+    assert len(body["per_candidate"]) == 1
+    cand = body["per_candidate"][0]
+    assert cand["samples_replayed"] == 6
+    assert cand["excluded_missing_body_count"] == 4
+    # Thinner projection is still a real, positive number computed off the present bodies.
+    assert cand["projected_monthly_cost_micro_usd"] > 0
+
+
+def test_replay_projection_all_bodies_missing_returns_insufficient_corpus(
+    client: TestClient,
+) -> None:
+    """CTO-241: the exact restart bug — durable index re-hydrated, in-memory bodies wiped. Every
+    body is gone, so /v1/replay returns the honest insufficient-corpus shape (empty per_candidate),
+    NOT a 500 and NOT a page of fabricated zeros."""
+    _seed_samples(client, n=5)
+    # Restart simulation: the index survives (durable ClickHouse re-hydrate) but the in-process
+    # blob store comes back empty.
+    app.state.replay_blob_store = InMemoryReplayBlobStore()
+
+    r = client.post(
+        "/v1/replay",
+        headers={"X-Tenant-Id": T},
+        json={
+            "tenant_id": T,
+            "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["per_candidate"] == []
+    assert body["samples_available"] == 5
+    assert body["diagnostics"]["missing_body_count"] == 5
+    assert body["diagnostics"]["samples_replayed"] == 0
+
+
 def test_replay_projection_filters_by_feature_tag(client: TestClient) -> None:
     _seed_samples(client, n=30, feature_tag="chat")
     _seed_samples(client, n=20, feature_tag="research")

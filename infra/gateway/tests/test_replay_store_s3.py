@@ -19,6 +19,7 @@ from gateway.config import Settings
 from gateway.replay_sampler import ReplaySamplePayload
 from gateway.replay_store import (
     InMemoryReplayBlobStore,
+    ReplayBodyMissing,
     S3ReplayBlobStore,
     build_replay_object_key,
     persist_sample,
@@ -126,6 +127,48 @@ def test_content_type_passed_and_bucket_used() -> None:
     assert "my-bucket" in client.buckets_used
 
 
+# --- Missing body (CTO-241) ------------------------------------------------------------------
+
+def test_get_bytes_raises_typed_missing_on_nosuchkey() -> None:
+    """A 404 / NoSuchKey out of S3 becomes the typed, non-fatal ReplayBodyMissing so /v1/replay
+    can skip the sample instead of 500-ing (mirrors the in-memory backend)."""
+    store = S3ReplayBlobStore(bucket="b", client=_FakeS3Client())
+    with pytest.raises(ReplayBodyMissing):
+        store.get_bytes("tenants/t/gone.json")
+
+
+def test_get_bytes_reraises_non_404_errors() -> None:
+    class _BoomClient(_FakeS3Client):
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            raise _FakeClientError("AccessDenied", status=403)
+
+    store = S3ReplayBlobStore(bucket="b", client=_BoomClient())
+    with pytest.raises(_FakeClientError):
+        store.get_bytes("tenants/t/x.json")
+
+
+def test_endpoint_url_forwarded_to_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CTO-241: when no client is injected, the endpoint override reaches boto3.client so the store
+    can point at MinIO. Uses a fake boto3 module so the real dependency is not required."""
+    captured: dict[str, object] = {}
+
+    class _FakeBoto3:
+        @staticmethod
+        def client(service: str, *, region_name=None, endpoint_url=None):
+            captured["service"] = service
+            captured["region_name"] = region_name
+            captured["endpoint_url"] = endpoint_url
+            return _FakeS3Client()
+
+    monkeypatch.setitem(sys.modules, "boto3", _FakeBoto3)
+    S3ReplayBlobStore(bucket="b", region="us-east-1", endpoint_url="http://minio:9000")
+    assert captured == {
+        "service": "s3",
+        "region_name": "us-east-1",
+        "endpoint_url": "http://minio:9000",
+    }
+
+
 # --- exists() --------------------------------------------------------------------------------
 
 def test_exists_true_after_put_and_false_when_absent() -> None:
@@ -182,10 +225,18 @@ def test_backend_selection_picks_s3(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _StubS3:
-        def __init__(self, bucket: str, *, prefix: str = "", region: str | None = None) -> None:
+        def __init__(
+            self,
+            bucket: str,
+            *,
+            prefix: str = "",
+            region: str | None = None,
+            endpoint_url: str | None = None,
+        ) -> None:
             captured["bucket"] = bucket
             captured["prefix"] = prefix
             captured["region"] = region
+            captured["endpoint_url"] = endpoint_url
 
     monkeypatch.setattr("gateway.app.S3ReplayBlobStore", _StubS3)
     settings = Settings(
@@ -200,7 +251,35 @@ def test_backend_selection_picks_s3(monkeypatch: pytest.MonkeyPatch) -> None:
         "bucket": "tally-replay-prod",
         "prefix": "env/prod",
         "region": "us-east-1",
+        # No endpoint set -> None so boto3 resolves the real regional AWS endpoint.
+        "endpoint_url": None,
     }
+
+
+def test_backend_selection_passes_endpoint_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CTO-241: TALLY_REPLAY_S3_ENDPOINT threads through to the store so the s3 backend can target
+    MinIO (or any S3-compatible endpoint) in local dev."""
+    from gateway.app import _build_replay_blob_store
+
+    captured: dict[str, object] = {}
+
+    class _StubS3:
+        def __init__(
+            self, bucket: str, *, prefix: str = "", region: str | None = None,
+            endpoint_url: str | None = None,
+        ) -> None:
+            captured["endpoint_url"] = endpoint_url
+
+    monkeypatch.setattr("gateway.app.S3ReplayBlobStore", _StubS3)
+    settings = Settings(
+        replay_blob_backend="s3",
+        replay_s3_bucket="tally-replay",
+        replay_s3_endpoint="http://minio:9000",
+    )
+    _build_replay_blob_store(settings)
+    assert captured["endpoint_url"] == "http://minio:9000"
 
 
 def test_s3_empty_region_resolves_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +288,10 @@ def test_s3_empty_region_resolves_to_none(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, object] = {}
 
     class _StubS3:
-        def __init__(self, bucket: str, *, prefix: str = "", region: str | None = None) -> None:
+        def __init__(
+            self, bucket: str, *, prefix: str = "", region: str | None = None,
+            endpoint_url: str | None = None,
+        ) -> None:
             captured["region"] = region
 
     monkeypatch.setattr("gateway.app.S3ReplayBlobStore", _StubS3)

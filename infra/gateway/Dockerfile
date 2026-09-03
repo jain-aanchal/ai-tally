@@ -13,8 +13,10 @@ COPY sdk/python /app/sdk/python
 COPY infra/gateway /app/infra/gateway
 
 # Install the SDK, then the gateway. We resolve `tally` from the local path rather than PyPI.
+# CTO-241: install the [s3] extra so boto3 is present for the s3 replay-blob backend the
+# docker-compose stack selects by default (persisting replay bodies in MinIO across restarts).
 RUN pip install /app/sdk/python \
- && pip install /app/infra/gateway
+ && pip install "/app/infra/gateway[s3]"
 
 EXPOSE 8080
 

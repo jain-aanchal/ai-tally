@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     replay_s3_bucket: str = ""
     replay_s3_prefix: str = ""
     replay_s3_region: str = ""
+    # CTO-241: S3 endpoint override so the ``s3`` backend can target an S3-compatible service
+    # (MinIO in the local docker-compose stack) instead of real AWS. Empty means "use the regional
+    # AWS endpoint". boto3 also honours ``AWS_ENDPOINT_URL_S3`` from the environment when this is
+    # empty. Wiring the dev gateway to MinIO here is what stops a restart from wiping replay bodies
+    # and blanking the Recoverable Cost page.
+    replay_s3_endpoint: str = ""
 
     # BigQuery export sink (CTO-154). OPTIONAL, additive analytics mirror that copies
     # spans / business_events / attribution / daily rollups into a tenant's OWN BigQuery
