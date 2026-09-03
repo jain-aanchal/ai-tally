@@ -251,6 +251,8 @@ def _build_replay_blob_store(settings) -> ReplayBlobStore:
             bucket=settings.replay_s3_bucket,
             prefix=settings.replay_s3_prefix,
             region=settings.replay_s3_region or None,
+            # CTO-241: point at MinIO in local dev; empty -> real AWS (or AWS_ENDPOINT_URL_S3).
+            endpoint_url=settings.replay_s3_endpoint or None,
         )
     raise ValueError(
         f"unknown TALLY_REPLAY_BLOB_BACKEND: {backend!r} (expected 'memory', 'gcs', or 's3')"
@@ -3009,11 +3011,19 @@ async def project_replay(
 
     per_candidate = []
     total_replay_cost = 0
+    # CTO-241: projection-scope tallies to decide, honestly, whether ANY captured body was still
+    # present. A restart can leave the durable index pointing at bodies the in-memory dev store no
+    # longer holds; those samples are skipped (excluded_missing_body) rather than 500-ing the
+    # request. If nothing at all could be replayed because every body was gone, we fall through to
+    # the same "insufficient corpus" shape the no-corpus branch returns, never a guessed number.
+    projection_replayed = 0
+    projection_missing_body = 0
     for cand in candidates:
         provider = str(cand["provider"])
         model = str(cand["model"])
         results = []
         excluded_budget = 0
+        excluded_missing_body = 0
         latencies: list[int] = []
         errors = 0
         cost_sum = 0
@@ -3038,6 +3048,10 @@ async def project_replay(
             if result.excluded_budget:
                 excluded_budget += 1
                 continue
+            if result.excluded_missing_body:
+                # CTO-241: body gone from the store; skip it, count it, fabricate nothing.
+                excluded_missing_body += 1
+                continue
             if result.row is not None:
                 latencies.append(result.row.latency_ms)
                 cost_sum += result.row.cost_micro_usd
@@ -3047,7 +3061,9 @@ async def project_replay(
         # Project per-sample cost into a monthly figure by scaling to the *corpus* size.
         # `samples_available` is the matched corpus (after filter); we treat it as a
         # representative slice of the tenant's monthly volume on that feature_tag.
-        replayed = len(results) - excluded_budget
+        replayed = len(results) - excluded_budget - excluded_missing_body
+        projection_replayed += replayed
+        projection_missing_body += excluded_missing_body
         avg_cost = (cost_sum / replayed) if replayed > 0 else 0
         # Honest extrapolation: avg cost per call × corpus size, scaled by a 30/sample-window-days
         # factor of 30 — we don't track window days yet, so v1 just reports avg × corpus.
@@ -3065,6 +3081,24 @@ async def project_replay(
             "error_rate": error_rate,
             "samples_replayed": replayed,
             "excluded_budget_count": excluded_budget,
+            "excluded_missing_body_count": excluded_missing_body,
+        })
+
+    # CTO-241: every selected body was gone (nothing replayed, and the reason was missing bodies,
+    # not the budget cap). Return the same honest "insufficient corpus" shape as the no-corpus
+    # branch rather than a page full of zeros, so Recoverable Cost shows a blank with a reason.
+    if projection_replayed == 0 and projection_missing_body > 0:
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "feature_tag": feature_tag,
+            "samples_available": samples_available,
+            "per_candidate": [],
+            "diagnostics": {
+                "context_fidelity": "resolved-context replay (no live retrieval)",
+                "replay_cost_micro_usd": 0,
+                "samples_replayed": 0,
+                "missing_body_count": projection_missing_body,
+            },
         })
 
     return JSONResponse({
@@ -3174,6 +3208,7 @@ async def project_replay_estimate(
     model = str(candidate["model"])
     results = []
     excluded_budget = 0
+    excluded_missing_body = 0
     latencies: list[int] = []
     errors = 0
     cost_sum = 0
@@ -3198,13 +3233,31 @@ async def project_replay_estimate(
         if result.excluded_budget:
             excluded_budget += 1
             continue
+        if result.excluded_missing_body:
+            # CTO-241: index row without a body (e.g. a restart wiped the dev store). Skip it and
+            # fabricate nothing rather than 500-ing the what-if.
+            excluded_missing_body += 1
+            continue
         if result.row is not None:
             latencies.append(result.row.latency_ms)
             cost_sum += result.row.cost_micro_usd
             if result.row.error_msg:
                 errors += 1
 
-    replayed = len(results) - excluded_budget
+    replayed = len(results) - excluded_budget - excluded_missing_body
+
+    # CTO-241: nothing left to replay because every selected body was gone — return the honest
+    # "insufficient corpus" shape (empty per_candidate) instead of a zero-filled projection.
+    if replayed == 0 and excluded_missing_body > 0:
+        diagnostics["missing_body_count"] = excluded_missing_body
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "feature_tag": feature_tag,
+            "samples_available": samples_available,
+            "per_candidate": [],
+            "diagnostics": diagnostics,
+        })
+
     avg_cost = (cost_sum / replayed) if replayed > 0 else 0
     projected_monthly_cost = int(round(avg_cost * samples_available))
     sorted_lat = sorted(latencies)
@@ -3227,6 +3280,7 @@ async def project_replay_estimate(
             "error_rate": error_rate,
             "samples_replayed": replayed,
             "excluded_budget_count": excluded_budget,
+            "excluded_missing_body_count": excluded_missing_body,
         }],
         "diagnostics": diagnostics,
     })

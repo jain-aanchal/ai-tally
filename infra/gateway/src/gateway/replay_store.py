@@ -21,6 +21,13 @@ from uuid import UUID
 
 from gateway.replay_sampler import ReplaySamplePayload
 
+# CTO-241: ReplayBodyMissing is defined in gateway.replay_errors (a module nothing reloads) so its
+# class identity stays stable across an importlib.reload of this module. The optional-dependency
+# tests reload gateway.replay_store; if the exception were defined here, a reload would rebind it to
+# a fresh class the executor's ``except`` clause would stop catching. Re-exported so callers keep
+# importing it from gateway.replay_store alongside the stores.
+from gateway.replay_errors import ReplayBodyMissing
+
 UTC = timezone.utc
 
 
@@ -57,7 +64,13 @@ class InMemoryReplayBlobStore:
         self._objects[key] = body
 
     def get_bytes(self, key: str) -> bytes:
-        return self._objects[key]
+        # CTO-241: a bare ``self._objects[key]`` raised a plain KeyError that bubbled out of
+        # /v1/replay as a 500 after a restart wiped this in-process dict. Translate the miss into
+        # the typed, non-fatal ReplayBodyMissing so the executor can skip the sample instead.
+        try:
+            return self._objects[key]
+        except KeyError:
+            raise ReplayBodyMissing(key) from None
 
     def __len__(self) -> int:
         return len(self._objects)
@@ -113,7 +126,14 @@ class GCSReplayBlobStore:
         blob.upload_from_string(body, content_type=content_type)
 
     def get_bytes(self, key: str) -> bytes:
-        return self._bucket.blob(key).download_as_bytes()
+        # CTO-241: mirror the in-memory/S3 path — a missing blob is the typed, non-fatal
+        # ReplayBodyMissing, not a raw google-cloud NotFound that would 500 /v1/replay.
+        try:
+            return self._bucket.blob(key).download_as_bytes()
+        except Exception as exc:  # noqa: BLE001 — normalise google-cloud NotFound (404) to a miss.
+            if _is_gcs_not_found(exc):
+                raise ReplayBodyMissing(key) from exc
+            raise
 
 
 class S3ReplayBlobStore:
@@ -155,6 +175,7 @@ class S3ReplayBlobStore:
         *,
         prefix: str = "",
         region: str | None = None,
+        endpoint_url: str | None = None,
         client: object | None = None,
     ) -> None:
         if not bucket:
@@ -165,7 +186,12 @@ class S3ReplayBlobStore:
             # instance profile / env / shared file) automatically — we never handle a raw key here.
             import boto3  # type: ignore[import-not-found]
 
-            client = boto3.client("s3", region_name=region)
+            # CTO-241: ``endpoint_url`` points the client at an S3-compatible service (MinIO in the
+            # local docker-compose stack) so replay bodies survive a gateway restart instead of
+            # living only in an in-process dict. Left None for real AWS, boto3 resolves the regional
+            # AWS endpoint itself. boto3 also honours AWS_ENDPOINT_URL_S3 from the environment when
+            # this arg is None, so the compose env can set it either way.
+            client = boto3.client("s3", region_name=region, endpoint_url=endpoint_url or None)
         self._client = client
         self._bucket = bucket
         # Normalise prefix to a bare, slash-terminated segment (or empty) so key joins are clean.
@@ -183,7 +209,14 @@ class S3ReplayBlobStore:
         )
 
     def get_bytes(self, key: str) -> bytes:
-        resp = self._client.get_object(Bucket=self._bucket, Key=self._full_key(key))
+        # CTO-241: a body that was indexed but never landed (or aged out of the bucket) must be a
+        # typed, non-fatal miss like the in-memory path, not a raw botocore 404 that 500s /v1/replay.
+        try:
+            resp = self._client.get_object(Bucket=self._bucket, Key=self._full_key(key))
+        except Exception as exc:  # noqa: BLE001 — normalise botocore ClientError (404/NoSuchKey).
+            if _is_s3_not_found(exc):
+                raise ReplayBodyMissing(key) from exc
+            raise
         return resp["Body"].read()
 
     def exists(self, key: str) -> bool:
@@ -211,6 +244,16 @@ def _is_s3_not_found(exc: BaseException) -> bool:
         if status == 404:
             return True
     return False
+
+
+def _is_gcs_not_found(exc: BaseException) -> bool:
+    """Return True for a google-cloud 'blob not found' error (HTTP 404 / NotFound).
+
+    Kept structural (duck-typed on ``code`` / class name) so the module never needs
+    ``google-cloud-storage`` imported to interpret the error and tests can raise a stand-in."""
+    if getattr(exc, "code", None) == 404:
+        return True
+    return type(exc).__name__ == "NotFound"
 
 
 # --- ClickHouse-side index rows --------------------------------------------------------------

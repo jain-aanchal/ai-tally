@@ -39,7 +39,7 @@ from uuid import UUID, uuid4
 
 from tally.pricing import PriceCatalog, Usage, compute_cost_micro_usd
 
-from gateway.replay_store import ReplayBlobStore, ReplayRunRow
+from gateway.replay_store import ReplayBlobStore, ReplayBodyMissing, ReplayRunRow
 
 UTC = timezone.utc
 logger = logging.getLogger("tally.gateway.replay_executor")
@@ -87,6 +87,11 @@ class ReplayResult:
     candidate_provider: str
     candidate_model: str
     excluded_budget: bool = False
+    # CTO-241: the sample's index row existed but its scrubbed body was gone from the blob store
+    # (e.g. a restart wiped the in-memory dev store). The sample is skipped, not replayed, and MUST
+    # NOT contribute a fabricated cost/latency to the projection. Distinct from ``excluded_budget``
+    # so the caller can report the two skip reasons separately and stay honest under uncertainty.
+    excluded_missing_body: bool = False
     error_msg: str = ""
     row: ReplayRunRow | None = None
 
@@ -158,7 +163,22 @@ class ReplayExecutor:
             )
 
         async with self._semaphore(tenant_id):
-            envelope_bytes = self.blob_store.get_bytes(object_key)
+            try:
+                envelope_bytes = self.blob_store.get_bytes(object_key)
+            except ReplayBodyMissing:
+                # CTO-241: index row without a body. Skip the sample rather than 500 the whole
+                # /v1/replay request; the projection is computed over the bodies that ARE present.
+                # We emit nothing for it (no guessed cost) to preserve honesty under uncertainty.
+                logger.info(
+                    "replay: body missing for sample=%s key=%s — skipping",
+                    sample_id, object_key,
+                )
+                return ReplayResult(
+                    sample_id=sample_id,
+                    candidate_provider=candidate_provider,
+                    candidate_model=candidate_model,
+                    excluded_missing_body=True,
+                )
             envelope = json.loads(envelope_bytes.decode("utf-8"))
             if envelope_transform is not None:
                 envelope = envelope_transform(envelope)

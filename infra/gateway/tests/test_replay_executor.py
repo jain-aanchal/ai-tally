@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
 
 from tally.pricing import seed_catalog
 
@@ -19,6 +20,7 @@ from gateway.replay_executor import (
 )
 from gateway.replay_store import (
     InMemoryReplayBlobStore,
+    ReplayBodyMissing,
     ReplayRunRow,
     build_replay_object_key,
 )
@@ -115,6 +117,41 @@ def test_replay_persists_candidate_response_text() -> None:
     ch = row.as_clickhouse_row()
     assert ch[-2] == "The candidate's actual answer is 42."
     assert ch[-1] == "stop"
+
+
+# --- Missing body (CTO-241) ---------------------------------------------------
+
+def test_replay_skips_when_body_missing() -> None:
+    """A durable index row whose body is gone from the store (e.g. a restart wiped the in-memory
+    dev store) must be skipped, not 500. The executor emits no row and fabricates no cost."""
+    exec_, rows = _make_executor()
+    sid = uuid4()
+    # Intentionally do NOT seed the blob: the object_key points at a body that is not present.
+    missing_key = build_replay_object_key("t1", sid, datetime.now(timezone.utc))
+
+    result = asyncio.run(exec_.replay_sample(
+        tenant_id="t1",
+        sample_id=sid,
+        object_key=missing_key,
+        candidate_provider="anthropic",
+        candidate_model="claude-haiku-4-5",
+        daily_budget_usd=Decimal("5.00"),
+    ))
+
+    assert result.excluded_missing_body is True
+    assert result.excluded_budget is False
+    assert result.row is None
+    assert result.succeeded is False
+    assert rows == []  # nothing written; no guessed figure
+
+
+def test_in_memory_store_raises_typed_missing() -> None:
+    """The typed miss is what makes the skip a KNOWN condition (and it stays a KeyError subclass
+    so any legacy bare-except-KeyError caller keeps working)."""
+    store = InMemoryReplayBlobStore()
+    with pytest.raises(ReplayBodyMissing):
+        store.get_bytes("tenants/t1/replay_samples/2026/01/01/nope.json")
+    assert issubclass(ReplayBodyMissing, KeyError)
 
 
 # --- Budget cap ---------------------------------------------------------------

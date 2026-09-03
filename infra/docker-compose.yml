@@ -151,6 +151,23 @@ services:
       timeout: 3s
       retries: 20
 
+  # --- MinIO bucket bootstrap (CTO-241) --------------------------------------------------------
+  # One-shot: create the replay-body bucket before the gateway boots so the s3 backend has a
+  # target. Persistent MinIO storage is what stops a gateway restart from wiping replay bodies and
+  # blanking the Recoverable Cost page. Idempotent (mb --ignore-existing), then exits 0.
+  minio-setup:
+    image: minio/mc:RELEASE.2024-09-16T17-43-14Z
+    container_name: ai-tally-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-tally} ${MINIO_ROOT_PASSWORD:-tally-minio} &&
+      mc mb --ignore-existing local/${TALLY_REPLAY_S3_BUCKET:-tally-replay} &&
+      echo 'replay bucket ready';
+      "
+
   # --- Ingest gateway (SDK batch -> enrich -> ClickHouse) --------------------------------------
   gateway:
     build:
@@ -165,6 +182,16 @@ services:
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_POSTGRES_DSN: postgresql://${POSTGRES_USER:-tally}:${POSTGRES_PASSWORD:-tally}@postgres:5432/${POSTGRES_DB:-tally}
       TALLY_REQUIRE_API_KEY: ${TALLY_REQUIRE_API_KEY:-false}
+      # CTO-241: persist replay sample bodies in MinIO (S3-compatible) instead of the in-process
+      # dict, so a gateway restart no longer wipes them and blanks the Recoverable Cost page. The
+      # AWS_* creds are the local MinIO root user/password; the endpoint targets the in-network
+      # MinIO S3 API on 9000. Region is nominal (MinIO ignores it, boto3 still wants one).
+      TALLY_REPLAY_BLOB_BACKEND: ${TALLY_REPLAY_BLOB_BACKEND:-s3}
+      TALLY_REPLAY_S3_BUCKET: ${TALLY_REPLAY_S3_BUCKET:-tally-replay}
+      TALLY_REPLAY_S3_ENDPOINT: http://minio:9000
+      TALLY_REPLAY_S3_REGION: ${TALLY_REPLAY_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-tally}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-tally-minio}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
@@ -172,6 +199,10 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz').status==200 else 1)"]
       interval: 10s
