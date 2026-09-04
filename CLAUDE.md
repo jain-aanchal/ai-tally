@@ -37,7 +37,7 @@ These are enforced throughout and reviews reject violations:
 - Prose, comments and docs use no em dashes. (The `—` glyph the honest-blank UI component renders is a real UI character and is exempt.)
 - Control-plane writes go through gateway endpoints; the web app never touches Postgres directly. New per-tenant config follows the existing store pattern (see `gateway/connectors/config_admin.py`, `gateway/tenant_budgets.py`).
 - Postgres migrations are strictly numbered; take the next free number and add the `infra/docker-compose.yml` mount. `docker-entrypoint-initdb.d` only runs on a first boot against an empty volume, so apply a new migration by hand to test against a running stack.
-- Tenant identity: the dashboard passes the tenant NAME (`local-dev`), control-plane tables key on `tenants.id` (UUID). Resolve with `gateway.tenant_lookup.resolve_tenant_uuid`; do not feed a name into a UUID column.
+- Tenant identity: on the product path the dashboard resolves the active Clerk org to a tenant UUID (`web/lib/getTenant.ts`) and passes that UUID; the tenant NAME (`local-dev`) survives only behind the `TALLY_DEV_TENANT` dev escape hatch. Control-plane tables key on `tenants.id` (UUID). Resolve any of UUID / Clerk org id / name with `gateway.tenant_lookup.resolve_tenant_uuid`; do not feed a name into a UUID column. See `docs/initiatives/01-organizations-users-access.md`.
 
 ## Verification
 
