@@ -10,6 +10,7 @@ pure logic — this module is just the HTTP + storage shell.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import time
@@ -59,6 +60,13 @@ from gateway.protocol import (
 )
 from gateway.ratelimit import RateLimiter
 from gateway.reconciliation import ReconciliationStore
+from gateway.replay_perf import (
+    EnvelopeCache,
+    ProjectionCache,
+    ReplayRunStore,
+    candidates_key,
+    prime_envelopes,
+)
 from gateway.scheduler import JobRegistry, build_scheduler
 from gateway.stitcher_job import register_stitcher_job
 from gateway.store import ClickHouseStore
@@ -334,7 +342,16 @@ async def lifespan(app: FastAPI):
             logger.info("replay: hydrated %d sample(s) from ClickHouse", len(hydrated))
     except Exception as exc:  # noqa: BLE001 - hydrate must never crash boot
         logger.warning("replay: hydrate skipped (%s)", exc)
-    app.state.replay_runs = []  # list[ReplayRunRow]
+    # CTO-243: runs are DEDUPED by (tenant, sample, candidate), newest wins, instead of appended to
+    # an unbounded list. A repeat /v1/replay replaces the prior run rather than stacking, so the eval
+    # judge grades one pair per selected sample (~50) instead of the whole accumulated history (800+).
+    app.state.replay_runs = ReplayRunStore()  # ReplayRunStore[ReplayRunRow]
+    # CTO-243: parsed-envelope LRU + finished-projection memos for the replay/eval hot path. The
+    # envelope cache turns the judge loop's per-pair blob GETs into a single off-loop preload; the
+    # projection caches return a warm result instantly and keep a web restart from forcing a recompute.
+    app.state.replay_envelope_cache = EnvelopeCache()
+    app.state.replay_projection_cache = ProjectionCache()
+    app.state.eval_projection_cache = ProjectionCache()
     # Eval harness (CTO-114): pairwise-LLM-judge over the replay outputs. Opt-in like replay;
     # judge calls accumulate in-memory until the ClickHouse writeback path lands.
     app.state.tenant_eval = TenantEvalStore(settings)
@@ -467,8 +484,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 — discovery must never crash boot
         logger.warning("models: discovery raised, defaulting to empty list: %s", exc)
         app.state.models = []
+    # CTO-243: keep the replay/eval projection cache warm out-of-band, so the first Compare /
+    # Recoverable-Cost load serves a precomputed result instead of paying the full LLM-judge cost on
+    # the request path. Fires a few seconds after boot, then on a slow interval; fail-soft throughout.
+    app.state.projection_warmer_task = asyncio.create_task(_projection_warmer_loop(app))
     logger.info("gateway up (require_api_key=%s)", settings.require_api_key)
     yield
+    # CTO-243: stop the out-of-band cache warmer before the stores it reads through are torn down.
+    _warmer_task = getattr(app.state, "projection_warmer_task", None)
+    if _warmer_task is not None:
+        _warmer_task.cancel()
     # Shutdown order matters (CTO-219). The buffer is flushed FIRST, before anything is allowed to
     # wait on the scheduler: it holds accepted customer telemetry that is not durable anywhere yet,
     # while the scheduler holds jobs that are re-run from recorded history on the next tick. Stopping
@@ -482,6 +507,71 @@ async def lifespan(app: FastAPI):
         # cancelled, so past the bound it is left to die with the process. See Scheduler.stop.
         await app.state.scheduler.stop()
     app.state.store.close()
+
+
+# CTO-243: candidate lineup the dashboard asks about. Kept in sync with the web layer's
+# DEFAULT_CANDIDATES so the warmer populates the SAME projection-cache keys the Compare / Recoverable
+# pages read (the cache key is candidate-set-order-independent, so only the set has to match).
+_WARMER_CANDIDATES = [
+    {"provider": "anthropic", "model": "claude-haiku-4-5"},
+    {"provider": "openai", "model": "gpt-5-mini"},
+    {"provider": "google", "model": "gemini-3-flash"},
+]
+_WARMER_FIRST_DELAY_S = 5.0
+_WARMER_INTERVAL_S = 600.0
+
+
+async def _warm_projection_cache(app: FastAPI) -> None:
+    """Precompute /v1/replay + /v1/eval for every (tenant, feature) that has a corpus, off the
+    request path, so the first user load serves a warm result (CTO-243).
+
+    Best-effort: it drives the real endpoints in-process via an ASGI transport (so it fills the exact
+    cache entries the pages read), and any error on any target is logged and skipped, never raised.
+    """
+    index = getattr(app.state, "replay_sample_index", []) or []
+    # Distinct (tenant, feature), plus each tenant's feature=None view the pages also request.
+    targets: set[tuple[str, str | None]] = set()
+    for row in index:
+        targets.add((row.tenant_id, row.feature_tag))
+        targets.add((row.tenant_id, None))
+    if not targets:
+        return
+    import httpx
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://warmer") as client:
+        for tenant_id, feature_tag in targets:
+            payload: dict[str, object] = {
+                "tenant_id": tenant_id,
+                "candidate_models": _WARMER_CANDIDATES,
+                "sample_size": 50,
+            }
+            if feature_tag is not None:
+                payload["feature_tag"] = feature_tag
+            for path in ("/v1/replay", "/v1/eval"):
+                try:
+                    await client.post(
+                        path, json=payload, headers={"x-tenant-id": tenant_id}, timeout=120.0
+                    )
+                except Exception as exc:  # noqa: BLE001 - warming is best-effort
+                    logger.warning(
+                        "warmer: %s %s/%s skipped (%s)", path, tenant_id, feature_tag, exc
+                    )
+
+
+async def _projection_warmer_loop(app: FastAPI) -> None:
+    """Warm the projection cache shortly after boot, then on a slow interval, so it stays warm across
+    the app's use without ever landing on a user's request path (CTO-243)."""
+    try:
+        await asyncio.sleep(_WARMER_FIRST_DELAY_S)
+        while True:
+            try:
+                await _warm_projection_cache(app)
+            except Exception as exc:  # noqa: BLE001 - never let the warmer crash its own loop
+                logger.warning("warmer: pass failed (%s)", exc)
+            await asyncio.sleep(_WARMER_INTERVAL_S)
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="ai-tally ingest gateway", version="0.1.0", lifespan=lifespan)
@@ -2995,6 +3085,16 @@ async def project_replay(
             },
         })
 
+    # CTO-243: serve a warm projection instantly when the corpus is unchanged. Keyed by
+    # (tenant, feature, sample_size, candidate set) against a cheap corpus-size signature, so a repeat
+    # load (or the Recoverable-Cost fan-out) does not re-execute the replay when nothing has changed.
+    _pcache = app.state.replay_projection_cache
+    _pkey = ("replay", tenant_id, feature_tag or "", sample_size, candidates_key(candidates))
+    _psig = str(samples_available)
+    _phit = _pcache.get(_pkey, _psig)
+    if _phit is not None:
+        return JSONResponse(_phit)
+
     # Pick samples stratified by token quintile (re-use the sampler's logic on the index).
     selected = _pick_for_projection(matching, sample_size)
 
@@ -3101,7 +3201,7 @@ async def project_replay(
             },
         })
 
-    return JSONResponse({
+    _presult = {
         "tenant_id": tenant_id,
         "feature_tag": feature_tag,
         "samples_available": samples_available,
@@ -3110,7 +3210,9 @@ async def project_replay(
             "context_fidelity": "resolved-context replay (no live retrieval)",
             "replay_cost_micro_usd": total_replay_cost,
         },
-    })
+    }
+    _pcache.put(_pkey, _psig, _presult)
+    return JSONResponse(_presult)
 
 
 @app.post("/v1/replay/estimate")
@@ -3190,12 +3292,18 @@ async def project_replay_estimate(
     selected = _pick_for_projection(matching, min(sample_size, samples_available))
 
     client = getattr(app.state, "replay_candidate_client", None) or _mock_candidate_client
+    # CTO-243: a prompt-override what-if must NOT enter the shared replay corpus. Runs are now deduped
+    # by (tenant, sample, candidate), so an estimate run would otherwise shadow the real /v1/replay run
+    # for the same pair and the eval judge would grade the what-if instead of the captured baseline.
+    # Estimate reads nothing back from this sink (its projection comes from the local ``results``), so
+    # a throwaway list keeps the what-if fully isolated. Budget is still checked against real spend.
+    _estimate_runs: list = []
     executor = ReplayExecutor(
         catalog=app.state.catalog,
         blob_store=app.state.replay_blob_store,
         client=client,
         todays_spend_micro_usd=lambda t: _todays_spend(app.state.replay_runs, t),
-        sink=app.state.replay_runs.append,
+        sink=_estimate_runs.append,
     )
 
     transform = (
@@ -3465,9 +3573,32 @@ async def project_eval(
             },
         })
 
+    # CTO-243: serve a warm eval instantly when nothing that feeds it has changed. Signature folds in
+    # the corpus size, the deduped run count and the judge model, so it recomputes on a real change
+    # but not on a repeat load or the Recoverable-Cost fan-out re-asking for the same feature.
+    _ecache = app.state.eval_projection_cache
+    _ekey = ("eval", tenant_id, feature_tag or "", sample_size, candidates_key(candidates))
+    _esig = f"{samples_available}:{len(replay_runs)}:{cfg.judge_model}"
+    _ehit = _ecache.get(_ekey, _esig)
+    if _ehit is not None:
+        return JSONResponse(_ehit)
+
     # Pick the same stratified slice the replay projection would have picked. Reuse helper.
     selected_index_rows = _pick_for_projection(list(matching_samples.values()), sample_size)
     selected_ids = {r.sample_id for r in selected_index_rows}
+
+    # CTO-243: preload every DISTINCT selected envelope once, on a worker thread, so the judge loop
+    # below reads bodies from memory instead of doing a blocking blob GET per pair. The per-pair GETs
+    # were what wedged the gateway's single event loop (starving unrelated reads like the Home budget).
+    _env_cache = app.state.replay_envelope_cache
+    _selected_keys = {
+        matching_samples[sid].s3_object_key
+        for sid in selected_ids
+        if sid in matching_samples
+    }
+    await asyncio.to_thread(
+        prime_envelopes, _env_cache, _selected_keys, lambda k: _load_envelope(blob_store, k)
+    )
 
     judge_client = getattr(app.state, "eval_judge_client", None) or _mock_judge_client
     executor = EvalExecutor(
@@ -3503,7 +3634,10 @@ async def project_eval(
             sample_row = matching_samples.get(run.sample_id)
             if sample_row is None:
                 continue
-            envelope = _load_envelope(blob_store, sample_row.s3_object_key)
+            # CTO-243: from the off-loop preload above; a miss (rare) falls back to a direct read.
+            envelope = _env_cache.get(sample_row.s3_object_key)
+            if envelope is None:
+                envelope = _load_envelope(blob_store, sample_row.s3_object_key)
             instruction = _extract_instruction(envelope)
             current_response = _extract_response(envelope)
             # Candidate response (CTO-125): the replay executor now persists the candidate model's
@@ -3564,7 +3698,7 @@ async def project_eval(
             "judge_cost_micro_usd": cost_sum,
         })
 
-    return JSONResponse({
+    _eresult = {
         "tenant_id": tenant_id,
         "feature_tag": feature_tag,
         "samples_available": samples_available,
@@ -3574,7 +3708,9 @@ async def project_eval(
             "rubric_version": "rubric-v1",
             "judge_cost_micro_usd": total_judge_cost,
         },
-    })
+    }
+    _ecache.put(_ekey, _esig, _eresult)
+    return JSONResponse(_eresult)
 
 
 def _load_envelope(blob_store, object_key: str) -> dict:
