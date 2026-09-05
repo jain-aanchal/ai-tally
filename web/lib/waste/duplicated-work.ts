@@ -279,22 +279,35 @@ export async function collectDuplicatedWork(
     // change feature/agent/model/user mid-trace); its timestamp is the last span's, its cost the
     // trace sum, and its outcome the worst StatusCode (2 == error => failed). compute/egress spans
     // are tenant-level infra rows, not agent runs, so they are excluded exactly as queryAgents does.
+    // Perf (CTO-243): a duplicated-work finding REQUIRES a failed run, so only clusters that contain
+    // at least one failure can ever produce one. We reduce the per-trace runs to exactly those
+    // clusters inside ClickHouse (an IN over the cluster tuple) instead of shipping one row per trace
+    // to Node and clustering the whole tenant in JS. On the demo corpus that is 740 rows instead of
+    // ~420k. This is lossless: a failure-free cluster is dropped precisely because it can never match.
     const rows = await rowsPCached<RunRow>(
       db,
-      `SELECT TraceId AS traceId,
-              any(FeatureTag) AS feature,
-              any(ServiceName) AS agent,
-              any(${MODEL_EXPR}) AS model,
-              if(empty(any(UserIdHash)), '', toString(any(UserIdHash))) AS userIdHash,
-              toString(toUnixTimestamp(max(Timestamp))) AS tsSec,
-              sum(EstimatedCost) AS cost,
-              toString(max(StatusCode)) AS maxStatus
-       FROM otel_spans
-       WHERE TenantId = {tenant:String}
-         AND Timestamp >= now() - INTERVAL ${w} DAY
-         AND GenAiOperation NOT IN ('compute', 'egress')
-         ${clause}
-       GROUP BY TraceId`,
+      `WITH runs AS (
+         SELECT TraceId AS traceId,
+                any(FeatureTag) AS feature,
+                any(ServiceName) AS agent,
+                any(${MODEL_EXPR}) AS model,
+                if(empty(any(UserIdHash)), '', toString(any(UserIdHash))) AS userIdHash,
+                toString(toUnixTimestamp(max(Timestamp))) AS tsSec,
+                sum(EstimatedCost) AS cost,
+                max(StatusCode) AS maxStatusNum
+         FROM otel_spans
+         WHERE TenantId = {tenant:String}
+           AND Timestamp >= now() - INTERVAL ${w} DAY
+           AND GenAiOperation NOT IN ('compute', 'egress')
+           ${clause}
+         GROUP BY TraceId
+       )
+       SELECT traceId, feature, agent, model, userIdHash, tsSec, cost,
+              toString(maxStatusNum) AS maxStatus
+       FROM runs
+       WHERE (feature, agent, model, userIdHash) IN (
+         SELECT feature, agent, model, userIdHash FROM runs WHERE maxStatusNum = 2
+       )`,
       { tenant, ...params },
     );
 
