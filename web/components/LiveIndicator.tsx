@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 
 import { relativeAge } from "@/lib/dataState";
+import { isDemoMode } from "@/lib/demoMode";
 
 export function LiveIndicator({
   updatedAt,
@@ -18,12 +19,18 @@ export function LiveIndicator({
   updatedAt: Date | null;
   paused?: boolean;
 }) {
+  // Demo mode: the dashboard does not auto-refresh (poll disabled), so the "live / updated Ns ago"
+  // badge and its once-a-second tick would read as a refresh that is not happening. Hide it and skip
+  // the interval entirely for a static screen-share.
+  const demo = isDemoMode();
   // Re-tick once per second so the "Ns ago" label stays fresh even between polls.
   const [, setTick] = useState(0);
   useEffect(() => {
+    if (demo) return;
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [demo]);
+  if (demo) return null;
 
   const age = updatedAt ? relativeAge(updatedAt.toISOString()) : null;
   const dotClass = paused ? "bg-muted" : "animate-pulse bg-good";

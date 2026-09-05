@@ -34,10 +34,10 @@ import {
 // pure lib/waste.ts stays free of presentation. The union is closed, so this Record is exhaustive and
 // a new category would force a compile error here until it is labelled.
 const CATEGORY_LABEL: Record<WasteCategory, string> = {
-  paid_for_nothing: "Paid for nothing",
+  paid_for_nothing: "Failed but billed",
   duplicated_work: "Duplicated work",
   wrong_sized_model: "Wrong-sized model",
-  no_measured_return: "No measured return",
+  no_measured_return: "Unproven spend",
   structural_inefficiency: "Structural inefficiency",
 };
 

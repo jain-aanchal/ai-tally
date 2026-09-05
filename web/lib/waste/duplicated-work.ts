@@ -190,11 +190,9 @@ function heuristicReason(): string {
   // indistinguishable from legitimate multi-turn use, so claiming dollars for them would fabricate
   // waste (review: rapid-repeat conflated with normal conversation).
   return (
-    `An errored run was followed within ${minutes} min by another run of the same shape that ` +
-    `succeeded, so the failed attempt is spend the retry made redundant. This is a heuristic on run ` +
-    `SHAPE and TIMING (same feature, agent, model and user, close in time), earning its dollars from ` +
-    `the observed failure, not from repetition: telemetry stores no prompts or completions, so ` +
-    `identical work is approximated, not proven. Confidence is medium for that reason.`
+    `A failed run was retried within ${minutes} min by a same-shape run that succeeded, so the ` +
+    `failed attempt is redundant spend. Matched on run shape and timing, not prompt text, so it is a ` +
+    `medium-confidence estimate.`
   );
 }
 

@@ -77,11 +77,10 @@ describe("detectWrongSizedModel", () => {
     expect(f.evidence.qualityCiLow).toBe(0.44);
     expect(f.evidence.qualityCiHigh).toBe(0.54);
     expect(f.evidence.samplesReplayed).toBe(120);
-    // The honest caveat: candidate cost from resolved-context replay, incumbent from real traffic,
-    // compared per call.
-    expect(f.reason).toContain("resolved-context replay, no live retrieval");
+    // The honest caveat: candidate cost from replay, incumbent from real traffic, compared per call.
+    expect(f.reason).toContain("Candidate cost from replay");
     expect(f.reason).toContain("per call");
-    expect(f.reason).toContain("measured on");
+    expect(f.reason).toContain("real traffic");
   });
 
   it("reports high confidence on a tight CI and medium on a wide one", () => {

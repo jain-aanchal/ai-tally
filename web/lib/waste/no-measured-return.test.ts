@@ -44,8 +44,8 @@ describe("detectNoMeasuredReturn", () => {
     expect(f.recoverableMicroUsd).toBe(250 * USD);
     expect(f.windowSpendMicroUsd).toBe(250 * USD);
     expect(f.drillHref).toBe("/attribution");
-    // The reason MUST name the category phrase and carry the investigate-not-verdict caveat.
-    expect(f.reason.toLowerCase()).toContain("spend with no measured return");
+    // The reason MUST state the no-attributed-value claim and carry the investigate-not-verdict caveat.
+    expect(f.reason.toLowerCase()).toContain("no converting business event");
     expect(f.reason.toLowerCase()).toContain("investigate");
     expect(f.evidence).toMatchObject({
       windowSpend: 250 * USD,

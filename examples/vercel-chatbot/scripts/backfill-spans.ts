@@ -158,7 +158,7 @@ interface ChatModel {
   outUsdPerMtok: number;
 }
 const OPENAI_MODELS: ChatModel[] = [
-  { provider: "openai", model: "gpt-4o", inUsdPerMtok: 2.5, outUsdPerMtok: 10.0 },
+  { provider: "openai", model: "gpt-5", inUsdPerMtok: 2.5, outUsdPerMtok: 10.0 },
   {
     provider: "openai",
     model: "gpt-4o-mini",
@@ -398,7 +398,7 @@ function generate(args: Args): Generated {
       const tsBaseNs = randTsNs();
       const provider = rng() < OPENAI_SHARE ? "openai" : "anthropic";
       const pool = provider === "openai" ? OPENAI_MODELS : ANTHROPIC_MODELS;
-      // Bias toward the more capable (pricier) model — pool[0] is gpt-4o /
+      // Bias toward the more capable (pricier) model — pool[0] is gpt-5 /
       // claude-sonnet-4-5. A $52K/mo startup is doing ~100-200k substantial
       // calls, not millions of micro-calls, so keep the span count believable
       // and the per-call cost in the tens-of-cents range.
