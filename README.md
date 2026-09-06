@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-[![Watch the Demo Video](https://github.com/jain-aanchal/ai-tally/blob/main/Thumbnail.png)](https://youtu.be/5YUwYEXrV0g)
+[![Watch the Demo Video](https://github.com/jain-aanchal/ai-tally/blob/main/Thumbnail.png)](https://www.youtube.com/watch?v=r4NlWZ6eaZI)
 
 Click on the thumbnail to watch the demo.
 
