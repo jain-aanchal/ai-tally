@@ -75,11 +75,6 @@ const MIN_REPLAYED_SAMPLES = 50;
 // looser one, so it lands at medium. This gates ONLY confidence, never the dollar math.
 const TIGHT_CI_WIDTH = 0.1;
 
-// The fidelity caveat every Compare projection carries (CTO diagnostics / the /compare page): the
-// replay resolves captured context rather than re-running live retrieval, so a finding built on it
-// must say so rather than imply a live A/B. Kept verbatim so the wording matches the page.
-const REPLAY_FIDELITY_CAVEAT = "resolved-context replay, no live retrieval";
-
 /**
  * Strip a dated / versioned suffix so two ids for the SAME model compare equal. This is used ONLY to
  * skip a candidate that is really the incumbent (self-comparison) - CTO-236 does NOT reintroduce a
@@ -216,10 +211,8 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
       title: `${scope.incumbentModel} is over-sized for this workload`,
       reason:
         `${best.candidateModel} replayed cheaper per call than ${scope.incumbentModel}${featureClause} ` +
-        `at no significant quality regression (pairwise win-rate ${best.winRate.toFixed(2)}, 95% CI ` +
-        `${best.ciLow.toFixed(2)}-${best.ciHigh.toFixed(2)} overlaps the even line). Candidate cost is ` +
-        `from ${REPLAY_FIDELITY_CAVEAT} over a representative corpus; the incumbent cost is measured on ` +
-        `real traffic; the two are compared per call.`,
+        `with no significant quality drop (win-rate ${best.winRate.toFixed(2)}). Candidate cost from ` +
+        `replay, incumbent from real traffic, compared per call.`,
       evidence: {
         incumbentModel: scope.incumbentModel,
         candidateModel: best.candidateModel,
@@ -243,6 +236,39 @@ export function detectWrongSizedModel(input: WrongSizedModelInput): WasteFinding
 // the top-K features by spend: replay/eval each burn real provider/judge spend, and the tail of tiny
 // features is not where the tenant's money is. K is a named const so the bound is visible.
 const MAX_FEATURES = 12;
+
+// The per-feature Compare-path fan-out hits the gateway's /v1/replay + /v1/eval, and those run on the
+// gateway's SINGLE async event loop. Dispatching all top-K features at once (a bare Promise.all) fired
+// up to 2*MAX_FEATURES concurrent replay/judge calls, which wedged that loop: it stopped serving the
+// lightweight control-plane reads every OTHER page makes (home, budget, connectors) and spiked
+// /api/waste itself to multiple seconds (CTO-234). Cap the number of features in flight so the gateway
+// stays responsive; each feature still runs replay-then-eval sequentially within itself, so the ceiling
+// on concurrent gateway calls is this constant, not 2*MAX_FEATURES. Order is preserved (see
+// mapWithConcurrency), so the resulting scope order and findings are identical to the old Promise.all.
+const GATEWAY_FANOUT_CONCURRENCY = 3;
+
+/**
+ * Map `fn` over `items` with at most `limit` invocations in flight at once, preserving input order in
+ * the result (result[i] === fn(items[i])). A fixed pool of `limit` workers pulls the next index off a
+ * shared cursor until the list is drained. This is the bounded-concurrency replacement for
+ * `Promise.all(items.map(fn))` on the gateway fan-out: same order, same results, capped peak load.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = cursor++; i < items.length; i = cursor++) {
+      results[i] = await fn(items[i]);
+    }
+  };
+  const pool = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(pool);
+  return results;
+}
 
 /** One feature's incumbent: its dominant model (max spend) and that model's window spend + per-call
  *  cost, plus the feature's total spend across all models (the top-K ranking key). Integer micro-USD. */
@@ -395,14 +421,17 @@ export async function collectWrongSizedModel(
     )
     .slice(0, MAX_FEATURES);
 
-  // Fan the per-feature Compare-path reads out CONCURRENTLY (CTO-234 perf). This was a sequential
-  // await loop over the top-K features, so it cost ~2K serial gateway round-trips (replay + eval) on
-  // the /api/waste hot path and dominated the page's latency. Promise.all dispatches all features at
-  // once; the array order is preserved, so the resulting scope order (and thus the findings) is
-  // identical to the old loop. Replay stays sequenced BEFORE eval WITHIN a feature so a feature with
-  // no replay corpus still never burns judge spend on an eval it would discard.
-  const built = await Promise.all(
-    ranked.map(async (f): Promise<WrongSizedModelScope | null> => {
+  // Fan the per-feature Compare-path reads out with BOUNDED concurrency (CTO-234 perf). It was first a
+  // sequential await loop (~2K serial gateway round-trips), then a bare Promise.all -- but that swung
+  // too far, slamming the gateway's single event loop with up to 2*MAX_FEATURES concurrent replay/judge
+  // calls and wedging it (see GATEWAY_FANOUT_CONCURRENCY). mapWithConcurrency caps the features in
+  // flight while preserving array order, so the resulting scope order (and thus the findings) is
+  // identical to the old loop. Replay stays sequenced BEFORE eval WITHIN a feature so a feature with no
+  // replay corpus still never burns judge spend on an eval it would discard.
+  const built = await mapWithConcurrency(
+    ranked,
+    GATEWAY_FANOUT_CONCURRENCY,
+    async (f): Promise<WrongSizedModelScope | null> => {
       // (1) No incumbent traffic to rescale against -> nothing to flag (skip before any replay/eval read).
       if (f.incumbentPerCallMicroUsd <= 0 || f.windowSpendMicroUsd <= 0) return null;
 
@@ -448,7 +477,7 @@ export async function collectWrongSizedModel(
         incumbentPerCallMicroUsd: f.incumbentPerCallMicroUsd,
         candidates,
       };
-    }),
+    },
   );
   const scopes: WrongSizedModelScope[] = built.filter(
     (s): s is WrongSizedModelScope => s !== null,

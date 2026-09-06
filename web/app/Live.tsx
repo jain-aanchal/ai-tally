@@ -46,7 +46,7 @@ import { LAYERS, type Layer } from "@/lib/cost";
 import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
 import { rangeDays } from "@/lib/filters";
 import type { FeatureRoi, SpendSummary } from "@/lib/types";
-import { formatUSD } from "@/lib/types";
+import { formatUSD, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -60,11 +60,15 @@ export function HomeLive({
   initialData,
   enabledLayers,
   forecast,
+  priorMonthMicroUsd = null,
 }: {
   initialData: HomePayload;
   enabledLayers: readonly Layer[];
   /** Tenant-wide month-end projection, the same one /cost draws. Fetched once, not polled. */
   forecast: ForecastPayload;
+  /** Last full calendar month's actual spend, for the forecast card's "vs last month" delta.
+   *  Null when unknown (ClickHouse down, or no prior-month spend); the card then omits the delta. */
+  priorMonthMicroUsd?: MicroUSD | null;
 }) {
   // Same URL-synced filter state the FilterBar writes. Home reads it BOTH to narrow the tables it
   // holds and, since CTO-226, to drive the time-range window: the endpoint carries the managed query
@@ -144,7 +148,7 @@ export function HomeLive({
 
   const grid = (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <MonthlyForecastCard forecast={forecast} />
+      <MonthlyForecastCard forecast={forecast} priorMonthMicroUsd={priorMonthMicroUsd} />
 
       <Card title="ROI snapshot">
         <table className="w-full text-sm">
@@ -280,7 +284,13 @@ export function HomeLive({
  * flattering zero; a missing budget shows the projection with no variance rather than a variance
  * against zero.
  */
-function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
+function MonthlyForecastCard({
+  forecast,
+  priorMonthMicroUsd = null,
+}: {
+  forecast: ForecastPayload;
+  priorMonthMicroUsd?: MicroUSD | null;
+}) {
   const section = forecast.section;
   if (!section) {
     return (
@@ -325,33 +335,63 @@ function MonthlyForecastCard({ forecast }: { forecast: ForecastPayload }) {
         <Money micro={f.projectedMicroUsd} reason="nothing was projected" />
       </div>
       <div className="mt-1 text-sm text-muted">
-        all-in AI spend for {month} (LLM, vector, tools, compute, embeddings, egress)
+        projected all-in AI spend for {month}
         {isDemoMode() ? "" : ", a forecast and not a commitment"}
       </div>
 
-      <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-        <div>
-          <dt className="text-xs uppercase tracking-wide text-muted">80% range</dt>
-          <dd className="mt-0.5 tabular-nums">
-            <Money micro={f.lowMicroUsd} reason="nothing was projected" /> to{" "}
-            <Money micro={f.highMicroUsd} reason="nothing was projected" />
-          </dd>
-        </div>
-        <div>
-          <dt className="text-xs uppercase tracking-wide text-muted">Settled so far</dt>
-          <dd className="mt-0.5 tabular-nums">
-            <Money micro={f.spendToDateMicroUsd} />
-            <span className="ml-2 text-xs text-muted">
-              {f.daysElapsed} of {f.daysInPeriod} days
-            </span>
-          </dd>
-        </div>
-      </dl>
+      <MonthOverMonth
+        projectedMicroUsd={f.projectedMicroUsd}
+        priorMonthMicroUsd={priorMonthMicroUsd}
+      />
 
       <div className="mt-4 border-t border-edge pt-3 text-sm">
         <ForecastStanding section={section} />
       </div>
     </Card>
+  );
+}
+
+/**
+ * The month-over-month line under the headline: "+$12,259 more than last month (16%)". Up is red
+ * (spend grew), down is green. Rendered only when both the projection and a real prior-month total
+ * exist; otherwise it stays silent (demo) or shows an honest blank with its reason (CTO-227), never
+ * a delta against a fabricated or zero baseline.
+ */
+function MonthOverMonth({
+  projectedMicroUsd,
+  priorMonthMicroUsd,
+}: {
+  projectedMicroUsd: MicroUSD | null;
+  priorMonthMicroUsd: MicroUSD | null;
+}) {
+  if (projectedMicroUsd === null || priorMonthMicroUsd === null || priorMonthMicroUsd === 0) {
+    if (isDemoMode()) return null;
+    return (
+      <p className="mt-2 text-sm text-muted">
+        <Blank reason="last month's settled total is not available to compare against" /> No
+        month-over-month comparison.
+      </p>
+    );
+  }
+  const delta = projectedMicroUsd - priorMonthMicroUsd;
+  const pct = delta / priorMonthMicroUsd;
+  const up = delta > 0;
+  const flat = delta === 0;
+  return (
+    <p className="mt-2 text-sm">
+      <span className={flat ? "text-muted" : up ? "text-bad" : "text-good"}>
+        {flat ? (
+          "About level with"
+        ) : (
+          <>
+            {up ? "+" : "−"}
+            <Money micro={Math.abs(delta)} /> ({up ? "+" : "−"}
+            <Pct value={Math.abs(pct)} />) {up ? "more than" : "less than"}
+          </>
+        )}
+      </span>{" "}
+      last month
+    </p>
   );
 }
 

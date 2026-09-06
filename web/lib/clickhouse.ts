@@ -15,10 +15,13 @@
 
 import { createClient, type ClickHouseClient } from "@clickhouse/client";
 
+import { isDemoMode } from "@/lib/demoMode";
+
 import type {
   CostOutlier,
   DataQuality,
   FeatureRoi,
+  MicroUSD,
   SpendByLayer,
   SpendSummary,
 } from "./types";
@@ -282,6 +285,29 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
       reconciledThrough: t.recThrough && t.recThrough !== "\\N" ? t.recThrough : "1970-01-01",
       byLayer,
     };
+  });
+}
+
+/**
+ * Last calendar month's total AI spend, for the Home forecast's month-over-month delta (CTO-227).
+ * Full prior month [toStartOfMonth(now()) - 1 month, toStartOfMonth(now())) so it compares like for
+ * like against the projected FULL current month, on the warehouse clock (CTO-203), never the Node
+ * clock. Returns null (an honest blank, never $0) when ClickHouse is unreachable or the prior month
+ * carried no spend, so the card omits the delta rather than baselining against a fabricated figure.
+ */
+export async function queryPriorMonthSpend(): Promise<MicroUSD | null> {
+  return tryLive(async (db, tenant) => {
+    const r = await rows<{ total: string }>(
+      db,
+      `SELECT sum(EstimatedCost) AS total
+       FROM otel_spans
+       WHERE TenantId = {tenant:String}
+         AND Timestamp >= toStartOfMonth(now()) - INTERVAL 1 MONTH
+         AND Timestamp < toStartOfMonth(now())`,
+      tenant,
+    );
+    const total = micro(r[0]?.total ?? "0");
+    return total > 0 ? total : null;
   });
 }
 
@@ -3055,7 +3081,9 @@ export interface ReplayProjection {
   };
 }
 
-const REPLAY_CACHE_TTL_MS = 5 * 60 * 1000;
+// Demo mode caches replay for 4h so Recoverable Cost / Model Comparison serve from cache during a
+// walkthrough instead of re-running the ~5s gateway replay on every load; normal use stays 5 min.
+const REPLAY_CACHE_TTL_MS = isDemoMode() ? 4 * 60 * 60 * 1000 : 5 * 60 * 1000;
 const _replayCache = new Map<string, { at: number; data: ReplayProjection | null }>();
 
 // Default candidate list when the caller doesn't override. Models come from the SDK's expanded
@@ -3113,7 +3141,7 @@ export async function queryReplayCandidates(
     });
     if (!res.ok) {
       console.warn(`[replay] /v1/replay HTTP ${res.status}; falling back to mock`);
-      _replayCache.set(cacheKey, { at: Date.now(), data: null });
+      // Do NOT cache a transient failure (poisons the long demo-mode cache); retry next load.
       return null;
     }
     const body = (await res.json()) as ReplayProjection;
@@ -3122,7 +3150,7 @@ export async function queryReplayCandidates(
     return data;
   } catch (err) {
     console.warn("[replay] gateway unreachable, falling back to mock:", (err as Error).message);
-    _replayCache.set(cacheKey, { at: Date.now(), data: null });
+    // Do NOT cache a transient failure (see above); retry on the next load.
     return null;
   }
 }
@@ -3207,7 +3235,8 @@ export interface EvalProjection {
   };
 }
 
-const EVAL_CACHE_TTL_MS = 10 * 60 * 1000;
+// Demo mode caches eval for 4h (see REPLAY_CACHE_TTL_MS); normal use stays 10 min.
+const EVAL_CACHE_TTL_MS = isDemoMode() ? 4 * 60 * 60 * 1000 : 10 * 60 * 1000;
 const _evalCache = new Map<string, { at: number; data: EvalProjection | null }>();
 
 /**
@@ -3245,7 +3274,8 @@ export async function queryEvalCandidates(
     });
     if (!res.ok) {
       console.warn(`[eval] /v1/eval HTTP ${res.status}; falling back to null`);
-      _evalCache.set(cacheKey, { at: Date.now(), data: null });
+      // Do NOT cache a transient failure: a wedged / 500 gateway would otherwise poison the (long,
+      // demo-mode) cache with null and suppress the finding until the TTL expires. Retry next load.
       return null;
     }
     const body = (await res.json()) as EvalProjection;
@@ -3254,7 +3284,7 @@ export async function queryEvalCandidates(
     return data;
   } catch (err) {
     console.warn("[eval] gateway unreachable, qualityScore will be null:", (err as Error).message);
-    _evalCache.set(cacheKey, { at: Date.now(), data: null });
+    // Do NOT cache a transient failure (see above); retry on the next load.
     return null;
   }
 }

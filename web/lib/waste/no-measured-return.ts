@@ -107,13 +107,11 @@ export function detectNoMeasuredReturn(
       recoverableMicroUsd: row.windowSpendMicroUsd,
       windowSpendMicroUsd: row.windowSpendMicroUsd,
       confidence,
-      title: `${row.scopeValue}: spend with no measured return`,
+      title: `${row.scopeValue}: unproven spend`,
       reason:
-        "Spend with no measured return: this scope cost real money over the window, yet no " +
-        "converting business event traces back to it, while the tenant attributes value " +
-        "elsewhere. Caveat: top-of-funnel work, or revenue that is simply not yet wired to this " +
-        "scope, looks identical from telemetry alone, so treat this as a flag to investigate, not " +
-        "a verdict of pure waste.",
+        "This scope cost real money over the window, but no converting business event traces back " +
+        "to it. Could be top-of-funnel work or revenue not yet wired up, so treat it as a flag to " +
+        "investigate.",
       evidence: {
         windowSpend: row.windowSpendMicroUsd,
         attributedValue: 0,
