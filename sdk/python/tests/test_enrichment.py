@@ -83,3 +83,95 @@ def test_original_not_mutated():
     before = dict(span)
     enrich_cost(span, seed_catalog(), at=AT)
     assert span == before  # enrich returns a copy
+
+
+# CTO-244: a known model with unknown usage must land unpriced, not as a confident $0.
+# compute_cost_micro_usd prices whatever it is handed, so coercing absent token counts to 0 here
+# produced EstimatedCost = 0 with CostSource = 'estimated' for a real, billed call. See
+# _usage_or_none.
+
+
+def test_known_model_absent_usage_is_unpriced_not_zero():
+    span = build_span_attributes(
+        SpanFields(system="openai", response_model="gpt-4o-mini", operation="chat")
+    )
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.usage_unknown is True
+    assert res.server_cost_micro_usd is None
+    # No cost claim at all on the span, so mapping writes NULL / CostSource = 'unpriced'.
+    assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
+    assert GenAI.COST_PRICE_CATALOG_VERSION not in res.attributes
+
+
+def test_regression_gpt_4o_mini_chat_no_usage_does_not_fabricate_zero():
+    # The exact call the end-to-end integration test proved still fabricated a priced $0.
+    res = enrich_cost(
+        {
+            GenAI.SYSTEM: "openai",
+            GenAI.RESPONSE_MODEL: "gpt-4o-mini",
+            GenAI.OPERATION_NAME: "chat",
+        },
+        seed_catalog(),
+    )
+    assert res.server_cost_micro_usd is None
+    assert res.attributes.get(GenAI.COST_ESTIMATED_MICRO_USD) is None
+    assert res.attributes.get(GenAI.COST_PRICE_CATALOG_VERSION) is None
+
+
+def test_provider_reported_zero_tokens_prices_as_a_real_zero():
+    # A reported 0 is a number, not an absence: it still prices, and it prices to 0.
+    res = enrich_cost(_span(inp=0, out=0), seed_catalog(), at=AT)
+    assert res.usage_unknown is False
+    assert res.catalog_miss is False
+    assert res.server_cost_micro_usd == 0
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 0
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+
+
+def test_half_reported_usage_is_still_unknown():
+    # Output absent with input known would price the output side at 0, understating a real call.
+    span = build_span_attributes(
+        SpanFields(
+            system="openai", response_model="gpt-5-mini", operation="chat", input_tokens=500
+        )
+    )
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.usage_unknown is True
+    assert res.server_cost_micro_usd is None
+
+
+def test_unparseable_usage_is_unknown_not_zero():
+    span: dict[str, object] = {
+        GenAI.SYSTEM: "openai",
+        GenAI.RESPONSE_MODEL: "gpt-5-mini",
+        GenAI.USAGE_INPUT_TOKENS: "lots",
+        GenAI.USAGE_OUTPUT_TOKENS: None,
+    }
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.usage_unknown is True
+    assert res.server_cost_micro_usd is None
+
+
+def test_unknown_usage_is_not_reported_as_a_catalog_miss():
+    # Two different failures: we HAD a rate, we did not have counts to apply it to.
+    span = build_span_attributes(
+        SpanFields(system="openai", response_model="gpt-5-mini", operation="chat")
+    )
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.usage_unknown is True
+    assert res.catalog_miss is False
+
+
+def test_client_cost_still_surfaces_when_usage_is_unknown():
+    span = build_span_attributes(
+        SpanFields(
+            system="openai",
+            response_model="gpt-5-mini",
+            operation="chat",
+            cost_estimated_micro_usd=1234,
+        )
+    )
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.client_cost_micro_usd == 1234
+    assert res.server_cost_micro_usd is None
+    assert res.drift is None

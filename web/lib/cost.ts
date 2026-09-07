@@ -50,6 +50,56 @@ export function totalForDay(p: CostDayPoint): MicroUSD {
   return LAYERS.reduce((sum, l) => sum + p.byLayer[l], 0);
 }
 
+/** One layer's figure for a window, or the reason we cannot report one. */
+export interface LayerCoverage {
+  layer: Layer;
+  /** Measured spend in micro-USD, or null when we have nothing to report for this window. */
+  totalMicroUsd: MicroUSD | null;
+  /** Why it is blank. Empty string exactly when totalMicroUsd is a real measured number. */
+  reason: string;
+}
+
+/**
+ * Classify every cost layer for a window (CTO-244).
+ *
+ * LAYERS is a fixed six-element list of the layers the product knows about, not a list of the
+ * layers a given tenant has data for. Mapping it straight onto a per-layer sum therefore invented a
+ * row for a layer nobody ever reported, and that row read "Compute $0.00, 0.0%": a confident zero
+ * for something we never measured. Same failure as a fabricated cost, on the read side.
+ *
+ * Telling "genuinely spent nothing" from "we have nothing" needs a second signal, and there are two,
+ * in order of strength:
+ *   - `spanCounts`: spans we actually observed for the layer. A layer with spans summing to 0 IS a
+ *     measured zero, and it reports a real 0 rather than blanking. Only the live breakdown carries
+ *     this, which is why it is optional.
+ *   - the connector roster, when no span count is available. An enabled-but-silent connector and a
+ *     connector that was never connected are different claims, and neither is "$0.00": both blank,
+ *     each saying which situation the reader is in.
+ *
+ * Without a span count a zero total is unresolvable by construction (a real measured zero and an
+ * absent layer arrive identical), so it blanks rather than guessing.
+ */
+export function layerCoverage(
+  byLayer: Readonly<Record<Layer, number>>,
+  enabled: readonly Layer[],
+  spanCounts?: Readonly<Partial<Record<Layer, number>>>,
+): LayerCoverage[] {
+  return LAYERS.map((layer) => {
+    const total = byLayer[layer] ?? 0;
+    if (total > 0) return { layer, totalMicroUsd: total, reason: "" };
+    // Spans observed but no spend: measured, and the measurement is zero.
+    if ((spanCounts?.[layer] ?? 0) > 0) return { layer, totalMicroUsd: total, reason: "" };
+    const label = LAYER_LABEL[layer];
+    return {
+      layer,
+      totalMicroUsd: null,
+      reason: enabled.includes(layer)
+        ? `the ${label} connector is enabled but reported nothing in this window, so we cannot tell genuine zero spend from a connector that is not producing data`
+        : `no ${label} connector is connected, so no ${label} cost was collected for this window`,
+    };
+  });
+}
+
 // 14 days, oldest → newest. Reconciled through day 8 (index), estimated after.
 // Proportions match the per-feature mix in featureRows below: LLM dominates (real ingest today),
 // vector / tools / compute / embeddings / egress are smaller shares to surface the all-in story.

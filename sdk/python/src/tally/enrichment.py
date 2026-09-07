@@ -31,10 +31,40 @@ class EnrichmentResult:
     drift: float | None
     drift_exceeded: bool
     catalog_miss: bool
+    # CTO-244: True when the model was priceable but the producer reported no usable token counts,
+    # so no cost was resolved. Distinct from catalog_miss, which means we had no rate to apply.
+    usage_unknown: bool = False
 
 
 def _int_or_none(v: object) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _usage_or_none(attributes: dict[str, object]) -> Usage | None:
+    """Build a :class:`Usage` only when the producer actually reported token counts.
+
+    CTO-244. ``compute_cost_micro_usd`` prices whatever it is handed, so coercing an absent or
+    unparseable count to 0 here produced a confident ``EstimatedCost = 0`` with
+    ``CostSource = 'estimated'`` for a real, billed call: a fabricated number asserted as priced.
+    That is the exact failure the Nullable cost columns exist to prevent. Returning None instead
+    leaves the cost unresolved so the row lands NULL with ``CostSource = 'unpriced'``.
+
+    Input and output are both required, matching the rollup's UnknownUsageSpanCount predicate
+    (``InputTokens IS NULL OR OutputTokens IS NULL``): a span counted as unknown-usage must not
+    also carry a priced cost. A provider that genuinely reports 0 is reporting a number, so it
+    still prices as a real 0. Cached input is a refinement of a known input count rather than a
+    tier of its own, so an absent one bills the full input rate, which is what the catalog does
+    when no cached rate is seeded.
+    """
+    input_tokens = _int_or_none(attributes.get(GenAI.USAGE_INPUT_TOKENS))
+    output_tokens = _int_or_none(attributes.get(GenAI.USAGE_OUTPUT_TOKENS))
+    if input_tokens is None or output_tokens is None:
+        return None
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=_int_or_none(attributes.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0,
+    )
 
 
 def enrich_cost(
@@ -50,7 +80,10 @@ def enrich_cost(
     - server value (from the catalog) overwrites ``gen_ai.cost.estimated_micro_usd``;
     - ``gen_ai.cost.price_catalog_version`` is set;
     - the client-emitted value is treated as a hint and compared for drift;
-    - on a catalog miss the cost key is removed and ``catalog_miss`` is True (span still returned).
+    - on a catalog miss the cost key is removed and ``catalog_miss`` is True (span still returned);
+    - CTO-244: when the model is priceable but no usable token counts were reported the cost key is
+      likewise removed and ``usage_unknown`` is True, so the row lands NULL / 'unpriced' rather
+      than claiming a priced 0.
     """
     out = dict(attributes)
     client_cost = _int_or_none(out.get(GenAI.COST_ESTIMATED_MICRO_USD))
@@ -61,11 +94,16 @@ def enrich_cost(
         # nothing to price against
         return EnrichmentResult(out, None, client_cost, None, False, catalog_miss=True)
 
-    usage = Usage(
-        input_tokens=_int_or_none(out.get(GenAI.USAGE_INPUT_TOKENS)) or 0,
-        output_tokens=_int_or_none(out.get(GenAI.USAGE_OUTPUT_TOKENS)) or 0,
-        cached_input_tokens=_int_or_none(out.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0,
-    )
+    usage = _usage_or_none(out)
+    if usage is None:
+        # CTO-244: a known model with unknown usage is unpriced, not free. Drop the keys so the
+        # span carries no cost claim at all and the row lands NULL / 'unpriced'.
+        out.pop(GenAI.COST_ESTIMATED_MICRO_USD, None)
+        out.pop(GenAI.COST_PRICE_CATALOG_VERSION, None)
+        return EnrichmentResult(
+            out, None, client_cost, None, False, catalog_miss=False, usage_unknown=True
+        )
+
     server_cost, version = compute_cost_micro_usd(
         catalog, provider, model, usage, at=at, tenant_id=tenant_id
     )

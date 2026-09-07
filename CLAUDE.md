@@ -48,4 +48,4 @@ CI must stay green. Before shipping a change, run the affected project's checks:
 - web: `cd web && npm run typecheck && npm run lint && npm run test`.
 - edge-proxy: `cd infra/edge-proxy && go build ./... && go test ./... && gofmt -l .` (gofmt must list nothing).
 
-Known: two `web/app/api/api.test.ts` cases ("falls back to mock when ClickHouse is unreachable") fail whenever a local ClickHouse IS running, because they assert the unreachable path. They pass in CI. Introduce no new failures beyond those two.
+All four suites are expected to pass, with a local stack running or without one. Introduce no new failures.
