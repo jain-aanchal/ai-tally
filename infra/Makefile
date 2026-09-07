@@ -95,11 +95,27 @@ chatbot-demo-realistic: ## Live realistic-volume run (~5000 sessions/~10min, REA
 chatbot-demo-backfill: ## $0 backfill — POST 30 days of backdated synthetic spans to match the seed story (no LLM calls, no API keys)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \
 	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
+	@# Same refusal as `make demo` above, for the same reason (Initiative 1, §8). This target used
+	@# to drop --tenant entirely when the UUID would not resolve, so the backfill fell back to its
+	@# own `local-dev` default: 30 days of spans landed in ClickHouse under the tenant NAME, the
+	@# dashboard read by UUID, matched nothing, and rendered empty with no error anywhere. Never a
+	@# silent fallback; fail with the thing to check.
+	@test -n "$(strip $(TENANT_UUID))" || { \
+	  echo "ERROR: could not resolve the 'local-dev' tenant UUID from Postgres."; \
+	  echo ""; \
+	  echo "       The dashboard reads spans by tenant UUID, so there is no safe fallback here:"; \
+	  echo "       backfilling under the tenant NAME would write 30 days of rows nothing renders."; \
+	  echo ""; \
+	  echo "       Check, in order:"; \
+	  echo "         1. Postgres is up:    make ps"; \
+	  echo "         2. The tenant exists: make psql  ->  SELECT id, name FROM tenants;"; \
+	  echo "         3. If it is missing, seeding never ran or failed: make seed"; \
+	  exit 1; }
 	@cd ../examples/vercel-chatbot/app && \
 	  { [ -d node_modules ] || pnpm install --silent --prefer-offline || \
 	    npm install --silent --no-audit --no-fund; } && \
 	  TALLY_GATEWAY_URL="$${TALLY_GATEWAY_URL:-http://localhost:8080/v1/batches}" \
-	  pnpm --silent exec tsx ../scripts/backfill-spans.ts $(if $(strip $(TENANT_UUID)),--tenant $(TENANT_UUID),) $(BACKFILL_ARGS)
+	  pnpm --silent exec tsx ../scripts/backfill-spans.ts --tenant $(TENANT_UUID) $(BACKFILL_ARGS)
 
 chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-demo
 	@if [ -f $(CHATBOT_PID) ]; then \

@@ -100,11 +100,17 @@ echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # Backfill under the SAME tenant UUID the dashboard was just pointed at. Both sides come from the
 # one resolve_tenant_uuid call above, so the seeded data and the rendered tenant cannot drift into
 # an empty dashboard (CTO-243).
+#
+# GATEWAY_SERVICE_TOKEN is threaded in because the backfill resolves its synthetic accounts'
+# AccountIdHash through the control plane (POST /v1/tenant/account-lookup), which is service-token
+# authenticated when TALLY_REQUIRE_API_KEY is on (Initiative 1 §6). Without it the backfill stops
+# with a real error instead of shipping a corpus whose account dimension is empty.
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
 docker run --rm \
   --network "${COMPOSE_NETWORK}" \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
+  -e GATEWAY_SERVICE_TOKEN="${TALLY_GATEWAY_SERVICE_TOKEN:-}" \
   node:22-bookworm-slim \
   npx --yes tsx /scripts/backfill-spans.ts --tenant "${TENANT_UUID}"
 

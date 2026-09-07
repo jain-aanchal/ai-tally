@@ -98,12 +98,16 @@ echo "==> Re-backfilling 30 days of SYNTHETIC demo spans"
 #         (see the WHY block above). Override with BACKFILL_SEED if you need a reproducible run.
 # --tenant: the resolved tenant UUID, the value the dashboard binds into its ClickHouse read filter,
 #         so seed data and the rendered tenant cannot drift (a NAME here matches no rows).
+# GATEWAY_SERVICE_TOKEN: the backfill resolves its synthetic accounts' AccountIdHash through the
+#         control plane (POST /v1/tenant/account-lookup), which needs the service token when
+#         TALLY_REQUIRE_API_KEY is on (Initiative 1 §6).
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
 BACKFILL_SEED="${BACKFILL_SEED:-$(date +%s)}"
 docker run --rm \
   --network "${COMPOSE_NETWORK}" \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
+  -e GATEWAY_SERVICE_TOKEN="${TALLY_GATEWAY_SERVICE_TOKEN:-}" \
   node:22-bookworm-slim \
   npx --yes tsx /scripts/backfill-spans.ts --seed "${BACKFILL_SEED}" --tenant "${TENANT_UUID}"
 
