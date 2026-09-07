@@ -10,13 +10,20 @@ ingest, not mock data.
                                                  │  validate → enrich cost → map to row
                                                  ▼
                                             ClickHouse  otel_spans
-                                            (:8123, db=default, TenantId=local-dev)
+                                            (:8123, db=default, TenantId=<tenant UUID>)
                                                  ▲
-   browser ──▶ Next.js web (:3000) ──Route Handler──┘  (web/lib/clickhouse.ts, tenant=local-dev)
+   browser ──▶ Next.js web (:3000) ──Route Handler──┘  (web/lib/clickhouse.ts, TALLY_DEV_TENANT)
 ```
 
-Everything is keyed to the **`local-dev`** tenant: the demo batch writes as `local-dev`, and the
-web UI reads `local-dev` by default — they line up with zero configuration.
+Everything is keyed to the tenant `make seed` creates, and the key is its **UUID**, not the name
+`local-dev` (Initiative 1 §8). Ingest writes `TenantId` verbatim from the batch and the dashboard
+binds `TALLY_DEV_TENANT` straight into the read filter (`TenantId = ...`), so the two only line up
+when both carry the UUID. Send a batch under the name and it lands in ClickHouse and never appears
+on screen: no error anywhere, just an empty dashboard. `make seed` prints the UUID; `make demo`
+resolves it for you and refuses to send without it.
+
+(Control-plane calls are the exception: `/v1/tenant/*` accepts either, because the gateway folds a
+name onto the UUID. Reads do not.)
 
 ## Prerequisites
 
@@ -79,20 +86,25 @@ Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API 
 
 ## 3. Push telemetry through the gateway
 
-Easiest — the built-in demo batch (writes as tenant `local-dev`, and re-sends once to demonstrate
-idempotent replay):
+Easiest: the built-in demo batch (resolves the seeded tenant's UUID and writes under it, then
+re-sends once to demonstrate idempotent replay):
 
 ```bash
 make demo            # run it a few times for more rows
 ```
 
-Or fire your own burst (note `tenant_id` **must** be `local-dev` for the UI to show it):
+Or fire your own burst. `tenant_id` **must** be the tenant UUID for the UI to show it, so grab it
+first (this is the same lookup `make demo` and the demo-deploy kit do):
 
 ```bash
+TENANT=$(docker compose exec -T postgres \
+  psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" | tr -d '[:space:]')
+test -n "$TENANT" || echo "not seeded, run 'make seed' first"
+
 for i in $(seq 1 40); do
   curl -s -X POST localhost:8080/v1/batches \
     -H 'content-type: application/json' \
-    -d '{"tenant_id":"local-dev","sdk_version":"test","resource_spans":[
+    -d '{"tenant_id":"'"$TENANT"'","sdk_version":"test","resource_spans":[
           {"trace_id":"tr'$i'","span_id":"s'$i'","gen_ai.system":"openai",
            "gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o",
            "gen_ai.usage.input_tokens":1200,"gen_ai.usage.output_tokens":350}]}' >/dev/null
@@ -103,11 +115,13 @@ Verify the rows landed (and carry enriched cost):
 
 ```bash
 curl -s 'http://localhost:8123/?user=tally&password=tally&database=default' \
-  --data "SELECT count(), round(sum(EstimatedCost),4) FROM otel_spans WHERE TenantId='local-dev'"
+  --data "SELECT count(), round(sum(EstimatedCost),4) FROM otel_spans WHERE TenantId='$TENANT'"
 ```
 
 or open a SQL shell with `make ch` and run
-`SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans WHERE TenantId='local-dev' GROUP BY FeatureTag`.
+`SELECT TenantId, FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY TenantId, FeatureTag`.
+A `TenantId` that reads `local-dev` rather than a UUID is a batch that the dashboard will not
+render: re-send it under the UUID.
 
 ## 4. Run the web dashboard
 
@@ -121,11 +135,23 @@ npm run dev
 
 Open **http://localhost:3000**.
 
-No env config is needed: `web/lib/clickhouse.ts` defaults to exactly what the stack uses —
-`http://localhost:8123`, database `default`, tenant `local-dev`. Each Route Handler queries
-ClickHouse live and falls back to mock data **only** if ClickHouse is unreachable. With the stack up
-and a batch sent, the **Cost**, **Features**, **Agents**, and **Data Quality** pages render your
-ingested `local-dev` spans.
+The ClickHouse connection needs no config: `web/lib/clickhouse.ts` defaults to exactly what the
+stack uses: `http://localhost:8123`, database `default`. The **tenant** does need one variable.
+There is no pinned default any more: on the product path the dashboard resolves the caller's Clerk
+organization, so to run locally with no Clerk account set the dev escape hatch to the UUID that
+`make seed` printed (Initiative 1 §10):
+
+```bash
+export TALLY_DEV_TENANT=<the UUID make seed printed>
+npm run dev
+```
+
+Use the UUID, not `local-dev`: the value is bound into the ClickHouse read filter and a name matches
+no rows. Leave it unset and the dashboard errors rather than guessing a tenant.
+
+Each Route Handler queries ClickHouse live and falls back to mock data **only** if ClickHouse is
+unreachable. With the stack up and a batch sent, the **Cost**, **Features**, **Agents**, and **Data
+Quality** pages render your ingested spans.
 
 ---
 

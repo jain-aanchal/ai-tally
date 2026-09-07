@@ -51,10 +51,20 @@ services:
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_CLICKHOUSE_DB: default
       TALLY_GATEWAY_URL: http://gateway:8080
-      TALLY_TENANT_ID: ${TALLY_TENANT_ID:-local-dev}
-      # Initiative 1 §6: the control-plane service token. Empty here because the demo VM runs
-      # with TALLY_REQUIRE_API_KEY off, which makes the gateway gate a no-op. Set it in .env
-      # (same value as the gateway's TALLY_GATEWAY_SERVICE_TOKEN) if you turn auth on.
+      # Initiative 1 §10: the dev escape hatch that pins the tenant, so the demo VM needs no Clerk
+      # account. It MUST be the tenant UUID, not the name `local-dev`: the web binds this value
+      # straight into the ClickHouse read filter (TenantId = ...) and the backfill tags spans with
+      # the UUID, so a name matches no rows and renders an empty dashboard.
+      #
+      # Not settable by hand in .env: the UUID only exists once `make seed` has run. deploy.sh
+      # resolves it from Postgres after seeding and exports it, then recreates this service. Left
+      # empty on the very first `up` (before seeding), where the dashboard errors loudly rather
+      # than rendering a blank page for an unknown tenant.
+      TALLY_DEV_TENANT: ${TALLY_DEV_TENANT:-}
+      # Initiative 1 §6: the control-plane service token, the same secret the gateway reads as
+      # TALLY_GATEWAY_SERVICE_TOKEN (the gateway picks it up from the base compose file and the
+      # same .env, so the two cannot disagree). The gateway's gate is a no-op while the demo VM
+      # runs with TALLY_REQUIRE_API_KEY off; turn auth on and it is mandatory on both sides.
       GATEWAY_SERVICE_TOKEN: ${TALLY_GATEWAY_SERVICE_TOKEN:-}
     # No host port: the browser reaches the dashboard only through Caddy (caddy -> web:3000).
     depends_on:

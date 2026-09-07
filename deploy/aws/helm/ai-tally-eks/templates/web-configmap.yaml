@@ -11,7 +11,10 @@ data:
   # the gateway (TALLY_GATEWAY_URL). The ClickHouse password comes from the synced Secret.
   PORT: {{ .Values.web.service.port | quote }}
   TALLY_GATEWAY_URL: {{ include "ai-tally.gatewayUrl" . | quote }}
-  TALLY_TENANT_ID: {{ .Values.web.config.tenantId | quote }}
+  # Initiative 1 §10: dev escape hatch. Empty on the product path (tenant comes from the
+  # caller's Clerk org). When pinned it must be the tenant UUID, not a name: the value is
+  # bound into the ClickHouse read filter (TenantId = ...), so a name matches no rows.
+  TALLY_DEV_TENANT: {{ .Values.web.config.devTenant | quote }}
   TALLY_CLICKHOUSE_URL: {{ printf "%s://%s:%d" .Values.clickhouse.scheme (include "ai-tally.clickhouseHost" .) (int .Values.clickhouse.httpPort) | quote }}
   TALLY_CLICKHOUSE_DB: {{ .Values.web.config.clickhouseDb | quote }}
   TALLY_CLICKHOUSE_USER: {{ .Values.web.config.clickhouseUser | quote }}

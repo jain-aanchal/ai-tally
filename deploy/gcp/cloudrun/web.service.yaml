@@ -35,7 +35,12 @@ spec:
             - containerPort: 8080
           env:
             - { name: TALLY_GATEWAY_URL,    value: "REPLACE_GATEWAY_URL" }
-            - { name: TALLY_TENANT_ID,      value: "local-dev" }
+            # Initiative 1 §10: the dev escape hatch that pins a tenant and skips Clerk. Leave it
+            # EMPTY on the product path, where the tenant comes from the caller's Clerk org. Set it
+            # only for a single-tenant demo, and then to the tenant UUID (`make seed` prints it),
+            # never to a name: the value is bound into the ClickHouse read filter (TenantId = ...),
+            # so a name matches no rows and renders an empty dashboard.
+            - { name: TALLY_DEV_TENANT,     value: "" }
             - { name: TALLY_CLICKHOUSE_URL, value: "REPLACE_CLICKHOUSE_URL" }
             - { name: TALLY_CLICKHOUSE_DB,  value: "default" }
             - { name: TALLY_CLICKHOUSE_USER, value: "tally" }

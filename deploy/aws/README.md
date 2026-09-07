@@ -320,10 +320,28 @@ rows land in ClickHouse. Finally open the web URL — the **Cost**, **Features**
 
 ## 9. Point the dashboard at production tenants
 
-The web tier defaults to tenant `local-dev`. For real tenants, set `web.config.tenantId` (EKS) or the
-`TALLY_TENANT_ID` env (ECS `web.taskdef.json`), and keep `gateway.config.requireApiKey=true` (the
-cloud default) so ingest requires `Authorization: Bearer <key>` — seed keys with the gateway's
-`seed.py` against RDS.
+On the product path the dashboard does not pin a tenant at all: it resolves the caller's Clerk
+organization to a tenant UUID through the gateway control plane. So leave `web.config.devTenant`
+(EKS) and the `TALLY_DEV_TENANT` env (ECS `web.taskdef.json`) **empty**, and keep
+`gateway.config.requireApiKey=true` (the cloud default) so ingest requires
+`Authorization: Bearer <key>`. Seed keys with the gateway's `seed.py` against RDS.
+
+Two things follow from that, and both bite silently if you get them wrong:
+
+- **Control-plane calls need the service token.** Every `/v1/tenant/*` request carries
+  `Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN`, and with `requireApiKey` on the gateway
+  refuses to boot when the token is empty rather than serve an open control plane. The gateway
+  reads it as `TALLY_GATEWAY_SERVICE_TOKEN` and the web tier reads the same secret as
+  `GATEWAY_SERVICE_TOKEN`; both taskdefs and both charts reference the
+  `ai-tally-gateway-service-token` Secrets Manager entry, so put a real value in it
+  (`openssl rand -hex 32`) and never a committed literal. A mismatch surfaces as a `401` on every
+  dashboard control-plane write.
+
+- **If you do pin a tenant, pin the UUID.** `TALLY_DEV_TENANT` / `web.config.devTenant` is a
+  single-tenant demo escape hatch, and its value is bound straight into the ClickHouse read filter
+  (`TenantId = ...`) while spans are tagged with the tenant UUID. The name `local-dev` therefore
+  matches no rows: the stack comes up green and the dashboard renders empty. `make seed` prints the
+  UUID to use. The older `TALLY_TENANT_ID` env is no longer read by the web tier at all.
 
 ## 10. Teardown
 
