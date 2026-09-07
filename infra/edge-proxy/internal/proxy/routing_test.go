@@ -88,7 +88,8 @@ func TestHostRoutingSelectsOrigin(t *testing.T) {
 		t.Fatalf("host routing wrong: openaiHit=%v anthropicHit=%v", openaiHit.Load(), anthropicHit.Load())
 	}
 	sink.waitFor(t, 1)
-	if got := sink.last(); got.Model != "gpt-5" || got.PromptTokens != 11 || got.CompletionTokens != 7 {
+	if got := sink.last(); got.Model != "gpt-5" || !tokensEq(got.PromptTokens, 11) ||
+		!tokensEq(got.CompletionTokens, 7) {
 		t.Errorf("openai route trace = %+v, want gpt-5 11/7", got)
 	}
 
@@ -106,7 +107,8 @@ func TestHostRoutingSelectsOrigin(t *testing.T) {
 		t.Fatalf("host routing wrong on 2nd: openaiHit=%v anthropicHit=%v", openaiHit.Load(), anthropicHit.Load())
 	}
 	sink.waitFor(t, 2)
-	if got := sink.last(); got.Model != "claude" || got.PromptTokens != 3 || got.CompletionTokens != 9 {
+	if got := sink.last(); got.Model != "claude" || !tokensEq(got.PromptTokens, 3) ||
+		!tokensEq(got.CompletionTokens, 9) {
 		t.Errorf("anthropic route trace = %+v, want claude 3/9", got)
 	}
 }
