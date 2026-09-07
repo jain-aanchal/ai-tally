@@ -92,3 +92,31 @@ ERR
     return 1
   fi
 }
+
+# Say up front that this kit's SEEDING path does not work with gateway auth on.
+#
+# WHY (CTO-243): with TALLY_REQUIRE_API_KEY on, /v1/batches demands a bearer ingest API key, but
+# examples/vercel-chatbot/scripts/backfill-spans.ts sends no Authorization header and has no
+# api-key option, so it takes a 401 on the first batch. Without this warning the operator finds out
+# minutes into a run that has already built images and seeded, which is exactly the late failure
+# the preflight exists to eliminate. This warns rather than aborts because bringing the stack up
+# with auth on is still a valid thing to do; only the synthetic backfill cannot run that way.
+warn_backfill_unsupported_if_auth_on() {
+  local auth_on="${TALLY_REQUIRE_API_KEY:-false}"
+  case "${auth_on}" in
+    true|TRUE|True|1|yes|on) ;;
+    *) return 0 ;;
+  esac
+
+  cat >&2 <<'WARN'
+WARNING: TALLY_REQUIRE_API_KEY is on, and the demo kit's SEEDING path does not support that.
+
+         The synthetic backfill (examples/vercel-chatbot/scripts/backfill-spans.ts) posts to
+         /v1/batches with no Authorization header, and with auth on the gateway answers 401. The
+         stack and the dashboard will come up fine; the backfill step near the end of this run WILL
+         fail and the dashboard will have no demo data.
+
+         To seed the demo, run with auth off (leave TALLY_REQUIRE_API_KEY unset or false), then
+         turn auth on afterwards if you need it. Continuing anyway.
+WARN
+}
