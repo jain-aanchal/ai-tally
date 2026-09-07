@@ -57,6 +57,11 @@ secretManager:
     # fail-soft without them (CTO-109). Consumed as OPENAI_API_KEY / ANTHROPIC_API_KEY.
     openaiApiKey: ai-tally-openai-api-key
     anthropicApiKey: ai-tally-anthropic-api-key
+    # Control-plane service token (Initiative 1 §6). The web server presents it as a bearer token
+    # on every /v1/tenant/* call and the gateway refuses to boot without it when
+    # gateway.config.requireApiKey is true. Consumed as TALLY_GATEWAY_SERVICE_TOKEN (gateway)
+    # and GATEWAY_SERVICE_TOKEN (web).
+    gatewayServiceToken: ai-tally-gateway-service-token
   # NOTE on Stripe + HMAC: the Stripe webhook *signing secret* is NOT a gateway env var — it is
   # pasted per-tenant in the dashboard and persisted in Postgres (see db/postgres/0003_*.sql), so
   # it is protected by protecting Cloud SQL. Per-tenant HMAC user-id keys (CTO-74) live in the

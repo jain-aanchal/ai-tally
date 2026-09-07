@@ -23,6 +23,7 @@ secretsManager:
     clickhousePassword: ai-tally-clickhouse-password
     openaiApiKey: ai-tally-openai-api-key
     anthropicApiKey: ai-tally-anthropic-api-key
+    gatewayServiceToken: ai-tally-gateway-service-token
 
 rds:
   endpoint: ai-tally-pg.abcdefghijkl.us-east-1.rds.amazonaws.com   # informational

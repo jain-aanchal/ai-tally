@@ -101,6 +101,7 @@ services:
       - ../db/postgres/0028_tenant_ingest_cursors.sql:/docker-entrypoint-initdb.d/0028_tenant_ingest_cursors.sql:ro
       - ../db/postgres/0029_orgs_and_access.sql:/docker-entrypoint-initdb.d/0029_orgs_and_access.sql:ro
       - ../db/postgres/0030_edge_keys_watermark_index.sql:/docker-entrypoint-initdb.d/0030_edge_keys_watermark_index.sql:ro
+      - ../db/postgres/0031_api_keys_display_bounds.sql:/docker-entrypoint-initdb.d/0031_api_keys_display_bounds.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s
@@ -182,6 +183,10 @@ services:
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_POSTGRES_DSN: postgresql://${POSTGRES_USER:-tally}:${POSTGRES_PASSWORD:-tally}@postgres:5432/${POSTGRES_DB:-tally}
       TALLY_REQUIRE_API_KEY: ${TALLY_REQUIRE_API_KEY:-false}
+      # Initiative 1 §6: the shared secret the web server presents on every /v1/tenant/* call. The
+      # gate is a no-op while TALLY_REQUIRE_API_KEY is false (the `make up` default), but the gateway
+      # refuses to BOOT when auth is on and this is empty, so it has to be pass-through-able here.
+      TALLY_GATEWAY_SERVICE_TOKEN: ${TALLY_GATEWAY_SERVICE_TOKEN:-}
       # CTO-241: persist replay sample bodies in MinIO (S3-compatible) instead of the in-process
       # dict, so a gateway restart no longer wipes them and blanks the Recoverable Cost page. The
       # AWS_* creds are the local MinIO root user/password; the endpoint targets the in-network

@@ -21,8 +21,13 @@ export default defineConfig({
     globals: true,
     // The dev escape hatch (Initiative 1, §10). Tests run with no Clerk account, so `getTenant()`
     // short-circuits to a pinned tenant instead of consulting Clerk. This mirrors how `make up` and
-    // CI run the product with no Clerk keys, and keeps the tenant scoping in the fetch-shaped tests
-    // exactly what it was before Clerk (`local-dev`).
-    env: { TALLY_DEV_TENANT: "local-dev" },
+    // CI run the product with no Clerk keys.
+    //
+    // The pinned value is a UUID, not the name `local-dev`, because the canonical TenantId is the
+    // tenant UUID (§8) and this value is bound straight into the ClickHouse read filter. Pinning a
+    // name here would let a read path that only works for names pass in CI and then render an empty
+    // dashboard against real data. The all-zero UUID is deliberately not a real tenant; it matches
+    // the placeholder in web/.env.example.
+    env: { TALLY_DEV_TENANT: "00000000-0000-0000-0000-000000000000" },
   },
 });

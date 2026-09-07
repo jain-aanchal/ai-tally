@@ -52,6 +52,10 @@ services:
       TALLY_CLICKHOUSE_DB: default
       TALLY_GATEWAY_URL: http://gateway:8080
       TALLY_TENANT_ID: ${TALLY_TENANT_ID:-local-dev}
+      # Initiative 1 §6: the control-plane service token. Empty here because the demo VM runs
+      # with TALLY_REQUIRE_API_KEY off, which makes the gateway gate a no-op. Set it in .env
+      # (same value as the gateway's TALLY_GATEWAY_SERVICE_TOKEN) if you turn auth on.
+      GATEWAY_SERVICE_TOKEN: ${TALLY_GATEWAY_SERVICE_TOKEN:-}
     # No host port: the browser reaches the dashboard only through Caddy (caddy -> web:3000).
     depends_on:
       clickhouse:

@@ -43,6 +43,11 @@ spec:
             - name: TALLY_CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef: { name: ai-tally-clickhouse-password, key: latest }
+            # Initiative 1 §6: same secret the gateway reads as TALLY_GATEWAY_SERVICE_TOKEN. The web
+            # server is the only legitimate caller of the gateway control plane.
+            - name: GATEWAY_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: ai-tally-gateway-service-token, key: latest }
           resources:
             limits:
               cpu: "1"

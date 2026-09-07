@@ -94,7 +94,7 @@ import {
 // The active tenant is resolved per call from the Clerk org (or the dev escape hatch), not a
 // module-level `local-dev` constant (Initiative 1, §7/§8). The ClickHouse read filter binds this
 // UUID, so a UUID-scoped read matches UUID-tagged ingest.
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 import { firstEventStatus, type FirstEventStatus } from "./firstEvent";
 
 let _client: ClickHouseClient | null = null;
@@ -1866,7 +1866,7 @@ interface ReconciliationRun {
 async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/reconciliation/status`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2391,7 +2391,7 @@ export interface IntegrationStatusRow {
 export async function queryIntegrationStatus(): Promise<IntegrationStatusRow[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/integrations/status`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2518,7 +2518,7 @@ export async function queryGuardrailActivity(): Promise<Map<string, GuardrailAct
 export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -2563,7 +2563,7 @@ export interface FeatureValueEventConfig {
 export async function queryFeatureValueEvents(): Promise<FeatureValueEventConfig[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -3128,7 +3128,7 @@ export async function queryReplayCandidates(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/replay`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      headers: controlPlaneHeaders(tenant, { "content-type": "application/json" }),
       body: JSON.stringify({
         tenant_id: tenant,
         feature_tag: featureTag,
@@ -3182,7 +3182,7 @@ export async function queryReplayEstimate(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/replay/estimate`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      headers: controlPlaneHeaders(tenant, { "content-type": "application/json" }),
       body: JSON.stringify({
         tenant_id: tenant,
         feature_tag: req.featureTag,
@@ -3260,7 +3260,7 @@ export async function queryEvalCandidates(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/eval`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": tenant },
+      headers: controlPlaneHeaders(tenant, { "content-type": "application/json" }),
       body: JSON.stringify({
         tenant_id: tenant,
         feature_tag: featureTag,

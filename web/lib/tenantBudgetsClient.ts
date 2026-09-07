@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Read this tenant's budgets from the gateway (CTO-209, F5; endpoint from CTO-205, F1).
 //
 // Server-only, imported by Route Handlers. The dashboard never touches Postgres directly, same rule
@@ -35,7 +35,7 @@ export type TenantBudgetsResult =
 export async function fetchTenantBudgets(): Promise<TenantBudgetsResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

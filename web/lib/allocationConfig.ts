@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Per-tenant shared-cost allocation rule, read via the gateway (CTO-193, plan C2).
 //
 // The rule decides how compute and egress are split across accounts on /cost-per-customer, which on
@@ -91,7 +91,7 @@ export function settingFromApi(body: AllocationConfigApi | null): AllocationRule
 export async function queryAllocationRule(): Promise<AllocationRuleSetting> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/allocation-config`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

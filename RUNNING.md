@@ -65,6 +65,18 @@ make seed     # creates the `local-dev` tenant + API key + feature tags in Postg
 This prints a one-time API key (`tally_sk_…`). Only its SHA-256 is stored — copy it if you plan to
 enable auth. For local testing auth is **off** by default (`TALLY_REQUIRE_API_KEY=false`).
 
+### Control-plane auth when you flip `TALLY_REQUIRE_API_KEY=true`
+
+The `/v1/tenant/*` control plane is authenticated separately from ingest (Initiative 1 §6). With auth
+on, every control-plane call needs a bearer **service token** (`TALLY_GATEWAY_SERVICE_TOKEN` on the
+gateway, `GATEWAY_SERVICE_TOKEN` on the web server, same value) plus an `x-tenant-id` header naming
+the tenant. An ingest API key does **not** open the control plane, and the gateway refuses to boot
+when auth is on and no service token is set, rather than coming up with an open control plane. So the
+`curl … -H 'x-tenant-id: …'` examples below work as written only while auth is off; with auth on, add
+`-H "Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN"`.
+
+Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API key above.
+
 ## 3. Push telemetry through the gateway
 
 Easiest — the built-in demo batch (writes as tenant `local-dev`, and re-sends once to demonstrate

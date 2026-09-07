@@ -1001,29 +1001,6 @@ def get_usage(
     return JSONResponse(record.as_dict(), status_code=200)
 
 
-def _resolve_tenant_for_control_plane(
-    authorization: str | None, x_tenant_id: str | None
-) -> str:
-    """Shared tenant-resolution for read/write control-plane endpoints.
-
-    Same pattern as :func:`get_usage`: bearer key when auth is on, ``X-Tenant-Id`` header in dev.
-    Refuses ambiguity so the caller can never accidentally cross tenants.
-    """
-    settings = app.state.settings
-    auth: ApiKeyAuth = app.state.auth
-    if settings.require_api_key:
-        if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="missing bearer token")
-        token = authorization.split(" ", 1)[1].strip()
-        tenant_id = auth.tenant_for_key(token)
-        if tenant_id is None:
-            raise HTTPException(status_code=403, detail="invalid api key")
-        return tenant_id
-    if not x_tenant_id:
-        raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
-    return x_tenant_id
-
-
 def _require_service_token(authorization: str | None) -> None:
     """Gate a control-plane endpoint on the ``GATEWAY_SERVICE_TOKEN`` (Initiative 1, §6).
 
@@ -1093,7 +1070,8 @@ def list_tenant_connectors(
     *enabled* layers count as a real gap when they report zero. Layers the tenant never enabled
     don't appear in the response and don't contribute to partiality.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantConnectorStore = app.state.tenant_connectors
     rows = store.list(tenant_id)
     return JSONResponse(
@@ -1117,7 +1095,8 @@ async def set_tenant_connector(
     Body: ``{"layer": "vector", "enabled": true, "notes": "optional"}``. Idempotent — re-enabling an
     already-enabled connector is a no-op, disabling an absent one stamps a tombstone row.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1150,7 +1129,8 @@ def list_cost_connectors(
     Safe view only: every ``*_ref`` returned is a secret-manager REFERENCE, which is all the column
     ever holds. No raw credential exists to leak here.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     admin: CostConnectorAdmin = app.state.cost_connector_admin
     try:
         rows = admin.list_configs(tenant_id)
@@ -1174,7 +1154,8 @@ async def upsert_cost_connector(
     required fields are enforced in :mod:`gateway.connectors.config_admin`, which also rejects
     anything shaped like a raw credential before it can reach Postgres.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1202,7 +1183,8 @@ def delete_cost_connector(
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
     """Disconnect one cloud cost connector. Idempotent: deleting an absent row is a 200."""
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     admin: CostConnectorAdmin = app.state.cost_connector_admin
     try:
         deleted = admin.delete(tenant_id, connector)
@@ -1224,7 +1206,8 @@ def list_tenant_guardrails(
     Rules in 'shadow' state are evaluated and observed but never alter agent behavior — that's the
     safe staging step before flipping to 'enabled'.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantGuardrailStore = app.state.tenant_guardrails
     rules = store.list(tenant_id)
     return JSONResponse({
@@ -1244,7 +1227,8 @@ async def upsert_tenant_guardrail(
     Body: ``{rule_id, kind, params, state, change_id, actor?, notes?}``. Replaying the same
     change_id is a no-op (returns the existing rule unchanged).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1294,7 +1278,8 @@ def list_tenant_guardrail_audit(
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
     """Recent guardrail rule changes for the caller's tenant (CTO-116)."""
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantGuardrailStore = app.state.tenant_guardrails
     changes = store.audit(tenant_id, rule_id=rule_id)
     return JSONResponse({
@@ -1314,7 +1299,8 @@ def list_tenant_feature_value_events(
     The /features page reads this to overlay the configured value event onto each feature row and
     to decide whether the onboarding "Finish setup" banner should still show.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantFeatureValueEventStore = app.state.tenant_feature_value_events
     events = store.list(tenant_id)
     return JSONResponse({
@@ -1334,7 +1320,8 @@ async def upsert_tenant_feature_value_event(
     Body: ``{feature_tag, event_name, change_id, actor?, notes?}``. Replaying the same change_id is
     a no-op (returns the existing mapping unchanged).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1379,7 +1366,8 @@ async def delete_tenant_feature_value_event(
     Body: ``{feature_tag, change_id, actor?}``. Deleting an absent mapping (or replaying a change_id)
     is a no-op that still returns 200.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1412,7 +1400,8 @@ async def connect_tenant_stripe(
     a *fingerprint* of the secret (last 4 chars) so the dashboard can show "connected" — the raw
     secret is never re-exposed.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1442,7 +1431,8 @@ def get_tenant_stripe(
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
     """Read the safe (no-secret) view of a tenant's Stripe config — used by the connectors tile."""
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantStripeStore = app.state.tenant_stripe
     cfg = store.get(tenant_id)
     return JSONResponse(
@@ -1462,7 +1452,8 @@ def list_tenant_integration_status(
     merges this against its static catalog of supported third-party integrations and renders
     catalog-entries-without-a-row as "Not connected" (the honest default for fresh tenants).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantIntegrationStore = app.state.tenant_integrations
     rows = store.get_status(tenant_id)
     return JSONResponse(
@@ -1483,7 +1474,8 @@ def get_tenant_reconciliation_status(
     tenant — the honest first-render state, which the web fn turns into a null so the route falls
     back to its mock.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: ReconciliationStore = app.state.reconciliation
     run = store.get_latest(tenant_id)
     return JSONResponse(
@@ -1532,7 +1524,8 @@ async def lookup_account_id(
     :mod:`gateway.tenant_identity`): the tenant name and the ``tenants.id`` UUID derive different
     HMAC keys, so callers should match spans against the whole set rather than assume a spelling.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1627,7 +1620,8 @@ def list_tenant_account_labels(
     design, and the tab falls back to a shortened hash. A tenant that wants no customer names in
     our system sets none and everything still works.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantAccountLabelStore = app.state.tenant_account_labels
     try:
         labels = store.list(tenant_id)
@@ -1660,7 +1654,8 @@ async def upsert_tenant_account_label(
     The label is written to Postgres and joined at render time. It is never stamped onto a span,
     so ClickHouse never holds a customer name. See ``db/postgres/0023_tenant_account_labels.sql``.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         raw = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1705,7 +1700,8 @@ async def delete_tenant_account_label(
     Deleting an already-unlabelled account returns 200 with ``removed: false`` rather than 404. The
     end state the caller asked for is the end state they get, and a double-click is not an error.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         raw = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1750,7 +1746,8 @@ def get_tenant_allocation_config(
     A tenant with no ``tenants`` row is 404, not a silent default: that is a misrouted request, and
     inventing an allocation rule for a tenant we do not know is not a recovery.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantAllocationStore = app.state.tenant_allocation
     try:
         config = store.get(tenant_id)
@@ -1784,7 +1781,8 @@ async def upsert_tenant_allocation_config(
     another would leave the page naming a rule that did not produce its numbers, which is exactly
     the invisible assumption this config exists to remove.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1839,7 +1837,8 @@ def list_tenant_budgets(
     An unknown tenant is 404 rather than an empty list. A misrouted request is not a tenant who has
     set no budgets, and answering "no budget set" for a tenant we do not know would hide the bug.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantBudgetStore = app.state.tenant_budgets
     try:
         budgets = store.list(tenant_id)
@@ -1886,7 +1885,8 @@ async def upsert_tenant_budget(
     a budget, either POST the same ``budget_id`` (which edits in place) or close the old one by
     setting its ``ends_on`` first.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1943,7 +1943,8 @@ async def delete_tenant_budget(
     account-labels control plane: the end state the caller asked for is the end state they get, and
     a double-click is not an error.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     if budget_id is None:
         try:
             body = await request.json()
@@ -2349,7 +2350,8 @@ def list_tenant_cac(
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
     """List monthly CAC periods for the caller's tenant, newest first."""
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantCacStore = app.state.tenant_cac
     rows = store.list(tenant_id)
     return JSONResponse(
@@ -2369,7 +2371,8 @@ async def upsert_tenant_cac(
     Rejects rows whose ``period_start`` is already closed (the successor month exists). Rejects
     rows whose ``new_customers_total < new_customers_paid`` (sanity guard).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -2391,7 +2394,8 @@ async def upload_tenant_cac_csv(
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
     """Bulk-upsert CAC periods from a CSV body (fixed column order)."""
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     body = (await request.body()).decode("utf-8", errors="replace")
     try:
         forms = parse_csv(body)
@@ -2418,7 +2422,8 @@ def download_tenant_cac_template(
     """Return the CSV template (header + example row). Used by the upload UI."""
     from fastapi.responses import PlainTextResponse
 
-    _ = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    _ = _service_token_tenant(x_tenant_id)
     return PlainTextResponse(
         csv_template(),
         media_type="text/csv",
@@ -2436,7 +2441,8 @@ def get_tenant_unit_economics_config(
     Returns ``config: null`` when the tenant has no row — the web classify helpers then fall back to
     the hardcoded B2B-SaaS defaults. Same per-tenant auth as the CAC route.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantUnitEconomicsStore = app.state.tenant_unit_economics
     config = store.get(tenant_id)
     return JSONResponse(
@@ -2457,7 +2463,8 @@ async def upsert_tenant_unit_economics_config(
     payback_months_yellow, change_id, updated_by?}``. Replaying the same change_id is a no-op
     (returns the existing config unchanged). Rejects inverted bands (422).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -2493,7 +2500,8 @@ def get_tenant_revenue_source_config(
     (every source counts; ValueType monetary + mrr are revenue; refunds net off). Same per-tenant
     auth as the unit-economics route.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantRevenueSourceStore = app.state.tenant_revenue_sources
     try:
         config = store.get(tenant_id)
@@ -2519,7 +2527,8 @@ async def upsert_tenant_revenue_source_config(
     ``revenue_sources: null`` means every source counts. An empty array is rejected (422) because
     "nothing is revenue" silently blanks the dashboard and is never what a caller means.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -2579,7 +2588,8 @@ def list_revenue_uploads(
     The dashboard derives its "as of" date and staleness badge from ``uploaded_at``. An empty list
     means nothing has ever been uploaded, which the UI renders as an invitation rather than a zero.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     store: RevenueUploadStore = app.state.revenue_uploads
     try:
         rows = store.list(tenant_id)
@@ -2637,7 +2647,8 @@ async def upload_revenue_csv(
     ``BusinessEventId`` of every row is derived from ``(period, account hash)``. Re-uploading the
     same file leaves exactly the same rows behind.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -2728,7 +2739,8 @@ def delete_revenue_upload(
     manifest row (or the other way round) would leave the dashboard claiming a freshness it cannot
     back, so both go in one call.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     if normalize_period(period) is None:
         raise HTTPException(status_code=422, detail="period must be a YYYY-MM calendar month")
     store: ClickHouseStore = app.state.store
@@ -2775,7 +2787,8 @@ async def ingest_revenue_event(
     the response reports whether the tenant's own configured revenue sources (CTO-194) will count
     it, so a narrowed policy shows up on the first request rather than as a blank dashboard later.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -2882,7 +2895,8 @@ def get_tenant_replay_config(
 
     Defaults to ``enabled=false`` when the tenant has no row yet — sampling is opt-in.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     cfg = app.state.tenant_replay.get(tenant_id)
     return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
 
@@ -2898,7 +2912,8 @@ async def set_tenant_replay_config(
     Body fields (all optional — only what changes is updated):
     ``{enabled?: bool, sample_rate?: 0..1, retention_days?: int>0, daily_budget_usd?: number>=0}``.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3043,6 +3058,7 @@ async def project_replay(
     client; with a real provider client the executor's concurrency limit (5 per tenant) keeps
     things bounded.
     """
+    _require_service_token(authorization)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3050,9 +3066,7 @@ async def project_replay(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
-        authorization, x_tenant_id
-    )
+    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidates = body.get("candidate_models") or []
     if not isinstance(candidates, list) or not all(
@@ -3240,6 +3254,7 @@ async def project_replay_estimate(
     honesty/diagnostics block. Like ``/v1/replay``, the candidate client is injectable via
     ``app.state.replay_candidate_client`` (a deterministic mock by default).
     """
+    _require_service_token(authorization)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3247,9 +3262,7 @@ async def project_replay_estimate(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
-        authorization, x_tenant_id
-    )
+    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidate = body.get("candidate_model")
     if not isinstance(candidate, dict) or "provider" not in candidate or "model" not in candidate:
@@ -3455,7 +3468,8 @@ def get_tenant_eval_config(
     Defaults to ``enabled=false`` when the tenant has no row yet — eval is opt-in (judge calls
     burn real provider budget).
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     cfg = app.state.tenant_eval.get(tenant_id)
     return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
 
@@ -3471,7 +3485,8 @@ async def set_tenant_eval_config(
     Body fields (all optional — only what changes is updated):
     ``{enabled?: bool, judge_model?: str, daily_budget_usd?: number>=0}``.
     """
-    tenant_id = _resolve_tenant_for_control_plane(authorization, x_tenant_id)
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3527,6 +3542,7 @@ async def project_eval(
     fits inside a 10-minute timeout for typical 50-sample × 3-candidate passes against the
     in-memory mock judge.
     """
+    _require_service_token(authorization)
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3534,9 +3550,7 @@ async def project_eval(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _resolve_tenant_for_control_plane(
-        authorization, x_tenant_id
-    )
+    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidates = body.get("candidate_models") or []
     if not isinstance(candidates, list) or not all(

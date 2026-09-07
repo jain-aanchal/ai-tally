@@ -28,7 +28,8 @@
         { "name": "NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS", "value": "5000" }
       ],
       "secrets": [
-        { "name": "TALLY_CLICKHOUSE_PASSWORD", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-clickhouse-password" }
+        { "name": "TALLY_CLICKHOUSE_PASSWORD", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-clickhouse-password" },
+        { "name": "GATEWAY_SERVICE_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-gateway-service-token" }
       ],
       "healthCheck": {
         "command": ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/ || exit 1"],
