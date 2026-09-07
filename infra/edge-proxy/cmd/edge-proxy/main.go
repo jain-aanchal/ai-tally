@@ -22,10 +22,21 @@ import (
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/telemetry"
 )
 
+// telemetryReportInterval is how often the sink summarizes shed records. A minute is frequent
+// enough to notice a broken pipeline in the first alert window and quiet enough that a healthy
+// proxy (which logs nothing, since the report is silent when nothing was shed) stays quiet.
+const telemetryReportInterval = time.Minute
+
 func main() {
 	cfg, err := config.FromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("edge-proxy: config error: %v", err)
+	}
+
+	// A config can parse cleanly and still ship nothing (telemetry with no usable credential). Say so
+	// loudly at boot rather than logging a destination the proxy will never successfully write to.
+	for _, w := range cfg.Warnings() {
+		log.Printf("edge-proxy: WARNING: %s", w)
 	}
 
 	var opts []proxy.Option
@@ -55,6 +66,10 @@ func main() {
 			URL:         cfg.TelemetryURL,
 			Deployment:  dep,
 			IngestToken: cfg.IngestToken,
+			// Shed records are the only evidence of a telemetry pipeline that is failing without
+			// erroring (no credential, every span rejected per item). Report them on a cadence so the
+			// operator finds out from the proxy's own log instead of from a missing dashboard.
+			ReportInterval: telemetryReportInterval,
 		})
 		opts = append(opts, proxy.WithSink(sink))
 		log.Printf("edge-proxy: telemetry -> %s (deployment=%s)", cfg.TelemetryURL, dep)
@@ -139,7 +154,9 @@ func main() {
 		log.Printf("edge-proxy: graceful shutdown failed: %v", err)
 	}
 	if sink != nil {
-		sink.Close() // flush any buffered telemetry before exit
+		// Flush buffered telemetry, then report anything that was shed: a proxy that shipped nothing
+		// at all must say so before it exits.
+		sink.Close()
 	}
 	log.Printf("edge-proxy: stopped")
 }
