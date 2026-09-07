@@ -66,13 +66,24 @@ func main() {
 			URL:         cfg.TelemetryURL,
 			Deployment:  dep,
 			IngestToken: cfg.IngestToken,
+			// The envelope tenant for records the edge-key cache did not resolve. Without it a
+			// gateway running with auth disabled has no tenant to attribute the batch to and refuses
+			// every one of them.
+			TenantId: cfg.TenantId,
 			// Shed records are the only evidence of a telemetry pipeline that is failing without
 			// erroring (no credential, every span rejected per item). Report them on a cadence so the
 			// operator finds out from the proxy's own log instead of from a missing dashboard.
 			ReportInterval: telemetryReportInterval,
 		})
 		opts = append(opts, proxy.WithSink(sink))
-		log.Printf("edge-proxy: telemetry -> %s (deployment=%s)", cfg.TelemetryURL, dep)
+		// The tenant claim is logged because it decides where proxied spend lands and it is a UUID,
+		// not a secret. "unresolved-only" is not a fallback: it means the envelope claims no tenant.
+		tenantClaim := cfg.TenantId
+		if tenantClaim == "" {
+			tenantClaim = "none (the ingest credential's tenant decides)"
+		}
+		log.Printf("edge-proxy: telemetry -> %s (deployment=%s, fallback tenant=%s)",
+			cfg.TelemetryURL, dep, tenantClaim)
 	}
 
 	// Provider-protocol mode (CTO-167): the proxy reads scalar model/usage metadata off responses.

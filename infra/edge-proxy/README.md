@@ -59,6 +59,7 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
 | `EDGE_PROXY_TELEMETRY_URL` | — | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
 | `EDGE_PROXY_INGEST_TOKEN` | — | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
+| `EDGE_PROXY_TENANT_ID` | — | your tenant **UUID**, claimed in the batch envelope for every record the edge-key cache did not resolve. **Required when the gateway runs with auth disabled** (`TALLY_REQUIRE_API_KEY=false`), which cannot derive a tenant from the credential and refuses a batch claiming none with `422`. A tenant name is rejected at startup |
 | `EDGE_PROXY_ROUTES` | — | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
 | `EDGE_PROXY_ROUTE_MODE` | `host` | `host` (match on hostname, hosted default) or `path` (match+strip a leading prefix) |
 | `EDGE_PROXY_KEYS_URL` | — | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
@@ -232,6 +233,28 @@ credential, so it never becomes an outgoing bearer: `EDGE_PROXY_INGEST_TOKEN` is
 neither available the record is shed and counted (`HTTPSink.Unauthenticated()`) rather than posted
 unattributable. The key travels on the header only; it is never a field in the body and never
 logged.
+
+**Who the batch says it belongs to.** The envelope's `tenant_id` is the UUID the edge-key cache
+resolved. A gateway running with auth **on** ignores an empty claim, because the authenticating key
+decides the tenant. A gateway running with auth **off** (`TALLY_REQUIRE_API_KEY=false`, the
+`make up` default) has nothing to derive a tenant from and answers `422 tenant_id required when
+auth is disabled`, so a self-host with no key feed used to meter absolutely nothing while looking
+healthy. Set `EDGE_PROXY_TENANT_ID` to your tenant UUID and it is claimed for every unresolved
+record, the same records `EDGE_PROXY_INGEST_TOKEN` authenticates: the credential and the tenant are
+one operator-scoped pair. A record the cache *did* resolve always keeps its own tenant. Nothing is
+ever invented: unset means the envelope honestly claims no tenant, and a value that is not a UUID
+fails at startup rather than writing a claim that joins to nothing. If ingest answers `422` to a
+batch that claimed no tenant, the sink says so once, in full, naming the variable to set.
+
+**Backpressure does not cost you spend.** A retryable ingest failure (a network error, `429`, or a
+`5xx`) is resent, byte for byte so the stable `batch_id` makes the resend idempotent, with capped
+exponential backoff and jitter up to a small attempt cap (`RetryPolicy`, mirroring the SDK's
+`BatchingTransport`). A non-retryable `4xx` (validation, credential, scope, protocol) is never
+resent: identical bytes cannot change a deterministic answer. Past the cap the record is shed and
+counted (`HTTPSink.Undelivered()`), which keeps the terminal behavior bounded in both time and
+memory: the buffer is fixed-size, the retry budget is fixed, `Record` never blocks the proxied
+request, and shutdown abandons what it cannot ship inside a short drain grace rather than holding
+the process open on a dead gateway.
 
 **Failure is never silent.** A config that can authenticate nothing (`EDGE_PROXY_TELEMETRY_URL` set,
 no `EDGE_PROXY_INGEST_TOKEN`, no `EDGE_PROXY_KEYS_URL`) is warned about at startup rather than

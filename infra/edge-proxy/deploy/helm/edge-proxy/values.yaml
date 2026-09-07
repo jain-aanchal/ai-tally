@@ -52,6 +52,14 @@ proxy:
   # secret, so set it on the Deployment from your own Secret rather than through this ConfigMap.
   telemetryURL: ""
 
+  # Your tenant UUID, claimed in the batch envelope for every record the edge-key cache did not
+  # resolve. Required when the gateway you ship to runs with auth disabled (TALLY_REQUIRE_API_KEY
+  # false, the self-hosted default): it cannot derive a tenant from the credential, so it refuses a
+  # batch that claims none with 422 and nothing is recorded. Leave empty against a gateway with auth
+  # on, where the ingest credential's own tenant decides. It must be the UUID, not the tenant name;
+  # a name is rejected at startup. Not a secret, so the ConfigMap is the right place for it.
+  tenantId: ""
+
 # --- key broker (broker mode only) -------------------------------------------------------------
 broker:
   # The KMS-export mapping tenant key -> provider Authorization header. Two ways to supply it:
