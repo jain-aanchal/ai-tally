@@ -943,8 +943,9 @@ function generate(args: Args, accounts: Account[]): Generated {
 
 const SPANS_PER_BATCH = 500;
 const EVENTS_PER_BATCH = 500;
-const RATE_LIMIT_MAX_ATTEMPTS = 60;
+const RETRY_MAX_ATTEMPTS = 60;
 const DEFAULT_RETRY_AFTER_MS = 250;
+const MAX_RETRY_WAIT_MS = 5_000;
 
 async function postBatch(
   args: Args,
@@ -961,10 +962,12 @@ async function postBatch(
   };
   if (args.dryRun) return;
   const body = JSON.stringify(batch);
-  // A 30-day corpus is ~500k spans, which is well past the gateway's per-tenant rate limit for a
-  // flat-out loop. The gateway tells us how long to wait (`retry_after_ms`), so honour it instead
-  // of failing the whole backfill half-loaded. Re-posting the same batch_id is safe: the
-  // (tenant_id, batch_id) dedup means a retry can never double-count.
+  // A 30-day corpus is ~500k spans, which is far more than a flat-out loop can push past the
+  // gateway's two load guards: the per-tenant rate limit (429, CTO-33) and backpressure shedding
+  // (503 `status: retry`, CTO-36). Both are the gateway working as designed and both say "come
+  // back shortly", so honour them rather than failing a half-loaded backfill. Re-posting the same
+  // batch_id is safe by construction: the (tenant_id, batch_id) dedup means a retry, or a whole
+  // re-run after an abort, can never double-count.
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(args.gatewayUrl, {
       method: "POST",
@@ -973,15 +976,22 @@ async function postBatch(
     });
     if (res.ok) return;
     const text = await res.text();
-    if (res.status === 429 && attempt < RATE_LIMIT_MAX_ATTEMPTS) {
-      let waitMs = DEFAULT_RETRY_AFTER_MS;
+    const retryable = res.status === 429 || res.status === 503;
+    if (retryable && attempt < RETRY_MAX_ATTEMPTS) {
+      // The gateway states its own wait, at the top level (429) or under server_hints (503). A
+      // hinted 0 means "no specific delay", so fall back to a small backoff rather than spinning.
+      let waitMs = 0;
       try {
-        const parsed = JSON.parse(text) as { retry_after_ms?: number };
-        if (typeof parsed.retry_after_ms === "number" && parsed.retry_after_ms > 0) {
-          waitMs = parsed.retry_after_ms;
-        }
+        const parsed = JSON.parse(text) as {
+          retry_after_ms?: number;
+          server_hints?: { retry_after_ms?: number };
+        };
+        waitMs = parsed.retry_after_ms ?? parsed.server_hints?.retry_after_ms ?? 0;
       } catch {
-        // keep the default; the body was not the shape we expected
+        // body was not the shape we expected; fall through to the backoff below
+      }
+      if (!(waitMs > 0)) {
+        waitMs = Math.min(DEFAULT_RETRY_AFTER_MS * 2 ** Math.min(attempt, 5), MAX_RETRY_WAIT_MS);
       }
       await new Promise((r) => setTimeout(r, waitMs + 25));
       continue;
