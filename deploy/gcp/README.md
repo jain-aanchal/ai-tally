@@ -163,6 +163,34 @@ printf 'sk-...'      | gcloud secrets create ai-tally-openai-api-key    --data-f
 printf 'sk-ant-...'  | gcloud secrets create ai-tally-anthropic-api-key --data-file=-
 ```
 
+### The control-plane service token, and when to create it
+
+The `/v1/tenant/*` control plane is gated on a shared **service token** (Initiative 1 §6) whenever
+`gateway.config.requireApiKey` / `TALLY_REQUIRE_API_KEY` is true. The gateway refuses to boot with
+the gate on and no token, so **the secret has to exist before the upgrade that turns the gate on**,
+not after:
+
+```bash
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create ai-tally-gateway-service-token --data-file=-
+```
+
+Then, and only then, point the chart at it:
+
+```yaml
+secretManager:
+  secrets:
+    gatewayServiceToken: ai-tally-gateway-service-token
+```
+
+It ships **empty** in `values.yaml` on purpose. A non-empty default makes an ordinary `helm upgrade`
+of an existing release mount a secret that does not exist yet, and the pods sit in
+`ContainerCreating` with nothing in the logs to explain it. Left empty with `requireApiKey: true`,
+the chart instead fails to render with a message naming this value. The web tier does not need the
+token at all while the gate is off. The gateway reads the same value as
+`TALLY_GATEWAY_SERVICE_TOKEN` and the web tier as `GATEWAY_SERVICE_TOKEN`; the two must match
+exactly, or the dashboard sends no `Authorization` and every control-plane read 401s.
+
+
 > **Not deploy-time secrets:** the **Stripe** webhook signing secret is pasted per-tenant in the
 > dashboard and persisted in Postgres (`db/postgres/0003_tenant_stripe_config.sql`) — protect it by
 > protecting Cloud SQL, not via an env var. Per-tenant **HMAC** user-id keys (CTO-74) live in the

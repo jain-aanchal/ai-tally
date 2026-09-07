@@ -43,9 +43,11 @@ Hosted multi-tenancy requires the tenant to come from the authenticated session 
 instead. That is a change to the signature of essentially every query function in `web/lib`, and it
 has to be done in a way where forgetting it is impossible rather than merely discouraged.
 
-The gateway is in better shape. It already resolves tenants per request from a bearer key or header
-(`_resolve_tenant_for_control_plane`), stamps `TenantId` on every row, and holds per-tenant HMAC key
-versions for user hashing. The backend was built multi-tenant. The dashboard was not.
+The gateway is in better shape. It already resolves tenants per request: ingest from the bearer api
+key's own tenant, and the control plane from the `x-tenant-id` the web server resolved, behind the
+service-token gate (`_require_service_token` / `_service_token_tenant` in `gateway/app.py`). It
+stamps `TenantId` on every row and holds per-tenant HMAC key versions for user hashing. The backend
+was built multi-tenant. The dashboard was not.
 
 ## Isolation, and the thing that will keep you up at night
 
