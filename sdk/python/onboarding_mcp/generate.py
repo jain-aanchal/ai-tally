@@ -2,18 +2,30 @@
 """The code-returning MCP tools (CTO-261 section 4.2).
 
 ``get_recipe``, ``generate_middleware``, ``instrument_call_site``, ``explain_layer``,
-and a ``coverage_report`` stub. Each returns recipes or generated code, never an edit
-applied to a repo (section 4.2). Every path is honest under uncertainty: a stack with
-no recipe returns a reported gap, never a fabricated ``record_*`` call (section 2
-decision 2, section 9).
+and ``coverage_report``. Each returns recipes, generated code or a read of the coverage
+probe, never an edit applied to a repo (section 4.2). Every path is honest under
+uncertainty: a stack with no recipe returns a reported gap, never a fabricated
+``record_*`` call (section 2 decision 2, section 9), and an unanswerable coverage probe
+returns unknown with a reason, never a verdict (section 7).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+from onboarding_mcp.coverage_client import (
+    DEFAULT_LAYERS,
+    CoverageConfig,
+    CoverageUnavailable,
+    Transport,
+    config_from_env,
+    derive_layer,
+    fetch_coverage,
+    index_layers,
+)
 from onboarding_mcp.sdk_surface import emitted_tally_calls, layer_grounding
 
 _HOLE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -238,29 +250,85 @@ def explain_layer(query: str, *, catalog: RecipeCatalog | None = None) -> dict[s
     return result
 
 
-def coverage_report(tenant_key: str, *, layers: list[str] | None = None) -> dict[str, Any]:
-    """Per-layer coverage (section 7). Stubbed against the spec contract for P1.
+def coverage_report(
+    tenant_key: str,
+    *,
+    layers: list[str] | None = None,
+    wired: list[str] | None = None,
+    config: CoverageConfig | None = None,
+    transport: Transport | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Per-layer coverage (section 7), read from the gateway's real probe (section 12 P3).
 
-    The real ClickHouse per-layer existence probe is the gateway's work in a later PR
-    (section 12 P3). Until then this reports each layer as not-yet-probed rather than
-    fabricating a covered / dark verdict, honoring "honest under uncertainty": a layer
-    is never marked covered without a span to prove it (section 7, CLAUDE.md).
+    Calls ``GET /v1/tenant/onboarding/coverage`` and re-derives every verdict from the proving
+    span counts it returns, so a layer reaches ``covered`` only behind evidence and a payload
+    that claims coverage with nothing to show for it is downgraded to ``unknown``
+    (:mod:`onboarding_mcp.coverage_client`).
+
+    Every way this can fail (unconfigured, unreachable, non-2xx, timeout, unreadable body) leaves
+    ``probe_available`` False and every layer ``unknown`` WITH the reason attached. None of them
+    ever becomes "not covered": saying a developer's tools layer is unwired because our gateway
+    blipped would be fabricating a negative out of an absence of knowledge (CLAUDE.md, honest
+    under uncertainty).
+
+    ``wired`` passes the agent's claim about what it just instrumented straight through. It only
+    separates "wired, awaiting first event" from "not wired" for a dark layer and can never
+    manufacture coverage. ``tenant_key`` is reported as present or absent and never echoed back;
+    the tenant the probe reads and the service token it authenticates with both come from
+    configuration, by reference.
     """
-    layer_names = layers or ["llm", "tool", "vector", "embeddings", "account"]
+    layer_names = layers or list(DEFAULT_LAYERS)
+    claimed_wired = {name for name in (wired or []) if name in DEFAULT_LAYERS}
+
+    if config is None:
+        config, config_reason = config_from_env(env)
+    else:
+        config_reason = ""
+
+    if config is None:
+        return _unavailable_coverage(tenant_key, layer_names, config_reason)
+
+    try:
+        payload = fetch_coverage(config, wired=claimed_wired, transport=transport, env=env)
+    except CoverageUnavailable as exc:
+        return _unavailable_coverage(tenant_key, layer_names, str(exc))
+
+    rows = index_layers(payload)
     return {
         "tenant_key_present": bool(tenant_key),
-        "probe_available": False,
-        "note": (
-            "Per-layer coverage probe ships in a later PR (CTO-261 section 7 / P3). "
-            "No layer is reported as covered without a proving span."
-        ),
+        "probe_available": True,
         "layers": [
             {
                 "layer": name,
-                "signal": (grounding or {}).get("signal", ""),
-                "status": "not_probed",
+                "signal": (layer_grounding(name) or {}).get("signal", ""),
+                **derive_layer(rows.get(name), wired=name in claimed_wired),
             }
             for name in layer_names
-            for grounding in [layer_grounding(name)]
+        ],
+    }
+
+
+def _unavailable_coverage(
+    tenant_key: str, layer_names: list[str], reason: str
+) -> dict[str, Any]:
+    """The honest answer when the probe did not run: unknown everywhere, with the reason.
+
+    ``probe_available: False`` is kept from the P1 stub because it is still the correct answer
+    here, and ``proving_spans`` stays null rather than 0: an unknown count is not a zero count.
+    """
+    return {
+        "tenant_key_present": bool(tenant_key),
+        "probe_available": False,
+        "reason": reason,
+        "layers": [
+            {
+                "layer": name,
+                "signal": (layer_grounding(name) or {}).get("signal", ""),
+                "status": "unknown",
+                "reason": reason,
+                "proving_spans": None,
+            }
+            for name in layer_names
         ],
     }

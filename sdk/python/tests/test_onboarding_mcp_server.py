@@ -54,7 +54,7 @@ def test_every_registered_tool_has_a_docstring(built: RecordingServer):
     assert all(fn.__doc__ for fn in built.tools.values())
 
 
-def test_registered_tools_delegate_to_the_plain_functions(built: RecordingServer):
+def test_registered_tools_delegate_to_the_plain_functions(built: RecordingServer, monkeypatch):
     detect = built.tools["detect_stack"]("fastapi==0.115.0\npinecone-client==5.0.0\n")
     assert "vector.pinecone.query" in detect["matched_recipes"]
 
@@ -76,7 +76,14 @@ def test_registered_tools_delegate_to_the_plain_functions(built: RecordingServer
     assert site["sdk_call"] == "tally.record_vector_call"
 
     assert built.tools["explain_layer"]("vector")["operation_name"] == "vector"
-    assert built.tools["coverage_report"]("tally_sk_live_x")["probe_available"] is False
+
+    # Unconfigured, so the probe cannot run: unknown with a reason through the binding too,
+    # never a fabricated verdict (CTO-261 section 7).
+    monkeypatch.delenv("TALLY_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("TALLY_TENANT_ID", raising=False)
+    coverage = built.tools["coverage_report"]("tally_sk_live_x")
+    assert coverage["probe_available"] is False
+    assert {layer["status"] for layer in coverage["layers"]} == {"unknown"}
 
 
 def test_unknown_input_stays_a_gap_through_the_tool_layer(built: RecordingServer):

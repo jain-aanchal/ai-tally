@@ -233,9 +233,13 @@ def test_explain_layer_unknown_is_a_gap():
 
 
 def test_coverage_report_is_honest_and_not_fabricated():
-    result = coverage_report("tally_sk_live_deadbeef")
+    # Unconfigured: the probe cannot run, so every layer is unknown WITH a reason. Never
+    # "not covered", never a fabricated verdict (section 7, CLAUDE.md). The wired probe path
+    # is covered in tests/test_onboarding_mcp_coverage.py.
+    result = coverage_report("tally_sk_live_deadbeef", env={})
     assert result["probe_available"] is False
     statuses = {layer["status"] for layer in result["layers"]}
-    assert statuses == {"not_probed"}
+    assert statuses == {"unknown"}
+    assert all(layer["reason"] for layer in result["layers"])
     # No layer is claimed covered without a proving span (section 7, CLAUDE.md).
     assert all(layer["status"] != "covered" for layer in result["layers"])

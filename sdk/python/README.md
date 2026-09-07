@@ -197,7 +197,33 @@ has it installed instead: `"command": "/path/to/.venv/bin/tally-onboarding-mcp"`
 | `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line |
 | `instrument_call_site` | the adapted `record_*` edit for one concrete call site |
 | `explain_layer` | which `record_*` method covers a layer and why, grounded on the live SDK surface |
-| `coverage_report` | per-layer coverage; reports `not_probed` until the probe ships, never a guessed verdict |
+| `coverage_report` | per-layer coverage read from the gateway's probe: which layers a real span proves are flowing, and why each dark layer is dark |
+
+#### Configuring `coverage_report`
+
+`coverage_report` is the only tool that talks to anything outside your machine. It calls the
+gateway's coverage probe, which is the side that can read your telemetry, so it needs three
+things from the environment:
+
+| Variable | What it is |
+|---|---|
+| `TALLY_GATEWAY_URL` | base URL of the gateway that holds your telemetry |
+| `TALLY_TENANT_ID` | your tenant UUID, sent as `x-tenant-id` |
+| `GATEWAY_SERVICE_TOKEN` | the control-plane service token. Set `TALLY_GATEWAY_SERVICE_TOKEN_ENV` to read it from a differently named variable instead |
+
+The token is held by reference: the tool reads the variable at the moment it calls the probe and
+never stores, echoes or logs the value. The `tenant_key` argument is likewise reported only as
+present or absent, never sent onward.
+
+Leave these unset and the tool answers `probe_available: false` with every layer `unknown` and
+the reason attached. That is also what you get if the gateway is unreachable, answers an error,
+times out, or returns something unreadable. None of those ever turns into "this layer is not
+wired": a layer is reported covered only when the probe returns a span count above zero to prove
+it, re-derived from that count rather than taken on the wire's word, so a payload claiming
+coverage with no evidence is downgraded back to `unknown`.
+
+Pass `wired` (the layers you just instrumented) to separate "wired, awaiting first event" from
+"not wired" on a dark layer. It only softens the wording; it can never produce coverage.
 
 Two things the server will not do. It never guesses which customer a request belongs to: pass
 `generate_middleware` the header or resolver you confirmed, and with no answer it returns a
