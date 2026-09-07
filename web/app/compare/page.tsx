@@ -17,6 +17,7 @@ import { ExploreChartCard } from "@/components/ExploreChartCard";
 import { FilterBar } from "@/components/FilterBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
+import { Money, Pct } from "@/components/HonestValue";
 import { apiGet } from "@/lib/api";
 import { type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
@@ -38,7 +39,13 @@ export default async function ComparePage({
   // This projection is built off reconciled baseline traffic — surface that baseline's freshness so
   // a comparison off a stale window is never shown as fresh (CTO-80).
   const reconciledThrough = boundaryFromMinutesAgo(diagnostics.reconcilerLastRunMinutesAgo);
-  const noBaseline = current.monthlyCostMicroUsd === 0 || candidates.length === 0;
+  // CTO-244 follow-up: an unknown incumbent cost is as much "no baseline" as a zero one. It used to
+  // fall through this gate as a real figure and the page then rendered a blank tile next to a
+  // "$0.00" candidate table and a "0% reduction" recommendation, all at once.
+  const noBaseline =
+    current.monthlyCostMicroUsd === null ||
+    current.monthlyCostMicroUsd === 0 ||
+    candidates.length === 0;
   const noReplay = diagnostics.samplesReplayed === 0 && diagnostics.samplesAvailable > 0;
   const state = deriveDataState({
     isEmpty: noBaseline,
@@ -49,13 +56,20 @@ export default async function ComparePage({
 
   // Money headlines from the payload. Cheapest candidate is a genuine min over real figures; null
   // when there are no candidates (honest blank rather than a fabricated 0).
+  // Only candidates with a real projected cost can be "cheapest": a candidate whose cost could not
+  // be projected is not a cheap one, it is an unknown one (CTO-244 follow-up).
+  const priced = candidates.filter(
+    (c): c is typeof c & { monthlyCostMicroUsd: number } => c.monthlyCostMicroUsd !== null,
+  );
   const cheapest =
-    candidates.length > 0
-      ? candidates.reduce((best, c) =>
-          c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best,
-        )
+    priced.length > 0
+      ? priced.reduce((best, c) => (c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best))
       : null;
-  const savingsPct = Math.round(recommendation.projectedSavingsPct * 100);
+  // The incumbent's cost is unknown, so nothing on this page can be projected from it. One reason,
+  // used by every blank below, so the tiles, the table and the card all say the same thing.
+  const unknownBaseline = current.monthlyCostMicroUsd === null;
+  const UNKNOWN_BASELINE_REASON =
+    "some of the current model's spend over the window could not be priced, so its monthly cost is unknown and nothing can be projected from it";
 
   // FilterBar options: the models in play and their distinct providers, so the live chart can be
   // narrowed to a model or a provider.
@@ -70,19 +84,29 @@ export default async function ComparePage({
         <SummaryTile
           label="Current cost/mo"
           micro={current.monthlyCostMicroUsd}
+          reason={UNKNOWN_BASELINE_REASON}
           hint={current.model}
         />
         <SummaryTile
           label="Cheapest candidate/mo"
           micro={cheapest?.monthlyCostMicroUsd ?? null}
-          reason="no candidate cleared replay yet"
+          reason={
+            unknownBaseline
+              ? UNKNOWN_BASELINE_REASON
+              : "no candidate cleared replay yet"
+          }
           hint={cheapest?.model}
         />
         <SummaryTile
           label="Projected savings/mo"
           micro={recommendation.projectedSavingsMicroUsd}
+          reason={UNKNOWN_BASELINE_REASON}
           higherIsBetter
-          hint={`${savingsPct}% reduction`}
+          hint={
+            recommendation.projectedSavingsPct === null
+              ? "no reduction to report"
+              : `${Math.round(recommendation.projectedSavingsPct * 100)}% reduction`
+          }
         />
         <SummaryTile
           label="Replay cost"
@@ -119,14 +143,20 @@ export default async function ComparePage({
         </div>
       </Card>
 
-      <Card title={`Recommendation — ${recommendation.verdict}`}>
+      <Card title={`Recommendation: ${recommendation.verdict}`}>
         <p className="text-sm text-fg">{recommendation.summary}</p>
+        {/* CTO-244 follow-up: this line used to read "saves $0.00/mo (0% reduction)" directly under
+            a summary saying the cost is unknown. Both halves are honest blanks now, so the figure
+            and the sentence above it agree. */}
         <div className="mt-3 flex items-baseline gap-2 text-sm">
           <span className="text-good text-lg font-semibold">
-            saves {formatUSD(recommendation.projectedSavingsMicroUsd)}/mo
+            saves{" "}
+            <Money micro={recommendation.projectedSavingsMicroUsd} reason={UNKNOWN_BASELINE_REASON} />
+            /mo
           </span>
           <span className="text-muted">
-            ({Math.round(recommendation.projectedSavingsPct * 100)}% reduction)
+            (<Pct value={recommendation.projectedSavingsPct} reason={UNKNOWN_BASELINE_REASON} digits={0} />{" "}
+            reduction)
           </span>
         </div>
         <button
@@ -190,7 +220,8 @@ export default async function ComparePage({
 }
 
 type RowMetric = {
-  monthlyCostMicroUsd: MicroUSD;
+  /** null when the projection has no anchor: see CandidateMetrics (CTO-244 follow-up). */
+  monthlyCostMicroUsd: MicroUSD | null;
   qualityScore: number | null; // CTO-114
   qualityCi?: { lo: number; hi: number }; // CTO-114
   latencyP95Ms: number | null; // CTO-115
@@ -216,7 +247,12 @@ function Row({
     <tr className={`border-t border-edge ${highlight ? "font-medium" : ""}`}>
       <td className="py-2">{label}</td>
       <td className="py-2 text-right tabular-nums">
-        {formatUSD(m.monthlyCostMicroUsd)}
+        {/* The row that produced "$0.00NaN%": a candidate rescaled off an unknown incumbent cost
+            collapsed to 0, and its delta divided by that same unknown. Both are blanks now. */}
+        <Money
+          micro={m.monthlyCostMicroUsd}
+          reason="this projection is anchored to the current model's monthly cost, which is unknown because some of its spend could not be priced"
+        />
         {current && <Delta v={deltaPct(current.monthlyCostMicroUsd, m.monthlyCostMicroUsd)} betterWhenNegative />}
       </td>
       <td className="py-2 text-right tabular-nums">
@@ -279,8 +315,10 @@ function QualityCell({ m, current }: { m: RowMetric; current?: RowMetric }) {
   );
 }
 
-function Delta({ v, betterWhenNegative }: { v: number; betterWhenNegative: boolean }) {
-  if (v === 0) return null;
+function Delta({ v, betterWhenNegative }: { v: number | null; betterWhenNegative: boolean }) {
+  // A null delta is one side of the comparison being unknown. Rendering nothing is right here: the
+  // cell it sits beside is already an explained blank, so a second blank would only repeat it.
+  if (v === null || v === 0) return null;
   const good = betterWhenNegative ? v < 0 : v > 0;
   const sign = v > 0 ? "+" : "";
   return (

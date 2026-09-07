@@ -156,12 +156,11 @@ export async function GET(req: Request) {
         ...comparison.current,
         model: live.model,
         provider: live.provider,
-        // CTO-244: an unknown incumbent cost maps to 0 here deliberately, because 0 is this
-        // payload's existing "no baseline" sentinel: web/app/compare/page.tsx gates on
-        // `current.monthlyCostMicroUsd === 0` and renders the empty-state banner instead of a
-        // dollar figure. So the page shows "no baseline", not a fabricated $0.00/mo, and the
-        // recommendation built above states the actual reason.
-        monthlyCostMicroUsd: live.monthlyCostMicroUsd ?? 0,
+        // CTO-244 follow-up: an unknown incumbent cost now travels as null, not as the 0 that
+        // used to stand in as the "no baseline" sentinel. The page's own gate reads null as no
+        // baseline (same banner) AND the tile renders the explained blank instead of "$0.00/mo",
+        // which is what the sentinel cost us: a fabricated zero everywhere the gate did not reach.
+        monthlyCostMicroUsd: live.monthlyCostMicroUsd,
         // CTO-115: live p95 / error from otel_spans over the same 7-day window. `null` when
         // fewer than 50 spans landed — page renders "—" so we never fabricate.
         latencyP95Ms: live.latencyP95Ms,
@@ -197,14 +196,15 @@ export async function GET(req: Request) {
   //      preserves the mock's *relative price ratios* (e.g. haiku ≈ 27% of sonnet) while anchoring
   //      to the user's actual workload size. Still an approximation — real ratios depend on token
   //      mix, which is what workflow-5 replay actually solves — but it's no longer absurd.
-  const mockCurrentCost = comparison.current.monthlyCostMicroUsd;
-  // CTO-244: with an unknown live cost there is nothing to anchor the rescale to. Scale 0 collapses
-  // every candidate to $0, which would read as a free alternative, so the branch below hands
-  // deriveRecommendation the null and it refuses to project at all.
+  const mockCurrentCost = comparison.current.monthlyCostMicroUsd ?? 0;
+  // CTO-244 follow-up: with an unknown live cost there is nothing to anchor the rescale to, so
+  // there is no candidate figure either. It used to fall back to scale 0, which collapsed every
+  // candidate row to "$0.00" (and, divided against the unknown incumbent, printed a literal
+  // "NaN%" beside it). A null scale means null candidate costs: honest blanks, not free models.
   const scale =
     mockCurrentCost > 0 && live.monthlyCostMicroUsd !== null
       ? live.monthlyCostMicroUsd / mockCurrentCost
-      : 0;
+      : null;
   const candidates = comparison.candidates
     .filter((c) => c.model !== live.model)
     .map((c) => {
@@ -214,7 +214,10 @@ export async function GET(req: Request) {
       const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
       return {
         ...c,
-        monthlyCostMicroUsd: Math.round(c.monthlyCostMicroUsd * scale),
+        monthlyCostMicroUsd:
+          scale === null || c.monthlyCostMicroUsd === null
+            ? null
+            : Math.round(c.monthlyCostMicroUsd * scale),
         qualityScore: quality?.qualityScore ?? null,
         ...(quality ? { qualityCi: quality.qualityCi } : {}),
       };
@@ -227,14 +230,22 @@ export async function GET(req: Request) {
   const recommendation = deriveRecommendation({
     currentModel: live.model,
     currentCostMicroUsd: live.monthlyCostMicroUsd,
-    candidates: candidates.map((c) => ({
-      model: c.model,
-      monthlyCostMicroUsd: c.monthlyCostMicroUsd,
-      qualityScore: c.qualityScore,
-      // Candidate latency here is still the fixture mock (no replay); deriveRecommendation ignores
-      // it on the insufficient-data path, so no mock latency leaks into the summary.
-      latencyP95Ms: c.latencyP95Ms,
-    })),
+    // A candidate with no projected cost cannot be the cheapest one, so it is not a candidate for
+    // the recommendation at all (CTO-244 follow-up).
+    candidates: candidates.flatMap((c) =>
+      c.monthlyCostMicroUsd === null
+        ? []
+        : [
+            {
+              model: c.model,
+              monthlyCostMicroUsd: c.monthlyCostMicroUsd,
+              qualityScore: c.qualityScore,
+              // Candidate latency here is still the fixture mock (no replay); deriveRecommendation
+              // ignores it on the insufficient-data path, so no mock latency leaks into the summary.
+              latencyP95Ms: c.latencyP95Ms,
+            },
+          ],
+    ),
     samplesReplayed: 0,
   });
 

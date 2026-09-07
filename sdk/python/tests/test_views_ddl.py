@@ -107,6 +107,49 @@ def test_unattributed_is_modeled(attribution):
     assert "no_trace_in_window" in attribution  # reasons enumerated, not silent drop
 
 
+def _unknown_usage_predicates(rollups: str) -> list[str]:
+    """The body of every `countIf(...) AS UnknownUsageSpanCount` in the file, one per MV."""
+    out: list[str] = []
+    for chunk in rollups.split("AS UnknownUsageSpanCount")[:-1]:
+        start = chunk.rindex("countIf(")
+        out.append(" ".join(chunk[start:].split()))
+    return out
+
+
+def test_unknown_usage_never_counts_a_priced_span(rollups):
+    """CTO-244 follow-up: the invariant the counter's name promises, asserted structurally.
+
+    A span counted as unknown-usage must NEVER also carry a priced cost. The predicate enforces
+    that by construction with an `EstimatedCost IS NULL` conjunct, so this test fails loudly if a
+    later edit drops it. Both MVs write the same SummingMergeTree column, so both are checked.
+    """
+    predicates = _unknown_usage_predicates(rollups)
+    assert len(predicates) == 2, "expected the daily and hourly MV predicates"
+    for p in predicates:
+        assert p.startswith("countIf( otel_spans.EstimatedCost IS NULL AND"), p
+
+
+def test_unknown_usage_is_per_operation_kind(rollups):
+    """An embedding has no output side, and tool / vector spans have no token usage at all.
+
+    The old chat-shaped `InputTokens IS NULL OR OutputTokens IS NULL` flagged all three as
+    unknown-usage even when they were correctly priced per call. The predicate branches on
+    GenAiOperation, the same discriminator the cost layers and enrich_cost use.
+    """
+    for p in _unknown_usage_predicates(rollups):
+        assert "otel_spans.GenAiOperation = 'embeddings', otel_spans.InputTokens IS NULL" in p
+        assert "otel_spans.GenAiOperation IN ('tool', 'vector', 'compute', 'egress'), 0" in p
+        # The chat fallback keeps both sides required: a chat call is priced from both.
+        assert p.rstrip(") ").endswith(
+            "otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL"
+        ), p
+
+
+def test_both_rollup_mvs_count_unknown_usage_identically(rollups):
+    daily, hourly = _unknown_usage_predicates(rollups)
+    assert daily == hourly
+
+
 @pytest.mark.parametrize("name", ["rollups.sql", "last_touch_index.sql", "attribution.sql"])
 def test_balanced_parens(name):
     sql = _read(name)

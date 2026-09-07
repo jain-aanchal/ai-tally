@@ -645,9 +645,17 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
     // Per-group totals over the whole window. Group cardinality is inherently small (one row per
     // distinct dimension value), so this is not the unbounded axis; the day×group read below is
     // bounded to the kept groups.
-    const totalRows = await rowsP<{ grp: string; cost: string; spans: string }>(
+    // CTO-244 follow-up: `unpriced` travels with every group total, exactly as it already does in
+    // querySpendSummary. Without it a group whose spans were ALL unpriced arrives as sum() = 0 and
+    // renders "$0.00", which is indistinguishable from a group that genuinely cost nothing. That
+    // put a confident "google $0.00" on the provider axis for the streamed spans whose usage cannot
+    // be scanned at all. capGroups turns the count into the honest blank (or the lower-bound hint).
+    const totalRows = await rowsP<{ grp: string; cost: string; spans: string; unpriced: string }>(
       db,
-      `SELECT ${groupExpr} AS grp, sum(EstimatedCost) AS cost, count() AS spans
+      `SELECT ${groupExpr} AS grp,
+              sum(EstimatedCost) AS cost,
+              count() AS spans,
+              countIf(EstimatedCost IS NULL) AS unpriced
        FROM otel_spans
        WHERE ${scope} ${filterClause}
        GROUP BY grp
@@ -658,6 +666,7 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       group: r.grp,
       totalMicroUsd: micro(r.cost),
       spanCount: parseInt(r.spans, 10) || 0,
+      unpricedSpanCount: parseInt(r.unpriced, 10) || 0,
     }));
     const capped = capGroups(groupTotals);
     const kept = [...capped.keptGroups];
@@ -689,9 +698,18 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       : [];
 
     const dayList = isoDaysFrom(b.windowStart, windowDays);
+    // CTO-244 follow-up: a day whose spans were all unpriced sums to NULL. microOrNull keeps that
+    // apart from a real zero and the row is dropped, so the chart and the sparklines plot only days
+    // we actually measured instead of a fabricated zero point.
     const costRows: ExploreCostRow[] = [
-      ...perDayKept.map((r) => ({ day: r.day, group: r.grp, costMicroUsd: micro(r.cost) })),
-      ...perDayOther.map((r) => ({ day: r.day, group: OTHER_GROUP, costMicroUsd: micro(r.cost) })),
+      ...perDayKept.flatMap((r) => {
+        const cost = microOrNull(r.cost);
+        return cost === null ? [] : [{ day: r.day, group: r.grp, costMicroUsd: cost }];
+      }),
+      ...perDayOther.flatMap((r) => {
+        const cost = microOrNull(r.cost);
+        return cost === null ? [] : [{ day: r.day, group: OTHER_GROUP, costMicroUsd: cost }];
+      }),
     ];
     const days = pivotExploreDays(dayList, costRows, capped.keptGroups, hasOther);
 
@@ -705,6 +723,9 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       breakdown: capped.breakdown,
       totalMicroUsd: capped.totalMicroUsd,
       truncatedGroups: capped.truncatedGroups,
+      unknownCostGroups: capped.unknownCostGroups,
+      spanCount: capped.spanCount,
+      unpricedSpanCount: capped.unpricedSpanCount,
     };
   });
 }
@@ -815,22 +836,32 @@ export async function queryCostSliceTotals(
       estimated: string;
       reconciled: string;
       recThrough: string | null;
+      unpriced: string;
+      spans: string;
     }>(
       db,
       `SELECT
          sum(EstimatedCost) AS total,
          sumIf(EstimatedCost, CostSource = 'estimated') AS estimated,
          sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
+         countIf(EstimatedCost IS NULL) AS unpriced,
+         count() AS spans,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${clause}`,
       { tenant, ...params },
     );
-    const t = out[0] ?? { total: "0", estimated: "0", reconciled: "0", recThrough: null };
+    const t = out[0] ?? {
+      total: "0", estimated: "0", reconciled: "0", recThrough: null, unpriced: "0", spans: "0",
+    };
     return {
       totalMicroUsd: micro(t.total),
       estimatedMicroUsd: micro(t.estimated),
       reconciledMicroUsd: micro(t.reconciled),
+      // CTO-244 follow-up: carried so the tile can blank (all unpriced) or disclose a lower bound
+      // (some unpriced) instead of presenting a sum over NULL-skipped rows as the slice total.
+      unpricedSpanCount: parseInt(t.unpriced, 10) || 0,
+      spanCount: parseInt(t.spans, 10) || 0,
       // null / ClickHouse's `\N` → boundary in the far past so everything reads as estimated,
       // never a fabricated recent settlement date.
       reconciledThrough: t.recThrough && t.recThrough !== "\\N" ? t.recThrough : "1970-01-01",

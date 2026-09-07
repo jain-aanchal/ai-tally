@@ -7,9 +7,9 @@
 //
 // CTO-168: the fixture's `workload` string and `recommendation` prose below are NO LONGER shipped
 // on the live path. When queryCurrentModel returns real traffic, the /api/compare route derives
-// `workload` from the real query context (tag filter + time window — see deriveWorkload) and
+// `workload` from the real query context (tag filter + time window, see deriveWorkload) and
 // generates `recommendation.verdict` + `summary` from the REAL computed deltas (cost savings %,
-// pairwise-judge quality, latency — see deriveRecommendation). The fixture verdict/summary/workload
+// pairwise-judge quality, latency, see deriveRecommendation). The fixture verdict/summary/workload
 // survive ONLY on the unreachable-gateway fallback (queryCurrentModel === null), which the page
 // labels via SyntheticPreviewBanner. This stops the old bug where the hardcoded
 // "$12.2K/mo … haiku-4.5" prose and "research_agent / … / last 7 days" label rendered on live data.
@@ -25,10 +25,10 @@
 // candidates below are used only by the unreachable-gateway rescaled-mock fallback path.
 //
 // CTO-166: the `gemini-3-flash` / `provider: "google"` candidate below is now ALSO grounded in
-// the live path — CTO-149 made Google a first-class priced provider, and gemini was added to the
+// the live path. CTO-149 made Google a first-class priced provider, and gemini was added to the
 // gateway candidate list (DEFAULT_CANDIDATES in clickhouse.ts) so it flows through /v1/replay +
 // /v1/eval exactly like the anthropic/openai rows. The same honest-null floors apply to it:
-// null latency/error below 50 replayed responses, null qualityScore below 10 judged samples —
+// null latency/error below 50 replayed responses, null qualityScore below 10 judged samples:
 // never a fabricated Gemini number. The numeric mock below is now purely the
 // unreachable-gateway fallback, same status as the other mock candidates.
 //
@@ -47,11 +47,19 @@ export interface CandidateMetrics {
   /** display label, e.g. "claude-haiku-4.5" */
   model: string;
   provider: string;
-  /** projected monthly cost at current traffic */
-  monthlyCostMicroUsd: MicroUSD;
+  /**
+   * Projected monthly cost at current traffic, or `null` when there is no honest figure to give
+   * (CTO-244 follow-up).
+   *
+   * On the `current` row that means the incumbent's window could not be fully priced. On a
+   * candidate row it means the projection is anchored to that same unknown incumbent cost, so the
+   * candidate figure would be a rescaling of a number we do not have. Both render the honest blank;
+   * the previous 0 collapsed every candidate to "$0.00" and read as a free alternative.
+   */
+  monthlyCostMicroUsd: MicroUSD | null;
   /**
    * Pairwise-LLM-judge win rate (0..1) from CTO-114. `null` when no eval pass has judged
-   * >= 10 samples for this candidate — the page renders "—" in that case. NEVER substitute a
+   * >= 10 samples for this candidate; the page renders "—" in that case. NEVER substitute a
    * mock when this is null; the ticket is explicit about that. Always `null` on the `current`
    * row (no judge pair when comparing a model to itself).
    */
@@ -61,7 +69,7 @@ export interface CandidateMetrics {
   /**
    * p95 latency in milliseconds. `null` on the `current` row when the live 7-day window has
    * fewer than 50 spans, and on candidate rows when fewer than 50 responses were replayed
-   * (rendered as "—" — CTO-115 / CTO-123).
+   * (rendered as "—", CTO-115 / CTO-123).
    */
   latencyP95Ms: number | null;
   /** 0..1. `null` on the `current` row under the same low-sample suppression rule (CTO-115). */
@@ -76,8 +84,9 @@ export interface Comparison {
   recommendation: {
     verdict: "switch" | "keep" | "mixed";
     summary: string;
-    projectedSavingsMicroUsd: MicroUSD;
-    projectedSavingsPct: number; // 0..1
+    /** null when the incumbent's cost is unknown, so there is no saving to project (CTO-244). */
+    projectedSavingsMicroUsd: MicroUSD | null;
+    projectedSavingsPct: number | null; // 0..1, null when there is nothing to divide by
   };
   diagnostics: {
     samplesReplayed: number;
@@ -95,7 +104,15 @@ export interface Comparison {
   };
 }
 
-export function deltaPct(current: number, candidate: number): number {
+/**
+ * Candidate vs current as a signed fraction, or `null` when there is no honest comparison.
+ *
+ * CTO-244 follow-up: either side can now be unknown, and `(null - 0) / null` is NaN, which is how a
+ * literal "NaN%" reached the candidate rows on screen. An unknown side has no delta at all, so this
+ * returns null and the caller renders nothing rather than a non-number.
+ */
+export function deltaPct(current: number | null, candidate: number | null): number | null {
+  if (current === null || candidate === null) return null;
   if (current === 0) return 0;
   return (candidate - current) / current;
 }
@@ -129,14 +146,14 @@ export function scaleCandidateMonthlyCost(
   return Number(scaled);
 }
 
-// Compare fixture for the research_agent workload — the dominant cost driver from cost.ts
+// Compare fixture for the research_agent workload, the dominant cost driver from cost.ts
 // ($19.1K LLM spend on this workload alone over 30 days, ≈ $4.5K/week).
 //
 // CTO-168: this whole object is the unreachable-gateway fallback ONLY. The `workload` label and
-// the `recommendation` verdict/summary below are fixture prose — on the live path the route
+// the `recommendation` verdict/summary below are fixture prose. On the live path the route
 // replaces them with values derived from real traffic (deriveWorkload / deriveRecommendation).
 export const comparison: Comparison = {
-  // Fixture label — used only in the unreachable-gateway fallback. Live path calls deriveWorkload.
+  // Fixture label, used only in the unreachable-gateway fallback. Live path calls deriveWorkload.
   workload: "research_agent / production / last 7 days",
   current: {
     model: "claude-sonnet-4.5",
@@ -176,7 +193,7 @@ export const comparison: Comparison = {
       errorRate: 0.012,
     },
   ],
-  // Fixture verdict/summary — unreachable-gateway fallback ONLY. The live path never renders this
+  // Fixture verdict/summary, unreachable-gateway fallback ONLY. The live path never renders this
   // prose; the route calls deriveRecommendation off the real computed deltas instead (CTO-168).
   recommendation: {
     verdict: "mixed",
@@ -213,7 +230,7 @@ export function deriveWorkload(featureTag: string | undefined, windowDays: numbe
 
 /**
  * Minimum replayed-response count across all candidates before we'll issue a switch/keep verdict.
- * Below this the projection is too thin to recommend anything — we return an honest "insufficient
+ * Below this the projection is too thin to recommend anything, so we return an honest "insufficient
  * data" summary instead of the fixture prose. Matches the per-candidate replay floor (CTO-123).
  */
 export const MIN_SAMPLES_TO_RECOMMEND = 50;
@@ -230,8 +247,10 @@ export interface RecommendationCandidate {
 export interface DerivedRecommendation {
   verdict: "switch" | "keep" | "mixed";
   summary: string;
-  projectedSavingsMicroUsd: MicroUSD;
-  projectedSavingsPct: number;
+  /** null when the incumbent's monthly cost is unknown: there is no saving to project (CTO-244). */
+  projectedSavingsMicroUsd: MicroUSD | null;
+  /** null on the same branch. A percent needs a denominator we have. */
+  projectedSavingsPct: number | null;
 }
 
 // Below this fractional cost saving we don't consider a switch worthwhile (noise, not signal).
@@ -260,7 +279,7 @@ export function deriveRecommendation(input: {
    */
   currentCostMicroUsd: MicroUSD | null;
   candidates: RecommendationCandidate[];
-  /** total replayed responses across candidates — the gate for whether we recommend at all. */
+  /** total replayed responses across candidates: the gate for whether we recommend at all. */
   samplesReplayed: number;
 }): DerivedRecommendation {
   const { currentModel, currentCostMicroUsd, candidates, samplesReplayed } = input;
@@ -270,14 +289,16 @@ export function deriveRecommendation(input: {
     null,
   );
 
-  // CTO-244: an unpriced incumbent cannot anchor a savings projection. Report zero savings with a
-  // verdict that says WHY, instead of a percentage measured against a number we do not have.
+  // CTO-244 follow-up: an unpriced incumbent cannot anchor a savings projection, and the savings
+  // are UNKNOWN, not zero. Returning 0/0 here put "$0.00, 0% reduction" and "saves $0.00/mo" on the
+  // page directly under this very sentence saying the cost is unknown: the card contradicted itself.
+  // Nulls make the honest-blank component render the dash the sentence is describing.
   if (currentCostMicroUsd === null) {
     return {
       verdict: "mixed",
-      summary: `— cannot project savings for ${currentModel}: some of its spend over the window could not be priced, so its monthly cost is unknown. Fix the pricing gap before comparing candidates.`,
-      projectedSavingsMicroUsd: 0,
-      projectedSavingsPct: 0,
+      summary: `Cannot project savings for ${currentModel}: some of its spend over the window could not be priced, so its monthly cost is unknown. Fix the pricing gap before comparing candidates.`,
+      projectedSavingsMicroUsd: null,
+      projectedSavingsPct: null,
     };
   }
 
@@ -287,13 +308,13 @@ export function deriveRecommendation(input: {
   const projectedSavingsPct =
     currentCostMicroUsd > 0 ? projectedSavingsMicroUsd / currentCostMicroUsd : 0;
 
-  // Thin / absent data — say so honestly rather than shipping a confident sentence off noise.
+  // Thin / absent data: say so honestly rather than shipping a confident sentence off noise.
   if (!cheapest || samplesReplayed < MIN_SAMPLES_TO_RECOMMEND) {
     return {
       verdict: "mixed",
       summary: cheapest
-        ? `— insufficient replay data to recommend a switch (only ${samplesReplayed.toLocaleString()} of the needed ${MIN_SAMPLES_TO_RECOMMEND} responses replayed). Run a fuller replay pass.`
-        : `— no alternative candidate cleared replay for this workload yet. Keep ${currentModel} until a candidate has samples.`,
+        ? `Insufficient replay data to recommend a switch (only ${samplesReplayed.toLocaleString()} of the needed ${MIN_SAMPLES_TO_RECOMMEND} responses replayed). Run a fuller replay pass.`
+        : `No alternative candidate cleared replay for this workload yet. Keep ${currentModel} until a candidate has samples.`,
       projectedSavingsMicroUsd,
       projectedSavingsPct,
     };
@@ -304,11 +325,11 @@ export function deriveRecommendation(input: {
   const latencyClause =
     cheapest.latencyP95Ms !== null ? ` Latency p95 ${cheapest.latencyP95Ms}ms.` : "";
 
-  // Current is already at/near the cheapest option — no candidate saves enough to bother switching.
+  // Current is already at/near the cheapest option: no candidate saves enough to bother switching.
   if (projectedSavingsPct < MIN_MEANINGFUL_SAVINGS_PCT) {
     return {
       verdict: "keep",
-      summary: `Keep ${currentModel}: the cheapest candidate (${cheapest.model}) saves only ${pct}% — below the ${Math.round(
+      summary: `Keep ${currentModel}: the cheapest candidate (${cheapest.model}) saves only ${pct}%, below the ${Math.round(
         MIN_MEANINGFUL_SAVINGS_PCT * 100,
       )}% threshold worth a switch.`,
       projectedSavingsMicroUsd,
@@ -316,11 +337,11 @@ export function deriveRecommendation(input: {
     };
   }
 
-  // Meaningful savings — the verdict now hinges on quality (the pairwise-judge win-rate vs current).
+  // Meaningful savings: the verdict now hinges on quality (the pairwise-judge win-rate vs current).
   if (cheapest.qualityScore === null) {
     return {
       verdict: "mixed",
-      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet — run an eval pass before routing production traffic.${latencyClause}`,
+      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet, so run an eval pass before routing production traffic.${latencyClause}`,
       projectedSavingsMicroUsd,
       projectedSavingsPct,
     };
@@ -338,7 +359,7 @@ export function deriveRecommendation(input: {
 
   return {
     verdict: "mixed",
-    summary: `${cheapest.model} is ${pct}% cheaper (saves ${dollars}/mo) but wins only ${winPct}% of judged pairs vs ${currentModel} — route cost-tolerant traffic to it, keep ${currentModel} for quality-critical calls.${latencyClause}`,
+    summary: `${cheapest.model} is ${pct}% cheaper (saves ${dollars}/mo) but wins only ${winPct}% of judged pairs vs ${currentModel}: route cost-tolerant traffic to it, keep ${currentModel} for quality-critical calls.${latencyClause}`,
     projectedSavingsMicroUsd,
     projectedSavingsPct,
   };

@@ -118,6 +118,12 @@ FROM otel_spans WHERE TenantId = 'local-dev';
 ```
 
 The rollups carry the same disclosure as `UnpricedSpanCount` and `UnknownUsageSpanCount` columns.
+The two are not the same count. `UnpricedSpanCount` is every span with no cost, whatever the cause.
+`UnknownUsageSpanCount` is the subset whose USAGE is what we are missing, and it is read per
+operation kind: a chat span needs both token sides, an embedding call has only an input side, and
+tool / vector / compute / egress spans are priced per call and carry no token usage to be unknown
+about. So a span counted as unknown-usage never also carries a priced cost, and a span whose model
+is simply not in the catalog is unpriced without being unknown-usage.
 Anything that divides cost by a count (per call, per user, per conversion, per token) is a ratio
 between a partial numerator and a complete denominator whenever `unpriced_spans > 0`; the dashboard
 renders those as a blank with a reason rather than a smaller number.

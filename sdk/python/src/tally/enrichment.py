@@ -49,9 +49,11 @@ def _usage_or_none(attributes: dict[str, object]) -> Usage | None:
     That is the exact failure the Nullable cost columns exist to prevent. Returning None instead
     leaves the cost unresolved so the row lands NULL with ``CostSource = 'unpriced'``.
 
-    Input and output are both required, matching the rollup's UnknownUsageSpanCount predicate
-    (``InputTokens IS NULL OR OutputTokens IS NULL``): a span counted as unknown-usage must not
-    also carry a priced cost. A provider that genuinely reports 0 is reporting a number, so it
+    Input and output are both required, matching the chat branch of the rollup's
+    UnknownUsageSpanCount predicate (which is per operation kind: an embedding has only an input
+    side, and tool / vector spans are priced per call and have no token usage at all). The
+    invariant both sides keep is that a span counted as unknown-usage must not also carry a priced
+    cost. A provider that genuinely reports 0 is reporting a number, so it
     still prices as a real 0. Cached input is a refinement of a known input count rather than a
     tier of its own, so an absent one bills the full input rate, which is what the catalog does
     when no cached rate is seeded.

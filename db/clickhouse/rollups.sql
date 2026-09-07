@@ -74,7 +74,26 @@ AS SELECT
     ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8))  AS EstimatedCost,
     ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
     count()                                AS SpanCount,
-    countIf(otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL) AS UnknownUsageSpanCount,
+    -- CTO-244 (follow-up): "unknown usage" is per operation kind, and it is only unknown when it
+    -- actually stopped us pricing the span. `InputTokens IS NULL OR OutputTokens IS NULL` was
+    -- written for the chat path and over-reported everywhere else: an embedding call has no output
+    -- side by design, and tool / vector / compute / egress spans are priced per call and carry no
+    -- token counts at all, so three correctly priced layers were being flagged unknown-usage. On a
+    -- live stack that read 5 of 8 spans unknown when 1 genuinely was, 4 of them with a real priced
+    -- cost. The `EstimatedCost IS NULL` conjunct makes the invariant structural rather than
+    -- incidental: a span counted here can never also carry a priced cost. A span whose usage is
+    -- known but whose model is not in the catalog is unpriced-but-not-unknown-usage, so it lands in
+    -- UnpricedSpanCount alone, which is the distinction these two counters exist to draw.
+    -- Getting this right at INSERT time matters: these are SummingMergeTree targets, so a wrong
+    -- count is added into the sum forever and no later merge can repair it.
+    countIf(
+        otel_spans.EstimatedCost IS NULL
+        AND multiIf(
+            otel_spans.GenAiOperation = 'embeddings', otel_spans.InputTokens IS NULL,
+            otel_spans.GenAiOperation IN ('tool', 'vector', 'compute', 'egress'), 0,
+            otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL
+        )
+    ) AS UnknownUsageSpanCount,
     countIf(otel_spans.EstimatedCost IS NULL) AS UnpricedSpanCount,
     uniqState(TraceId)                     AS TraceCountState,
     uniqState(UserIdHash)                  AS UserCountState
@@ -138,7 +157,17 @@ AS SELECT
     ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8))  AS EstimatedCost,
     ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
     count()                                AS SpanCount,
-    countIf(otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL) AS UnknownUsageSpanCount,
+    -- Same per-operation predicate as the daily MV above, and for the same reason: see the long
+    -- CTO-244 follow-up note there. Both MVs write the same counter, so they must agree exactly or
+    -- the hourly and daily views of one day disagree about how much of it we could price.
+    countIf(
+        otel_spans.EstimatedCost IS NULL
+        AND multiIf(
+            otel_spans.GenAiOperation = 'embeddings', otel_spans.InputTokens IS NULL,
+            otel_spans.GenAiOperation IN ('tool', 'vector', 'compute', 'egress'), 0,
+            otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL
+        )
+    ) AS UnknownUsageSpanCount,
     countIf(otel_spans.EstimatedCost IS NULL) AS UnpricedSpanCount,
     uniqState(TraceId)                     AS TraceCountState,
     uniqState(UserIdHash)                  AS UserCountState

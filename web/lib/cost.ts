@@ -78,17 +78,34 @@ export interface LayerCoverage {
  *
  * Without a span count a zero total is unresolvable by construction (a real measured zero and an
  * absent layer arrive identical), so it blanks rather than guessing.
+ *
+ * `unpricedCounts` (CTO-244 follow-up) is the third signal, and it overrides the second: spans we
+ * observed but could not price are NOT a measured zero. A layer whose every span is unpriced has an
+ * unknown cost and blanks with that reason, rather than reporting the "$0.00" a bare span count
+ * would otherwise license.
  */
 export function layerCoverage(
   byLayer: Readonly<Record<Layer, number>>,
   enabled: readonly Layer[],
   spanCounts?: Readonly<Partial<Record<Layer, number>>>,
+  unpricedCounts?: Readonly<Partial<Record<Layer, number>>>,
 ): LayerCoverage[] {
   return LAYERS.map((layer) => {
     const total = byLayer[layer] ?? 0;
+    const spans = spanCounts?.[layer] ?? 0;
+    const unpriced = unpricedCounts?.[layer] ?? 0;
+    if (spans > 0 && unpriced >= spans) {
+      const label = LAYER_LABEL[layer];
+      return {
+        layer,
+        totalMicroUsd: null,
+        reason: `all ${spans.toLocaleString()} ${label} span${spans === 1 ? "" : "s"} in this window could not be priced, so the cost is unknown rather than zero`,
+      };
+    }
     if (total > 0) return { layer, totalMicroUsd: total, reason: "" };
-    // Spans observed but no spend: measured, and the measurement is zero.
-    if ((spanCounts?.[layer] ?? 0) > 0) return { layer, totalMicroUsd: total, reason: "" };
+    // Spans observed, at least one of them priced, and no spend: measured, and the measurement is
+    // zero. (A partly unpriced layer keeps its priced figure; the table says it is a lower bound.)
+    if (spans > 0) return { layer, totalMicroUsd: total, reason: "" };
     const label = LAYER_LABEL[layer];
     return {
       layer,
