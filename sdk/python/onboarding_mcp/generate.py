@@ -298,6 +298,11 @@ def coverage_report(
     return {
         "tenant_key_present": bool(tenant_key),
         "probe_available": True,
+        # Present on both branches so the shape is stable: a caller reading ``result["reason"]``
+        # unconditionally used to get a KeyError exactly when the probe succeeded (CTO-261). The
+        # top-level reason explains why the probe as a whole did not answer, so on success it is
+        # empty; the per-layer reasons carry the detail.
+        "reason": "",
         "layers": [
             {
                 "layer": name,

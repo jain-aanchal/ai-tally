@@ -8,15 +8,21 @@ instrumentation is missing. The transport is a fake throughout, so no test opens
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
+import urllib.request
 from typing import Any
 
 import pytest
 from onboarding_mcp import coverage_report
 from onboarding_mcp.coverage_client import (
+    MAX_RESPONSE_BYTES,
     CoverageConfig,
     CoverageUnavailable,
+    _build_opener,
+    _read_capped,
+    _SameOriginRedirectHandler,
     config_from_env,
     derive_layer,
     fetch_coverage,
@@ -252,3 +258,214 @@ def test_fetch_coverage_error_text_carries_no_token_and_no_body():
         fetch_coverage(CONFIG, transport=_raising(exc), env=ENV)
     assert "svc-token-value" not in str(caught.value)
     assert "internal" not in str(caught.value)
+
+
+# ---------------------------------------------------------------------------------------------
+# Review fixes (CTO-261): the token never crosses an origin, every failure stays a gap, and a
+# derived status never carries prose that contradicts it.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_scheme_less_url_is_a_gap_not_a_crash():
+    """``urlopen`` raises a bare ValueError ("unknown url type"), which is not an OSError."""
+    config = CoverageConfig(gateway_url="gateway.example", tenant_id="t")
+    boom = ValueError("unknown url type: 'gateway.example'")
+    with pytest.raises(CoverageUnavailable) as caught:
+        fetch_coverage(config, transport=_raising(boom), env=ENV)
+    assert "could not" in str(caught.value)
+
+    result = coverage_report("k", transport=_raising(boom), config=config, env=ENV)
+    _assert_all_unknown_with_reason(result, "ValueError")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        http.client.IncompleteRead(b""),
+        http.client.BadStatusLine("garbage"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        RuntimeError("something nobody predicted"),
+    ],
+)
+def test_every_transport_failure_resolves_to_the_gap_shape(exc):
+    result = coverage_report("k", transport=_raising(exc), config=CONFIG, env=ENV)
+    assert result["probe_available"] is False
+    for layer in result["layers"]:
+        assert layer["status"] == "unknown"
+        assert layer["proving_spans"] is None
+        assert layer["reason"].strip()
+    # Only the class name travels: no token, no body.
+    assert "svc-token-value" not in json.dumps(result)
+
+
+def test_an_oversized_body_is_a_gap_not_an_unbounded_read():
+    class _Fat:
+        def __init__(self) -> None:
+            self.asked: int | None = None
+
+        def read(self, n: int | None = None) -> bytes:
+            self.asked = n
+            return b"x" * (MAX_RESPONSE_BYTES + 1)
+
+    fat = _Fat()
+    with pytest.raises(CoverageUnavailable) as caught:
+        _read_capped(fat)
+    # Capped at the source: the reader never pulls an unbounded stream into memory.
+    assert fat.asked == MAX_RESPONSE_BYTES + 1
+    assert "xxxx" not in str(caught.value)
+
+
+def test_a_non_utf8_body_decodes_instead_of_raising():
+    class _Mojibake:
+        def read(self, n: int | None = None) -> bytes:
+            return b'{"layers": []} \xff\xfe'
+
+    assert "layers" in _read_capped(_Mojibake())
+
+
+@pytest.mark.parametrize(
+    "base",
+    ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://gw.example"],
+)
+def test_a_safe_base_url_is_accepted(base):
+    config, reason = config_from_env({"TALLY_GATEWAY_URL": base, "TALLY_TENANT_ID": "abc"})
+    assert reason == ""
+    assert config is not None and config.gateway_url == base
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://gw.example",
+        "http://10.0.0.5:8080",
+        "ftp://gw.example",
+        "gateway.example",
+        "https://",
+    ],
+)
+def test_an_unsafe_base_url_is_a_reasoned_gap_not_an_exception(base):
+    config, reason = config_from_env({"TALLY_GATEWAY_URL": base, "TALLY_TENANT_ID": "abc"})
+    assert config is None
+    assert "TALLY_GATEWAY_URL" in reason
+    assert "othing is being claimed" in reason
+
+
+def test_a_cleartext_base_is_refused_before_the_token_is_read():
+    env = {
+        "TALLY_GATEWAY_URL": "http://gw.example",
+        "TALLY_TENANT_ID": "abc",
+        "GATEWAY_SERVICE_TOKEN": "svc-token-value",
+    }
+    result = coverage_report("k", config=None, env=env, transport=_transport(_payload()))
+    _assert_all_unknown_with_reason(result, "https")
+    assert "svc-token-value" not in json.dumps(result)
+
+
+class _FakeResponse:
+    """Enough of a response object for ``HTTPRedirectHandler.redirect_request``.
+
+    ``HTTPError`` adopts the fp it is handed, so it needs ``close`` as well as ``read``.
+    """
+
+    def read(self, n: int | None = None) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        return None
+
+
+def _redirect(from_url: str, to_url: str):
+    handler = _SameOriginRedirectHandler()
+    request = urllib.request.Request(from_url, headers={"authorization": "Bearer svc-token-value"})
+    return handler.redirect_request(
+        request, _FakeResponse(), 301, "Moved", {"location": to_url}, to_url
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://evil.example/v1/tenant/onboarding/coverage",
+        "http://gateway.example/v1/tenant/onboarding/coverage",
+        "https://gateway.example:8443/v1/tenant/onboarding/coverage",
+    ],
+)
+def test_a_cross_origin_redirect_never_forwards_the_authorization_header(target):
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _redirect("https://gateway.example/v1/tenant/onboarding/coverage", target)
+    assert "svc-token-value" not in str(caught.value)
+    assert "cross-origin redirect refused" in str(caught.value)
+
+
+def test_a_same_origin_redirect_is_still_followed():
+    redirected = _redirect(
+        "https://gateway.example/v1/tenant/onboarding/coverage",
+        "https://gateway.example/v2/tenant/onboarding/coverage",
+    )
+    assert redirected is not None
+    assert redirected.full_url == "https://gateway.example/v2/tenant/onboarding/coverage"
+
+
+def test_the_transport_opener_carries_the_same_origin_redirect_handler():
+    opener = _build_opener()
+    assert any(isinstance(handler, _SameOriginRedirectHandler) for handler in opener.handlers)
+
+
+def test_the_default_timeout_allows_for_a_cold_clickhouse_read():
+    assert CoverageConfig(gateway_url="https://gw.example", tenant_id="t").timeout >= 30.0
+
+
+def test_a_drifted_row_reason_matches_the_status_we_derived():
+    """A ``not_wired`` row with real spans must not carry "not wired" prose under ``covered``."""
+    row = {
+        "layer": "tools",
+        "state": "not_wired",
+        "proving_spans": 5,
+        "reason": "not wired: no span with GenAiOperation = 'tool'",
+    }
+    derived = derive_layer(row)
+    assert derived["status"] == "covered"
+    assert derived["proving_spans"] == 5
+    assert "not wired" not in derived["reason"]
+
+
+def test_an_unreadable_count_never_delivers_a_fabricated_negative_as_prose():
+    row = {
+        "layer": "tools",
+        "state": "not_wired",
+        "proving_spans": "many",
+        "reason": "not wired: no span found",
+    }
+    derived = derive_layer(row)
+    assert derived["status"] == "unknown"
+    assert derived["proving_spans"] is None
+    assert "not wired" not in derived["reason"]
+
+
+def test_an_agreeing_row_keeps_the_probes_own_prose():
+    derived = derive_layer(_row("llm", "covered", 12))
+    assert derived["status"] == "covered"
+    assert derived["reason"] == "llm: covered"
+
+
+def test_a_drifted_awaiting_row_says_it_is_awaiting_not_what_the_wire_said():
+    row = {
+        "layer": "vector",
+        "state": "not_wired",
+        "proving_spans": 0,
+        "reason": "not wired at all",
+    }
+    derived = derive_layer(row, wired=True)
+    assert derived["status"] == "awaiting_first_event"
+    assert "not wired at all" not in derived["reason"]
+
+
+def test_the_success_path_carries_a_reason_key_too():
+    result = coverage_report(
+        "k", transport=_transport(_payload(_row("llm", "covered", 3))), config=CONFIG, env=ENV
+    )
+    assert result["probe_available"] is True
+    # Reading result["reason"] unconditionally must not raise on the success branch.
+    assert result["reason"] == ""
+    failed = coverage_report("k", transport=_raising(TimeoutError()), config=CONFIG, env=ENV)
+    assert set(failed) == set(result)
