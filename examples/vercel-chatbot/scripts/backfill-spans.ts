@@ -576,13 +576,13 @@ function toolSpan(
     "gen_ai.system": tool.provider,
     "gen_ai.operation.name": "tool",
     "gen_ai.tool.name": tool.name,
-    // Two carriers on purpose. `gen_ai.tool.cost_micro_usd` is what the SDK's record_tool_call
-    // emits, so keeping it makes this corpus wire-identical to a real tool span; but only
-    // `gen_ai.cost.estimated_micro_usd` reaches the EstimatedCost column (gateway.mapping), and a
-    // tool span carries no model, so cost enrichment leaves the client value in place rather than
-    // overwriting it. Without the second key the Tools layer bar is a fabricated $0.
+    // One carrier, the same one the SDK's record_tool_call emits, so this corpus is wire-identical
+    // to a real tool span and exercises the gateway's promotion rather than bypassing it (CTO-243).
+    // This previously also set `gen_ai.cost.estimated_micro_usd` directly, because nothing promoted
+    // the tool carrier and the Tools layer bar read a fabricated $0. Now that enrich_cost prices
+    // tool and vector calls, writing the cost column here would mask a regression in that promotion:
+    // the corpus would look correct even if the gateway stopped resolving these costs.
     "gen_ai.tool.cost_micro_usd": micro,
-    "gen_ai.cost.estimated_micro_usd": micro,
     "gen_ai.cost.currency": "USD",
   };
 }
@@ -599,10 +599,11 @@ function vectorSpan(
     SpanName: "vector.query",
     "gen_ai.system": v.provider,
     "gen_ai.operation.name": "vector",
-    // Same {provider}.{index}.{operation} slot the SDK's record_vector_call uses.
+    // Same {provider}.{index}.{operation} slot the SDK's record_vector_call uses. The gateway
+    // prices off the last dot-segment, so an index name containing dots still resolves.
     "gen_ai.tool.name": `${v.provider}.${v.index}.${v.op}`,
+    // Single carrier, for the reason spelled out in toolSpan above (CTO-243).
     "gen_ai.tool.cost_micro_usd": micro,
-    "gen_ai.cost.estimated_micro_usd": micro,
     "gen_ai.cost.currency": "USD",
   };
 }
