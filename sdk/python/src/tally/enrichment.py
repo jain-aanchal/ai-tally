@@ -22,6 +22,20 @@ from tally.schema import GenAI
 
 DEFAULT_DRIFT_THRESHOLD = 0.05  # 5%
 
+# CTO-244: which token counts an operation has to carry before its cost can be resolved. The rule
+# differs per operation because the layers are BILLED differently, not as a convenience, so do not
+# collapse these back into one both-sides check:
+#   - an embedding call has no output side at all by design, and is priced off the input tokens
+#     alone (see compute_embedding_cost_micro_usd), so demanding an output count marks every
+#     correctly instrumented embedding span unknown-usage and refuses to price it;
+#   - tool / vector / compute / egress calls are priced PER CALL and carry no token counts at all,
+#     so there is no token usage for them to be unknown about.
+# These sets are the write-side half of one rule: they mirror, operation for operation, the
+# UnknownUsageSpanCount predicate in db/clickhouse/rollups.sql. Change one and you must change the
+# other, or a span can be counted unknown-usage on read while carrying a priced cost from write.
+_INPUT_ONLY_OPERATIONS = frozenset({"embeddings"})
+_PER_CALL_OPERATIONS = frozenset({"tool", "vector", "compute", "egress"})
+
 
 @dataclass(frozen=True, slots=True)
 class EnrichmentResult:
@@ -49,23 +63,48 @@ def _usage_or_none(attributes: dict[str, object]) -> Usage | None:
     That is the exact failure the Nullable cost columns exist to prevent. Returning None instead
     leaves the cost unresolved so the row lands NULL with ``CostSource = 'unpriced'``.
 
-    Input and output are both required, matching the chat branch of the rollup's
-    UnknownUsageSpanCount predicate (which is per operation kind: an embedding has only an input
-    side, and tool / vector spans are priced per call and have no token usage at all). The
-    invariant both sides keep is that a span counted as unknown-usage must not also carry a priced
-    cost. A provider that genuinely reports 0 is reporting a number, so it
+    What counts as "actually reported" is per operation, keyed off ``gen_ai.operation.name``: the
+    same discriminator the cost layers and the rollup's UnknownUsageSpanCount predicate use. See
+    ``_INPUT_ONLY_OPERATIONS`` / ``_PER_CALL_OPERATIONS`` for why the rule cannot be one both-sides
+    check. Chat is the fallback for an absent or unrecognised operation, because a token-priced LLM
+    call understated by a missing side is the failure worth being strict about.
+
+    The invariant both the read and write sides keep is that a span counted as unknown-usage must
+    not also carry a priced cost. A provider that genuinely reports 0 is reporting a number, so it
     still prices as a real 0. Cached input is a refinement of a known input count rather than a
     tier of its own, so an absent one bills the full input rate, which is what the catalog does
     when no cached rate is seeded.
     """
+    operation = attributes.get(GenAI.OPERATION_NAME)
+    op = operation.strip().lower() if isinstance(operation, str) else ""
+    cached_tokens = _int_or_none(attributes.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0
+
+    if op in _PER_CALL_OPERATIONS:
+        # Priced per call from the catalog, so there are no counts to miss. Any per-call branch
+        # upstream of here resolves the cost before this point; this only keeps the token check
+        # from vetoing an operation that never had tokens.
+        return Usage(input_tokens=0, output_tokens=0, cached_input_tokens=0)
+
     input_tokens = _int_or_none(attributes.get(GenAI.USAGE_INPUT_TOKENS))
     output_tokens = _int_or_none(attributes.get(GenAI.USAGE_OUTPUT_TOKENS))
+
+    if op in _INPUT_ONLY_OPERATIONS:
+        if input_tokens is None:
+            return None
+        # An absent output side is the norm here, not an omission, so it is a real 0 rather than
+        # an unknown. The input count is what the embedding rate is applied to.
+        return Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens if output_tokens is not None else 0,
+            cached_input_tokens=cached_tokens,
+        )
+
     if input_tokens is None or output_tokens is None:
         return None
     return Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cached_input_tokens=_int_or_none(attributes.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0,
+        cached_input_tokens=cached_tokens,
     )
 
 
@@ -85,7 +124,9 @@ def enrich_cost(
     - on a catalog miss the cost key is removed and ``catalog_miss`` is True (span still returned);
     - CTO-244: when the model is priceable but no usable token counts were reported the cost key is
       likewise removed and ``usage_unknown`` is True, so the row lands NULL / 'unpriced' rather
-      than claiming a priced 0.
+      than claiming a priced 0. Which counts are required is per operation (see
+      ``_usage_or_none``), so an embedding or a per-call layer is never marked unknown-usage for
+      lacking a token count it was never going to have.
     """
     out = dict(attributes)
     client_cost = _int_or_none(out.get(GenAI.COST_ESTIMATED_MICRO_USD))
