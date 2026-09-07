@@ -155,6 +155,42 @@ def test_explain_layer_on_boto3_is_a_gap_not_a_confident_llm_answer():
     assert result["gap"] is True
 
 
+def test_explain_layer_on_ambiguous_common_word_prose_is_a_gap():
+    # "together" is a real package (together.ai) AND an everyday adverb, so free-text prose
+    # containing it must not ground on the LLM layer. A gap beats a confident wrong answer
+    # (CTO-261 review finding 2, CLAUDE.md "honest under uncertainty").
+    for prose in (
+        "let us work through this together",
+        "do these two calls get metered together?",
+        "how are my agents metered?",
+        "do the numbers cohere across layers?",
+    ):
+        result = explain_layer(prose)
+        assert result["gap"] is True, prose
+
+
+def test_explain_layer_still_answers_an_ambiguous_token_in_package_shaped_context():
+    # The stronger signal is import-shaped or package-shaped context, so a genuine
+    # together.ai question still gets the grounded LLM answer.
+    for excerpt in (
+        "import together",
+        "what records this together.ai call?",
+        "from together import Together",
+    ):
+        result = explain_layer(excerpt)
+        assert result.get("gap") is not True, excerpt
+        assert result["call"] == "tally.record_llm_call", excerpt
+
+
+def test_detect_stack_still_detects_together_from_a_manifest_and_from_imports():
+    # The explain_layer guard must not cost together.ai manifest / import detection: in
+    # detect_stack the token appearing really does mean the dependency is present.
+    manifest = detect_stack("together==1.2.3\n")
+    assert "llm.generic.call" in manifest["matched_recipes"]
+    excerpt = detect_stack("", "import together\nclient = together.Together()")
+    assert "llm.generic.call" in excerpt["matched_recipes"]
+
+
 def test_explain_layer_does_not_match_an_import_name_buried_in_a_longer_identifier():
     # Imports match on identifier-token boundaries rather than bare substrings, so an
     # unrelated name that merely contains a provider name is a gap, not a confident
