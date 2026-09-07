@@ -1640,7 +1640,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
           severity: "warn",
           message:
             `${feature} ran ${uncosted.toLocaleString()} tool calls with no cost attached over the last 30 days. ` +
-            `Those calls are uncosted — the all-in spend for this feature is understated.`,
+            `Those calls are uncosted, so the all-in spend for this feature is understated.`,
         },
       });
     }

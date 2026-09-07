@@ -93,7 +93,7 @@ describe("FeatureValueEvents (CTO-140)", () => {
     render(<FeatureValueEvents initialFeatures={[feature({})]} />);
     fireEvent.click(screen.getByText(/configure value event/i));
     await waitFor(() =>
-      expect(screen.getByText(/No business events yet — wire Stripe/i)).toBeTruthy(),
+      expect(screen.getByText(/No business events yet: wire Stripe/i)).toBeTruthy(),
     );
   });
 

@@ -100,7 +100,7 @@ export function Onboarding({
           </h2>
           <p className="mb-3 text-sm text-muted">
             Set two environment variables. Your <code className="text-muted">OPENAI_API_KEY</code>{" "}
-            stays in your environment — we never see it.
+            stays in your environment. We never see it.
           </p>
 
           <div className="mb-2 flex gap-1 text-xs">
@@ -155,7 +155,7 @@ export function Onboarding({
               {status.timeToFirstTraceMs !== null && (
                 <>
                   in <strong>{formatDuration(status.timeToFirstTraceMs)}</strong>
-                  {status.withinTarget ? " — under the 5-minute target ✓" : ""}
+                  {status.withinTarget ? ", under the 5-minute target ✓" : ""}
                 </>
               )}
               . Your dashboards will populate as traces flow in.

@@ -36,7 +36,7 @@ export function SyntheticPreviewBanner({
             Sample data
           </span>
           <span className="text-muted">
-            Preview of {workflow} — no real telemetry yet. These numbers are synthetic.
+            Preview of {workflow}: no real telemetry yet. These numbers are synthetic.
           </span>
         </div>
         <ConnectorCta />
@@ -76,9 +76,9 @@ export function PartialDataBanner({
   if (trippedLayers && trippedLayers.length > 0) {
     const names = trippedLayers.join(", ");
     const verb = trippedLayers.length === 1 ? "is" : "are";
-    body = `${names} ${verb} reporting zero — that connector isn’t producing data right now.`;
+    body = `${names} ${verb} reporting zero. That connector isn’t producing data right now.`;
   } else {
-    body = `Showing what we have, but ${missing ?? "a data source"} isn’t connected yet — some numbers are incomplete.`;
+    body = `Showing what we have, but ${missing ?? "a data source"} isn’t connected yet, so some numbers are incomplete.`;
   }
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
@@ -115,7 +115,7 @@ export function StaleBadge({
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-warn/50 bg-warn/10 px-2.5 py-1 text-xs font-medium text-warn">
         <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-warn" />
-        Stale — {verb} {age} (as of {asOf})
+        Stale: {verb} {age} (as of {asOf})
       </span>
     );
   }
