@@ -25,6 +25,7 @@ from .guards import (
     assert_git_subcommand_allowed,
     assert_push_flags_allowed,
     assert_push_target_allowed,
+    assert_token_env_name_allowed,
     redact,
 )
 
@@ -67,6 +68,10 @@ class GitRunner:
 
     def _askpass_path(self) -> Path:
         if self._askpass is None:
+            # Re-checked at the point of interpolation, not only at config construction: this
+            # is the one place an operator string becomes shell source, so the refusal lives
+            # next to the substitution (CTO-261 section 9).
+            assert_token_env_name_allowed(self.config.token_env)
             path = self.workdir / "askpass.sh"
             path.write_text(_ASKPASS_TEMPLATE.replace("${token_env}", f"${self.config.token_env}"))
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -150,8 +155,24 @@ class GitRunner:
         self.run("add", "-A", cwd=repo_dir)
         self.run("commit", "-m", message, cwd=repo_dir)
 
-    def push_branch(self, repo_dir: Path, branch: str, default_branch: str) -> None:
+    def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool:
+        """Ask the remote whether the branch is already there.
+
+        A branch that exists means an earlier run got this far. Reporting that by name beats
+        the bare non-fast-forward error git would otherwise raise at push time (CTO-261).
+        """
+        result = self.run(
+            "ls-remote", "--heads", "origin", branch, cwd=repo_dir, with_credentials=True
+        )
+        return bool(result.stdout.strip())
+
+    def push_branch(
+        self, repo_dir: Path, branch: str, default_branch: str, *, flags: tuple[str, ...] = ()
+    ) -> None:
         """Push the new branch. The single push path in the component, and it is guarded."""
         assert_push_target_allowed(branch, default_branch)
-        assert_push_flags_allowed([])
-        self.run("push", "origin", f"{branch}:{branch}", cwd=repo_dir, with_credentials=True)
+        argv = ["push", *flags, "origin", f"{branch}:{branch}"]
+        # The flags actually in the argv, not a hard-coded empty list: a refusal that
+        # inspects nothing reads like enforcement and enforces nothing (CTO-261 section 9).
+        assert_push_flags_allowed([arg for arg in argv if arg.startswith("-")])
+        self.run(*argv, cwd=repo_dir, with_credentials=True)
