@@ -18,6 +18,10 @@ class ErrorCode(str, Enum):
     HMAC_EXPORT_DISABLED = "HMAC_EXPORT_DISABLED"  # per-tenant policy forbids HMAC key export (Init 2 §3.2)
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"          # monthly tenant quota spent
     RATE_LIMITED = "RATE_LIMITED"              # short-term per-tenant rate cap hit
+    # CTO-245: the durable (tenant_id, batch_id) store could not answer, so the gateway cannot tell
+    # a replay from a new batch. Retryable on purpose: accepting a batch we cannot dedup would
+    # double-count its spend permanently, and no later query could tell which dollars were doubled.
+    IDEMPOTENCY_UNAVAILABLE = "IDEMPOTENCY_UNAVAILABLE"
 
     # --- validation (CTO-34) ---
     INVALID_SCHEMA = "INVALID_SCHEMA"          # span/event fails OTel + extension schema
