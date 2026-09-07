@@ -250,7 +250,15 @@ const MIN_MEANINGFUL_SAVINGS_PCT = 0.05;
  */
 export function deriveRecommendation(input: {
   currentModel: string;
-  currentCostMicroUsd: MicroUSD;
+  /**
+   * CTO-244: null when the incumbent's spend could not be fully priced over the window.
+   *
+   * A savings projection is `current - candidate`, so an under-counted `current` understates the
+   * saving; worse, the candidate side is derived from a FULL call count, so the two sides describe
+   * different populations and the percentage is wrong rather than merely small. We refuse to
+   * project rather than publish a confident number built on a coverage gap.
+   */
+  currentCostMicroUsd: MicroUSD | null;
   candidates: RecommendationCandidate[];
   /** total replayed responses across candidates — the gate for whether we recommend at all. */
   samplesReplayed: number;
@@ -261,6 +269,17 @@ export function deriveRecommendation(input: {
     (best, c) => (best === null || c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best),
     null,
   );
+
+  // CTO-244: an unpriced incumbent cannot anchor a savings projection. Report zero savings with a
+  // verdict that says WHY, instead of a percentage measured against a number we do not have.
+  if (currentCostMicroUsd === null) {
+    return {
+      verdict: "mixed",
+      summary: `— cannot project savings for ${currentModel}: some of its spend over the window could not be priced, so its monthly cost is unknown. Fix the pricing gap before comparing candidates.`,
+      projectedSavingsMicroUsd: 0,
+      projectedSavingsPct: 0,
+    };
+  }
 
   const projectedSavingsMicroUsd = cheapest
     ? Math.max(0, currentCostMicroUsd - cheapest.monthlyCostMicroUsd)

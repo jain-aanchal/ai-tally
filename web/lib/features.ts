@@ -7,7 +7,8 @@ export interface FeatureEconomics {
   feature: string;
   /** value event the ROI is attributed against; null = unattributed */
   valueEvent: string | null;
-  costPerUserMicroUsd: MicroUSD;
+  /** CTO-244: null when any span for this feature could not be priced. See types.ts FeatureRoi. */
+  costPerUserMicroUsd: MicroUSD | null;
   valuePerUserMicroUsd: MicroUSD | null;
   paybackDays: number | null;
   attributionRate: number | null; // 0..1
@@ -29,7 +30,10 @@ export interface FeatureEconomics {
 }
 
 export function margin(e: FeatureEconomics): number | null {
-  if (e.valuePerUserMicroUsd === null) return null;
+  // CTO-244: an unknown cost per user makes the margin unknown too. Substituting 0 for the cost
+  // would report a 100% margin on a feature we cannot price, which is the most flattering possible
+  // fabrication and exactly the failure the honest-blank posture exists to prevent.
+  if (e.valuePerUserMicroUsd === null || e.costPerUserMicroUsd === null) return null;
   if (e.valuePerUserMicroUsd === 0) return 0;
   return (e.valuePerUserMicroUsd - e.costPerUserMicroUsd) / e.valuePerUserMicroUsd;
 }

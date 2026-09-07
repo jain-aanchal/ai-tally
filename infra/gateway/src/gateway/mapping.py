@@ -166,6 +166,20 @@ def _i(v: object | None) -> int:
     return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
 
 
+def _i_or_none(v: object | None) -> int | None:
+    """Like :func:`_i` but returns None (-> ClickHouse NULL) when the value is not a number.
+
+    CTO-244. The columns this feeds (InputTokens/OutputTokens/CachedInputTokens) are Nullable
+    precisely so that "the provider never told us" is representable. Coercing an absent or
+    unparseable count to 0 asserted that a real, billed call consumed nothing, which is a
+    fabricated number, not a conservative one. A provider-reported 0 is a number and still
+    stores as 0, distinct from NULL.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return int(v)
+
+
 def _fixed64(v: object | None) -> str:
     """FixedString(64) wants exactly 64 bytes; ClickHouse pads, but truncate over-long input."""
     s = _s(v)
@@ -198,11 +212,17 @@ def span_to_row(
     """
     ts = datetime.fromtimestamp(effective_ts_ns / 1e9, tz=timezone.utc)
 
+    # CTO-244. A span that carries no priced cost is UNPRICED, not free. Writing Decimal(0) here
+    # told every downstream sum that a real call cost nothing; the honest write is NULL plus the
+    # reason. The reason reuses the existing cost-source notion rather than a parallel one:
+    # CostSource = 'unpriced', alongside the empty PriceCatalogVersion that tally.pricing already
+    # returns on a catalog miss (see compute_cost_micro_usd, which yields version "" when a rate is
+    # missing). A provider/SDK-reported cost of exactly 0 micro-USD is a real priced zero and is
+    # still stored as 0 with CostSource = 'estimated'.
     cost_micro = span.get(GenAI.COST_ESTIMATED_MICRO_USD)
-    estimated_cost: Decimal = (
-        micro_to_usd(cost_micro) if isinstance(cost_micro, int) and not isinstance(cost_micro, bool)
-        else Decimal(0)
-    )
+    priced = isinstance(cost_micro, int) and not isinstance(cost_micro, bool)
+    estimated_cost: Decimal | None = micro_to_usd(cost_micro) if priced else None
+    cost_source = "estimated" if priced else "unpriced"
 
     # Long-tail attributes: anything not promoted and not structural, stringified for Map(String,String).
     # PII guard (CTO-118): refuse to persist any key that looks like it could carry a message body.
@@ -241,12 +261,13 @@ def span_to_row(
         _s(span.get(GenAI.RESPONSE_MODEL)),
         _s(span.get(GenAI.OPERATION_NAME)),
         _s(span.get(GenAI.TOOL_NAME)),
-        _i(span.get(GenAI.USAGE_INPUT_TOKENS)),
-        _i(span.get(GenAI.USAGE_OUTPUT_TOKENS)),
-        _i(span.get(GenAI.USAGE_CACHED_INPUT_TOKENS)),
+        # CTO-244: absent usage writes NULL, never 0. See _i_or_none.
+        _i_or_none(span.get(GenAI.USAGE_INPUT_TOKENS)),
+        _i_or_none(span.get(GenAI.USAGE_OUTPUT_TOKENS)),
+        _i_or_none(span.get(GenAI.USAGE_CACHED_INPUT_TOKENS)),
         estimated_cost,
         _s(span.get(GenAI.COST_CURRENCY) or "USD"),
-        "estimated",
+        cost_source,
         _s(span.get(GenAI.COST_PRICE_CATALOG_VERSION)),
         _s(span.get(GenAI.AGENT_RUN_ID)),
         _i(span.get(GenAI.AGENT_STEP_INDEX)),

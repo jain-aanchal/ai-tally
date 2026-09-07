@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS daily_feature_rollup
     EstimatedCost       Decimal64(8),
     ReconciledCost      Decimal64(8),
     SpanCount           UInt64,
+    -- CTO-244 coverage counters. otel_spans.InputTokens/OutputTokens/EstimatedCost are Nullable:
+    -- "the provider never told us" is a real state and it is not 0. The sums above therefore cover
+    -- only the spans we actually know, which makes them a LOWER BOUND, not a total. These two
+    -- counters are what stops that from being silent: a reader that finds them non-zero must say
+    -- the figure is partial (and blank any per-call or per-token derivation from it) rather than
+    -- present an under-count as complete. They are plain UInt64 so SummingMergeTree adds them the
+    -- same way it adds SpanCount.
+    UnknownUsageSpanCount UInt64,
+    UnpricedSpanCount     UInt64,
     TraceCountState     AggregateFunction(uniq, String),
     UserCountState      AggregateFunction(uniq, FixedString(64))
 )
@@ -26,19 +35,51 @@ ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(Day)
 ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Day);
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS daily_feature_rollup_mv
+
+-- CTO-244 migration for an EXISTING deployment. Two steps, and both are needed.
+--
+-- 1. The CREATE TABLE above is IF NOT EXISTS, so it is a no-op on a stack that already has these
+--    tables. Add the coverage counters explicitly. `AFTER SpanCount` keeps the physical column
+--    order identical to the CREATE TABLE, and DEFAULT 0 makes it metadata-only: rows rolled up
+--    before this change read 0 unknown, which is not a claim that they had no unknowns. It is a
+--    claim that nobody counted, because before the cutover an unknown was indistinguishable from a
+--    real zero. Pre-cutover rollup figures may understate spend and cannot be corrected. See the
+--    CTO-244 note in otel_spans.sql and RUNNING.md.
+-- 2. A materialized view's SELECT cannot be ALTERed, and `CREATE ... IF NOT EXISTS` will not
+--    replace one that already exists, so a replay would leave the old definition writing the old
+--    columns forever. The MVs below are therefore DROPped and recreated on every replay. Dropping
+--    a `TO`-table MV does not touch the target table, so no history is lost; the only cost is that
+--    spans inserted during the drop/create window are not rolled up, which is why ch-migrate is an
+--    operator action rather than something on the ingest path.
+ALTER TABLE daily_feature_rollup
+    ADD COLUMN IF NOT EXISTS UnknownUsageSpanCount UInt64 DEFAULT 0 AFTER SpanCount,
+    ADD COLUMN IF NOT EXISTS UnpricedSpanCount     UInt64 DEFAULT 0 AFTER UnknownUsageSpanCount;
+
+ALTER TABLE hourly_feature_rollup
+    ADD COLUMN IF NOT EXISTS UnknownUsageSpanCount UInt64 DEFAULT 0 AFTER SpanCount,
+    ADD COLUMN IF NOT EXISTS UnpricedSpanCount     UInt64 DEFAULT 0 AFTER UnknownUsageSpanCount;
+
+DROP VIEW IF EXISTS daily_feature_rollup_mv;
+CREATE MATERIALIZED VIEW daily_feature_rollup_mv
 TO daily_feature_rollup
 AS SELECT
     TenantId,
     toDate(Timestamp)                      AS Day,
     FeatureTag,
     GenAiResponseModel,
-    sum(InputTokens)                       AS InputTokens,
-    sum(OutputTokens)                      AS OutputTokens,
-    sum(CachedInputTokens)                 AS CachedInputTokens,
-    sum(EstimatedCost)                     AS EstimatedCost,
-    sum(ifNull(ReconciledCost, toDecimal64(0, 8))) AS ReconciledCost,
+    -- CTO-244: sum() already skips NULLs. ifNull sits OUTSIDE the aggregate (an all-NULL group sums
+    -- to NULL) so the result stays non-Nullable for the SummingMergeTree target column; wrapping the
+    -- column instead trips ClickHouse's nested-aggregate check. The `otel_spans.` qualifier is
+    -- required for the same reason: the output alias shadows the column name, so an unqualified
+    -- reference inside the aggregate resolves to the alias and ClickHouse sees sum() inside sum(). The honesty lives in the two counters below, not in the sum.
+    ifNull(sum(otel_spans.InputTokens), 0)            AS InputTokens,
+    ifNull(sum(otel_spans.OutputTokens), 0)           AS OutputTokens,
+    ifNull(sum(otel_spans.CachedInputTokens), 0)      AS CachedInputTokens,
+    ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8))  AS EstimatedCost,
+    ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
     count()                                AS SpanCount,
+    countIf(otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL) AS UnknownUsageSpanCount,
+    countIf(otel_spans.EstimatedCost IS NULL) AS UnpricedSpanCount,
     uniqState(TraceId)                     AS TraceCountState,
     uniqState(UserIdHash)                  AS UserCountState
 FROM otel_spans
@@ -57,6 +98,15 @@ CREATE TABLE IF NOT EXISTS hourly_feature_rollup
     EstimatedCost       Decimal64(8),
     ReconciledCost      Decimal64(8),
     SpanCount           UInt64,
+    -- CTO-244 coverage counters. otel_spans.InputTokens/OutputTokens/EstimatedCost are Nullable:
+    -- "the provider never told us" is a real state and it is not 0. The sums above therefore cover
+    -- only the spans we actually know, which makes them a LOWER BOUND, not a total. These two
+    -- counters are what stops that from being silent: a reader that finds them non-zero must say
+    -- the figure is partial (and blank any per-call or per-token derivation from it) rather than
+    -- present an under-count as complete. They are plain UInt64 so SummingMergeTree adds them the
+    -- same way it adds SpanCount.
+    UnknownUsageSpanCount UInt64,
+    UnpricedSpanCount     UInt64,
     TraceCountState     AggregateFunction(uniq, String),
     UserCountState      AggregateFunction(uniq, FixedString(64))
 )
@@ -64,19 +114,27 @@ ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(Hour)
 ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Hour);
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS hourly_feature_rollup_mv
+DROP VIEW IF EXISTS hourly_feature_rollup_mv;
+CREATE MATERIALIZED VIEW hourly_feature_rollup_mv
 TO hourly_feature_rollup
 AS SELECT
     TenantId,
     toStartOfHour(Timestamp)               AS Hour,
     FeatureTag,
     GenAiResponseModel,
-    sum(InputTokens)                       AS InputTokens,
-    sum(OutputTokens)                      AS OutputTokens,
-    sum(CachedInputTokens)                 AS CachedInputTokens,
-    sum(EstimatedCost)                     AS EstimatedCost,
-    sum(ifNull(ReconciledCost, toDecimal64(0, 8))) AS ReconciledCost,
+    -- CTO-244: sum() already skips NULLs. ifNull sits OUTSIDE the aggregate (an all-NULL group sums
+    -- to NULL) so the result stays non-Nullable for the SummingMergeTree target column; wrapping the
+    -- column instead trips ClickHouse's nested-aggregate check. The `otel_spans.` qualifier is
+    -- required for the same reason: the output alias shadows the column name, so an unqualified
+    -- reference inside the aggregate resolves to the alias and ClickHouse sees sum() inside sum(). The honesty lives in the two counters below, not in the sum.
+    ifNull(sum(otel_spans.InputTokens), 0)            AS InputTokens,
+    ifNull(sum(otel_spans.OutputTokens), 0)           AS OutputTokens,
+    ifNull(sum(otel_spans.CachedInputTokens), 0)      AS CachedInputTokens,
+    ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8))  AS EstimatedCost,
+    ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
     count()                                AS SpanCount,
+    countIf(otel_spans.InputTokens IS NULL OR otel_spans.OutputTokens IS NULL) AS UnknownUsageSpanCount,
+    countIf(otel_spans.EstimatedCost IS NULL) AS UnpricedSpanCount,
     uniqState(TraceId)                     AS TraceCountState,
     uniqState(UserIdHash)                  AS UserCountState
 FROM otel_spans

@@ -97,6 +97,46 @@ curl -s 'http://localhost:8123/?user=tally&password=tally&database=default' \
 or open a SQL shell with `make ch` and run
 `SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans WHERE TenantId='local-dev' GROUP BY FeatureTag`.
 
+### Nullable usage and cost (CTO-244)
+
+`InputTokens`, `OutputTokens`, `CachedInputTokens` and `EstimatedCost` are **nullable**. "We do not
+know" is a real state and it is not zero. The common case is a streamed response through the edge
+proxy: usage cannot be scanned off the stream, so the provider never tells us what the call
+consumed. Those spans store `NULL`, and `CostSource = 'unpriced'` records why the cost is missing
+(the same empty `PriceCatalogVersion` that `tally.pricing` already returns on a catalog miss). A
+cost or token count that the provider really did report as `0` still stores as `0` and stays
+distinguishable from `NULL`.
+
+This matters when you read the data yourself. `sum()` skips NULLs, so a plain
+`sum(EstimatedCost)` is a **lower bound**, not a total. Ask for the coverage alongside it:
+
+```sql
+SELECT sum(EstimatedCost)                AS known_spend,
+       countIf(EstimatedCost IS NULL)    AS unpriced_spans,
+       count()                           AS spans
+FROM otel_spans WHERE TenantId = 'local-dev';
+```
+
+The rollups carry the same disclosure as `UnpricedSpanCount` and `UnknownUsageSpanCount` columns.
+Anything that divides cost by a count (per call, per user, per conversion, per token) is a ratio
+between a partial numerator and a complete denominator whenever `unpriced_spans > 0`; the dashboard
+renders those as a blank with a reason rather than a smaller number.
+
+**Applying it to a stack that is already up.** Run `make ch-migrate` from `infra/`. Unlike the
+earlier additive column migrations, this one issues `MODIFY COLUMN`, which is a real ClickHouse
+mutation: it rewrites the affected parts in the background (watch `system.mutations`) instead of
+being metadata-only. Ingest keeps working while it runs. Replaying is safe, because modifying a
+column to the type it already has is a no-op.
+
+**Known limitation: figures from before this cutover may understate spend.** Rows written earlier
+hold `0` where the truth was either a genuine provider-reported zero **or** an unknown that ingest
+flattened to zero. Nothing recorded which, so nothing can separate them now. There is deliberately
+no backfill: guessing which zeros "should" be NULL would fabricate exactly the kind of number this
+change removes. So pre-cutover totals may be lower than the real spend, by an amount no query can
+measure, and the pre-cutover `UnpricedSpanCount` of `0` means "nobody counted", not "there were no
+unknowns". Post-cutover data is honest. If a clean baseline matters more than history on a local
+stack, `make nuke && make up && make seed` and re-backfill.
+
 ## 4. Run the web dashboard
 
 In a separate terminal:

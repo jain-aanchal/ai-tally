@@ -991,3 +991,97 @@ describe("querySettledCostSeries — settled-day rule (CTO-207)", () => {
     expect(await querySettledCostSeries()).toBeNull();
   });
 });
+
+// --- CTO-244: unknown usage / cost must survive into the readers as unknown ---------------------
+//
+// The write side is covered in infra/gateway (an absent token count stores NULL, a real 0 stores 0,
+// a catalog miss stores a NULL cost with CostSource = 'unpriced'). These cases cover the READ side:
+// what the dashboard does when a slice is part known and part unknown. The rule under test is that
+// a partly-unknown figure is never presented as though it were complete, and a per-unit figure
+// derived from a partial numerator blanks rather than silently shrinking.
+
+describe("CTO-244 - reading a mix of known and unknown", () => {
+  it("microOrNull keeps NULL as null while micro() would flatten it to 0", async () => {
+    const { micro, microOrNull } = await freshSut();
+    // ClickHouse serialises a Nullable column as JSON null in JSONEachRow.
+    expect(micro(null)).toBe(0);
+    expect(microOrNull(null)).toBeNull();
+    // A real zero is still a number on both paths, and stays distinct from the unknown.
+    expect(microOrNull("0")).toBe(0);
+    expect(microOrNull("0.75")).toBe(750_000);
+  });
+
+  it("querySpendSummary reports how much of the window it could not price", async () => {
+    const { querySpendSummary } = await freshSut();
+    // Two of five spans in the window were unpriced: the $12.50 total is a LOWER BOUND.
+    respondRows([
+      { total: "12.50", estimated: "12.50", reconciled: "0", recThrough: null, unpriced: "2", spans: "5" },
+    ]);
+    respondRows([{ layer: "llm", cost: "12.50" }]);
+    const out = (await querySpendSummary())!;
+    expect(out.totalMicroUsd).toBe(12_500_000);
+    // The disclosure that stops the headline reading as complete.
+    expect(out.unpricedSpanCount).toBe(2);
+    expect(out.spanCount).toBe(5);
+  });
+
+  it("querySpendSummary reports zero unpriced spans when everything is priced", async () => {
+    const { querySpendSummary } = await freshSut();
+    respondRows([
+      { total: "12.50", estimated: "12.50", reconciled: "0", recThrough: null, unpriced: "0", spans: "5" },
+    ]);
+    respondRows([{ layer: "llm", cost: "12.50" }]);
+    const out = (await querySpendSummary())!;
+    expect(out.unpricedSpanCount).toBe(0);
+  });
+
+  it("queryOutliers blanks the multiple rather than fabricating 1x median", async () => {
+    const { queryOutliers } = await freshSut();
+    respondRows([
+      // An unpriced run: ClickHouse returns NULL for both the sum and the derived multiple.
+      { runId: "r_unknown", agent: "a", cost: null, mult: null },
+      { runId: "r_known", agent: "a", cost: "2.00", mult: "4" },
+    ]);
+    const out = (await queryOutliers())!;
+    expect(out[0].costMicroUsd).toBeNull();
+    // Was `: 1` - a reassuring, invented figure for the run we understand least.
+    expect(out[0].multipleOfMedian).toBeNull();
+    expect(out[1].costMicroUsd).toBe(2_000_000);
+    expect(out[1].multipleOfMedian).toBe(4);
+  });
+
+  it("queryCurrentModel refuses to project a month from a partly-unpriced week", async () => {
+    const { queryCurrentModel } = await freshSut();
+    respond({
+      model: "claude-sonnet-4.5",
+      provider: "anthropic",
+      cost7d: "1.40",
+      unpriced7d: "3",
+      p95Ms: 2400,
+      errRate: 0.004,
+      sampleCount: 500,
+    });
+    const out = (await queryCurrentModel())!;
+    // monthlyCalls projects ALL calls; the cost sum covers only the priced ones. Publishing both
+    // would put a savings percentage on a coverage gap.
+    expect(out.monthlyCostMicroUsd).toBeNull();
+    expect(out.monthlyCalls).toBe(Math.round((500 * 30) / 7));
+    // Latency and error rate are unaffected: they do not depend on pricing.
+    expect(out.latencyP95Ms).not.toBeNull();
+  });
+
+  it("queryCurrentModel still projects when the whole week is priced", async () => {
+    const { queryCurrentModel } = await freshSut();
+    respond({
+      model: "claude-sonnet-4.5",
+      provider: "anthropic",
+      cost7d: "1.40",
+      unpriced7d: "0",
+      p95Ms: 2400,
+      errRate: 0.004,
+      sampleCount: 500,
+    });
+    const out = (await queryCurrentModel())!;
+    expect(out.monthlyCostMicroUsd).toBe(Math.round((1_400_000 * 30) / 7));
+  });
+});
