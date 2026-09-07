@@ -97,6 +97,10 @@ def generate_middleware(
         recipe.edit["template"],
         {"account_source": account_source, "feature_tag": feature_expr},
     )
+    # Section 3 step 4 describes the proposed diff as "tally.init() at startup +
+    # middleware + record_*". Returning the startup snippet alongside the middleware is
+    # what makes the bundle complete: the developer's agent would otherwise wire
+    # with_account into a process that never called init.
     return {
         "recipe_id": recipe.id,
         "web_framework": web_framework,
@@ -104,6 +108,41 @@ def generate_middleware(
         "code": code,
         "placement": recipe.edit["placement"],
         "bound_account_source": account_source,
+        "feature_tag": feature_tag,
+        "startup": generate_startup(feature_tag, catalog=cat),
+    }
+
+
+STARTUP_RECIPE_ID = "startup.tally.init"
+
+
+def generate_startup(
+    feature_tag: str | None = None,
+    *,
+    catalog: RecipeCatalog | None = None,
+) -> dict[str, Any]:
+    """Generate the ``tally.init()`` startup snippet (section 3 step 4).
+
+    The proposed diff is "init at startup + middleware + record_*"; without the init line
+    the other two edits run in a process that was never connected. A catalog with no
+    startup recipe is a reported gap, not an invented init line.
+    """
+    cat = catalog or get_catalog()
+    recipe = cat.get(STARTUP_RECIPE_ID)
+    if recipe is None:
+        return _gap(
+            f"no startup recipe {STARTUP_RECIPE_ID!r} in the catalog",
+            known_recipes=[r.id for r in cat.recipes],
+        )
+    code = _fill(
+        recipe.edit["template"],
+        {"feature_tag": repr(feature_tag) if feature_tag else "None"},
+    )
+    return {
+        "recipe_id": recipe.id,
+        "imports_to_add": recipe.edit["imports_to_add"],
+        "code": code,
+        "placement": recipe.edit["placement"],
         "feature_tag": feature_tag,
     }
 

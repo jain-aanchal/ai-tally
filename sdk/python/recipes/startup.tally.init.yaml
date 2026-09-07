@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 3 step 4: the tally.init() line the proposed diff always opens with.
+# Without this recipe the agent wires middleware and record_* calls into a process that
+# was never connected, so nothing ships.
+id: startup.tally.init
+kind: llm
+title: "Application startup -> tally.init()"
+detect:
+  # init applies to any metered app; the LLM clients are the strongest manifest signal
+  # that there is something to meter at all (CTO-260 auto-instruments them from here).
+  imports: ["openai", "anthropic", "langchain", "llama_index"]
+  call_patterns: ["if __name__ ==", "def create_app(", "FastAPI(", "Flask("]
+sdk_surface:
+  call: "tally.init"
+  delegates_to: "tally.init.init"
+  required_args: [feature_tag]
+  layer: llm
+edit:
+  imports_to_add: ["import tally"]
+  template: |
+    # Once at process startup, before the first LLM call. init is idempotent and
+    # non-blocking, and it patches the openai / anthropic clients in this process so
+    # the LLM layer needs no per-call-site edit (CTO-260).
+    # The key is read from the TALLY_KEY environment variable: it is a credential and
+    # is supplied by reference (env / secret manager), never committed to the repo.
+    tally.init(feature_tag={feature_tag})
+  placement: startup
+verify:
+  layer: llm
+  operation_name: "chat"
+notes: "feature_tag sets the process-wide default feature dimension; the middleware recipe overrides it per request via start_trace. Passing no key degrades to a disabled client with one warning rather than raising, so a missing TALLY_KEY is visible in logs and never silently fabricates telemetry."

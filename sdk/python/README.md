@@ -133,3 +133,77 @@ and does not write it to the span row, so no customer name lands in the telemetr
 are optional per account: set none and the dashboard falls back to a shortened hash, which is a
 supported way to run. A label with no account id alongside it is dropped, since there is nothing
 to key it on.
+
+## Onboarding MCP server (CTO-261)
+
+`tally.init()` meters the LLM layer on its own, but the other layers need app code: the
+vector, tool and embedding `record_*` calls, and the per-customer attribution only your app
+can resolve. The onboarding MCP server hands your own coding agent the maintained recipes and
+generated snippets for that wiring. Your source never leaves your machine: the server holds
+only the recipe catalog and the SDK surface, and it returns code, never an applied edit.
+
+Install the extra (it is optional, the SDK runtime itself has no dependencies):
+
+```bash
+pip install 'tally-sdk[mcp]'
+```
+
+That installs the `tally-onboarding-mcp` console script, which speaks MCP over stdio.
+
+### Claude Code
+
+```bash
+claude mcp add ai-tally-onboarding -- tally-onboarding-mcp
+```
+
+Or add it to `.mcp.json` in your project root so your team picks it up too:
+
+```json
+{
+  "mcpServers": {
+    "ai-tally-onboarding": {
+      "command": "tally-onboarding-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+### Cursor
+
+Add the same stanza to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "ai-tally-onboarding": {
+      "command": "tally-onboarding-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+If `tally-onboarding-mcp` is not on your agent's PATH, point `command` at the interpreter that
+has it installed instead: `"command": "/path/to/.venv/bin/tally-onboarding-mcp"`.
+
+### The tools
+
+| Tool | What it returns |
+|---|---|
+| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match and the gaps that matched nothing |
+| `get_recipe` | one machine-readable recipe, by id or by a friendly name (`pinecone`, `fastapi`) |
+| `generate_startup` | the `tally.init()` line for application startup |
+| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line |
+| `instrument_call_site` | the adapted `record_*` edit for one concrete call site |
+| `explain_layer` | which `record_*` method covers a layer and why, grounded on the live SDK surface |
+| `coverage_report` | per-layer coverage; reports `not_probed` until the probe ships, never a guessed verdict |
+
+Two things the server will not do. It never guesses which customer a request belongs to: pass
+`generate_middleware` the header or resolver you confirmed, and with no answer it returns a
+reported gap and the account layer stays unattributed. And it never invents an SDK call: a
+stack with no recipe comes back as a gap, and every hole it cannot fill from the call site you
+passed is left as a visible `<FILL:...>` marker for you to complete.
+
+Both mcp 1.x (`FastMCP`) and mcp 2.x (`MCPServer`) are supported. Without the extra installed,
+launching the server fails with a clear error rather than starting a server that does nothing.

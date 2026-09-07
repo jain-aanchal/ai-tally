@@ -17,8 +17,15 @@ from typing import Any
 
 import yaml
 
-# recipes/ sits next to onboarding_mcp/ under sdk/python/.
-RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
+# In-tree, recipes/ sits next to onboarding_mcp/ under sdk/python/. In an installed
+# wheel the catalog is force-included at onboarding_mcp/recipes/ so the console
+# entrypoint finds it without a source checkout (CTO-261 section 4.2).
+_INSTALLED_RECIPES = Path(__file__).resolve().parent / "recipes"
+RECIPES_DIR = (
+    _INSTALLED_RECIPES
+    if _INSTALLED_RECIPES.is_dir()
+    else Path(__file__).resolve().parent.parent / "recipes"
+)
 
 
 @dataclass(frozen=True)
