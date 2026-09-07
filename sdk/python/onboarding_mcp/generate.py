@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+from onboarding_mcp.detect import tokenize
 from onboarding_mcp.sdk_surface import emitted_tally_calls, layer_grounding
 
 _HOLE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -70,6 +71,11 @@ def generate_middleware(
     ``account_source`` is the confirmed resolver expression (an ``X-Customer-Id`` header, an
     auth dependency); it is injected verbatim, never inferred. Without an answer the account
     layer stays unattributed, so an empty ``account_source`` is a reported gap, not a guess.
+
+    The ``startup`` value is a union: normally the ``generate_startup`` result, but a gap
+    dict (``gap``, ``reason``) when the catalog has no startup recipe. Both shapes carry
+    ``code`` / ``placement`` / ``imports_to_add``, with ``code`` set to None in the gap case,
+    so ``result["startup"]["code"]`` is always safe to read.
     """
     cat = catalog or get_catalog()
     if not account_source.strip():
@@ -101,6 +107,15 @@ def generate_middleware(
     # middleware + record_*". Returning the startup snippet alongside the middleware is
     # what makes the bundle complete: the developer's agent would otherwise wire
     # with_account into a process that never called init.
+    startup = generate_startup(feature_tag, catalog=cat)
+    if startup.get("gap"):
+        # generate_startup returns a union: a generated snippet, or a _gap dict that
+        # carries none of the code / placement / imports_to_add keys. A caller reading
+        # result["startup"]["code"] would then raise KeyError instead of seeing the gap
+        # it was told about (CTO-261 review finding 6). Normalize to one shape: the
+        # gap and its reason survive, and code is None, which reads as "nothing to
+        # apply" rather than blowing up.
+        startup = {"code": None, "placement": None, "imports_to_add": [], **startup}
     return {
         "recipe_id": recipe.id,
         "web_framework": web_framework,
@@ -109,7 +124,7 @@ def generate_middleware(
         "placement": recipe.edit["placement"],
         "bound_account_source": account_source,
         "feature_tag": feature_tag,
-        "startup": generate_startup(feature_tag, catalog=cat),
+        "startup": startup,
     }
 
 
@@ -219,13 +234,27 @@ def explain_layer(query: str, *, catalog: RecipeCatalog | None = None) -> dict[s
     matched_recipe = None
     if facts is None:
         # Not a bare layer name: try to match the excerpt to a recipe by its detect block.
+        # Imports match on identifier-token boundaries, not bare substrings: a plain
+        # substring test lets an ordinary English word inside a question ("together")
+        # or an unrelated dependency name pass as a confident LLM answer, and a
+        # confidently wrong grounded answer is worse than a gap (CTO-261 review
+        # finding 2, CLAUDE.md "honest under uncertainty").
+        query_tokens = tokenize(query)
         for recipe in cat.recipes:
-            if any(pat in query for pat in recipe.call_patterns) or any(
-                imp in query for imp in recipe.imports
+            if not (
+                any(pat in query for pat in recipe.call_patterns)
+                or any(tokenize(imp) & query_tokens for imp in recipe.imports)
             ):
-                facts = layer_grounding(recipe.verify.get("layer", ""))
-                matched_recipe = recipe.id
-                break
+                continue
+            grounding = layer_grounding(recipe.verify.get("layer", ""))
+            if grounding is None:
+                # A recipe whose layer carries no record_* grounding (the startup line
+                # is the one such recipe) answers nothing here. Keep looking rather than
+                # reporting a gap a later recipe could have answered honestly.
+                continue
+            facts = grounding
+            matched_recipe = recipe.id
+            break
     if facts is None:
         return _gap(
             f"no known layer or recipe matches {query!r}",

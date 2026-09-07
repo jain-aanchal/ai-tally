@@ -89,6 +89,80 @@ def test_detect_stack_gap_names_the_unhandled_web_framework():
     assert "fastapi" not in account_gaps[0]
 
 
+# --------------------------------------------------------------------------- #
+# The manual LLM recipe must not fire on an already-patched call, and must not fire
+# on an app with no LLM at all (CTO-261 review findings 1 and 2).
+# --------------------------------------------------------------------------- #
+def test_patched_openai_call_does_not_match_the_manual_llm_recipe():
+    # tally.init monkeypatches client.chat.completions.create (CTO-260). Matching the
+    # manual recipe here made an agent add a second record_llm_call beside a metered
+    # call, doubling reported cost: the product's core number.
+    result = detect_stack(
+        "openai==1.0\nfastapi==0.115",
+        "r = client.chat.completions.create(model=m, messages=msgs)",
+    )
+    assert "llm.generic.call" not in result["matched_recipes"]
+
+
+def test_detected_auto_instrumented_provider_is_flagged_as_already_covered():
+    # A marker in the tool OUTPUT is not optional: the recipe template's comment never
+    # reaches the agent reading detect_stack's result.
+    result = detect_stack("openai==1.0\nanthropic==0.34\n")
+    assert result["already_covered"], "an auto-instrumented provider must be flagged"
+    marker = result["already_covered"][0]
+    assert "openai" in marker
+    assert "twice" in marker
+    assert "tally.init()" in marker
+
+
+def test_no_llm_provider_means_no_already_covered_marker():
+    result = detect_stack("requests==2.32.0\nflask==3.0\n")
+    assert result["already_covered"] == []
+
+
+def test_plain_requests_and_flask_app_does_not_match_the_llm_recipe():
+    # httpx / requests / boto3 are in nearly every Python app. Matching on them told an
+    # app with no LLM to add record_llm_call while llm_providers was empty.
+    result = detect_stack("requests==2.32.0\nflask==3.0\n")
+    assert result["llm_providers"] == []
+    assert "llm.generic.call" not in result["matched_recipes"]
+
+
+def test_boto3_alone_does_not_match_but_bedrock_runtime_does():
+    # boto3 is overwhelmingly S3 / DynamoDB, so it only signals an LLM call site with a
+    # bedrock-runtime call pattern alongside it.
+    plain = detect_stack("boto3==1.34.0\n", "s3 = boto3.client('s3')")
+    assert "llm.generic.call" not in plain["matched_recipes"]
+    bedrock = detect_stack("boto3==1.34.0\n", "brt = boto3.client('bedrock-runtime')")
+    assert "llm.generic.call" in bedrock["matched_recipes"]
+
+
+def test_genuinely_unpatched_providers_still_match():
+    # Narrowing must not blind the recipe to the call sites it exists for.
+    assert "llm.generic.call" in detect_stack("ollama==0.3.0\n")["matched_recipes"]
+    assert (
+        "llm.generic.call"
+        in detect_stack("", 'httpx.post("https://x/v1/chat/completions")')["matched_recipes"]
+    )
+
+
+def test_explain_layer_on_boto3_is_a_gap_not_a_confident_llm_answer():
+    # A confidently wrong grounded answer is worse than a gap (CLAUDE.md). boto3 must not
+    # resolve to record_llm_call / GenAiOperation='chat'.
+    result = explain_layer("what records this boto3 call?")
+    assert result["gap"] is True
+    result = explain_layer("boto3")
+    assert result["gap"] is True
+
+
+def test_explain_layer_does_not_match_an_import_name_buried_in_a_longer_identifier():
+    # Imports match on identifier-token boundaries rather than bare substrings, so an
+    # unrelated name that merely contains a provider name is a gap, not a confident
+    # LLM answer. (Guards the same class of bug as the boto3 case above.)
+    result = explain_layer("what records this vllmlike_helper call?")
+    assert result["gap"] is True
+
+
 def test_get_recipe_by_id_and_by_alias():
     by_id = get_recipe("vector.pinecone.query")
     assert by_id["id"] == "vector.pinecone.query"
@@ -160,6 +234,41 @@ def test_generate_startup_without_the_recipe_is_a_gap():
     result = generate_startup("chatbot", catalog=without)
     assert result["gap"] is True
     assert "code" not in result
+
+
+def test_middleware_startup_gap_is_readable_without_a_key_error():
+    # Finding 6: generate_startup returns a union, and the gap arm carries no code /
+    # placement / imports_to_add. A caller reading result["startup"]["code"] must see the
+    # gap, not a KeyError.
+    from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+
+    full = get_catalog()
+    without = RecipeCatalog(
+        [r for r in full.recipes if r.id != "startup.tally.init"], full.schema
+    )
+    result = generate_middleware(
+        "fastapi", 'request.headers["X-Customer-Id"]', "chatbot", catalog=without
+    )
+    startup = result["startup"]
+    assert startup["gap"] is True
+    assert startup["code"] is None
+    assert startup["placement"] is None
+    assert startup["imports_to_add"] == []
+    assert startup["reason"]
+
+
+def test_startup_recipe_is_not_counted_as_llm_layer_coverage():
+    # Finding 7: the init line is a startup recipe, not an LLM-call recipe. Counting it
+    # under llm would mislead the first consumer that branches on the kind (the P3
+    # coverage probe).
+    from onboarding_mcp.catalog import get_catalog
+
+    cat = get_catalog()
+    startup = cat.get("startup.tally.init")
+    assert startup.kind == "startup"
+    assert startup.sdk_surface["layer"] == "startup"
+    assert startup.verify["layer"] == "startup"
+    assert startup.id not in {r.id for r in cat.by_kind("llm")}
 
 
 def test_instrument_call_site_adapts_the_llm_recipe():
