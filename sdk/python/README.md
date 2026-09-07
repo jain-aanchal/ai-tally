@@ -207,3 +207,63 @@ passed is left as a visible `<FILL:...>` marker for you to complete.
 
 Both mcp 1.x (`FastMCP`) and mcp 2.x (`MCPServer`) are supported. Without the extra installed,
 launching the server fails with a clear error rather than starting a server that does nothing.
+
+## Hosted repo PR bot (CTO-261)
+
+The MCP server above hands the recipes to your own coding agent. The PR bot is the other end
+of the same catalog: give it scoped access to a repo and it runs the loop server-side and
+opens a reviewed pull request. Same recipes, same refusals, no coding agent needed on your
+side. It is a headless bot rather than a GitHub App, so the access you grant is a token you
+hold and can take back.
+
+```bash
+export TALLY_ONBOARDING_GITHUB_TOKEN=github_pat_...
+tally-onboarding-bot \
+  --repo acme/widgets \
+  --account-source 'request.headers.get("X-Customer-Id")' \
+  --feature-tag support-bot
+```
+
+Omit `--account-source` and the bot does not pick one for you: it opens the PR carrying the
+account question and the candidate resolvers it found, leaves the account layer
+unattributed, and says so in the body. `--dry-run` proposes the diff and stops before
+creating a branch.
+
+### Supplying and revoking the token
+
+1. In GitHub, go to Settings, Developer settings, Personal access tokens, Fine-grained
+   tokens, and generate a token whose repository access is **only** the repo you want the PR
+   in.
+2. Give it exactly two repository permissions: **Contents: read and write** (to push the new
+   branch) and **Pull requests: read and write** (to open the PR). Nothing else is used. Set
+   the shortest expiry you can live with.
+3. Put the value in the environment variable named by `--token-env` (default
+   `TALLY_ONBOARDING_GITHUB_TOKEN`), or in your secret manager and inject it from there. The
+   bot holds the variable NAME, never the value: it reads it at the moment git or the API
+   needs it, hands it to git through `GIT_ASKPASS` so it never lands in `.git/config` or in a
+   process listing, and redacts it from anything it prints.
+4. To revoke, delete the token on that same page, or unset the variable. There is no
+   installation to uninstall and no stored copy to clean up, which is the point of a token
+   you hold rather than an app you grant.
+
+A GitHub App is the harder-edged version of this (short-lived installation tokens, grants
+managed in GitHub) and stays the hardening path. It would change how the credential is
+minted, not what the bot is allowed to do.
+
+### What it refuses to do
+
+Enforced in `onboarding_bot/guards.py` and covered by `tests/test_onboarding_bot_guards.py`,
+not merely promised here:
+
+- **It never pushes to a default branch.** Every push resolves the repo's default branch
+  first and refuses it, along with `main` / `master` / `trunk` / `develop` whatever the
+  remote reports. It pushes the one new branch it created, and force pushes are refused.
+- **It never merges.** Git subcommands and GitHub endpoints are both allowlisted; `merge`
+  (and `rebase`, `cherry-pick`, `reset`) is on neither, so no code path reaches one. The PR
+  waits for a human.
+- **It keeps no source.** The clone is shallow, lives in a temporary directory, and is
+  deleted in a `finally` on every exit path including a refused run. What the run returns is
+  paths, counts, generated code and gaps, never your source.
+- **It invents nothing.** Every line it writes comes from the recipe catalog. A value it
+  cannot derive from the call site stays a visible `<FILL:...>` hole, and a block with a hole
+  is inserted commented out so nothing runs on a guessed value.

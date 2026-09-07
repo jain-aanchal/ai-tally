@@ -30,6 +30,9 @@ mcp = [
 # The stdio entrypoint a coding agent's MCP config launches (see README "Connect your
 # coding agent"). Fails with a clear RuntimeError when the mcp extra is absent.
 tally-onboarding-mcp = "onboarding_mcp.server:main"
+# CTO-261 P2: the hosted repo PR bot. Stdlib only (urllib + git), so it needs no extra;
+# the scoped GitHub token is supplied by reference in the environment, never as a flag.
+tally-onboarding-bot = "onboarding_bot.run:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,7 +41,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 # onboarding_mcp ships in the wheel so the console entrypoint above resolves for an
 # installed SDK; recipes/ is the data the server reads and is forced in below.
-packages = ["src/tally", "onboarding_mcp"]
+packages = ["src/tally", "onboarding_mcp", "onboarding_bot"]
 force-include = { "recipes" = "onboarding_mcp/recipes" }
 
 [tool.ruff]
