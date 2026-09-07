@@ -269,7 +269,10 @@ class TallyClient:
         """Record a tool call so the span lands in the gateway's ``tools`` cost-layer bucket.
 
         Bucketing is keyed off ``gen_ai.operation.name == 'tool'``. The tool's cost rides on
-        ``gen_ai.tool.cost_micro_usd``. When ``cost_micro_usd`` is omitted we resolve the rate from
+        ``gen_ai.tool.cost_micro_usd``; the gateway promotes it into the span's canonical cost
+        (``gen_ai.cost.estimated_micro_usd``, the ``EstimatedCost`` column) during enrichment,
+        preferring its own catalog price where it has one (CTO-243).
+        When ``cost_micro_usd`` is omitted we resolve the rate from
         the versioned price catalog (CTO-141) under ``PriceType.TOOL_CALL`` and stamp
         ``price_catalog_version`` on the span; an unknown ``(provider, tool)`` pair (or no catalog)
         defaults to 0 with a one-time WARN. A caller-supplied ``cost_micro_usd`` always overrides.
@@ -436,8 +439,9 @@ class TallyClient:
         """Record a vector-DB call so the span lands in the gateway's ``vector`` cost-layer bucket.
 
         Bucketing is keyed off ``gen_ai.operation.name == 'vector'``. The call's cost rides on
-        ``gen_ai.tool.cost_micro_usd`` (same carrier as ``record_tool_call`` — the gateway promotes
-        it into the layer's spend). The tool-name slot encodes ``{provider}.{index}.{operation}``.
+        ``gen_ai.tool.cost_micro_usd`` (same carrier as ``record_tool_call``, and the gateway
+        promotes it into the span's canonical cost during enrichment, CTO-243). The tool-name slot
+        encodes ``{provider}.{index}.{operation}``, and the gateway prices off the last segment.
         When ``cost_micro_usd`` is omitted we resolve the rate from the versioned price catalog
         (CTO-141) under ``PriceType.VECTOR_CALL`` keyed by ``(provider, operation)`` and stamp
         ``price_catalog_version`` on the span; an unknown pair (or no catalog) defaults to 0 with a
