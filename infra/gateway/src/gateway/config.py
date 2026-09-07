@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     idempotency_ttl_s: int = 24 * 3600
 
     # CTO-245: back the idempotency window with Postgres (`ingest_batch_idempotency`, migration
-    # 0031) instead of only an in-process dict. Without it the record dies with the worker, so a
+    # 0032) instead of only an in-process dict. Without it the record dies with the worker, so a
     # client retrying a batch across a restart is accepted twice and its spend counted twice.
     # On by default because that is the correct behaviour; set false only to reproduce the old one.
     idempotency_durable: bool = True

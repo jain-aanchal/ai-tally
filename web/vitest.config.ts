@@ -20,9 +20,14 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     // The dev escape hatch (Initiative 1, §10). Tests run with no Clerk account, so `getTenant()`
-    // short-circuits to a pinned tenant instead of consulting Clerk. This mirrors how `make up` and
-    // CI run the product with no Clerk keys, and keeps the tenant scoping in the fetch-shaped tests
-    // exactly what it was before Clerk (`local-dev`).
-    env: { TALLY_DEV_TENANT: "local-dev" },
+    // short-circuits to a pinned tenant instead of consulting Clerk. `.github/workflows/ci.yml`
+    // pins the SAME value for the production build step, so the suite and CI agree.
+    //
+    // It is a placeholder UUID, not the name `local-dev`. The canonical TenantId is `tenants.id`
+    // and the dashboard binds this value straight into the ClickHouse read filter
+    // (`TenantId = ...`), so a NAME here would exercise a filter shape that matches nothing against
+    // a real stack. No test asserts against live data, so any well-formed UUID does; this one is
+    // the same placeholder `web/.env.example` shows.
+    env: { TALLY_DEV_TENANT: "00000000-0000-0000-0000-000000000000" },
   },
 });

@@ -15,10 +15,10 @@ import {
 
 describe("getTenant dev escape hatch", () => {
   it("short-circuits to the pinned dev tenant without consulting Clerk", async () => {
-    expect(devTenant()).toBe("local-dev");
+    expect(devTenant()).toBe("00000000-0000-0000-0000-000000000000");
     const t = await getTenant();
-    expect(t).toEqual({ tenantId: "local-dev", orgId: null, orgRole: null });
-    expect(await resolveTenantId()).toBe("local-dev");
+    expect(t).toEqual({ tenantId: "00000000-0000-0000-0000-000000000000", orgId: null, orgRole: null });
+    expect(await resolveTenantId()).toBe("00000000-0000-0000-0000-000000000000");
   });
 
   it("treats dev as admin so local key management works", async () => {

@@ -1,6 +1,8 @@
 # ai-tally local infra. Run from the infra/ directory:  make up / seed / demo / logs / down / nuke
 COMPOSE := docker compose
-GATEWAY := ai-tally-gateway
+# Every target addresses containers by SERVICE name through `docker compose exec`, never by a
+# container name, so an isolated second stack is just `COMPOSE_PROJECT_NAME=... make up` with its
+# own host ports. See the header of docker-compose.yml.
 
 .PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
@@ -82,7 +84,12 @@ seed: ## Create a local tenant + API key + feature tags in Postgres
 	@echo "  export TALLY_DEV_TENANT=$(TENANT_UUID)"
 
 demo: ## Send a sample batch through the gateway into ClickHouse
-	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py
+	@# The gateway stores TenantId as the spelling the batch posted (gateway/tenant_identity.py does
+	@# not fold a name onto the UUID on the ingest path), and the dashboard reads by UUID, so a demo
+	@# batch sent under the bare name `local-dev` lands in ClickHouse invisible to the UI. Resolve
+	@# the seeded tenant's UUID the way chatbot-demo-backfill already does.
+	@test -n "$(TENANT_UUID)" || { echo "no local-dev tenant UUID resolved -- run 'make up && make seed' first"; exit 1; }
+	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py --tenant $(TENANT_UUID)
 
 aider-demo: ## Run Aider against a fixture repo through the edge proxy (needs OPENAI_API_KEY)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \

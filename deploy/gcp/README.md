@@ -277,8 +277,11 @@ and **Data Quality** pages should render your ingested `local-dev` spans.
 
 ## 9. Point the dashboard at production tenants
 
-The web tier defaults to tenant `local-dev` (matching local dev). For real tenants, set
-`web.config.tenantId` (GKE) or the `TALLY_TENANT_ID` env (Cloud Run), and enable
+The web tier resolves its tenant per request from the active Clerk organization and reads by tenant
+**UUID** (`web/lib/getTenant.ts`); it has no `local-dev` default any more. `TALLY_TENANT_ID` is no
+longer read by the web app, so the entries that still set it in `cloudrun/web.service.yaml` and the
+GKE `web-configmap` are inert. For a keyless deployment that must pin one tenant, set
+`TALLY_DEV_TENANT` to that tenant's UUID instead (never its name). Enable
 `gateway.config.requireApiKey=true` (the cloud default) so ingest requires
 `Authorization: Bearer <key>` — seed keys with the gateway's `seed.py` against Cloud SQL.
 

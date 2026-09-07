@@ -37,7 +37,7 @@ These are enforced throughout and reviews reject violations:
 - Prose, comments and docs use no em dashes. (The `—` glyph the honest-blank UI component renders is a real UI character and is exempt.)
 - Control-plane writes go through gateway endpoints; the web app never touches Postgres directly. New per-tenant config follows the existing store pattern (see `gateway/connectors/config_admin.py`, `gateway/tenant_budgets.py`).
 - Postgres migrations are strictly numbered; take the next free number and add the `infra/docker-compose.yml` mount. `docker-entrypoint-initdb.d` only runs on a first boot against an empty volume, so apply a new migration by hand to test against a running stack.
-- Tenant identity: the dashboard passes the tenant NAME (`local-dev`), control-plane tables key on `tenants.id` (UUID). Resolve with `gateway.tenant_lookup.resolve_tenant_uuid`; do not feed a name into a UUID column.
+- Tenant identity: the canonical identifier is the tenant UUID (`tenants.id`). The dashboard resolves and passes the UUID (`web/lib/getTenant.ts`: the Clerk org resolves to a UUID via the gateway, or `TALLY_DEV_TENANT` pins one for keyless local dev and CI), and control-plane tables key on it. The tenant NAME (`local-dev`) is still an accepted spelling on gateway control-plane calls, so resolve with `gateway.tenant_lookup.resolve_tenant_uuid`; do not feed a name into a UUID column. The ingest path does NOT fold a name onto the UUID: `/v1/batches` stores `TenantId` as the spelling the caller posted, so telemetry written under a name is invisible to a UUID-bound dashboard read.
 
 ## Verification
 

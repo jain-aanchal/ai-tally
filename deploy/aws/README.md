@@ -320,8 +320,11 @@ rows land in ClickHouse. Finally open the web URL — the **Cost**, **Features**
 
 ## 9. Point the dashboard at production tenants
 
-The web tier defaults to tenant `local-dev`. For real tenants, set `web.config.tenantId` (EKS) or the
-`TALLY_TENANT_ID` env (ECS `web.taskdef.json`), and keep `gateway.config.requireApiKey=true` (the
+The web tier resolves its tenant per request from the active Clerk organization and reads by tenant
+**UUID** (`web/lib/getTenant.ts`); it has no `local-dev` default any more. `TALLY_TENANT_ID` is no
+longer read by the web app, so the entries that still set it in `web.taskdef.json` and the EKS
+`web-configmap` are inert. For a keyless deployment that must pin one tenant, set `TALLY_DEV_TENANT`
+to that tenant's UUID instead (never its name). Keep `gateway.config.requireApiKey=true` (the
 cloud default) so ingest requires `Authorization: Bearer <key>` — seed keys with the gateway's
 `seed.py` against RDS.
 

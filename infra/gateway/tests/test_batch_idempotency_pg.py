@@ -6,7 +6,7 @@ the SQL itself settles the concurrent race. The claim is a single ``INSERT ... O
 NOTHING`` against the primary key, and "exactly one of N racing workers wins" is a property of
 Postgres, not of the Python around it. Testing it against an in-memory dict would prove nothing.
 
-Skipped unless ``TALLY_TEST_POSTGRES_DSN`` points at a database with migration 0031 applied, so a
+Skipped unless ``TALLY_TEST_POSTGRES_DSN`` points at a database with migration 0032 applied, so a
 checkout with no infrastructure still runs the suite green. Bring one up on spare ports and run:
 
     TALLY_TEST_POSTGRES_DSN=postgresql://tally:tally@localhost:55432/tally \\
@@ -33,7 +33,7 @@ from gateway.config import Settings
 DSN = os.environ.get("TALLY_TEST_POSTGRES_DSN", "")
 
 pytestmark = pytest.mark.skipif(
-    not DSN, reason="set TALLY_TEST_POSTGRES_DSN to a database with migration 0031 applied"
+    not DSN, reason="set TALLY_TEST_POSTGRES_DSN to a database with migration 0032 applied"
 )
 
 

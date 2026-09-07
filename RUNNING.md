@@ -10,13 +10,29 @@ ingest, not mock data.
                                                  │  validate → enrich cost → map to row
                                                  ▼
                                             ClickHouse  otel_spans
-                                            (:8123, db=default, TenantId=local-dev)
+                                            (:8123, db=default, TenantId=<tenant UUID>)
                                                  ▲
-   browser ──▶ Next.js web (:3000) ──Route Handler──┘  (web/lib/clickhouse.ts, tenant=local-dev)
+   browser ──▶ Next.js web (:3000) ──Route Handler──┘  (web/lib/clickhouse.ts, tenant=<tenant UUID>)
 ```
 
-Everything is keyed to the **`local-dev`** tenant: the demo batch writes as `local-dev`, and the
-web UI reads `local-dev` by default — they line up with zero configuration.
+**The canonical TenantId is the tenant UUID, not the name `local-dev`** (Initiative 1, §8). `make
+seed` creates a tenant *named* `local-dev` in Postgres, but that row's `tenants.id` UUID is what the
+dashboard binds into every ClickHouse read filter (`web/lib/getTenant.ts`), and the gateway writes
+`TenantId` as whatever spelling the caller posted (`gateway/tenant_identity.py`): it does not fold a
+name onto the UUID on the ingest path. So a batch posted as `"tenant_id": "local-dev"` lands under
+the string `local-dev` and the dashboard, reading by UUID, renders nothing.
+
+Resolve the UUID once and reuse it everywhere below. `make seed` prints the exact export line, and
+`infra/Makefile` resolves it the same way:
+
+```bash
+cd infra
+TENANT=$(docker compose exec -T postgres psql -U tally -d tally -tAc \
+  "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" | tr -d '[:space:]')
+echo "$TENANT"   # e.g. 5f1c8a0e-....
+```
+
+Every `$TENANT` in this document is that UUID.
 
 ## Prerequisites
 
@@ -65,9 +81,12 @@ make seed     # creates the `local-dev` tenant + API key + feature tags in Postg
 This prints a one-time API key (`tally_sk_…`). Only its SHA-256 is stored — copy it if you plan to
 enable auth. For local testing auth is **off** by default (`TALLY_REQUIRE_API_KEY=false`).
 
+It also prints the `export TALLY_DEV_TENANT=<uuid>` line for the dashboard. That UUID is the
+`$TENANT` used throughout this document.
+
 ## 3. Push telemetry through the gateway
 
-Easiest — the built-in demo batch (writes as tenant `local-dev`, and re-sends once to demonstrate
+Easiest is the built-in demo batch (writes as the resolved tenant UUID, and re-sends once to demonstrate
 idempotent replay; see [Batch idempotency](#batch-idempotency-cto-245) for exactly what that
 guarantee covers and what it does not):
 
@@ -75,13 +94,14 @@ guarantee covers and what it does not):
 make demo            # run it a few times for more rows
 ```
 
-Or fire your own burst (note `tenant_id` **must** be `local-dev` for the UI to show it):
+Or fire your own burst (note `tenant_id` **must** be the tenant UUID `$TENANT` for the UI to show
+it, not the name `local-dev`, because the gateway stores the spelling you post):
 
 ```bash
 for i in $(seq 1 40); do
   curl -s -X POST localhost:8080/v1/batches \
     -H 'content-type: application/json' \
-    -d '{"tenant_id":"local-dev","sdk_version":"test","resource_spans":[
+    -d '{"tenant_id":"'"$TENANT"'","sdk_version":"test","resource_spans":[
           {"trace_id":"tr'$i'","span_id":"s'$i'","gen_ai.system":"openai",
            "gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o",
            "gen_ai.usage.input_tokens":1200,"gen_ai.usage.output_tokens":350}]}' >/dev/null
@@ -92,11 +112,12 @@ Verify the rows landed (and carry enriched cost):
 
 ```bash
 curl -s 'http://localhost:8123/?user=tally&password=tally&database=default' \
-  --data "SELECT count(), round(sum(EstimatedCost),4) FROM otel_spans WHERE TenantId='local-dev'"
+  --data "SELECT count(), round(sum(EstimatedCost),4) FROM otel_spans WHERE TenantId='$TENANT'"
 ```
 
 or open a SQL shell with `make ch` and run
-`SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans WHERE TenantId='local-dev' GROUP BY FeatureTag`.
+`SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans WHERE TenantId='<uuid>' GROUP BY FeatureTag`
+(substitute the `$TENANT` UUID; the shell has no shell variable of its own).
 
 ### Nullable usage and cost (CTO-244)
 
@@ -115,7 +136,7 @@ This matters when you read the data yourself. `sum()` skips NULLs, so a plain
 SELECT sum(EstimatedCost)                AS known_spend,
        countIf(EstimatedCost IS NULL)    AS unpriced_spans,
        count()                           AS spans
-FROM otel_spans WHERE TenantId = 'local-dev';
+FROM otel_spans WHERE TenantId = '<tenant uuid>';
 ```
 
 The rollups carry the same disclosure as `UnpricedSpanCount` and `UnknownUsageSpanCount` columns.
@@ -142,7 +163,7 @@ stack, `make nuke && make up && make seed` and re-backfill.
 
 Re-posting a batch with a `batch_id` the gateway has already accepted returns the original response
 (`"replayed": true`) and writes nothing. That guarantee is now **durable**: the record lives in
-Postgres (`ingest_batch_idempotency`, migration 0031), so it survives a gateway restart, a deploy,
+Postgres (`ingest_batch_idempotency`, migration 0032), so it survives a gateway restart, a deploy,
 a crash and a scale-out onto a second worker.
 
 It did not before, and the consequence was real. The record used to live only in a dict inside one
@@ -159,7 +180,7 @@ make logs | grep -i "batch idempotency"
 ```
 
 `durable batch idempotency enabled` is the fixed state. A `WARNING` about it being unavailable means
-migration 0031 has not been applied (see below) and the gateway is running with the old, restart-
+migration 0032 has not been applied (see below) and the gateway is running with the old, restart-
 unsafe in-process cache. Set `TALLY_IDEMPOTENCY_DURABLE_REQUIRED=true` to make that a startup
 failure instead of a warning; any deployment that depends on the guarantee should.
 
@@ -183,7 +204,7 @@ Then restart the gateway and confirm the boot line above.
   backstop for anything that gets past the idempotency check. ReplacingMergeTree collapses rows only
   when parts **merge**, so between a duplicate insert and that merge a plain `SELECT sum(...)` still
   sees both rows. Add `FINAL` when you need exactness now:
-  `SELECT sum(EstimatedCost) FROM otel_spans FINAL WHERE TenantId = 'local-dev'`. **No read path in
+  `SELECT sum(EstimatedCost) FROM otel_spans FINAL WHERE TenantId = '<tenant uuid>'`. **No read path in
   the dashboard was converted to `FINAL` in this change**, so dashboard totals converge on the merge
   rather than being exact the instant a duplicate lands. They are never worse than before, where the
   duplicate was permanent.
@@ -226,17 +247,25 @@ In a separate terminal:
 
 ```bash
 cd web
-npm install         # first run only
+npm install                          # first run only
+export TALLY_DEV_TENANT="$TENANT"    # the dev escape hatch (Initiative 1, §10)
 npm run dev
 ```
 
 Open **http://localhost:3000**.
 
-No env config is needed: `web/lib/clickhouse.ts` defaults to exactly what the stack uses —
-`http://localhost:8123`, database `default`, tenant `local-dev`. Each Route Handler queries
-ClickHouse live and falls back to mock data **only** if ClickHouse is unreachable. With the stack up
-and a batch sent, the **Cost**, **Features**, **Agents**, and **Data Quality** pages render your
-ingested `local-dev` spans.
+`TALLY_DEV_TENANT` is the only env config you need locally. It is the dev escape hatch in
+`web/lib/getTenant.ts`: with it set the app runs with no Clerk account and pins every read to that
+tenant; with it unset and no active Clerk org the app refuses to serve tenant data rather than
+falling back to a guessed tenant. **Set it to the tenant UUID, not the name `local-dev`**: the
+value is bound straight into the ClickHouse read filter (`TenantId = ...`), so a bare name matches
+no rows and renders an empty dashboard. See `web/.env.example`.
+
+The backing-store connection needs nothing: `web/lib/clickhouse.ts` defaults to exactly what the
+stack uses (`http://localhost:8123`, database `default`). Each Route Handler queries ClickHouse live
+and falls back to mock data **only** if ClickHouse is unreachable. With the stack up and a batch
+sent under `$TENANT`, the **Cost**, **Features**, **Agents**, and **Data Quality** pages render your
+ingested spans.
 
 ---
 
@@ -562,7 +591,7 @@ Knobs:
 |---|---|
 | `Database tally does not exist` | Gateway pointed at the wrong DB. Use `TALLY_CLICKHOUSE_DB=default` (the compose gateway already does). |
 | Dashboard shows the **"mock data"** badge | A page's ClickHouse query failed and fell back to mock. Check `make logs` and that step 3's count is non-zero. |
-| Dashboard empty despite ingested rows | Tenant mismatch — the UI reads `local-dev`. Post with `tenant_id: local-dev` (or set `TALLY_TENANT_ID` for the web app). |
+| Dashboard empty despite ingested rows | Tenant mismatch. The UI reads the tenant UUID it resolved (`TALLY_DEV_TENANT`, or the Clerk org on the product path); the gateway stored whatever spelling the batch posted. Check `SELECT DISTINCT TenantId FROM otel_spans` against the UUID from `make seed`, and re-post under the UUID. `TALLY_TENANT_ID` is **not** read by the web app any more. |
 
 ## Make targets (run from `infra/`)
 

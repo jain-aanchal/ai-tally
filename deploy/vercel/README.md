@@ -69,7 +69,7 @@ fallback — the dashboard boots without any of them (it just renders the mock/`
 | `TALLY_CLICKHOUSE_PASSWORD` | ClickHouse password | `••••••••` | **Encrypted / Sensitive** |
 | `TALLY_CLICKHOUSE_DB` | ClickHouse database | `default` | Plain env |
 | `TALLY_GATEWAY_URL` | Ingest gateway base URL | `https://gateway.example.com` | Plain env |
-| `TALLY_TENANT_ID` | Tenant the dashboard reads | `local-dev` (prod: your tenant) | Plain env |
+| `TALLY_DEV_TENANT` | Pins the tenant the dashboard reads, bypassing Clerk (§10). Must be a tenant **UUID** | unset | Plain env |
 
 **Optional UI/build knobs (`NEXT_PUBLIC_*` are inlined at build time — non-secret by definition):**
 
