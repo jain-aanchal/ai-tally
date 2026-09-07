@@ -15,9 +15,9 @@ client on the dashboard side applies the same defense (``web/lib/firstEvent.ts``
 for the agent-facing path.
 
 WHY EVERY FAILURE IS ``unknown``, NEVER "not covered". An unreachable gateway, a 5xx, a timeout, a
-malformed body or absent configuration all mean we do not know. Collapsing any of them into
-``not_wired`` would tell a developer their instrumentation is missing when the truth is that ours
-could not answer (CLAUDE.md, honest under uncertainty).
+malformed body, a tenant id that is not a UUID or absent configuration all mean we do not know.
+Collapsing any of them into ``not_wired`` would tell a developer their instrumentation is missing
+when the truth is that ours could not answer (CLAUDE.md, honest under uncertainty).
 
 Stdlib ``urllib`` only, so the SDK runtime stays dependency-free, and the transport is injectable
 so the test suite never touches the network (the pattern ``onboarding_bot/github_pr.py`` uses).
@@ -30,6 +30,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -40,9 +41,19 @@ COVERAGE_PATH = "/v1/tenant/onboarding/coverage"
 # NAME of the environment variable, never its value, so a serialized config or a logged repr
 # cannot leak it (CLAUDE.md, credentials by reference).
 GATEWAY_URL_ENV = "TALLY_GATEWAY_URL"
-TENANT_ID_ENV = "TALLY_TENANT_ID"
+TENANT_ID_ENV = "TALLY_MCP_TENANT_ID"
 DEFAULT_TOKEN_ENV = "GATEWAY_SERVICE_TOKEN"
 TOKEN_ENV_REF = "TALLY_GATEWAY_SERVICE_TOKEN_ENV"
+
+# WHY THIS TOOL DOES NOT READ ``TALLY_TENANT_ID`` (CTO-261). That name is retired: it used to scope
+# the dashboard, no product code reads it any more, and several deploy manifests still SET it,
+# inertly, to the old value ``local-dev``. Reading it here (even as a fallback) would let a stale
+# taskdef, Helm value or ``.env`` silently scope the coverage probe to a tenant the operator did not
+# choose. Worse, ``local-dev`` is a tenant NAME while this value is bound into a UUID read filter,
+# so it would match nothing and the tool would report a confident, entirely wrong "nothing is
+# wired". So the retired name is never a value source: it is only DETECTED, to tell the operator to
+# rename it, and the answer stays an honest gap (CLAUDE.md, honest under uncertainty).
+RETIRED_TENANT_ID_ENV = "TALLY_TENANT_ID"
 
 # The probe does two ClickHouse reads, one of them a grouped pass over ``otel_spans`` that gets no
 # key-prefix benefit, so a large or cold tenant can sit well past a few seconds. A short timeout
@@ -122,6 +133,17 @@ def config_from_env(env: Mapping[str, str] | None = None) -> tuple[CoverageConfi
 
     required = ((GATEWAY_URL_ENV, gateway_url), (TENANT_ID_ENV, tenant_id))
     missing = [name for name, value in required if not value]
+
+    # The retired name set while the current one is absent is the stale-manifest case, and it gets
+    # its own reason: "not configured" would send an operator hunting for a variable they believe
+    # they already set. We still do not READ it (CTO-261).
+    if not tenant_id and (source.get(RETIRED_TENANT_ID_ENV) or "").strip():
+        return None, (
+            f"${RETIRED_TENANT_ID_ENV} is set but that name is retired and is not read: rename it "
+            f"to ${TENANT_ID_ENV}, whose value must be your tenant UUID. Its value was not used "
+            f"and nothing is being claimed about your instrumentation."
+        )
+
     if missing:
         return None, (
             f"the coverage probe is not configured: set {' and '.join(missing)}, plus "
@@ -132,7 +154,29 @@ def config_from_env(env: Mapping[str, str] | None = None) -> tuple[CoverageConfi
     if scheme_reason:
         return None, scheme_reason
 
+    if not _is_tenant_uuid(tenant_id):
+        return None, (
+            f"${TENANT_ID_ENV} must be your tenant UUID, not a tenant name. The coverage probe "
+            f"binds this value into a UUID read filter, so a name matches nothing and would be "
+            f"reported as an empty but confident-looking answer. The probe was not called and "
+            f"nothing is being claimed about your instrumentation."
+        )
+
     return CoverageConfig(gateway_url=gateway_url, tenant_id=tenant_id, token_env=token_env), ""
+
+
+def _is_tenant_uuid(value: str) -> bool:
+    """True only for a canonical 36-character UUID (CTO-261).
+
+    Deliberately stricter than ``uuid.UUID`` alone, which also accepts braced, URN and undashed
+    forms: the gateway compares this against a canonical UUID column, so accepting a shape it will
+    not match would just move the silent-empty-answer failure one step later. The value is never
+    echoed into the reason, since a mis-set variable can hold anything (CLAUDE.md, no bodies).
+    """
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _reject_unsafe_base(gateway_url: str) -> str:
