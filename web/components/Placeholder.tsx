@@ -6,7 +6,7 @@ export function Placeholder({ title, ticket }: { title: string; ticket: string }
       <p className="max-w-prose text-sm text-muted">
         This workflow is scaffolded but not yet built. Tracked as{" "}
         <span className="font-mono text-muted">{ticket}</span>. The app shell, routing, mock-data
-        layer, and design tokens are in place — screens land in follow-up PRs.
+        layer, and design tokens are in place. Screens land in follow-up PRs.
       </p>
     </div>
   );

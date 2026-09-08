@@ -208,7 +208,7 @@ export function AttributionLive({
           />
         )}
         <p className="mt-3 text-xs text-muted">
-          Intervals are Wilson 95% on the conversion rate — small samples produce
+          Intervals are Wilson 95% on the conversion rate: small samples produce
           wide bands, by design. Two providers &ldquo;tie&rdquo; when their bands overlap.
         </p>
       </Card>

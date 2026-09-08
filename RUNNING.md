@@ -466,7 +466,7 @@ judge calls run a frontier model and are pricier than candidate replays.
    `47.2%` with `[31–63%]` underneath: the real win-rate and Wilson 95% CI.
    Below the 10-judged-samples floor (small `n` means a CI wider than the
    number is useful), the cell shows `—` with the hint "needs ≥10 judged
-   samples — run eval pass". **The page will never fabricate a quality
+   samples: run eval pass". **The page will never fabricate a quality
    number**: there is no fallback to mock here, by design.
 
    The `current` row's Quality is always `—`: a model is never paired against
