@@ -2,7 +2,7 @@
 // Live ClickHouse reads for the dashboard (server-only).
 //
 // The Route Handlers call these and fall back to mock data when ClickHouse is unreachable (no
-// stack running, CI, fresh clone) — so `npm run dev/build/test` never depend on infra. Money comes
+// stack running, CI, fresh clone), so `npm run dev/build/test` never depend on infra. Money comes
 // back from ClickHouse as Decimal strings; we convert to integer micro-USD at the boundary to match
 // the wire/UI contract.
 //
@@ -943,7 +943,7 @@ export async function queryCostSliceTotals(
 // 31st a plain 30-day window would clip the 1st). A rolling `now() - INTERVAL 30 DAY` drifts by the
 // second and clips a partial day, which is why nothing here uses one.
 //
-// Clocks: every date in the result — window start, today, the day list, the day count — comes from
+// Clocks: every date in the result (window start, today, the day list, the day count) comes from
 // ClickHouse. None of it is generated from the Node process clock. Those are two clocks in two
 // timezones, and when they straddle midnight the JS-built list is shifted a day against the SQL
 // window, so the oldest day silently has no slot to land in while still counting toward the totals.
@@ -1009,7 +1009,7 @@ export interface SettledSpendSeries {
    * number (honest-under-uncertainty, and the minimum-history guard in the scope doc).
    */
   baselineDays: string[];
-  /** Newest settled day, or null when none is — never a fabricated date. */
+  /** Newest settled day, or null when none is. Never a fabricated date. */
   settledThrough: string | null;
   /** Which connector layers this tenant actually uses, i.e. what settlement waits on. */
   connectorLayers: ConnectorLayer[];
@@ -1469,7 +1469,7 @@ export async function queryExcludedInfraCost(query?: AccountCostQuery): Promise<
  * One account: layer split, top features, and a day-by-day trend across the window.
  *
  * Pass `''` for the unattributed bucket. Returns `null` when the tenant has no rollup rows at all
- * for this account in the window, i.e. we know nothing about it — that is a genuinely unknown
+ * for this account in the window, i.e. we know nothing about it: that is a genuinely unknown
  * account, not one that cost zero, and the caller should render it as not found rather than as a
  * free customer. An account we HAVE seen but whose spend is entirely compute and egress comes back
  * as a real row with zeroes, which is a different and true statement.
@@ -1646,18 +1646,18 @@ async function accountDetail(
 //
 // Real detection over the telemetry we actually have (otel_spans), replacing the canned
 // lib/cost.ts `hiddenCostAlerts` on the live path. Two rules fire today; both run per-tenant over
-// the last 30 days and only emit above a sane threshold (no fabricated alerts — returns [] when
+// the last 30 days and only emit above a sane threshold (no fabricated alerts; returns [] when
 // nothing qualifies).
 //
 //   1. Uncosted tool/agent activity: `GenAiOperation = 'tool'` spans with no cost attached, i.e.
 //      `EstimatedCost IS NULL` (the post-CTO-244 representation of "we could not price this") or
 //      `= 0` (how the same condition was flattened before that cutover). Emitted only above
 //      UNCOSTED_TOOL_THRESHOLD.
-//   2. High LLM-calls-per-session ratio — features whose avg LLM spans per SessionId exceeds
+//   2. High LLM-calls-per-session ratio: features whose avg LLM spans per SessionId exceeds
 //      LLM_PER_SESSION_THRESHOLD, a classic retry-loop / fan-out cost smell.
 //
 // DEFERRED: the "vendor-billed vs estimated" reconciliation rule (alert when a connector's billed
-// spend diverges from our estimate) has NO source today — the billing connectors aren't built yet
+// spend diverges from our estimate) has NO source today; the billing connectors aren't built yet
 // (CTO-143/144). It is intentionally omitted rather than faked.
 //
 // Alerts are ranked by impact = (share of total spend attributable to the offending feature) ×
@@ -1679,7 +1679,7 @@ interface RankedAlert {
  * Detect hidden-cost alerts from `otel_spans` for the current tenant over the last 30 days.
  *
  * Returns the top {@link MAX_HIDDEN_COST_ALERTS} alerts ranked by impact, or `[]` when nothing
- * qualifies (honest-empty — we never fabricate). Returns `null` (via tryLive) when ClickHouse is
+ * qualifies (honest-empty; we never fabricate). Returns `null` (via tryLive) when ClickHouse is
  * unreachable so the route can fall back to the canned mock for CI / fresh-clone rendering.
  */
 export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<HiddenCostAlert[] | null> {
@@ -1687,7 +1687,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
     const tag = filter?.tag ?? "";
     const tagClause = tag ? "AND FeatureTag = {tag:String}" : "";
 
-    // Total tenant spend over the window — the denominator for the impact ranking.
+    // Total tenant spend over the window: the denominator for the impact ranking.
     const totalRows = await rowsP<{ total: string }>(
       db,
       `SELECT sum(EstimatedCost) AS total
@@ -1742,7 +1742,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
       const uncosted = parseInt(r.uncosted, 10) || 0;
       if (uncosted <= UNCOSTED_TOOL_THRESHOLD) continue;
       const share = totalSpend > 0 ? micro(r.featureCost) / totalSpend : 0;
-      // Confidence is high — a zero-cost tool span is an unambiguous instrumentation gap.
+      // Confidence is high: a zero-cost tool span is an unambiguous instrumentation gap.
       const confidence = 0.9;
       ranked.push({
         impact: share * confidence,
@@ -1779,7 +1779,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
 
 // --- Features (ROI + attribution diagnostics) ---------------------------------------------------
 
-// Below this many attributed conversions we refuse to print value/payback/attributionRate — the
+// Below this many attributed conversions we refuse to print value/payback/attributionRate; the
 // numbers would be too noisy to trust. The UI renders these honest nulls as `—`.
 const MIN_CONVERSIONS_FOR_ECONOMICS = 5;
 
@@ -1788,7 +1788,7 @@ const MIN_CONVERSIONS_FOR_ECONOMICS = 5;
 // Cost side: sum(EstimatedCost)/uniq(UserIdHash) from `otel_spans` over 30d (unchanged).
 //
 // Value side: each row in `attribution_records` ties one converting `business_events` row
-// (BusinessEventId) to the `FeatureTag` of the agent run that last touched it — the per-feature
+// (BusinessEventId) to the `FeatureTag` of the agent run that last touched it, the per-feature
 // normalization that was missing. We join attribution_records (FINAL, to collapse the
 // ReplacingMergeTree) → business_events (FINAL) ON (TenantId, BusinessEventId) to pull EventName and
 // the converting user, then per feature compute:
@@ -1948,7 +1948,7 @@ export interface ObservedBusinessEvent {
 
 /**
  * Distinct `business_events.EventName` for the current tenant over the last 30 days, most-frequent
- * first — the live source for the /features "configure value event" modal (CTO-140). Returns null
+ * first: the live source for the /features "configure value event" modal (CTO-140). Returns null
  * when ClickHouse is unreachable so the route can distinguish "infra down" from "no events yet"
  * (an empty array), which drives the honest-empty state in the modal.
  */
@@ -1977,11 +1977,11 @@ interface ReconciliationRun {
  * The single real source for the reconciler's "last run" freshness (CTO-80): the latest
  * reconciliation_runs row (CTO-139) for this tenant, read from the gateway's reconciler run log via
  * GET /v1/tenant/reconciliation/status. Every surface that carries "reconciler last trued-up N min
- * ago" — Features diagnostics, Agents, Compare, Estimate — derives it from THIS function so they all
+ * ago" (Features diagnostics, Agents, Compare, Estimate) derives it from THIS function so they all
  * reflect one truth instead of independent hardcoded constants.
  *
- * Returns null when no reconciler run exists yet (`run` is null) — or the gateway is unreachable /
- * non-2xx — so callers can apply honest-null (`—`) rather than fabricate a value.
+ * Returns null when no reconciler run exists yet (`run` is null), or the gateway is unreachable /
+ * non-2xx, so callers can apply honest-null (`—`) rather than fabricate a value.
  */
 async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null> {
   try {
@@ -2010,7 +2010,7 @@ function minutesSince(finishedAt: string): number {
 /**
  * Minutes since the reconciler last finished a pass for the current tenant, from the real
  * reconciliation_runs source (see {@link fetchLatestReconciliationRun}). Returns null when the
- * reconciler has never run or the gateway is unavailable — the caller renders `—` (honest-null),
+ * reconciler has never run or the gateway is unavailable; the caller renders `—` (honest-null),
  * NEVER a fabricated constant (CTO-169 / the CTO-80 staleness guard).
  */
 export async function queryReconcilerLastRun(): Promise<number | null> {
@@ -2024,7 +2024,7 @@ export async function queryReconcilerLastRun(): Promise<number | null> {
  * convert to the page's units (hours / minutes-ago). Reads the same real source as
  * {@link queryReconcilerLastRun} so the freshness signal agrees across surfaces.
  *
- * Honest-null: when no reconciler run exists yet — or the gateway is unreachable / non-2xx — we
+ * Honest-null: when no reconciler run exists yet, or the gateway is unreachable / non-2xx, we
  * return null so the /api/features route falls back to its mock via `?? diagnostics`.
  */
 export async function queryAttributionDiagnostics(): Promise<AttributionDiagnostics | null> {
@@ -2230,7 +2230,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
     // CTO-119: per-stratum stats from typed columns. The "ci_half" formula is the standard
     // coefficient-of-variation half-width: zCrit × stddev(cost) / mean(cost) / sqrt(n), which
     // assumes cost is approximately log-normal within the stratum. Fine for body (high-volume,
-    // similar costs); heroic for tail (rare, expensive) — flagged in CTO-119 as a follow-up
+    // similar costs); heroic for tail (rare, expensive), flagged in CTO-119 as a follow-up
     // where a bootstrap estimator may be warranted. n<30 → null (page renders "—") rather than
     // a meaninglessly wide band.
     const strata = await rows<{ stratum: string; rate: string; n: string; spans: string; mean: string; std: string }>(
@@ -2352,7 +2352,7 @@ function toRunSpan(s: SpanRowRaw): RunSpan {
   };
 }
 
-// Fetch ordered spans for the given trace ids, grouped by trace id (a plain Record — avoids Map +
+// Fetch ordered spans for the given trace ids, grouped by trace id (a plain Record; avoids Map +
 // for-of, which behaved unreliably under Next's bundling for this query path).
 async function fetchSpansFor(
   db: ClickHouseClient,
@@ -2431,7 +2431,7 @@ export async function queryAgents(
     const runClause = run ? "AND TraceId = {run:String}" : "";
     const agentClause = agent ? "AND ServiceName = {agent:String}" : "";
     // Agent identity comes from ServiceName (e.g. "aider", "vercel-chatbot-demo"),
-    // not FeatureTag (which is the workflow-3 dimension — that's the /features view).
+    // not FeatureTag (which is the workflow-3 dimension; that's the /features view).
     // ?tag= still narrows agents to runs that produced a given feature.
     const aggs = await rowsP<RunAgg>(
       db,
@@ -2611,7 +2611,7 @@ export async function queryIntegrationStatus(): Promise<IntegrationStatusRow[] |
 //   params.max_cost_micro_usd     -> maxCostMicroUsd
 //   params.max_steps              -> maxSteps
 // The control plane does not carry fire counts, so wouldHaveFiredThisWeek / runsThisWeek default to
-// 0 (those are observability tallies the SDK emits, not config) — honest rather than fabricated.
+// 0 (those are observability tallies the SDK emits, not config), which is honest rather than fabricated.
 
 interface GatewayGuardrailRule {
   rule_id: string;
@@ -2645,13 +2645,13 @@ function mapGuardrailRule(r: GatewayGuardrailRule): GuardrailRule {
     mode,
     maxCostMicroUsd: guardrailIntOrNull(params["max_cost_micro_usd"]),
     maxSteps: guardrailIntOrNull(params["max_steps"]),
-    // Control plane carries config, not telemetry — fire counts come from the SDK, default 0.
+    // Control plane carries config, not telemetry; fire counts come from the SDK, default 0.
     wouldHaveFiredThisWeek: guardrailIntOrNull(params["would_have_fired_this_week"]) ?? 0,
     runsThisWeek: guardrailIntOrNull(params["runs_this_week"]) ?? 0,
   };
 }
 
-// Per-rule trip telemetry (CTO-146). The control plane stores config, not counts — the real
+// Per-rule trip telemetry (CTO-146). The control plane stores config, not counts; the real
 // runsThisWeek / wouldHaveFiredThisWeek come from guardrail-verdict spans the SDK emits. When a
 // rule is evaluated on a trace the SDK sets one map attribute per rule:
 //   SpanAttributes['gen_ai.guardrail.{rule_id}.verdict'] ∈ {enforced, shadow_observed, passed}
@@ -2659,7 +2659,7 @@ function mapGuardrailRule(r: GatewayGuardrailRule): GuardrailRule {
 //   runsThisWeek           = every verdict present (the rule was evaluated)
 //   wouldHaveFiredThisWeek = verdict ∈ {enforced, shadow_observed} (it fired / would have)
 // The key is dynamic per rule_id, so we ARRAY JOIN the attribute map and extract the rule_id from
-// keys matching `gen_ai.guardrail.%.verdict` — no need to enumerate rule ids in SQL.
+// keys matching `gen_ai.guardrail.%.verdict`, with no need to enumerate rule ids in SQL.
 export interface GuardrailActivity {
   runsThisWeek: number;
   wouldHaveFiredThisWeek: number;
@@ -2716,7 +2716,7 @@ export async function queryGuardrailRules(): Promise<GuardrailRule[] | null> {
     const body = (await res.json()) as { rules?: GatewayGuardrailRule[] };
     const rules = Array.isArray(body.rules) ? body.rules.map(mapGuardrailRule) : [];
     // Overlay live trip counts from verdict spans. If telemetry is unavailable (null), leave the
-    // config-default 0s — never fabricate a count.
+    // config-default 0s; never fabricate a count.
     const activity = await queryGuardrailActivity();
     if (activity) {
       for (const rule of rules) {
@@ -2847,10 +2847,10 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
 /**
  * $/conversion per provider, joined from otel_spans (cost) ⋈ business_events
  * (outcomes) on UserIdHash. The chatbot demo's lib/tally.ts derives one stable
- * UserIdHash per session — when a session converts, its events share that
+ * UserIdHash per session; when a session converts, its events share that
  * hash, so the join is direct.
  *
- * Filters are URL-driven (?tag=, ?provider=, ?outcome=) — see lib/attribution.ts.
+ * Filters are URL-driven (?tag=, ?provider=, ?outcome=); see lib/attribution.ts.
  * Returns null on any ClickHouse error so the API can fall back to the mock
  * report (CI / fresh-clone friendliness).
  */
@@ -2898,7 +2898,7 @@ export async function queryAttribution(
   return tryLive(async (db, tenant) => {
     // CTO-194: which sources/value types count as revenue for this tenant. Resolved from the
     // control plane, and falls back to the defaults (all sources, monetary + mrr, refunds net off)
-    // when the tenant has no row or the gateway is unreachable — it never throws, so a gateway
+    // when the tenant has no row or the gateway is unreachable. It never throws, so a gateway
     // outage degrades to the default policy rather than blanking the whole attribution report.
     const policy = await queryRevenuePolicy();
     const outcomeName = filters.outcome ?? "conversion";
@@ -2978,8 +2978,8 @@ export async function queryAttribution(
     // This used to require `b.Source = 'stripe'` and key off EventName. Both were wrong: `Source`
     // is an unconstrained LowCardinality(String) chosen by whichever connector ingested the row, so
     // any tenant on a non-Stripe biller had 100% of its revenue silently dropped, and EventName is
-    // equally freeform. `ValueType` is the real discriminator — a ClickHouse enum of
-    // ('monetary'=1,'count'=2,'mrr'=3,'refund'=4) — so we sum the money-typed events and subtract
+    // equally freeform. `ValueType` is the real discriminator, a ClickHouse enum of
+    // ('monetary'=1,'count'=2,'mrr'=3,'refund'=4), so we sum the money-typed events and subtract
     // refunds, which net off rather than being ignored. Source is now only ever a per-tenant
     // NARROWING, and absent config means every source counts (see lib/revenueSources.ts).
     //
@@ -3134,7 +3134,7 @@ export async function queryAccountRevenue(days?: number): Promise<AccountRevenue
   });
 }
 
-// --- Compare (Workflow 2) — current model from real traffic --------------------------------------
+// --- Compare (Workflow 2): current model from real traffic --------------------------------------
 //
 // Replaces the "current" half of the hardcoded mock in lib/compare.ts with a live read. Candidates,
 // quality scores, and latencies still mock today (those need workflow-5 replay infra). At least the
@@ -3162,7 +3162,7 @@ export async function queryCurrentModel(): Promise<{
   // (candidate per-call cost × this figure). Without it the route could only weigh a ~150-trace
   // replay corpus against a full month of incumbent spend, which reported a bogus ~100% reduction.
   monthlyCalls: number;
-  // null when sampleCount < MIN_SPANS_FOR_LATENCY_ERROR — the route surfaces these as "—" on the
+  // null when sampleCount < MIN_SPANS_FOR_LATENCY_ERROR; the route surfaces these as "—" on the
   // page rather than fabricating numbers off a too-small window.
   latencyP95Ms: number | null;
   errorRate: number | null;
@@ -3181,7 +3181,7 @@ export async function queryCurrentModel(): Promise<{
       sampleCount: string | number;
     }>(
       db,
-      // StatusCode is OTel semconv (UInt8): 0=Unset, 1=Ok, 2=Error — so an error span is
+      // StatusCode is OTel semconv (UInt8): 0=Unset, 1=Ok, 2=Error, so an error span is
       // `StatusCode = 2`. (The ticket suggested HTTP-style `>= 400`; the codebase already
       // uses `=== 2` for OTel error semantics, e.g. agents.ts toRunSpan().)
       // DurationNs is wrapped in `if(... > 0, ..., NULL)` because some insertion paths land
@@ -3191,8 +3191,8 @@ export async function queryCurrentModel(): Promise<{
       // (response model first, request model otherwise). Resolving the model any other way (e.g. the
       // old SpanAttributes['chatbot.real_model'] coalesce, whose historical-fallback rows have long
       // rolled out of the 30-day window per CTO-106) produced an id that never matched a breakdown row
-      // on the chatbot demo, so the wrong-sized-model detector always returned []. Resolve — and GROUP
-      // BY — on the SAME expression the cost breakdown uses so the join key matches by construction.
+      // on the chatbot demo, so the wrong-sized-model detector always returned []. Resolve (and GROUP
+      // BY) on the SAME expression the cost breakdown uses so the join key matches by construction.
       `SELECT
          ${EXPLORE_GROUP_EXPR.model} AS model,
          coalesce(
@@ -3272,7 +3272,7 @@ export async function queryCurrentModel(): Promise<{
 //
 // The gateway runs cross-provider replay against captured samples and returns per-candidate
 // cost / latency / error rate from real call outcomes. Cached for 5 minutes per (tenant, tag)
-// because each projection burns real provider spend — we don't want the dashboard re-replaying
+// because each projection burns real provider spend; we don't want the dashboard re-replaying
 // on every page refresh.
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
@@ -3303,20 +3303,20 @@ const REPLAY_CACHE_TTL_MS = isDemoMode() ? 4 * 60 * 60 * 1000 : 5 * 60 * 1000;
 const _replayCache = new Map<string, { at: number; data: ReplayProjection | null }>();
 
 // Default candidate list when the caller doesn't override. Models come from the SDK's expanded
-// catalog (CTO-106) — picked to mirror the existing mock so the dashboard's switcher looks the
+// catalog (CTO-106), picked to mirror the existing mock so the dashboard's switcher looks the
 // same when replay is active.
 //
 // CTO-166: Google/Gemini is a first-class priced provider (CTO-149), so the gemini candidate now
-// goes through the SAME /v1/replay + /v1/eval path as anthropic/openai — no provider allowlist.
+// goes through the SAME /v1/replay + /v1/eval path as anthropic/openai, with no provider allowlist.
 // It was previously absent here, which meant the gemini-3-flash row never got real replay/eval
 // data and stayed stuck on the compare.ts mock fallback. Adding it is the whole fix: the route
 // and the gateway clients are already provider-generic.
 //
-// CTO-171: dropped the retired `openai/gpt-4o-mini` — it is no longer a model we want the Compare
+// CTO-171: dropped the retired `openai/gpt-4o-mini`; it is no longer a model we want the Compare
 // switcher to surface. Every id below MUST be a current, catalog-priced model (see the SDK's
 // `seed_catalog()` in sdk/python/src/tally/pricing.py). This list is hardcoded rather than derived
 // from live provider discovery: the gateway discovers its lineup at boot (`app.state.models` via
-// `discover_models()`), but it does NOT yet expose that over HTTP — there is no `/v1/models` route.
+// `discover_models()`), but it does NOT yet expose that over HTTP; there is no `/v1/models` route.
 // Building one is the follow-up; until then, the guard test in clickhouse.test.ts asserts every id
 // here is present in a current known-good catalog set, so a retired id can't silently return.
 export const DEFAULT_CANDIDATES = [
@@ -3352,7 +3352,7 @@ export async function queryReplayCandidates(
         sample_size: 50,
       }),
       cache: "no-store",
-      // Replay is synchronous — 30s is plenty for 50 samples × 3 candidates on the mock client.
+      // Replay is synchronous; 30s is plenty for 50 samples × 3 candidates on the mock client.
       signal: AbortSignal.timeout(30_000),
     });
     if (!res.ok) {
@@ -3375,7 +3375,7 @@ export async function queryReplayCandidates(
 //
 // /estimate's POST surface lets an operator swap a candidate model AND tighten the system prompt,
 // then re-project cost off the captured corpus. Unlike queryReplayCandidates (which is cached and
-// multi-candidate), this is a single-candidate, override-bearing, uncached call — each what-if is
+// multi-candidate), this is a single-candidate, override-bearing, uncached call: each what-if is
 // a distinct intent and burns a fresh (cheap, mock-by-default) replay.
 
 export interface ReplayEstimateRequest {
@@ -3425,7 +3425,7 @@ export async function queryReplayEstimate(
 //
 // The gateway's /v1/eval runs a frontier judge over the replay outputs and returns per-candidate
 // win-rate with a Wilson 95% CI. We cache aggressively (10 minutes) because each pass burns real
-// judge spend — the dashboard must not re-judge on every refresh.
+// judge spend; the dashboard must not re-judge on every refresh.
 
 export interface EvalCandidateRow {
   provider: string;
@@ -3484,7 +3484,7 @@ export async function queryEvalCandidates(
         sample_size: 50,
       }),
       cache: "no-store",
-      // Eval is synchronous — judge calls are slower than replay calls. 10-minute timeout
+      // Eval is synchronous; judge calls are slower than replay calls. 10-minute timeout
       // matches the gateway-side allowance.
       signal: AbortSignal.timeout(600_000),
     });

@@ -51,7 +51,7 @@ export interface NoReturnEconRow {
   attributionRate: number | null;
   /**
    * Raw attributed-conversion count for the scope over the window, from `queryFeatureEconomics`.
-   * CTO-227 review finding (Bug 3): `attributionRate` is `null` in TWO different states — a feature
+   * CTO-227 review finding (Bug 3): `attributionRate` is `null` in TWO different states: a feature
    * with genuinely zero attribution AND a feature with some conversions but below the trust floor
    * (MIN_CONVERSIONS_FOR_ECONOMICS). Only the count tells them apart, so the detector gates on this,
    * not on the null rate, to avoid false-flagging a sparse-but-converting feature as pure waste.
