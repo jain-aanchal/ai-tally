@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CoveragePanel } from "@/components/CoveragePanel";
 import { apiGet } from "@/lib/api";
 import type { FunnelEvent, OnboardingProgress, TenantProxyCredentials } from "@/lib/onboarding";
 
@@ -24,6 +25,11 @@ export default async function OnboardingPage() {
         </p>
       </div>
       <Onboarding initialProgress={progress} creds={creds} />
+      {/* Per-layer coverage (CTO-261, §4.1). Sits under the connect steps because it answers the
+          question that comes NEXT: the steps above get the LLM layer flowing, and this says which
+          of the remaining layers a span actually proves. It polls on the client, so the page does
+          not block on the probe. */}
+      <CoveragePanel />
     </div>
   );
 }

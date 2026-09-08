@@ -47,7 +47,7 @@ export default async function DataQualityPage() {
           label="Context drops (24h)"
           value={overall.contextDropCount24h.toLocaleString()}
           health={classify("drops", overall.contextDropCount24h)}
-          hint="spans missing an active trace context — detectable, never silent"
+          hint="spans missing an active trace context: detectable, never silent"
         />
         <KpiCard
           label="Estimate calibration"
@@ -59,7 +59,7 @@ export default async function DataQualityPage() {
           label="Effective sample rate"
           value={`${Math.round(overall.effectiveSampleRate * 100)}%`}
           health="good"
-          hint="weighted across strata — tail kept ~100%, body sampled down"
+          hint="weighted across strata: tail kept ~100%, body sampled down"
         />
       </div>
 
@@ -129,7 +129,7 @@ export default async function DataQualityPage() {
 
       <AccountStitchingCard stitching={accountStitching} />
 
-      <Card title="Estimate vs. reconciled — last 7 reconciled days">
+      <Card title="Estimate vs. reconciled: last 7 reconciled days">
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-muted">
             <tr>
@@ -170,8 +170,8 @@ export default async function DataQualityPage() {
         if (overall.effectiveSampleRate >= 1.0 && totalSpans === 0) {
           return (
             <Card title="Sampling by stratum">
-              <p className="text-sm text-muted" title="no sampling configured — every span captured">
-                Not applicable — every span captured.
+              <p className="text-sm text-muted" title="no sampling configured: every span captured">
+                Not applicable. Every span captured.
               </p>
             </Card>
           );

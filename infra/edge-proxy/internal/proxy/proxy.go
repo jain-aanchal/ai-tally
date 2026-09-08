@@ -310,6 +310,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		AccountIdHash:    accountIdHash,
 		Method:           r.Method,
 		Path:             r.URL.Path,
+		Provider:         string(route.provider),
 		Model:            meta.Model,
 		PromptTokens:     meta.PromptTokens,
 		CompletionTokens: meta.CompletionTokens,

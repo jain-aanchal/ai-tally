@@ -273,8 +273,8 @@ export function deriveRecommendation(input: {
     return {
       verdict: "mixed",
       summary: cheapest
-        ? `— insufficient replay data to recommend a switch (only ${samplesReplayed.toLocaleString()} of the needed ${MIN_SAMPLES_TO_RECOMMEND} responses replayed). Run a fuller replay pass.`
-        : `— no alternative candidate cleared replay for this workload yet. Keep ${currentModel} until a candidate has samples.`,
+        ? `Insufficient replay data to recommend a switch (only ${samplesReplayed.toLocaleString()} of the needed ${MIN_SAMPLES_TO_RECOMMEND} responses replayed). Run a fuller replay pass.`
+        : `No alternative candidate cleared replay for this workload yet. Keep ${currentModel} until a candidate has samples.`,
       projectedSavingsMicroUsd,
       projectedSavingsPct,
     };
@@ -289,7 +289,7 @@ export function deriveRecommendation(input: {
   if (projectedSavingsPct < MIN_MEANINGFUL_SAVINGS_PCT) {
     return {
       verdict: "keep",
-      summary: `Keep ${currentModel}: the cheapest candidate (${cheapest.model}) saves only ${pct}% — below the ${Math.round(
+      summary: `Keep ${currentModel}: the cheapest candidate (${cheapest.model}) saves only ${pct}%, below the ${Math.round(
         MIN_MEANINGFUL_SAVINGS_PCT * 100,
       )}% threshold worth a switch.`,
       projectedSavingsMicroUsd,
@@ -301,7 +301,7 @@ export function deriveRecommendation(input: {
   if (cheapest.qualityScore === null) {
     return {
       verdict: "mixed",
-      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet — run an eval pass before routing production traffic.${latencyClause}`,
+      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet. Run an eval pass before routing production traffic.${latencyClause}`,
       projectedSavingsMicroUsd,
       projectedSavingsPct,
     };
@@ -319,7 +319,7 @@ export function deriveRecommendation(input: {
 
   return {
     verdict: "mixed",
-    summary: `${cheapest.model} is ${pct}% cheaper (saves ${dollars}/mo) but wins only ${winPct}% of judged pairs vs ${currentModel} — route cost-tolerant traffic to it, keep ${currentModel} for quality-critical calls.${latencyClause}`,
+    summary: `${cheapest.model} is ${pct}% cheaper (saves ${dollars}/mo) but wins only ${winPct}% of judged pairs vs ${currentModel}: route cost-tolerant traffic to it, keep ${currentModel} for quality-critical calls.${latencyClause}`,
     projectedSavingsMicroUsd,
     projectedSavingsPct,
   };

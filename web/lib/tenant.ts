@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Per-tenant cost-layer connector declarations (CTO-107).
 //
 // The "Partial data" banner used to fire whenever any cost layer reported zero, which made it
@@ -50,7 +50,7 @@ function asLayer(s: string): Layer | null {
 export async function queryEnabledConnectors(): Promise<Layer[]> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/connectors`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       // Short timeout: a slow gateway shouldn't block every page render.
       signal: AbortSignal.timeout(2000),
@@ -93,10 +93,9 @@ export async function setConnectorEnabled(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/connectors`, {
       method: "POST",
-      headers: {
+      headers: controlPlaneHeaders(await resolveTenantId(), {
         "content-type": "application/json",
-        "x-tenant-id": await resolveTenantId(),
-      },
+      }),
       body: JSON.stringify({ layer, enabled }),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

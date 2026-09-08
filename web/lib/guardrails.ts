@@ -43,7 +43,7 @@ export const GUARDRAIL_MODES: GuardrailModeMeta[] = [
   {
     mode: "hard_stop",
     label: "Hard stop",
-    blurb: "Abort the call outright. Opt-in only — for idempotent/read-only agents.",
+    blurb: "Abort the call outright. Opt-in only, for idempotent/read-only agents.",
     enforcing: true,
   },
 ];
@@ -97,8 +97,8 @@ export function graduationSignal(rule: GuardrailRule): GraduationSignal {
 
 export const GRADUATION_LABEL: Record<GraduationSignal, string> = {
   ready: "Ready to enforce",
-  review: "Cap never fires — review",
-  noisy: "Too noisy — tune the cap",
+  review: "Cap never fires: review",
+  noisy: "Too noisy: tune the cap",
   "insufficient-data": "Not enough data yet",
 };
 

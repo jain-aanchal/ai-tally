@@ -3,7 +3,11 @@
 # Without this recipe the agent wires middleware and record_* calls into a process that
 # was never connected, so nothing ships.
 id: startup.tally.init
-kind: llm
+# Not kind/layer llm. This is the line that connects the process, not a metered LLM call:
+# under llm it made by_kind("llm") and detect_stack's matched_kinds count the init line as
+# LLM-layer coverage, which would mislead the first consumer that branches on it (the P3
+# coverage probe). CTO-261 review finding 7.
+kind: startup
 title: "Application startup -> tally.init()"
 detect:
   # init applies to any metered app; the LLM clients are the strongest manifest signal
@@ -14,7 +18,7 @@ sdk_surface:
   call: "tally.init"
   delegates_to: "tally.init.init"
   required_args: [feature_tag]
-  layer: llm
+  layer: startup
 edit:
   imports_to_add: ["import tally"]
   template: |
@@ -26,6 +30,8 @@ edit:
     tally.init(feature_tag={feature_tag})
   placement: startup
 verify:
-  layer: llm
-  operation_name: "chat"
+  # No operation_name: init emits no span of its own. What it lights up is whatever the
+  # patched clients then record, so pinning it to GenAiOperation='chat' here would claim
+  # coverage this recipe does not itself prove.
+  layer: startup
 notes: "feature_tag sets the process-wide default feature dimension; the middleware recipe overrides it per request via start_trace. Passing no key degrades to a disabled client with one warning rather than raising, so a missing TALLY_KEY is visible in logs and never silently fabricates telemetry."

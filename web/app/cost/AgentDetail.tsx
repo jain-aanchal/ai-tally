@@ -66,7 +66,7 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
     return () => ctrl.abort();
   }, [endpoint]);
 
-  const title = `Run distribution — ${agent}`;
+  const title = `Run distribution: ${agent}`;
 
   if (status === "loading" && data === null) {
     return (
