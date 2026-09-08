@@ -12,12 +12,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date
 
 from fastapi.testclient import TestClient
 
 from gateway.app import app
 from gateway.config import get_settings
 from gateway.tenant_api_keys import ApiKeyMeta, MintedKey
+from gateway.tenant_budgets import Budget
 from gateway.tenant_provisioning import ProvisionResult
 
 TENANT_UUID = "8f14e45f-ceea-467a-9a3c-2f0e4d1b7c60"
@@ -256,3 +258,94 @@ def test_revoke_key_returns_204() -> None:
             headers=_svc_headers({"X-Tenant-Id": TENANT_UUID}),
         )
         assert r.status_code == 204
+
+
+# --- legacy control-plane endpoints ----------------------------------------------------------------
+#
+# Initiative 1 §6 closed the gap on the PRE-EXISTING /v1/tenant/* handlers too, not just the ones
+# this initiative added. Those used to resolve the tenant from an INGEST api key when auth was on,
+# so any holder of a write key could read and edit the control plane, and with auth off they trusted
+# a bare x-tenant-id from anyone who could reach the gateway. They now take the same service-token
+# gate and read the tenant from x-tenant-id. Budgets stands in for the whole set: a plain
+# store-backed read and write with no ingest coupling.
+
+
+class FakeBudgetStore:
+    """Minimal stand-in for TenantBudgetStore: enough for the auth assertions, no Postgres."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str]] = []
+
+    def upsert(self, tenant_id: str, **kw: object) -> Budget:
+        self.writes.append((tenant_id, str(kw.get("budget_id"))))
+        return Budget(
+            budget_id=str(kw.get("budget_id")),
+            period=str(kw.get("period")),
+            # Integer micro-USD, echoed back exactly as given: never a float, never defaulted to 0.
+            amount_micro=int(kw["amount_micro"]),  # type: ignore[arg-type]
+            scope_kind=str(kw.get("scope_kind")),
+            scope_value=str(kw.get("scope_value") or ""),
+            starts_on=date(2026, 1, 1),
+            ends_on=None,
+            created_at=None,
+            updated_at=None,
+        )
+
+    def list(self, tenant_id: str) -> list[Budget]:
+        return []
+
+
+_BUDGET_BODY = {
+    "budget_id": "research-agent-2026",
+    "period": "month",
+    "amount_micro": 30_000_000_000,
+    "scope_kind": "feature",
+    "scope_value": "research-agent",
+    "starts_on": "2026-01-01",
+}
+
+
+def test_legacy_budgets_write_rejected_without_service_token() -> None:
+    with _client(auth_on=True) as c:
+        store = FakeBudgetStore()
+        app.state.tenant_budgets = store
+        r = c.post(
+            "/v1/tenant/budgets",
+            json=_BUDGET_BODY,
+            headers={"X-Tenant-Id": TENANT_UUID},
+        )
+        assert r.status_code == 401
+        # The gate runs BEFORE the store, so an unauthenticated caller never reaches the write.
+        assert store.writes == []
+
+        wrong = c.post(
+            "/v1/tenant/budgets",
+            json=_BUDGET_BODY,
+            headers={"Authorization": "Bearer nope", "X-Tenant-Id": TENANT_UUID},
+        )
+        assert wrong.status_code == 401
+        assert store.writes == []
+
+
+def test_legacy_budgets_write_succeeds_with_service_token() -> None:
+    with _client(auth_on=True) as c:
+        store = FakeBudgetStore()
+        app.state.tenant_budgets = store
+        r = c.post(
+            "/v1/tenant/budgets",
+            json=_BUDGET_BODY,
+            headers=_svc_headers({"X-Tenant-Id": TENANT_UUID}),
+        )
+        assert r.status_code == 200
+        # The tenant comes from x-tenant-id, not from an ingest key: the service token authenticates
+        # the web SERVER, never a tenant (§6).
+        assert store.writes == [(TENANT_UUID, "research-agent-2026")]
+        assert r.json()["budget"]["amount_micro"] == 30_000_000_000
+
+
+def test_legacy_budgets_read_rejected_without_service_token() -> None:
+    with _client(auth_on=True) as c:
+        app.state.tenant_budgets = FakeBudgetStore()
+        assert c.get("/v1/tenant/budgets", headers={"X-Tenant-Id": TENANT_UUID}).status_code == 401
+        ok = c.get("/v1/tenant/budgets", headers=_svc_headers({"X-Tenant-Id": TENANT_UUID}))
+        assert ok.status_code == 200

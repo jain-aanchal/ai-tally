@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Which business events count as revenue, per tenant (CTO-194).
 //
 // The attribution revenue sum used to be gated on a hardcoded `business_events.Source = 'stripe'`.
@@ -97,7 +97,7 @@ const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 export async function queryRevenuePolicy(): Promise<RevenuePolicy> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/revenue-sources/config`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });

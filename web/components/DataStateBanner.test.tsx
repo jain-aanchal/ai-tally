@@ -9,7 +9,7 @@ describe("PartialDataBanner (CTO-107)", () => {
     render(<PartialDataBanner trippedLayers={["vector"]} />);
     expect(screen.getByText(/Partial data/i)).toBeTruthy();
     expect(
-      screen.getByText(/vector is reporting zero — that connector isn’t producing data/i),
+      screen.getByText(/vector is reporting zero. That connector isn’t producing data/i),
     ).toBeTruthy();
   });
 

@@ -208,3 +208,33 @@ def test_estimate_uses_injected_candidate_client(client: TestClient) -> None:
     # The override must have reached the injected client's envelope.
     assert seen
     assert all(c.envelope.get("system_prompt") == "x" * 2000 for c in seen)
+
+
+def test_body_tenant_that_disagrees_with_the_header_is_refused(client: TestClient) -> None:
+    """Defence in depth: the body must never silently outrank the header.
+
+    Only a service-token holder reaches this handler and the web server always sends the tenant it
+    resolved server-side, so this is not a live IDOR. It is refused anyway, because a body field is
+    the one input an attacker would control, and "the body wins" is the wrong thing to have already
+    written down if the gate is ever loosened. A matching body tenant_id still works.
+    """
+    r = client.post(
+        "/v1/replay/estimate",
+        headers={"X-Tenant-Id": T},
+        json={
+            "tenant_id": "some-other-tenant",
+            "candidate_model": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+        },
+    )
+    assert r.status_code == 403
+    assert "does not match" in r.json()["detail"]
+
+    r = client.post(
+        "/v1/replay/estimate",
+        headers={"X-Tenant-Id": T},
+        json={
+            "tenant_id": T,
+            "candidate_model": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+        },
+    )
+    assert r.status_code == 200

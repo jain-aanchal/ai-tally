@@ -56,6 +56,12 @@ spec:
             - name: TALLY_CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef: { name: ai-tally-clickhouse-password, key: latest }
+            # Initiative 1 §6: the control-plane service token the web server presents on every
+            # /v1/tenant/* call. REQUIRED here, because with TALLY_REQUIRE_API_KEY=true the gateway
+            # refuses to boot rather than come up with an unauthenticated control plane.
+            - name: TALLY_GATEWAY_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: ai-tally-gateway-service-token, key: latest }
             # Provider keys are OPTIONAL — the gateway boots fail-soft without them (CTO-109).
             # Remove these two blocks if you have not created the secrets.
             - name: OPENAI_API_KEY

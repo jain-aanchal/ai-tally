@@ -97,7 +97,7 @@ export function GuardrailConfig({ initialRules }: { initialRules: GuardrailRule[
       </div>
 
       <p className="text-xs text-muted">
-        Every rule starts in observe-only — the engine records what would have fired without touching
+        Every rule starts in observe-only: the engine records what would have fired without touching
         the agent. Mode changes reach the SDK within the {CONFIG_REFRESH_SECONDS}s config-refresh
         window.
       </p>

@@ -20,7 +20,7 @@ export default async function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold">Settings — Guardrails</h1>
+        <h1 className="text-xl font-semibold">Settings: Guardrails</h1>
         <p className="mt-1 text-sm text-muted">
           Cost and step caps per agent or feature. Start in observe-only, watch what would have
           fired, then graduate to enforcement with confidence.
@@ -36,7 +36,7 @@ export default async function SettingsPage() {
       <p className="text-xs text-muted">
         Looking for spending budgets?{" "}
         <Link href="/settings/budgets" className="text-accent hover:underline">
-          Settings — Budgets
+          Settings: Budgets
         </Link>
         .
       </p>

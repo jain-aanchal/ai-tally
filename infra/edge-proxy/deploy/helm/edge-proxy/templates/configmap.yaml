@@ -15,6 +15,9 @@ data:
   EDGE_PROXY_BROKER_TTL: {{ .Values.proxy.brokerTTL | quote }}
   EDGE_PROXY_SELF_HOSTED: {{ .Values.proxy.selfHosted | quote }}
   EDGE_PROXY_TELEMETRY_URL: {{ .Values.proxy.telemetryURL | quote }}
+  {{- if .Values.proxy.tenantId }}
+  EDGE_PROXY_TENANT_ID: {{ .Values.proxy.tenantId | quote }}
+  {{- end }}
   {{- if eq .Values.proxy.mode "broker" }}
   EDGE_PROXY_BROKER_FILE: "{{ .Values.broker.mountPath }}/{{ .Values.broker.secretKey }}"
   {{- end }}

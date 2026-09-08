@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Dashboard client for the account control plane (CTO-188, plan D2).
 //
 // Two gateway endpoints, one module, because they answer the two halves of the same question "which
@@ -52,7 +52,7 @@ interface AccountLookupResponse {
 export async function queryAccountLabels(): Promise<Map<string, string> | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/account-labels`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -101,7 +101,7 @@ export async function lookupAccountHashes(accountId: string): Promise<AccountLoo
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/account-lookup`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
       body: JSON.stringify({ account_id: trimmed }),
       cache: "no-store",
       signal: AbortSignal.timeout(TIMEOUT_MS),
