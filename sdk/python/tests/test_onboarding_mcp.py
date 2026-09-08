@@ -15,6 +15,7 @@ from onboarding_mcp import (
     detect_stack,
     explain_layer,
     generate_middleware,
+    generate_startup,
     get_recipe,
     instrument_call_site,
 )
@@ -119,6 +120,58 @@ def test_generate_middleware_is_bound_to_the_given_header():
     assert "with_account" in emitted
     assert "start_trace" in emitted
     assert "<FILL:" not in result["code"]  # both holes were bound
+
+
+def test_generate_middleware_bundles_the_startup_snippet():
+    # Section 3 step 4: the proposed diff is init + middleware + record_*. Middleware
+    # without the init line wires a process that was never connected.
+    result = generate_middleware("fastapi", 'request.headers["X-Customer-Id"]', "chatbot")
+    startup = result["startup"]
+    assert startup["recipe_id"] == "startup.tally.init"
+    assert startup["placement"] == "startup"
+    assert "tally.init(" in startup["code"]
+    ast.parse(startup["code"])
+    assert {c.name for c in emitted_tally_calls(startup["code"])} == {"init"}
+
+
+def test_generate_startup_binds_the_feature_tag_and_never_inlines_a_key():
+    result = generate_startup("chatbot")
+    assert "feature_tag='chatbot'" in result["code"]
+    assert "<FILL:" not in result["code"]
+    # Credentials by reference (CLAUDE.md): the key comes from the environment, so no
+    # snippet ever puts a tally_sk_live_ secret into the developer's diff.
+    assert "tally_sk_live_" not in result["code"]
+    assert "TALLY_KEY" in result["code"]
+
+
+def test_generate_startup_without_a_feature_tag_is_none_not_invented():
+    result = generate_startup()
+    assert "feature_tag=None" in result["code"]
+
+
+def test_generate_startup_without_the_recipe_is_a_gap():
+    # A catalog missing the startup recipe reports a gap rather than hand-writing init.
+    from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+
+    full = get_catalog()
+    without = RecipeCatalog(
+        [r for r in full.recipes if r.id != "startup.tally.init"], full.schema
+    )
+    result = generate_startup("chatbot", catalog=without)
+    assert result["gap"] is True
+    assert "code" not in result
+
+
+def test_instrument_call_site_adapts_the_llm_recipe():
+    # Section 5.3: LLM call sites CTO-260 auto-instrumentation does not cover.
+    result = instrument_call_site(
+        'r = httpx.post("/v1/chat/completions", json=payload)', "llm.generic.call"
+    )
+    assert result["sdk_call"] == "tally.record_llm_call"
+    assert "record_llm_call" in result["emitted_calls"]
+    # Token counts are left to fill from the provider's usage block, never guessed.
+    assert "input_tokens" in result["holes_to_fill"]
+    assert "<FILL:input_tokens>" in result["code"]
 
 
 def test_generate_middleware_without_an_answer_is_a_gap_not_a_guess():

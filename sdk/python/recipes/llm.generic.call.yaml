@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# CTO-261 section 5.3: LLM call sites CTO-260 auto-instrumentation does not cover
+# (a self-hosted or gateway-fronted model, a raw HTTP call, a provider with no patch).
+# The patched openai / anthropic clients need no edit; this recipe is for the rest.
+id: llm.generic.call
+kind: llm
+title: "Unpatched LLM call site -> tally.record_llm_call"
+detect:
+  imports: ["httpx", "requests", "boto3", "ollama", "vllm", "together", "groq"]
+  call_patterns: [".chat.completions.create(", "messages.create(", "/v1/chat/completions"]
+sdk_surface:
+  call: "tally.record_llm_call"
+  delegates_to: "tally.client.TallyClient.record_llm_call"
+  required_args: [provider, model, usage]
+  layer: llm
+edit:
+  imports_to_add: ["import tally", "from tally.pricing import Usage"]
+  template: |
+    # After the LLM call returns. Use this only where the patched openai / anthropic
+    # client does not already capture the call (CTO-260 auto-instrument), otherwise the
+    # same call is metered twice. Token counts come from the provider's own usage block:
+    # counts only, never the prompt or the completion.
+    tally.record_llm_call(
+        provider={llm_provider},
+        model={llm_model},
+        usage=Usage(
+            input_tokens={input_tokens},
+            output_tokens={output_tokens},
+        ),
+    )
+  placement: after_call
+verify:
+  layer: llm
+  operation_name: "chat"
+notes: "Cost resolves from the versioned catalog keyed by (provider, model); an unpriced pair keeps cost unknown with a one-time WARN rather than reporting a fabricated zero. Pass cached_input_tokens on Usage where the provider reports it."

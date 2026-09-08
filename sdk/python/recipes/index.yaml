@@ -35,3 +35,11 @@ recipes:
   - id: otel.ingest.gen_ai
     file: otel.ingest.yaml
     kind: otel
+  # Appended last on purpose: excerpt matching (explain_layer) resolves in index order,
+  # and these two are the broadest detect blocks in the catalog.
+  - id: startup.tally.init
+    file: startup.tally.init.yaml
+    kind: llm
+  - id: llm.generic.call
+    file: llm.generic.call.yaml
+    kind: llm
