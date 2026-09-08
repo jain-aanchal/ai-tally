@@ -28,7 +28,7 @@ export interface SampleByStratum {
   rate: number; // 0..1, average configured keep rate seen in this stratum over the window
   /**
    * 0..1 fractional half-width of the 95% CI on extrapolated cost. `null` when fewer than 30
-   * kept spans landed in this stratum over the window — Wilson-flavoured estimators get
+   * kept spans landed in this stratum over the window; Wilson-flavoured estimators get
    * uselessly wide below that. Render `—`, never a fabricated tight band (CTO-119).
    */
   ciHalfWidthPct: number | null;

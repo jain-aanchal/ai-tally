@@ -4,7 +4,7 @@
 Covers the three things the ticket asks the SDK side to prove:
   1. the seed catalog prices the Gemini lineup (non-zero, correct against the seeded rates);
   2. ``record_llm_call(provider="google", ...)`` costs from the catalog and stamps
-     ``gen_ai.system="google"`` on a conformant span — no provider allowlist to trip over;
+     ``gen_ai.system="google"`` on a conformant span, no provider allowlist to trip over;
   3. model discovery classifies a mocked Google model list into flash/pro and fails soft.
 """
 
@@ -249,7 +249,7 @@ def test_discover_google_fails_soft_on_network_error(
 def test_discover_google_fails_soft_on_malformed_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A body missing the "models" key must not crash — tolerant parsing skips Google.
+    # A body missing the "models" key must not crash; tolerant parsing skips Google.
     monkeypatch.setattr(
         M.urllib.request,
         "urlopen",

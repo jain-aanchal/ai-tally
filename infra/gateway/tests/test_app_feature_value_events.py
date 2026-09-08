@@ -1,4 +1,4 @@
-"""GET/POST/DELETE /v1/tenant/feature-value-events — CRUD + idempotency (CTO-140)."""
+"""GET/POST/DELETE /v1/tenant/feature-value-events: CRUD + idempotency (CTO-140)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ T = "t-acme"
 
 
 class FakeStore:
-    """In-memory stand-in for :class:`TenantFeatureValueEventStore` — no Postgres required.
+    """In-memory stand-in for :class:`TenantFeatureValueEventStore`, no Postgres required.
 
     Mirrors the idempotency contract: a repeated ``change_id`` is a no-op. For upsert it returns the
     existing mapping unchanged; for delete it returns False.

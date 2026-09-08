@@ -4,8 +4,8 @@
 Proves the two things the ticket asks the SDK side to demonstrate:
   1. a captured Vercel-AI-Gateway response shape resolves to the TRUE upstream
      ``(provider, model, usage)`` so ``record_llm_call`` prices it from the catalog to the
-     right non-zero cost — the gateway hop never launders the spend into a generic "vercel";
-  2. an unresolvable upstream attributes to ``unknown`` with a null cost — never a guess.
+     right non-zero cost; the gateway hop never launders the spend into a generic "vercel";
+  2. an unresolvable upstream attributes to ``unknown`` with a null cost, never a guess.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def test_record_gateway_llm_call_lands_true_upstream_span() -> None:
     assert result.cost_micro_usd is not None and result.cost_micro_usd > 0
     assert len(exporter.spans) == 1
     span = exporter.spans[0]
-    # True upstream on the span — NOT "vercel".
+    # True upstream on the span, NOT "vercel".
     assert span[GenAI.SYSTEM] == "openai"
     assert span[GenAI.REQUEST_MODEL] == "gpt-4o-mini"
     assert span[GenAI.USAGE_INPUT_TOKENS] == 1000
@@ -145,7 +145,7 @@ def test_unresolvable_upstream_attributes_to_unknown_null_cost() -> None:
     assert att.resolved is False
     assert att.provider == UNKNOWN
     assert att.model == UNKNOWN
-    # Usage is still captured — we just can't price it.
+    # Usage is still captured; we just can't price it.
     assert att.usage == Usage(1000, 250, 0)
 
     cost, version = compute_cost_micro_usd(
@@ -166,7 +166,7 @@ def test_record_unknown_upstream_emits_span_with_no_cost() -> None:
         result = record_gateway_llm_call(
             client, {"usage": {"prompt_tokens": 42, "completion_tokens": 7}}, at=AT
         )
-    # Recorded, never dropped — but priced null, attributed honestly to unknown.
+    # Recorded, never dropped, but priced null, attributed honestly to unknown.
     assert result.cost_micro_usd is None or result.cost_micro_usd == 0
     assert len(exporter.spans) == 1
     assert exporter.spans[0][GenAI.SYSTEM] == UNKNOWN

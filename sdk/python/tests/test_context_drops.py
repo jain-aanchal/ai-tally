@@ -24,7 +24,7 @@ def test_emits_three_attributes() -> None:
     assert attrs["gen_ai.context.dropped_messages"] == 3
     assert attrs["gen_ai.context.dropped_tokens"] == 1200
     assert attrs["gen_ai.context.window_used_pct"] == 0.92
-    # Window-drop path must NOT bump the trace-drop counter — different semantic.
+    # Window-drop path must NOT bump the trace-drop counter: different semantic.
     assert obs.context_drop_count == 0
 
 
@@ -46,7 +46,7 @@ def test_mutates_caller_attrs() -> None:
 
 
 def test_backwards_compatible_no_args() -> None:
-    """Legacy call site (no drop fields) still works — bumps the obs counter."""
+    """Legacy call site (no drop fields) still works; bumps the obs counter."""
     obs = SelfObservability()
     note_context_drop(obs, where="record_llm_call")
     assert obs.context_drop_count == 1
@@ -62,7 +62,7 @@ def test_partial_call_one_field() -> None:
 
 
 def test_negative_values_clamped_to_zero() -> None:
-    """Don't trust the caller blindly — negatives become 0, not negatives."""
+    """Don't trust the caller blindly: negatives become 0, not negatives."""
     obs = SelfObservability()
     attrs = note_context_drop(
         obs,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-135 / CTO-141 — record_tool_call lands spans in the Tools cost-layer bucket.
+"""CTO-135 / CTO-141: record_tool_call lands spans in the Tools cost-layer bucket.
 
 Default tool pricing now resolves from the versioned price catalog (CTO-141) under
 ``PriceType.TOOL_CALL``, not the removed inline ``_TOOL_PRICING`` dict.

@@ -23,7 +23,7 @@ T = "t-acme"
 
 
 class FakeReplayStore:
-    """In-memory stand-in for TenantReplayStore — no Postgres."""
+    """In-memory stand-in for TenantReplayStore, no Postgres."""
 
     def __init__(self) -> None:
         self._cfg: dict[str, ReplayConfig] = {}
@@ -215,7 +215,7 @@ def test_replay_projection_skips_missing_bodies_thinner(client: TestClient) -> N
 def test_replay_projection_all_bodies_missing_returns_insufficient_corpus(
     client: TestClient,
 ) -> None:
-    """CTO-241: the exact restart bug — durable index re-hydrated, in-memory bodies wiped. Every
+    """CTO-241: the exact restart bug, durable index re-hydrated, in-memory bodies wiped. Every
     body is gone, so /v1/replay returns the honest insufficient-corpus shape (empty per_candidate),
     NOT a 500 and NOT a page of fabricated zeros."""
     _seed_samples(client, n=5)

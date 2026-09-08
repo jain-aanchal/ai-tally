@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Route tests for /api/estimate POST — body-driven what-if + honest-null floor (CTO-128).
+// Route tests for /api/estimate POST: body-driven what-if + honest-null floor (CTO-128).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 

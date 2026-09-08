@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Object storage (S3) addressing + offload policy (CTO-28 / spec §5.3).
 
-Large or auxiliary blobs don't belong inline in ClickHouse — they bloat the hot store and slow
+Large or auxiliary blobs don't belong inline in ClickHouse; they bloat the hot store and slow
 every scan. Three categories live in S3 instead, referenced from a span by a small pointer string:
 
-* **resolved-context** — the fully-resolved prompt/context body for replay, offloaded when it
+* **resolved-context**: the fully-resolved prompt/context body for replay, offloaded when it
   exceeds the inline threshold (stored in ``otel_spans.ResolvedContextRef``).
-* **cold-span** — archived raw spans past the cold tier (CTO-29 drops them from ClickHouse).
-* **raw-cdp-payload** — the original webhook body behind a business event (CTO-68), kept for audit.
+* **cold-span**: archived raw spans past the cold tier (CTO-29 drops them from ClickHouse).
+* **raw-cdp-payload**: the original webhook body behind a business event (CTO-68), kept for audit.
 
 This module owns the **addressing scheme** (per-tenant + per-region prefixing so a bucket is never
 shared across isolation boundaries), the **inline-vs-offload decision** (>64 KiB → S3), the
@@ -62,7 +62,7 @@ def build_object_key(
 ) -> str:
     """Per-region, per-tenant, content-addressed key.
 
-    ``{region}/tenant={tenant}/{category}/dt=YYYY-MM-DD/{sha256}`` — region first so a bucket maps
+    ``{region}/tenant={tenant}/{category}/dt=YYYY-MM-DD/{sha256}``: region first so a bucket maps
     to one region (data-residency), tenant prefix for isolation, date partition for lifecycle
     rules, content hash for dedup (identical bodies collapse to one object).
     """
@@ -76,7 +76,7 @@ def build_object_key(
 
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
-    """A pointer to an S3 object — this is what gets stored inline in ClickHouse, not the blob."""
+    """A pointer to an S3 object: this is what gets stored inline in ClickHouse, not the blob."""
 
     bucket: str
     key: str
@@ -136,7 +136,7 @@ class ObjectStore(Protocol):
 
 @dataclass(slots=True)
 class InMemoryObjectStore:
-    """In-memory ObjectStore for dev/test — real put/get/delete round-trip, no S3 dependency.
+    """In-memory ObjectStore for dev/test: real put/get/delete round-trip, no S3 dependency.
 
     Content-addressed and idempotent: writing the same bytes twice yields the same key and object.
     """

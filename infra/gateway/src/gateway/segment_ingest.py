@@ -11,7 +11,7 @@ write-key (resolved by reference), and maps them:
 * ``identify`` → an :class:`~tally.wire.IdentityLink` joining the hashed ``anonymousId`` to the
   hashed ``userId`` in ``identity_graph``, so later track/span rows stitch to one identity.
 
-Only counts, mapped events and values are persisted — never the raw Segment message body. Every
+Only counts, mapped events and values are persisted, never the raw Segment message body. Every
 identifier is HMAC'd under the tenant's key before it touches storage (``messageId`` is the one
 non-PII field kept verbatim, as the dedup key).
 """
@@ -44,7 +44,7 @@ def map_track_event(
 ) -> BusinessEvent | None:
     """Map one Segment ``track`` event to a business event, or ``None`` if it isn't a usable track.
 
-    ``messageId`` is Segment's per-message unique id — it becomes ``BusinessEventId`` so redelivery
+    ``messageId`` is Segment's per-message unique id; it becomes ``BusinessEventId`` so redelivery
     collapses under ClickHouse's ReplacingMergeTree. Revenue-bearing track events are monetary;
     everything else is a ``count`` touch (no fabricated value).
     """
@@ -83,7 +83,7 @@ def map_identify_event(
 ) -> IdentityLink | None:
     """Map one Segment ``identify`` event to an anonymous↔user identity edge, or ``None``.
 
-    Needs BOTH ``anonymousId`` and ``userId`` — an identify with only one side carries no edge to
+    Needs BOTH ``anonymousId`` and ``userId``; an identify with only one side carries no edge to
     record. Both ids are hashed under the tenant key before the link is built.
     """
     if event.get("type") != "identify":
@@ -146,7 +146,7 @@ class SegmentWorker(IngestWorker):
                     if link is not None:
                         links.append(link)
                 # page / screen / group / alias → intentionally ignored (not value or identity)
-            except Exception:  # noqa: BLE001 — one bad message shouldn't fail the whole cycle
+            except Exception:  # noqa: BLE001 - one bad message shouldn't fail the whole cycle
                 errors += 1
 
         inserted = self._insert_events(tenant_id, events)

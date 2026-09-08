@@ -2,7 +2,7 @@
   {
     "id": "support-billing",
     "tag": "chatbot.support",
-    "opener": "My subscription billing is broken — I was charged twice this month. Can you help me get a refund?",
+    "opener": "My subscription billing is broken. I was charged twice this month. Can you help me get a refund?",
     "followups": [
       "What information do you need from me?",
       "I have the order number, it's 482910. The duplicate was on the 14th.",
@@ -14,7 +14,7 @@
   {
     "id": "support-stuck",
     "tag": "chatbot.support",
-    "opener": "I'm stuck — my dashboard won't load and the error says 'session expired' but I just logged in.",
+    "opener": "I'm stuck: my dashboard won't load and the error says 'session expired' but I just logged in.",
     "followups": [
       "I've already tried clearing my cache.",
       "Same problem in incognito.",
@@ -50,7 +50,7 @@
   {
     "id": "code-debug",
     "tag": "chatbot.code",
-    "opener": "I'm getting a TypeError: cannot read properties of undefined (reading 'map') in this React function — what's going wrong?",
+    "opener": "I'm getting a TypeError: cannot read properties of undefined (reading 'map') in this React function. What's going wrong?",
     "followups": [
       "Here's the snippet: const x = data.items.map(i => i.name)",
       "How do I add a loading state too?",
@@ -80,7 +80,7 @@
       "How would you handle teams vs individuals?",
       "What if we exposed cost-per-feature only on paid?",
       "What's the right number of seats to include free?",
-      "Imagine we have $200k/yr in budget — how would we market this?"
+      "Imagine we have $200k/yr in budget. How would we market this?"
     ]
   },
   {
@@ -98,13 +98,13 @@
   {
     "id": "support-cancel",
     "tag": "chatbot.support",
-    "opener": "I need to cancel my account — the billing keeps failing and I want to stop the subscription before another charge.",
+    "opener": "I need to cancel my account. The billing keeps failing and I want to stop the subscription before another charge.",
     "followups": [
       "Where do I find the cancel button?",
       "Will I lose my data immediately?",
       "Can I export it first?",
       "Will I get a final invoice?",
-      "Thanks. Confirming — nothing else needed from me?"
+      "Thanks. Confirming, nothing else needed from me?"
     ]
   },
   {
@@ -116,13 +116,13 @@
       "Will the temperature drop much overnight?",
       "What should I pack given that weather?",
       "Any chance of rain on Sunday?",
-      "Thanks — what's the weather looking like the following week?"
+      "Thanks. What's the weather looking like the following week?"
     ]
   },
   {
     "id": "support-weather-widget",
     "tag": "chatbot.support",
-    "opener": "The weather widget on my dashboard shows the wrong temperature — can you check the forecast for my city?",
+    "opener": "The weather widget on my dashboard shows the wrong temperature. Can you check the forecast for my city?",
     "followups": [
       "My city is Denver.",
       "It's showing 90 degrees but it feels much colder.",
@@ -134,7 +134,7 @@
   {
     "id": "code-perf",
     "tag": "chatbot.code",
-    "opener": "How can I optimize this Python function — it's slow on inputs over 100k items: def f(xs): return [x for x in xs if x in seen]",
+    "opener": "How can I optimize this Python function; it's slow on inputs over 100k items: def f(xs): return [x for x in xs if x in seen]",
     "followups": [
       "What's the time complexity right now?",
       "Show me with a set instead.",

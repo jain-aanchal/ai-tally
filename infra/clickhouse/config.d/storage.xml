@@ -4,7 +4,7 @@
 
   otel_spans.sql's TTL moves expired parts `TO VOLUME 'warm'`, which only resolves if the table's
   storage policy actually defines a volume named `warm`. The table specifies no explicit policy, so
-  it uses `default` — therefore we redefine the `default` policy here with two volumes:
+  it uses `default`; therefore we redefine the `default` policy here with two volumes:
 
     hot  -> the built-in `default` disk (fresh inserts land here)
     warm -> a second local disk (parts move here after the 7d TTL)

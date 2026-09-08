@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Operational metrics computed over spans.
 
-Implements CTO-83: ``agent_run.cross_process_ratio`` — the trigger metric for promoting a tenant's
+Implements CTO-83: ``agent_run.cross_process_ratio``, the trigger metric for promoting a tenant's
 guardrails from v1 (single-process) to v2 (a shared counter).
 
 A single logical agent run is identified by ``AgentRunId``. If the spans for one run arrive from
@@ -9,7 +9,7 @@ more than one process (distinct ``ServiceName`` / process id), that run is *dist
 v1 per-process guardrail counters under-count it. We measure the fraction of distributed runs per
 tenant; when it crosses a threshold (~5%), that tenant is a v2 candidate.
 
-Pure computation over span dicts — no infra needed.
+Pure computation over span dicts; no infra needed.
 """
 
 from __future__ import annotations

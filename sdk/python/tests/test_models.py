@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``tally.models`` — auto-discovery of provider model lineups.
+"""Tests for ``tally.models``: auto-discovery of provider model lineups.
 
 No live network is touched: ``fetch_*_models`` is exercised via ``monkeypatch`` over
 ``urllib.request.urlopen`` with fixture JSON that mimics the real ``/v1/models`` shape.
@@ -37,7 +37,7 @@ def test_classify_family_truth_table() -> None:
         "gemini-2.5-flash": "flash",
         "gemini-3-flash": "flash",
         "gemini-2.5-pro": "pro",
-        # Non-chat OpenAI SKUs must NOT land in a chat family — they'd 404 on
+        # Non-chat OpenAI SKUs must NOT land in a chat family: they'd 404 on
         # chat-completions if resolveLatest handed them over.
         "gpt-4o-mini-tts": "other",
         "gpt-4o-mini-transcribe": "other",
@@ -49,7 +49,7 @@ def test_classify_family_truth_table() -> None:
         "dall-e-3": "other",
         "whisper-1": "other",
         "omni-moderation-latest": "other",
-        # o-series reasoning minis are chat-capable — they stay in "mini".
+        # o-series reasoning minis are chat-capable; they stay in "mini".
         "o3-mini": "mini",
     }
     for model_id, expected in cases.items():
@@ -106,7 +106,7 @@ def test_latest_prefers_undated_alias_over_dated_snapshot() -> None:
 def test_latest_skips_deprecated() -> None:
     now = datetime.now(tz=timezone.utc)
     lineup = [
-        # Deprecated, newer created_at — must be skipped despite being newer.
+        # Deprecated, newer created_at: must be skipped despite being newer.
         _make("anthropic", "claude-haiku-3-5", created=now, deprecated=now - timedelta(days=1)),
         _make("anthropic", "claude-haiku-4-5", created=now - timedelta(days=30)),
     ]
@@ -230,7 +230,7 @@ def test_discover_falls_back_to_stale_cache_on_fetch_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Write a stale cache (older than the TTL) and have the live fetch raise. The
-    # gateway must still boot — that's the whole point of fail-soft discovery.
+    # gateway must still boot; that's the whole point of fail-soft discovery.
     cache = tmp_path / "models.json"
     M.save_cache([_make("anthropic", "claude-sonnet-4-5", created=None)], cache)
     old = time.time() - (M.CACHE_TTL_SECONDS + 60)

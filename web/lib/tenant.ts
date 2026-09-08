@@ -8,7 +8,7 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // counting those layers when computing partiality.
 //
 // Server-only: imported by Route Handlers. The gateway is the source of truth for the per-tenant
-// config — we never read Postgres directly from the dashboard. Failures fall back to ["llm"] so
+// config; we never read Postgres directly from the dashboard. Failures fall back to ["llm"] so
 // demos and CI (where the gateway may be unreachable) keep working and the banner stays quiet.
 //
 // Tenant scoping mirrors web/lib/clickhouse.ts: the active tenant is resolved per call via
@@ -30,7 +30,7 @@ interface TenantConnectorsResponse {
   enabled_layers: string[];
 }
 
-/** Fallback used when the gateway is unreachable — matches the only connector wired today. */
+/** Fallback used when the gateway is unreachable: matches the only connector wired today. */
 export const DEFAULT_ENABLED_LAYERS: Layer[] = ["llm"];
 
 function asLayer(s: string): Layer | null {
@@ -40,11 +40,11 @@ function asLayer(s: string): Layer | null {
 /**
  * Ask the gateway which cost-layer connectors this tenant has declared enabled.
  *
- * The dashboard uses this list — and only this list — to decide whether the "Partial data" banner
+ * The dashboard uses this list, and only this list, to decide whether the "Partial data" banner
  * should fire. A layer that was never declared isn't a gap; it's by design.
  *
  * When the gateway is unreachable (CI, fresh clone with nothing running, transient outage) we
- * return ``["llm"]`` so a demo doesn't suddenly start screaming "partial data" — which would
+ * return ``["llm"]`` so a demo doesn't suddenly start screaming "partial data", which would
  * defeat the purpose of this whole ticket.
  */
 export async function queryEnabledConnectors(): Promise<Layer[]> {
@@ -65,7 +65,7 @@ export async function queryEnabledConnectors(): Promise<Layer[]> {
       const l = asLayer(s);
       if (l) layers.push(l);
     }
-    // A tenant that exists but has declared nothing is treated like the fallback — otherwise the
+    // A tenant that exists but has declared nothing is treated like the fallback; otherwise the
     // banner would fire for *every* layer the moment any data lands. The intent is "no declared
     // connectors = no expectations", and the LLM connector is the implicit baseline.
     if (layers.length === 0) return [...DEFAULT_ENABLED_LAYERS];
@@ -83,7 +83,7 @@ export async function queryEnabledConnectors(): Promise<Layer[]> {
  * Enable or disable a single cost-layer connector for the current tenant.
  *
  * POSTs to the gateway's /v1/tenant/connectors. Returns ``{ ok: true }`` on success and
- * ``{ ok: false, error: "..." }`` when the gateway is unreachable or rejects the layer — callers
+ * ``{ ok: false, error: "..." }`` when the gateway is unreachable or rejects the layer; callers
  * use this to render an inline confirmation/error without taking down the page.
  */
 export async function setConnectorEnabled(

@@ -59,7 +59,7 @@ func (e ErrUnknownTenant) Error() string {
 // network round-trip on every request.
 //
 // The raw key material is held only in memory (never logged, never written back to disk by this
-// process) — consistent with the proxy's in-memory-only key guarantee.
+// process), consistent with the proxy's in-memory-only key guarantee.
 type StaticBroker struct {
 	ttl  time.Duration
 	now  func() time.Time

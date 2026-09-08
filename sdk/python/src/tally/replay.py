@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Replay engine — context-faithful pre-deploy model comparison, no live retrieval.
+"""Replay engine: context-faithful pre-deploy model comparison, no live retrieval.
 
 Implements CTO-59.
 
@@ -8,19 +8,19 @@ the original. Quality and cost deltas would then be noise rather than signal. So
 EXACT captured context from the original trace (a ``ResolvedContextRef``) and bypasses live
 retrieval entirely: the resolved prompt, retrieved-context blobs, and captured tool-call responses
 are all replayed verbatim from the original span events. No network, no live LLM call, no live tool
-execution happens in this module — the model is an INJECTED callable the caller supplies (exactly
+execution happens in this module; the model is an INJECTED callable the caller supplies (exactly
 like the judge callable in evals and the model in sampling), which keeps the engine pure and tests
 deterministic and offline.
 
 Sampling is STRATIFIED (not random) and deterministic: the same workload + seed always selects the
 same items, reusing the seeded-hash approach from :mod:`tally.sampling`. We sample stratified
-because prod prompts are not uniform — cost bands / features must each be represented so a candidate
+because prod prompts are not uniform: cost bands / features must each be represented so a candidate
 model is judged on the real mix, not whatever a uniform draw happened to surface.
 
 Execution is sandboxed by cost: a per-comparison cap and a per-tenant cap are enforced. Once a cap
 would be exceeded the engine stops admitting further replays gracefully (it reports how many ran vs.
-were skipped — it never raises). Replay cost is surfaced as integer micro-USD throughout (Decimal
-for any rate math, never float dollars — mirrors :mod:`tally.pricing` / :mod:`tally.schema`).
+were skipped; it never raises). Replay cost is surfaced as integer micro-USD throughout (Decimal
+for any rate math, never float dollars; mirrors :mod:`tally.pricing` / :mod:`tally.schema`).
 
 Clean seams (out of scope here):
 - Rate-limit governance lives in ``tally.governor`` (CTO-60); this engine does not couple to it.
@@ -44,7 +44,7 @@ class CapturedToolCall:
     """One tool call replayed VERBATIM from a captured span event.
 
     The ``response`` is the exact output the tool produced on the original trace. The engine never
-    re-executes the tool — it hands these captured responses to the injected model unchanged.
+    re-executes the tool; it hands these captured responses to the injected model unchanged.
     """
 
     tool_name: str
@@ -111,7 +111,7 @@ class ReplayOutcome:
 @runtime_checkable
 class ReplayModel(Protocol):
     """Injected, offline model. Given a candidate ``model`` and the captured context, return a
-    :class:`ReplayOutcome`. Implementations MUST NOT perform live retrieval or tool execution — the
+    :class:`ReplayOutcome`. Implementations MUST NOT perform live retrieval or tool execution; the
     captured tool responses on ``context`` are authoritative. May raise; the engine absorbs it."""
 
     def __call__(self, model: str, context: CapturedContext) -> ReplayOutcome: ...
@@ -221,7 +221,7 @@ def select_stratified(
 
     Each stratum receives a share of ``sample_size`` proportional to its size (largest-remainder
     apportionment, so the total lands exactly on the target). Within a stratum, items are ranked by
-    a seeded hash and the top-k taken — deterministic for a given (workload, seed). A sample size
+    a seeded hash and the top-k taken, deterministic for a given (workload, seed). A sample size
     that meets or exceeds the workload returns everything (in stratum order for stable output).
     """
     if sample_size <= 0:
@@ -364,7 +364,7 @@ class ReplayEngine:
         """Invoke the injected model for one (item, candidate) and price it. Never raises.
 
         Returns ``(cost_micro_usd, output, failed)``. A model that throws yields zero cost and an
-        empty output, recorded as failed — the run continues.
+        empty output, recorded as failed; the run continues.
         """
         try:
             outcome = model(candidate, item.context)

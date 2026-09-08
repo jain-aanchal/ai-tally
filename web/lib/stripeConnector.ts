@@ -2,14 +2,14 @@
 import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Per-tenant Stripe connector config (CTO-110).
 //
-// Mirrors lib/tenant.ts: the dashboard never talks to Postgres directly — it goes through the
+// Mirrors lib/tenant.ts: the dashboard never talks to Postgres directly; it goes through the
 // gateway's /v1/tenant/stripe + /v1/tenant/stripe/connect endpoints. Failure modes fall back
 // gracefully so a /connectors page render never breaks because the gateway is briefly down.
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 export interface StripeConfigView {
-  // The dashboard sees a fingerprint only — never the raw secret. The gateway derives this from
+  // The dashboard sees a fingerprint only, never the raw secret. The gateway derives this from
   // the persisted secret on every read.
   secretFingerprint: string | null;
   stripeAccountId: string | null;

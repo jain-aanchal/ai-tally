@@ -2,14 +2,14 @@
 
 An **optional, additive** worker that mirrors a tenant's telemetry into the tenant's *own*
 BigQuery dataset for enterprise analytics. ClickHouse stays ai-tally's primary telemetry store and
-the dashboard keeps reading it — BigQuery is a **mirror, never a replacement**. There is no reverse
+the dashboard keeps reading it; BigQuery is a **mirror, never a replacement**. There is no reverse
 sync and no realtime-streaming SLA; batch / near-real-time passes are the v1 contract.
 
 - Code: `infra/gateway/src/gateway/bq_export.py` (worker) and
   `infra/gateway/src/gateway/tenant_bq_export.py` (per-tenant config + watermark stores).
 - Optional dependency: the `[bigquery]` extra (`google-cloud-bigquery`), **lazy-imported** inside
   the worker. The gateway imports and boots without it.
-- Default: **disabled** — at the process level (`TALLY_BQ_EXPORT_ENABLED=false`) and per-tenant
+- Default: **disabled**, at the process level (`TALLY_BQ_EXPORT_ENABLED=false`) and per-tenant
   (`tenant_bq_export_config.enabled=false`, the state for any tenant with no row).
 
 ## What is exported
@@ -39,7 +39,7 @@ The authoritative BigQuery schema for each table is the `schema` on each `Export
 
 The export preserves ai-tally's "counts only, never bodies" invariant (CTO-118):
 
-1. The exported tables hold no message text to begin with — `otel_spans` already drops body-keyed
+1. The exported tables hold no message text to begin with: `otel_spans` already drops body-keyed
    attributes on ingest (`mapping.span_to_row`).
 2. At import time the worker asserts no exported column is body-keyed (reusing the span-side
    `mapping._is_body_key` guard) and that no spec reads a replay table.
@@ -47,7 +47,7 @@ The export preserves ai-tally's "counts only, never bodies" invariant (CTO-118):
    again before they leave (`strip_body_keys`).
 
 The replay **candidate-response text** (CTO-125, `replay_runs.ResponseText`) is a **separate,
-opt-in tier** and is explicitly **excluded** here — no export spec sources a replay table.
+opt-in tier** and is explicitly **excluded** here: no export spec sources a replay table.
 
 Covered by `infra/gateway/tests/test_bq_export.py`:
 `test_no_exported_column_is_body_keyed`, `test_no_spec_sources_a_replay_body_table`,
@@ -56,13 +56,13 @@ Covered by `infra/gateway/tests/test_bq_export.py`:
 ## Idempotency
 
 Each pass reads rows strictly greater than the stored watermark, then **upserts** into BigQuery on
-the same natural key ClickHouse dedupes on (`MERGE ... ON <key>`). Re-running a pass — e.g. after a
-crash — never duplicates rows. The watermark advances only to the max value actually seen. Covered
+the same natural key ClickHouse dedupes on (`MERGE ... ON <key>`). Re-running a pass (e.g. after a
+crash) never duplicates rows. The watermark advances only to the max value actually seen. Covered
 by `test_rerun_over_same_window_does_not_duplicate` and `test_watermark_advances_and_second_run_is_incremental`.
 
 ## Configuration
 
-Process-level settings (env, `TALLY_`-prefixed — see `gateway/config.py`):
+Process-level settings (env, `TALLY_`-prefixed; see `gateway/config.py`):
 
 | Setting                              | Default         | Meaning                                        |
 | ------------------------------------ | --------------- | ---------------------------------------------- |
@@ -76,7 +76,7 @@ Per-tenant config (`tenant_bq_export_config`, migration `db/postgres/0009_...`):
 `project_id`, `dataset`, `table_prefix`, `credential_ref`. Incremental cursor
 (`bq_export_watermarks`, migration `db/postgres/0010_...`): one row per (tenant, source table).
 
-### Auth — reference only, never a raw key
+### Auth: reference only, never a raw key
 
 `credential_ref` is a **reference**, not a secret: an ADC hint, a Workload-Identity
 service-account **email**, or a Secret Manager resource name. The gateway **rejects** anything that
@@ -120,7 +120,7 @@ pass is safe.
 ## What's stubbed
 
 `GoogleBigQuerySink` (the real load-into-staging + `MERGE` sink) and `ClickHouseExportReader` are
-implemented but exercised only against live BigQuery / ClickHouse — the unit suite drives the
+implemented but exercised only against live BigQuery / ClickHouse; the unit suite drives the
 in-memory fakes (`InMemoryBigQuerySink`, `FakeReader`) so the incremental + idempotency + no-body
 logic is fully testable with no cloud dependencies. Per-tenant *scheduling* (a running daemon /
 cron wiring) is intentionally out of scope, exactly as in `reconciliation.py`; `run_export` is the

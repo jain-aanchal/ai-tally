@@ -246,7 +246,7 @@ def test_next_tier_up_on_top_tier_returns_none() -> None:
 
 
 def test_next_tier_up_none_when_no_higher_clears() -> None:
-    # On PRO, usage that not even ENTERPRISE could fail to clear — but here
+    # On PRO, usage that not even ENTERPRISE could fail to clear, but here
     # construct a registry where the only higher tier doesn't cover usage.
     small_top = PlanTier(name="SMALL_TOP", max_traces_per_period=10, max_features=1, rank=9)
     usage = UsageSnapshot(traces=1000, features=50)
@@ -334,7 +334,7 @@ def test_decision_is_frozen(cap100: PlanTier) -> None:
 def test_decision_drops_data_cannot_be_overridden(cap100: PlanTier) -> None:
     d = classify(cap100, UsageSnapshot(traces=10, features=0))
     assert isinstance(d, EnforcementDecision)
-    # drops_data is a property — there is no settable attribute backing it.
+    # drops_data is a property; there is no settable attribute backing it.
     assert d.drops_data is False
 
 

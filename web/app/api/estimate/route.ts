@@ -26,7 +26,7 @@ export async function GET(req: Request) {
   const candidateProvider = url.searchParams.get("candidate_provider") ?? "anthropic";
   const featureTag = url.searchParams.get("tag") ?? undefined;
 
-  // CTO-169: baseline freshness is the real reconciliation_runs last-run, not the fixture constant —
+  // CTO-169: baseline freshness is the real reconciliation_runs last-run, not the fixture constant,
   // null (→ `—`) when the reconciler has never run / the source is unavailable.
   const reconcilerLastRunMinutesAgo = await queryReconcilerLastRun();
 
@@ -49,7 +49,7 @@ export async function GET(req: Request) {
     reconcilerLastRunMinutesAgo,
     proposed: {
       monthlyCostMicroUsd: proposed.projected_monthly_cost_micro_usd,
-      // p99 cost not available from per-call replay yet — keep the mock p99 multiplier as a
+      // p99 cost not available from per-call replay yet; keep the mock p99 multiplier as a
       // rough proxy until the executor returns the full distribution.
       p99CostMicroUsd: Math.round(proposed.projected_monthly_cost_micro_usd * 1.4),
       meanLatencyMs: proposed.p50_latency_ms,
@@ -117,7 +117,7 @@ export async function POST(req: Request) {
     reconcilerLastRunMinutesAgo,
     proposed: {
       monthlyCostMicroUsd: monthly,
-      // p99 cost not available from per-call replay yet — keep the mock 1.4x multiplier as a
+      // p99 cost not available from per-call replay yet; keep the mock 1.4x multiplier as a
       // rough proxy until the executor returns the full distribution.
       p99CostMicroUsd: monthly === null ? null : Math.round(monthly * 1.4),
       meanLatencyMs: sufficient ? row!.p50_latency_ms : null,

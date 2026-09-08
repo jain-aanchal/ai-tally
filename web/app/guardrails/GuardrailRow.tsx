@@ -3,10 +3,10 @@
 
 // One interactive guardrail rule row (CTO-120). Three affordances, all POSTing through
 // /api/guardrails (which forwards an idempotent change_id to the gateway):
-//   - Mode select  — flip enforcement mode; POSTs immediately (optimistic, rolls back on error).
-//   - Edit caps    — change the cost / step cap; shows a confirm dialog BEFORE POSTing, because a
+//   - Mode select:   flip enforcement mode; POSTs immediately (optimistic, rolls back on error).
+//   - Edit caps:     change the cost / step cap; shows a confirm dialog BEFORE POSTing, because a
 //                    cap change alters what trips for live traffic.
-//   - Audit        — expand the per-rule change log, read lazily from /api/guardrails?audit=1.
+//   - Audit:         expand the per-rule change log, read lazily from /api/guardrails?audit=1.
 
 import { useState, useTransition } from "react";
 

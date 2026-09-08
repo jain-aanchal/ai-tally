@@ -8,7 +8,7 @@ OAuth token (resolved by reference), and maps the ones that land a deal in **clo
 Non-closed-won stage changes are ignored (they aren't a conversion), so a noisy pipeline doesn't
 pollute ``business_events``. The deal's associated contact email, when present, is HMAC'd under the
 tenant key so the conversion stitches to the same identity as the spans; a missing email yields an
-empty ``UserIdHash`` — honest unattributed revenue.
+empty ``UserIdHash``, honest unattributed revenue.
 
 Account identity (CTO-195)
 --------------------------
@@ -89,7 +89,7 @@ def map_deal_stage_event(
     elif object_id is not None:
         business_event_id = f"hubspot-deal-{object_id}-closedwon"
     else:
-        return None  # nothing stable to dedup on — drop rather than risk duplicates
+        return None  # nothing stable to dedup on; drop rather than risk duplicates
 
     props = event.get("properties")
     props = props if isinstance(props, dict) else {}
@@ -170,7 +170,7 @@ class HubSpotWorker(IngestWorker):
                 )
                 if mapped is not None:
                     events.append(mapped)
-            except Exception:  # noqa: BLE001 — one bad event shouldn't fail the whole cycle
+            except Exception:  # noqa: BLE001 - one bad event shouldn't fail the whole cycle
                 errors += 1
 
         inserted = self._insert_events(tenant_id, events)

@@ -1,4 +1,4 @@
-"""Ingest burst buffer — pure logic with an in-memory mock backend (CTO-37).
+"""Ingest burst buffer: pure logic with an in-memory mock backend (CTO-37).
 
 In production a Kafka topic absorbs ingest bursts so the gateway never returns 5xx under load and a
 slow ClickHouse can't backpressure the edge. This module is the *transport-agnostic* core: a
@@ -64,7 +64,7 @@ class InMemoryBuffer:
     """A mock burst buffer: one FIFO queue per partition (stands in for a Kafka topic).
 
     Per-partition order is preserved on drain, so spans of a trace consume in produce order. Drains
-    are *fair across tenants* — a round-robin over tenants prevents one tenant's burst from starving
+    are *fair across tenants*: a round-robin over tenants prevents one tenant's burst from starving
     others sharing a partition.
     """
 
@@ -123,7 +123,7 @@ class BufferConsumer:
 
     Dedup is on ``(tenant_id, trace_id, span_id)`` so a redelivered record (Kafka at-least-once, or a
     replayed batch) is written exactly once. On a store failure nothing is marked seen and the count
-    is 0 — the records are still in the buffer, so the next drain retries them (at-least-once).
+    is 0; the records are still in the buffer, so the next drain retries them (at-least-once).
     """
 
     def __init__(self, store: SpanStore) -> None:

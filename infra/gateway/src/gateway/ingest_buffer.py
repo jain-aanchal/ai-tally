@@ -13,7 +13,7 @@ and re-enqueues a drained chunk if the store write fails (at-least-once; dedup m
 safe).
 
 In production the in-memory queue is replaced by a Kafka topic partitioned by
-``(tenant_id, trace_id_hash % N)`` — the same partition function (:func:`gateway.partition`) and the
+``(tenant_id, trace_id_hash % N)``, the same partition function (:func:`gateway.partition`) and the
 same :class:`~gateway.buffer.BufferConsumer` semantics carry over unchanged; only the queue's backing
 store differs. Keeping the mock here lets the gateway run, and the fairness/at-least-once/burst
 behavior be tested, without a broker.
@@ -55,7 +55,7 @@ class AsyncIngestBuffer:
 
     ``capacity`` is a high-water mark: producing never blocks, but rows beyond the cap are *shed*
     (reported as ``rejected`` so the request path can return them as retryable, never a 5xx). With a
-    generous cap the buffer only saturates if ClickHouse is down long enough to fill it — exactly the
+    generous cap the buffer only saturates if ClickHouse is down long enough to fill it, exactly the
     case where shedding the overflow as retryable is the correct backpressure signal.
     """
 

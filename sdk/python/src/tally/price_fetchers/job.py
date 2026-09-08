@@ -2,16 +2,16 @@
 """Daily price-scraper job (CTO-165).
 
 Wires the concrete fetchers into the CTO-53 :class:`~tally.pricing_scraper.PriceScraper` and turns a
-run into a *human-readable review artifact*. The job only PROPOSES — publishing stays behind
+run into a *human-readable review artifact*. The job only PROPOSES; publishing stays behind
 :class:`~tally.pricing_scraper.Approval` (a human approves; nothing auto-publishes).
 
 Two surfacing concerns, because :meth:`PriceScraper.build_candidate` swallows per-fetcher
 exceptions (so a broken provider goes silent):
 
-* **Skipped providers** — :func:`skipped_providers` diffs EXPECTED vs. PRESENT providers in the
+* **Skipped providers**: :func:`skipped_providers` diffs EXPECTED vs. PRESENT providers in the
   candidate set. A provider that raised (network/parse) contributes no rows, so it shows up here and
   gets logged as a WARNING.
-* **Large diff** — when ``diff.magnitude`` exceeds the scraper's ``large_diff_threshold`` the job
+* **Large diff**: when ``diff.magnitude`` exceeds the scraper's ``large_diff_threshold`` the job
   emits a structured WARNING (the ops path alerts on it). Publish still requires
   ``Approval(ack_large_diff=True)``.
 """
@@ -39,7 +39,7 @@ def default_fetchers() -> list[PriceFetcher]:
 
 
 def expected_providers(fetchers: Sequence[PriceFetcher]) -> set[str]:
-    """Providers we EXPECT a candidate row set to cover — one per configured fetcher."""
+    """Providers we EXPECT a candidate row set to cover: one per configured fetcher."""
     return {f.provider for f in fetchers}
 
 
@@ -51,7 +51,7 @@ def present_providers(candidate: Sequence[PriceEntry]) -> set[str]:
 def skipped_providers(
     fetchers: Sequence[PriceFetcher], candidate: Sequence[PriceEntry]
 ) -> set[str]:
-    """Expected-but-absent providers — the silently-skipped set. Testable and logged by the job."""
+    """Expected-but-absent providers: the silently-skipped set. Testable and logged by the job."""
     return expected_providers(fetchers) - present_providers(candidate)
 
 
@@ -133,7 +133,7 @@ def render_review(result: JobResult) -> str:
     """
     d = result.diff
     lines: list[str] = []
-    lines.append(f"# Price scraper review — candidate version {result.version}")
+    lines.append(f"# Price scraper review: candidate version {result.version}")
     lines.append(f"valid_from: {result.valid_from.isoformat()}")
     lines.append(
         f"diff magnitude: {d.magnitude} "
@@ -146,7 +146,7 @@ def render_review(result: JobResult) -> str:
         )
     if result.skipped:
         lines.append(f"** SKIPPED PROVIDERS **: {', '.join(sorted(result.skipped))} "
-                     f"(fetch/parse failed — not updated this run)")
+                     f"(fetch/parse failed, not updated this run)")
     else:
         lines.append("skipped providers: none")
 
@@ -170,7 +170,7 @@ def render_review(result: JobResult) -> str:
 
     lines.append("")
     if d.is_empty:
-        lines.append("No changes — nothing to approve.")
+        lines.append("No changes, nothing to approve.")
     else:
         lines.append("To publish: pass an Approval(approved=True, reviewer=..., "
                      "ack_large_diff=<bool>) to PriceScraper.publish().")

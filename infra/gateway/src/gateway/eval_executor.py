@@ -2,14 +2,14 @@
 
 For each ``(sample, candidate_response, current_response)`` triple the executor:
 
-1. Builds the pairwise rubric prompt — two responses labeled A and B, no framing leak about
+1. Builds the pairwise rubric prompt: two responses labeled A and B, no framing leak about
    which is "the new candidate".
 2. **Randomizes A/B ordering per sample** to mitigate position bias (judges tend to favor the
    first response on ambiguous calls). The (a_is_candidate) bit is recorded so the verdict is
    interpretable.
 3. Calls the judge model (default ``claude-opus-4-8``; overridable via
    ``TALLY_EVAL_JUDGE_MODEL`` env or per-tenant ``judge_model``).
-4. Parses the verdict — strict format: exactly one of ``A``, ``B``, ``TIE``. Anything else is
+4. Parses the verdict, strict format: exactly one of ``A``, ``B``, ``TIE``. Anything else is
    recorded as ``error`` rather than coerced.
 5. Writes an :class:`EvalRunRow` to ClickHouse ``eval_runs``.
 
@@ -63,7 +63,7 @@ RUBRIC_VERSION = "rubric-v1"
 # This prompt is load-bearing. Tweaks should bump RUBRIC_VERSION.
 #
 # Why this exact shape:
-#   * Two-line answer format — judges are far more reliable when they emit a short literal token
+#   * Two-line answer format: judges are far more reliable when they emit a short literal token
 #     than when they free-write. The parse below treats anything else as `error`.
 #   * "Impartial evaluator" framing keeps the judge from sliding into "the second is more
 #     polished" cargo-cult judgments common with chat-tuned models.
@@ -139,7 +139,7 @@ _VERDICT_RE = re.compile(r"\b(A|B|TIE)\b", re.IGNORECASE)
 def parse_verdict(text: str, *, a_is_candidate: bool) -> str | None:
     """Map the judge's raw text to one of (current_wins, candidate_wins, tie).
 
-    Returns ``None`` if the judge didn't answer in the required format — caller records that
+    Returns ``None`` if the judge didn't answer in the required format; caller records that
     as a ``VERDICT_ERROR`` row rather than coercing.
 
     The parse is intentionally narrow: we look for the FIRST occurrence of "A", "B", or "TIE"
@@ -198,7 +198,7 @@ class EvalExecutor:
 
         Returns an :class:`EvalResult`. On budget skip, ``excluded_budget=True`` and no row is
         written. On judge error (network, malformed verdict), a row with ``judge_verdict="error"``
-        IS written so the eval pass is auditable — the win-rate aggregate ignores error rows.
+        IS written so the eval pass is auditable; the win-rate aggregate ignores error rows.
         """
         budget_cap = int(Decimal(daily_budget_usd) * Decimal(1_000_000))
         already_spent = self.todays_spend_micro_usd(tenant_id)
@@ -236,7 +236,7 @@ class EvalExecutor:
                         prompt=prompt,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 — surface as error row
+            except Exception as exc:  # noqa: BLE001 - surface as error row
                 resp = JudgeResponse(
                     text="", input_tokens=0, output_tokens=0,
                     status_code=0, error_msg=f"network: {exc}",
@@ -279,7 +279,7 @@ class EvalExecutor:
             cost_micro_usd=cost_micro_usd,
             error_msg=err,
         )
-        # Sanity — the verdict had better be in the enum.
+        # Sanity: the verdict had better be in the enum.
         assert row.judge_verdict in ALL_VERDICTS
         self.sink(row)
         return EvalResult(

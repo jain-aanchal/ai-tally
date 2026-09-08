@@ -31,7 +31,7 @@ UTC = timezone.utc
 # --- Fake boto3 S3 client --------------------------------------------------------------------
 
 class _FakeClientError(Exception):
-    """Stand-in for ``botocore.exceptions.ClientError`` — carries a ``response`` dict."""
+    """Stand-in for ``botocore.exceptions.ClientError``: carries a ``response`` dict."""
 
     def __init__(self, code: str, status: int = 404) -> None:
         super().__init__(code)

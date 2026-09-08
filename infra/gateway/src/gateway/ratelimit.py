@@ -1,15 +1,15 @@
-"""Per-tenant rate limiting + monthly quota — pure, in-memory, clock-injectable.
+"""Per-tenant rate limiting + monthly quota: pure, in-memory, clock-injectable.
 
 Two independent guards (CTO-33, spec §12.1/§4.5):
 
-* **Rate limit** — a token bucket per tenant smooths short bursts. Capacity = burst, refilled at
+* **Rate limit**: a token bucket per tenant smooths short bursts. Capacity = burst, refilled at
   ``rps`` tokens/sec. One token per span. Empty bucket → ``RATE_LIMITED`` with a ``retry_after``.
-* **Quota** — a monthly span ceiling per tenant. Spent quota → ``QUOTA_EXCEEDED`` with a
+* **Quota**: a monthly span ceiling per tenant. Spent quota → ``QUOTA_EXCEEDED`` with a
   ``retry_after`` pointing at the start of next month.
 
 Both are process-local: this is the single-node enforcement layer. Cluster-wide fairness (shared
-Redis counters) is a later infra concern (CTO-30); the contract returned here — a
-:class:`Decision` with a stable :class:`~gateway.errors.ErrorCode` and a ``retry_after`` — does not
+Redis counters) is a later infra concern (CTO-30); the contract returned here (a
+:class:`Decision` with a stable :class:`~gateway.errors.ErrorCode` and a ``retry_after``) does not
 change when that lands.
 
 The clock is injectable so the whole module tests deterministically with zero sleeps.

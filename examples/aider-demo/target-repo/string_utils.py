@@ -3,7 +3,7 @@
 
 Three functions, deliberately under-implemented so Aider has something concrete
 (and bounded) to fix. The accompanying tests in test_string_utils.py describe
-the intended behavior — this is what the agent reads to figure out what to do.
+the intended behavior; this is what the agent reads to figure out what to do.
 """
 
 

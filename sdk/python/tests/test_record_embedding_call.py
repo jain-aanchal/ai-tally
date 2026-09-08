@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-136 — record_embedding_call lands spans in the Embeddings cost-layer bucket."""
+"""CTO-136: record_embedding_call lands spans in the Embeddings cost-layer bucket."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _FROM = date(2026, 5, 1)
 
 
 def _embedding_catalog() -> PriceCatalog:
-    # Seed under PriceType.EMBEDDING — the tier the real seed_catalog uses for
+    # Seed under PriceType.EMBEDDING: the tier the real seed_catalog uses for
     # text-embedding-3-*. record_embedding_call resolves this tier (not INPUT).
     cat = PriceCatalog()
     cat.add(
@@ -58,7 +58,7 @@ def test_embedding_cost_matches_seeded_catalog():
 
 def test_real_seed_catalog_prices_embeddings_nonzero():
     # Regression: the production seed_catalog() prices embeddings under PriceType.EMBEDDING.
-    # record_embedding_call must resolve that tier — a generic INPUT-only path would cost $0.
+    # record_embedding_call must resolve that tier; a generic INPUT-only path would cost $0.
     exporter = MemoryExporter()
     client = TallyClient(exporter=exporter, catalog=seed_catalog())
     result = client.record_embedding_call(

@@ -31,7 +31,7 @@ describe("boundaryFromMinutesAgo", () => {
     const boundary = boundaryFromMinutesAgo(180, NOW);
     expect(deriveDataState({ isEmpty: false, isPartial: true, reconciledThrough: boundary, now: NOW })).toBe("stale");
   });
-  it("maps null (unknown reconciler last-run, CTO-169) to the epoch sentinel — no as-of, no stale badge", () => {
+  it("maps null (unknown reconciler last-run, CTO-169) to the epoch sentinel: no as-of, no stale badge", () => {
     const boundary = boundaryFromMinutesAgo(null, NOW);
     expect(isSentinelBoundary(boundary)).toBe(true);
     expect(asOfLabel(boundary)).toBeNull();
@@ -150,7 +150,7 @@ describe("zeroEnabledLayers (CTO-107)", () => {
     expect(zeroEnabledLayers({}, [])).toEqual([]);
   });
   it("ignores layers that aren't declared, even when zero", () => {
-    // tools is zero but never declared — it's by-design partial, not a real gap.
+    // tools is zero but never declared: it's by-design partial, not a real gap.
     expect(zeroEnabledLayers({ llm: 5, vector: 0, tools: 0 }, ["llm"])).toEqual([]);
   });
 });

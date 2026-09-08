@@ -1,4 +1,4 @@
-"""/v1/tenant/cac — CRUD + CSV round-trip + sanity guard + period lock (CTO-111)."""
+"""/v1/tenant/cac: CRUD + CSV round-trip + sanity guard + period lock (CTO-111)."""
 
 from __future__ import annotations
 

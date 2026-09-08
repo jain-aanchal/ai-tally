@@ -5,10 +5,10 @@ an injected HTTP client, authenticated with the tenant's integration key (resolv
 and maps each "feature first-used" record to a low-value attribution touch: a ``feature_first_used``
 :class:`~tally.wire.BusinessEvent` of ``ValueType='count'`` with **no** monetary value.
 
-"Low-value" here means exactly that — a feature-use is an engagement signal, not revenue, so we
+"Low-value" here means exactly that: a feature-use is an engagement signal, not revenue, so we
 never fabricate a dollar amount. It rides ``business_events`` as a non-monetary ``count`` touch the
 attribution engine can weight downstream. The Pendo visitor id (often an email in the wild) is
-HMAC'd under the tenant key and only its hash is ever persisted — including inside the
+HMAC'd under the tenant key and only its hash is ever persisted, including inside the
 ``BusinessEventId``, which stays dedup-stable per (feature, visitor) without leaking the raw id.
 """
 
@@ -61,7 +61,7 @@ def map_feature_first_use(
         event_name="feature_first_used",
         user_id_hash=visitor_hash,
         occurred_at_ns=ms_to_ns(first_time),
-        # Engagement touch, not revenue — a low-value 'count' signal, never a fabricated amount.
+        # Engagement touch, not revenue: a low-value 'count' signal, never a fabricated amount.
         value_amount_micro=None,
         value_currency="USD",
         value_type="count",
@@ -105,7 +105,7 @@ class PendoWorker(IngestWorker):
                 mapped = map_feature_first_use(item, hasher)
                 if mapped is not None:
                     events.append(mapped)
-            except Exception:  # noqa: BLE001 — one bad row shouldn't fail the whole cycle
+            except Exception:  # noqa: BLE001 - one bad row shouldn't fail the whole cycle
                 errors += 1
 
         inserted = self._insert_events(tenant_id, events)

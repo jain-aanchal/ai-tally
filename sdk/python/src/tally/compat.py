@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Provider compatibility matrix — generated from registered instrumentors.
+"""Provider compatibility matrix: generated from registered instrumentors.
 
 Implements CTO-44. The matrix is built from instrumentor capabilities, not hand-maintained prose,
 so it can't drift from what the code actually supports. Renders to a dict (for an API/page) and to
@@ -87,7 +87,7 @@ def render_markdown() -> str:
 
 register(
     Capabilities(
-        provider=OpenAIInstrumentor().system,  # "openai" — sourced from the instrumentor
+        provider=OpenAIInstrumentor().system,  # "openai", sourced from the instrumentor
         token_usage=Support.FULL,
         cost=Support.FULL,
         streaming=Support.FULL,
@@ -96,6 +96,6 @@ register(
         models=("gpt-5", "gpt-5-mini"),
     )
 )
-# Anthropic / Vertex instrumentors are follow-ups — declared planned so the matrix is honest.
+# Anthropic / Vertex instrumentors are follow-ups; declared planned so the matrix is honest.
 register(Capabilities(provider="anthropic"))
 register(Capabilities(provider="vertex"))

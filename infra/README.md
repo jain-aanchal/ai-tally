@@ -14,7 +14,7 @@ the move to managed services later is a config change, not a rewrite.
 | Gateway    | SDK batch → enrich → ClickHouse (FastAPI) | 8080               |
 
 The canonical DDL in [`../db`](../db) is mounted into the containers and applied automatically on
-first boot — `otel_spans` and the rollup MVs into ClickHouse, the control-plane schema into Postgres.
+first boot: `otel_spans` and the rollup MVs into ClickHouse, the control-plane schema into Postgres.
 
 > **First boot only.** The init directory runs once, against an empty volume. A stack that is
 > already up will not pick up a column added to those files later. For ClickHouse, replay the DDL
@@ -32,7 +32,7 @@ first boot — `otel_spans` and the rollup MVs into ClickHouse, the control-plan
 > both count the overlap and SummingMergeTree adds them together, silently inflating cost.
 
 > The Go edge proxy (transparent OpenAI passthrough) lives in [`edge-proxy/`](./edge-proxy) and is
-> intentionally **not** wired into this Docker stack — the SDK ingestion path covers end-to-end flow
+> intentionally **not** wired into this Docker stack; the SDK ingestion path covers end-to-end flow
 > without it, and the proxy is a standalone, stateless binary you run wherever the customer's
 > traffic egresses. See its README for the p99 < 3ms latency budget and trust invariants.
 
@@ -48,21 +48,21 @@ cd infra
 make up        # build + start everything (first run pulls images, ~2-3 min)
 make seed      # create a local tenant + API key + feature tags
 make demo      # push a sample batch through the gateway into ClickHouse
-make ch        # SQL shell (default db) — try: SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY FeatureTag
+make ch        # SQL shell (default db); try: SELECT FeatureTag, count(), sum(EstimatedCost) FROM otel_spans GROUP BY FeatureTag
 make down      # stop (keep data)   |   make nuke = stop + wipe volumes
 ```
 
 Configuration lives in `.env` (auto-created from `.env.example` on first `make up`). All values are
-local-only defaults — nothing here is a real secret.
+local-only defaults; nothing here is a real secret.
 
 ## The gateway
 
 `POST /v1/batches` accepts a [`tally.wire.BatchRequest`](../sdk/python/src/tally/wire.py) JSON
 envelope and, reusing the SDK's already-tested pure logic:
 
-1. **authenticates** (optional) — `TALLY_REQUIRE_API_KEY=true` requires `Authorization: Bearer <key>`
+1. **authenticates** (optional): `TALLY_REQUIRE_API_KEY=true` requires `Authorization: Bearer <key>`
    whose SHA-256 is registered in `api_keys` (raw keys are never stored);
-2. **dedupes** idempotently on `(tenant_id, batch_id)` — replays return the original response;
+2. **dedupes** idempotently on `(tenant_id, batch_id)`, replays return the original response;
 3. **enriches cost** authoritatively from the price catalog (client cost kept only as a drift hint);
 4. **clamps clock skew** so a fast client can't poison time-bucketed rollups;
 5. **writes** spans → `otel_spans`, business events → `business_events`, identity links →
@@ -78,10 +78,10 @@ cd infra/gateway && uv run --extra dev pytest -q
 
 ## Cost
 
-- **Local: $0** — all images are free OSS; ~3–4 GB RAM while running.
+- **Local: $0**, all images are free OSS; ~3-4 GB RAM while running.
 - **Managed cloud** (when you outgrow local): see
-  [`../docs/adr/0001-clickhouse-managed-vs-self-hosted.md`](../docs/adr/0001-clickhouse-managed-vs-self-hosted.md)
-  — ~$200–400/mo at MVP, scaling with volume.
+  [`../docs/adr/0001-clickhouse-managed-vs-self-hosted.md`](../docs/adr/0001-clickhouse-managed-vs-self-hosted.md):
+  ~$200-400/mo at MVP, scaling with volume.
 
 ## Wiring the web dashboard at real data
 

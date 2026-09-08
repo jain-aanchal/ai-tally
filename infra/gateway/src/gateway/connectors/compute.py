@@ -1,18 +1,18 @@
-"""Compute cost-layer connector — AWS Cost Explorer & GCP Cloud Billing (CTO-143).
+"""Compute cost-layer connector: AWS Cost Explorer & GCP Cloud Billing (CTO-143).
 
 Pulls a tenant's daily cloud *compute* spend and hands it to the base connector, which lands one
-synthetic ``compute`` span per day. Two providers for v1 (aws | gcp — Azure is out of scope), one
+synthetic ``compute`` span per day. Two providers for v1 (aws | gcp; Azure is out of scope), one
 per configured tenant.
 
 Structure mirrors the rest of the gateway: the response-parsing logic is a pair of PURE functions
 (:func:`parse_aws_cost_response`, :func:`parse_gcp_billing_rows`) that are unit-tested against
 recorded fixtures, and the SDK-touching clients (:class:`AwsCostExplorerClient`,
 :class:`GcpCloudBillingClient`) are thin wrappers that fetch-then-parse. The cloud SDKs (boto3 /
-google-cloud-bigquery) are imported LAZILY inside the clients so the gateway — and the whole test
-suite — imports this module without those deps installed. Tests inject a fake ``BillingClient``.
+google-cloud-bigquery) are imported LAZILY inside the clients so the gateway, and the whole test
+suite, imports this module without those deps installed. Tests inject a fake ``BillingClient``.
 
 Credentials by reference only: the clients resolve ``config.credentials_ref`` (a Secret Manager /
-KMS / ARN pointer, or ``'aws-default-chain'`` for the ambient AWS credential chain) — raw keys never
+KMS / ARN pointer, or ``'aws-default-chain'`` for the ambient AWS credential chain); raw keys never
 appear in the DB, in this module, or in logs.
 """
 
@@ -36,12 +36,12 @@ from gateway.connectors.base import (
 DEFAULT_TAG_FILTER: dict[str, str] = {"tally:workload": "ai"}
 
 # Default GCP label set when a tenant hasn't overridden label_filter (CTO-150). GCP label keys can't
-# contain ``:``, so the AI workload is tagged with a ``-`` — distinct from the AWS ``tally:workload``.
+# contain ``:``, so the AI workload is tagged with a ``-``, distinct from the AWS ``tally:workload``.
 DEFAULT_GCP_LABEL_FILTER: dict[str, str] = {"tally-workload": "ai"}
 
 # A fully-qualified BigQuery table id: ``project.dataset.table`` (dots optional for dataset-qualified
 # ids). We interpolate the table into the SQL (BQ can't parameterize identifiers), so we validate it
-# to a safe charset first — everything else in the query is a bound parameter.
+# to a safe charset first; everything else in the query is a bound parameter.
 _BQ_TABLE_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 
@@ -63,7 +63,7 @@ def parse_aws_cost_response(response: dict[str, object]) -> list[DailyCost]:
 
     Expects DAILY granularity: ``ResultsByTime[].TimePeriod.Start`` (a ``YYYY-MM-DD`` string, the
     inclusive start of the day) and ``ResultsByTime[].Total.UnblendedCost.Amount`` (a decimal
-    string, USD). Days with zero/absent cost are dropped — a $0 day carries no synthetic span.
+    string, USD). Days with zero/absent cost are dropped; a $0 day carries no synthetic span.
     """
     out: list[DailyCost] = []
     results = response.get("ResultsByTime") or []
@@ -92,7 +92,7 @@ def _coerce_day(raw: object) -> date | None:
     """Coerce a BQ billing-export day value to a :class:`date`, or ``None`` if unparseable.
 
     The live BigQuery client hands back ``datetime.date`` / ``datetime.datetime`` objects; recorded
-    JSON fixtures hand back ISO strings (possibly a full timestamp — we take the date part).
+    JSON fixtures hand back ISO strings (possibly a full timestamp; we take the date part).
     """
     if isinstance(raw, datetime):
         return raw.date()
@@ -132,7 +132,7 @@ class AwsCostExplorerClient:
     """AWS Cost Explorer fetcher. boto3 imported lazily; credentials resolved by reference.
 
     ``credentials_ref == 'aws-default-chain'`` uses the ambient AWS credential chain (instance role
-    / env / SSO). Any other value is treated as an assumable-role ARN — resolved by the deployment's
+    / env / SSO). Any other value is treated as an assumable-role ARN, resolved by the deployment's
     STS wiring, which is out of scope here; we pass it through so the prod wrapper can assume it.
     """
 
@@ -225,13 +225,13 @@ class GcpCloudBillingClient:
 
     Two injection seams keep the whole thing off the network in tests:
 
-    * ``query_runner`` — a ``(config, start_day, end_day) -> list[dict]`` callable that returns raw
+    * ``query_runner``: a ``(config, start_day, end_day) -> list[dict]`` callable that returns raw
       export rows. Unit tests inject one returning a recorded fixture; nothing touches BigQuery.
-    * ``bq_client`` — a pre-built BigQuery-like client (``.query(sql, job_config=...).result()``).
+    * ``bq_client``: a pre-built BigQuery-like client (``.query(sql, job_config=...).result()``).
       Integration harnesses may supply one; unit tests use ``query_runner`` instead.
 
     With neither injected, the live path lazily imports ``google-cloud-bigquery`` and constructs a
-    ``bigquery.Client`` from ADC / Workload Identity (``project`` optional) — raw credentials never
+    ``bigquery.Client`` from ADC / Workload Identity (``project`` optional): raw credentials never
     appear here; ``credentials_ref`` is a Secret Manager pointer the deployment resolves out of band.
     """
 

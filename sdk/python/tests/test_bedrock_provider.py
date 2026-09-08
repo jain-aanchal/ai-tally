@@ -6,7 +6,7 @@ to demonstrate:
   1. the seed catalog prices the Bedrock lineup under the ``bedrock/`` provider prefix
      (non-zero, correct against the seeded rates, no collision with vendor-direct entries);
   2. ``record_llm_call(provider="bedrock", ...)`` costs from the catalog and stamps
-     ``gen_ai.system="bedrock"`` on a conformant span — no provider allowlist to trip over;
+     ``gen_ai.system="bedrock"`` on a conformant span, no provider allowlist to trip over;
   3. model discovery lists foundation models via an INJECTED Bedrock control-plane client
      (never the network), classifies them into families, and fails soft when unavailable.
 """
@@ -161,7 +161,7 @@ def test_record_llm_call_bedrock_maps_cached_tokens() -> None:
     assert cached.cost_micro_usd < full.cost_micro_usd
 
 
-# --- Model discovery (injected client — never the network) --------------------
+# --- Model discovery (injected client, never the network) --------------------
 
 
 class _FakeBedrock:

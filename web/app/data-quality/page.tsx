@@ -163,7 +163,7 @@ export default async function DataQualityPage() {
       </Card>
 
       {/* CTO-119: hide the table entirely when no sampling is configured (effective rate == 100%
-          AND no spans in any stratum) — every span is captured, the CI is degenerate, the table
+          AND no spans in any stratum): every span is captured, the CI is degenerate, the table
           would just be confusing. Inactive tenants (no data) get the same treatment. */}
       {(() => {
         const totalSpans = sampling.reduce((s, r) => s + r.spans, 0);

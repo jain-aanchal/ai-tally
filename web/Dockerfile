@@ -1,18 +1,18 @@
-# ai-tally dashboard (Next.js 15 / React 19) — production image.
+# ai-tally dashboard (Next.js 15 / React 19): production image.
 #
 # Build context is the `web/` directory:
 #   docker build -t REGION-docker.pkg.dev/PROJECT/ai-tally/web:TAG web/
 #
 # Multi-stage:
-#   deps    — install node_modules from the lockfile (cache-friendly layer).
-#   builder — `next build` in standalone mode, emitting a self-contained server.
-#   runner  — a slim runtime carrying only the standalone server + static assets.
+#   deps:     install node_modules from the lockfile (cache-friendly layer).
+#   builder:  `next build` in standalone mode, emitting a self-contained server.
+#   runner:   a slim runtime carrying only the standalone server + static assets.
 #
 # Standalone output: the repo's web/next.config.mjs is intentionally NOT modified by this ticket
 # (additive-only), so instead of setting `output: "standalone"` in the config we force it at build
 # time with NEXT_PRIVATE_STANDALONE=true. Next.js reads that env and emits `.next/standalone`
 # exactly as the config flag would. If the web team later adds `output: "standalone"` to
-# next.config.mjs, this env becomes a redundant no-op — leave it or drop it, either works.
+# next.config.mjs, this env becomes a redundant no-op; leave it or drop it, either works.
 
 # ---- deps ---------------------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS deps

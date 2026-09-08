@@ -6,12 +6,12 @@ Implements CTO-38. Spec §12.9.
 Spans carry a client-emitted timestamp; the gateway also records when it received the batch.
 Client clocks drift, and a future-dated client timestamp would poison time-bucketed rollups. So:
 
-- the **effective** timestamp used for rollups is ``min(client_ts, server_recv_ts + max_future)``
-  — a slightly-fast client is tolerated up to ``max_future`` (default 1h), a wildly-future client
+- the **effective** timestamp used for rollups is ``min(client_ts, server_recv_ts + max_future)``:
+  a slightly-fast client is tolerated up to ``max_future`` (default 1h), a wildly-future client
   is clamped to "now-ish";
 - skew beyond a threshold (default 5 min) is flagged per tenant for monitoring.
 
-Pure functions over nanosecond epoch timestamps — no infra.
+Pure functions over nanosecond epoch timestamps; no infra.
 """
 
 from __future__ import annotations

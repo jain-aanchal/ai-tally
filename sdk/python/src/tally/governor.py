@@ -6,14 +6,14 @@ Implements CTO-60. Spec §9 W1.
 Bulk *replay* (re-running historical prompts to compare models/prompts) hammers provider APIs and
 will hit rate limits. Two things must be true:
 
-1. We must not get the tenant *banned* — so concurrency is capped **per provider** and retries are
+1. We must not get the tenant *banned*, so concurrency is capped **per provider** and retries are
    spread with exponential backoff + full jitter.
-2. A 429 / throttled response is an artifact of *our* replay pressure, not of the prompt or model —
+2. A 429 / throttled response is an artifact of *our* replay pressure, not of the prompt or model,
    so it must **not** contaminate latency or quality aggregates. Throttled outcomes are explicitly
    marked excluded.
 
 This module is the *governing primitive* the replay execution engine (CTO-59, out of scope) will
-call. It is a synchronous, in-memory state machine of integer counters — no network, no asyncio, no
+call. It is a synchronous, in-memory state machine of integer counters: no network, no asyncio, no
 real sleeping. ``time.sleep`` and ``random`` are **injected** so every decision is a pure, testable
 function. A minimal :class:`threading.Lock` guards the mutable counters so the engine can drive it
 from a thread pool, but the decision helpers (:func:`backoff_delay`, :func:`counts_toward_metrics`)
@@ -38,13 +38,13 @@ class Outcome(str, Enum):
     """Lifecycle outcome of a single replay call. Closed set.
 
     ``THROTTLED`` and ``EXCLUDED`` are the outcomes that must never reach quality/latency
-    aggregates — see :func:`counts_toward_metrics`.
+    aggregates; see :func:`counts_toward_metrics`.
     """
 
     ADMITTED = "admitted"  # passed the concurrency gate, now in flight
-    COMPLETED = "completed"  # finished cleanly — counts toward metrics
-    THROTTLED = "throttled"  # provider returned 429 / rate_limit — excluded from metrics
-    EXCLUDED = "excluded"  # explicitly dropped for any non-quality reason — excluded
+    COMPLETED = "completed"  # finished cleanly, counts toward metrics
+    THROTTLED = "throttled"  # provider returned 429 / rate_limit, excluded from metrics
+    EXCLUDED = "excluded"  # explicitly dropped for any non-quality reason, excluded
 
 
 class Decision(str, Enum):
@@ -92,7 +92,7 @@ def backoff_delay(
     ``delay = random_in[0, min(max_s, base_s * 2**attempt)]`` (AWS "full jitter").
 
     ``attempt`` is 0-based (first retry = 0). Negative attempts are clamped to 0. ``rand`` is an
-    injected ``random.random``-like callable returning ``[0, 1)`` — pass a seeded one for
+    injected ``random.random``-like callable returning ``[0, 1)``: pass a seeded one for
     deterministic tests; defaults to :func:`random.random`. Never sleeps; just returns the seconds
     a caller *should* sleep.
     """

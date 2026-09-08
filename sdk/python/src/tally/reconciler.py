@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Reconciler — cloud-billing true-up (CTO-64).
+"""Reconciler: cloud-billing true-up (CTO-64).
 
 We bill and display two cost tracks and keep them honest by never conflating them:
 
 - **estimated** cost is computed live at ingest from the price catalog (cheap, instant, but a
-  model — it can drift from what the cloud actually charges);
-- **reconciled** cost is the truth from the provider's invoice, which lags 24–48h.
+  model: it can drift from what the cloud actually charges);
+- **reconciled** cost is the truth from the provider's invoice, which lags 24-48h.
 
 This module trues the first up against the second. A daily job feeds it (a) the estimated
 per-feature cost for a day and (b) the actual cloud-billing line items for that day; it maps each
@@ -16,7 +16,7 @@ event ("est \\$X → reconciled \\$Y, +Z%").
 Two honesty rules drive the design:
 
 1. **Respect the billing lag.** A day whose invoice has not settled yet (less than ``lag_hours``
-   since the day closed) is *not* trued up — its rows stay ``CostSource.ESTIMATED`` and the day is
+   since the day closed) is *not* trued up; its rows stay ``CostSource.ESTIMATED`` and the day is
    reported as skipped, so we never publish a half-arrived invoice as final.
 2. **Shared cost is allocated, not double-counted.** Billing lines that map to no single feature
    (shared DB, NAT gateway, …) go into a pool that is split across the day's features in
@@ -24,7 +24,7 @@ Two honesty rules drive the design:
    parts sum back to the pool exactly.
 
 Money is integer micro-USD throughout (see :mod:`tally.schema`); proportional math uses
-:class:`~decimal.Decimal`. Pure functions over plain dataclasses — no infra, no network (the
+:class:`~decimal.Decimal`. Pure functions over plain dataclasses: no infra, no network (the
 caller fetches billing; cf. the connector framework CTO-63). Deliberately self-contained: it does
 not import the connector module, so it consumes abstract cost rows rather than a specific source.
 """
@@ -58,7 +58,7 @@ class CostSource(str, Enum):
 class EstimatedCostRow:
     """The estimated cost for one feature on one day, plus the query count used to allocate shared
     infrastructure cost. ``query_count`` is the number of traces/queries the feature drove that
-    day — the weight by which a shared bill is split."""
+    day, the weight by which a shared bill is split."""
 
     feature_tag: str
     day: date
@@ -260,7 +260,7 @@ def _allocate_by_weight(total_micro: int, weights: Mapping[str, int]) -> dict[st
 
     total_weight = sum(max(0, weights[k]) for k in keys)
     if total_weight == 0:
-        # no usage signal — divide as evenly as possible, remainder to the first keys
+        # no usage signal: divide as evenly as possible, remainder to the first keys
         base, rem = divmod(total_micro, len(keys))
         return {k: base + (1 if i < rem else 0) for i, k in enumerate(keys)}
 
@@ -300,7 +300,7 @@ def reconcile(
     in the map is treated as shared and allocated across the day's features by query count.
     ``as_of`` is the wall-clock time the job runs (used with ``lag_hours`` to decide settlement).
 
-    Never raises on malformed input — non-dataclass entries are skipped. Returns a
+    Never raises on malformed input; non-dataclass entries are skipped. Returns a
     :class:`ReconciliationReport`.
     """
     cfg = config or ReconcilerConfig()

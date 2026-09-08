@@ -2,9 +2,9 @@
 
 Two contracts checked here:
 
-1. Presence — the three ``gen_ai.context.*`` attributes land in their typed columns,
+1. Presence: the three ``gen_ai.context.*`` attributes land in their typed columns,
    absent ones default to 0.
-2. The hard "no bodies in telemetry" guard — even if a caller sends a key like
+2. The hard "no bodies in telemetry" guard: even if a caller sends a key like
    ``message_text`` or ``gen_ai.prompt.text`` carrying a real prompt, the gateway
    does NOT persist it (neither as a column nor in ``SpanAttributes``).
 """
@@ -55,7 +55,7 @@ def test_context_drop_attrs_not_duplicated_in_span_attributes_map() -> None:
 
 
 def test_window_pct_out_of_range_clamped() -> None:
-    """Float coercion clamps to [0, 1] — a buggy/malicious caller can't poison the column."""
+    """Float coercion clamps to [0, 1]: a buggy/malicious caller can't poison the column."""
     span = {"gen_ai.context.window_used_pct": 1.7}
     row = _row_dict(span_to_row(span, tenant_id="t1", effective_ts_ns=0))
     assert row["ContextWindowUsedPct"] == 1.0
@@ -70,7 +70,7 @@ def test_window_pct_out_of_range_clamped() -> None:
 
 def test_pii_guard_drops_message_text_key() -> None:
     """A caller that tries to ship the actual dropped prompt under a familiar name must
-    have it stripped — not stored in any column, not stored in the long-tail map."""
+    have it stripped: not stored in any column, not stored in the long-tail map."""
     leaked = "The user's full medical history: ..."
     span = {
         "gen_ai.context.dropped_messages": 2,
@@ -83,14 +83,14 @@ def test_pii_guard_drops_message_text_key() -> None:
     # Counts present.
     assert row["ContextDroppedMessages"] == 2
     assert row["ContextDroppedTokens"] == 400
-    # Body absent — not in the map, not anywhere.
+    # Body absent: not in the map, not anywhere.
     assert "message_text" not in extra
     for v in extra.values():
         assert leaked not in v
 
 
 def test_pii_guard_drops_namespaced_body_keys() -> None:
-    """Nested namespaces don't bypass the guard — we match by trailing segment."""
+    """Nested namespaces don't bypass the guard: we match by trailing segment."""
     leaked = "secret prompt body"
     span = {
         "gen_ai.prompt.text": leaked,
@@ -106,12 +106,12 @@ def test_pii_guard_drops_namespaced_body_keys() -> None:
 
 
 def test_is_body_key_unit() -> None:
-    """Direct unit on the helper — defends against well-meaning refactors."""
+    """Direct unit on the helper: defends against well-meaning refactors."""
     assert _is_body_key("message_text")
     assert _is_body_key("gen_ai.prompt.text")
     assert _is_body_key("X.Y.completion")
     assert _is_body_key("MESSAGES")
-    # Negatives — counts and metadata must pass.
+    # Negatives: counts and metadata must pass.
     assert not _is_body_key("gen_ai.context.dropped_messages")
     assert not _is_body_key("gen_ai.usage.input_tokens")
     assert not _is_body_key("gen_ai.feature_tag")

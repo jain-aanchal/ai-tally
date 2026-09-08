@@ -188,7 +188,7 @@ function CustomRangeControl({
         onClick={() => setOpen((v) => !v)}
         className={segmentClass(active)}
       >
-        {active && from && to ? `${from.slice(5)} – ${to.slice(5)}` : "Custom"}
+        {active && from && to ? `${from.slice(5)} to ${to.slice(5)}` : "Custom"}
       </button>
       {open && (
         <div className="absolute left-0 top-full z-10 mt-1 flex flex-col gap-2 rounded-lg border border-edge bg-panel p-3 shadow-lg">

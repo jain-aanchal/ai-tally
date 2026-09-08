@@ -53,7 +53,7 @@ if ! curl -sf "$GATEWAY_URL/healthz" >/dev/null 2>&1; then
   exit 1
 fi
 if ! curl -sf http://localhost:3000 >/dev/null 2>&1; then
-  echo "WARN:  dashboard not running at http://localhost:3000 — start it with:"
+  echo "WARN:  dashboard not running at http://localhost:3000; start it with:"
   echo "         cd web && npm run dev"
   echo "       (you can keep going; spans will land in ClickHouse either way)"
 fi
@@ -111,10 +111,10 @@ echo
 echo "─── aider-live: ai-tally edge-proxy + emit loop ready ────────────"
 echo "  feature.tag = $FEATURE_TAG    model = $AIDER_MODEL"
 echo "  dashboard:    http://localhost:3000/agents?tag=$FEATURE_TAG"
-echo "  the tab auto-refreshes — leave it open while you work."
+echo "  the tab auto-refreshes; leave it open while you work."
 echo "─────────────────────────────────────────────────────────────────"
 echo
 
-# 5. Run Aider interactively (no redirection of stdin — full TTY).
+# 5. Run Aider interactively (no redirection of stdin, full TTY).
 #    Tee its output to $log so the emit loop can parse "Cost: $X message" lines.
 aider --no-git --yes --model "$AIDER_MODEL" "$@" 2>&1 | tee "$log"

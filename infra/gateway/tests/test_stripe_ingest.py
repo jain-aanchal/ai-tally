@@ -1,6 +1,6 @@
 """Unit tests for the Stripe ingest mapper + signature verifier (CTO-110).
 
-No infrastructure required — every payload is a recorded JSON sample under
+No infrastructure required: every payload is a recorded JSON sample under
 ``tests/fixtures/stripe/``. Signature tests build a valid Stripe-Signature header from a known
 secret + timestamp so the verifier can be exercised end-to-end without network.
 """
@@ -66,7 +66,7 @@ def test_subscription_deleted_maps_to_churn_with_zero_value() -> None:
     assert mapped is not None
     assert mapped.event_name == "churn"
     assert mapped.value_amount_micro == 0
-    # The subscription object doesn't carry an email — that's expected, the join will be on
+    # The subscription object doesn't carry an email; that's expected, the join will be on
     # customer_id-derived identity instead (or the row stays unattributed, which is honest).
     assert mapped.customer_email is None
 

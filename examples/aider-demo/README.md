@@ -41,7 +41,7 @@ edge-proxy just like openai/anthropic. The proxy runs in native-Gemini mode
 (`EDGE_PROXY_PROVIDER=gemini`): LiteLLM's `gemini/*` calls are pointed at the
 proxy via `GEMINI_API_BASE`, and the proxy forwards them to
 `generativelanguage.googleapis.com` with the `?key=`/`x-goog-api-key`
-credential preserved untouched — never logged — while reading the model and
+credential preserved untouched (never logged) while reading the model and
 token usage off the response into its metadata-only `TraceRecord`. As with
 every provider, `run.sh` also POSTs the feature-tagged batch to the gateway so
 the dashboard gets its rows; cost enrichment relies on CTO-149 having priced
@@ -80,8 +80,8 @@ aider --message-file 01-fix-test.txt …
    ▼  (OPENAI_API_BASE=http://localhost:7070/v1, header: X-Tally-Feature-Tag)
 edge-proxy (Go)  ──▶  api.openai.com
    │
-   ▼ (TraceRecord — metadata only, no body)
-   (CTO-40/41: bridge to otel_spans — not wired yet)
+   ▼ (TraceRecord: metadata only, no body)
+   (CTO-40/41: bridge to otel_spans, not wired yet)
 
 run.sh also POSTs a feature-tagged batch directly to the gateway between tasks
 (parsed cost + turn count from Aider's stdout) so the dashboard has rows the
@@ -108,7 +108,7 @@ cd infra && make aider-demo-stop   # kills the proxy via PID file
 | `ERROR: GEMINI_API_KEY (or GOOGLE_API_KEY) not set` | `export GEMINI_API_KEY=…` before `PROVIDER=google make aider-demo` |
 | `ERROR: aider not on PATH` | `pip install aider-chat` |
 | Edge-proxy didn't bind | Check `/tmp/ai-tally-aider-edge-proxy.log` |
-| Dashboard shows "Synthetic preview" | The gateway batch failed — check `make logs` |
+| Dashboard shows "Synthetic preview" | The gateway batch failed; check `make logs` |
 
 ## What good looks like
 

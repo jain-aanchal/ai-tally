@@ -1,4 +1,4 @@
-"""Tests for POST /v1/replay/estimate — body-driven what-if (CTO-128)."""
+"""Tests for POST /v1/replay/estimate: body-driven what-if (CTO-128)."""
 
 from __future__ import annotations
 

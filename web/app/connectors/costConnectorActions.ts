@@ -3,7 +3,7 @@
 
 // Server actions for the cloud cost-connector forms (CTO-176). These persist per-tenant connector
 // config through the gateway; nothing is written from the browser and no raw credential is ever
-// accepted — every credential field is a secret-manager reference.
+// accepted; every credential field is a secret-manager reference.
 import { revalidatePath } from "next/cache";
 
 import {

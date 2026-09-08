@@ -3,10 +3,10 @@
 Companion to :mod:`gateway.tenant_connectors`. Each row in ``tenant_guardrails`` is one rule scoped
 to one tenant; the SDK polls the gateway on its config-refresh window and enforces matching rules
 in-process. Every upsert appends a row to ``tenant_guardrail_changes``, keyed by a client-supplied
-``change_id`` UUID so a retried request is idempotent — both the rule write and the audit row are
+``change_id`` UUID so a retried request is idempotent; both the rule write and the audit row are
 no-ops on replay.
 
-Reads and writes both go through ``GET/POST /v1/tenant/guardrails`` — the web app never touches
+Reads and writes both go through ``GET/POST /v1/tenant/guardrails``; the web app never touches
 Postgres directly. The audit log is exposed via ``GET /v1/tenant/guardrails/audit``.
 """
 
@@ -55,7 +55,7 @@ class GuardrailRule:
 
 @dataclass(frozen=True, slots=True)
 class GuardrailChange:
-    """One audit row — before/after JSON snapshots of the rule around a change."""
+    """One audit row, before/after JSON snapshots of the rule around a change."""
 
     change_id: str
     rule_id: str
@@ -92,7 +92,7 @@ class TenantGuardrailStore:
     """Tiny Postgres-backed CRUD over ``tenant_guardrails`` + audit log.
 
     Every method takes the ``tenant_id`` resolved by upstream auth so the SQL never crosses tenants.
-    Upserts are idempotent on the client-supplied ``change_id`` — the second call with the same id
+    Upserts are idempotent on the client-supplied ``change_id``; the second call with the same id
     is a no-op and returns the existing rule unchanged.
     """
 
@@ -132,7 +132,7 @@ class TenantGuardrailStore:
 
         On a new change_id: capture the current row as ``before`` (NULL if absent), apply the
         upsert, then append an audit row with both before/after JSON. On a replayed change_id:
-        no SQL writes — just return the existing rule.
+        no SQL writes, just return the existing rule.
         """
         if kind not in ALLOWED_KINDS:
             raise ValueError(f"unknown kind '{kind}'")
@@ -186,7 +186,7 @@ class TenantGuardrailStore:
                     row = cur.fetchone()
                     if row is None:
                         raise RuntimeError(
-                            "change_id reserved but rule absent — out-of-band delete?"
+                            "change_id reserved but rule absent; out-of-band delete?"
                         )
                     return _row_to_rule(row)
                 return before_rule

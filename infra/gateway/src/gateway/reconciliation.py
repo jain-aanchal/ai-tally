@@ -1,6 +1,6 @@
 """Reconciler pipeline + late-arrival tracking (CTO-139).
 
-The /features "Attribution diagnostics" card surfaces three tenant-wide signals — how many value
+The /features "Attribution diagnostics" card surfaces three tenant-wide signals: how many value
 events arrived "late", the median lateness, and how long ago the reconciler last ran. Before this
 ticket those were honestly hardcoded zero because no reconciler existed. This module is the real
 pipeline:
@@ -10,7 +10,7 @@ pipeline:
   than :data:`LATE_THRESHOLD_SECONDS` after the matched span ``Timestamp``) and returns the lag
   distribution (median + p95) over those late events.
 * :class:`ReconciliationStore` is a tiny Postgres-backed CRUD over ``reconciliation_runs`` mirroring
-  :mod:`gateway.tenant_integrations` — ``record_run`` stamps the outcome of one pass, ``get_latest``
+  :mod:`gateway.tenant_integrations`: ``record_run`` stamps the outcome of one pass, ``get_latest``
   reads the most recent for the dashboard.
 * :func:`run_reconciliation` is a thin orchestrator: it queries ClickHouse for recent events + their
   matched span timestamps, calls the pure compute, and records the run.
@@ -22,7 +22,7 @@ pipeline:
 Per-tenant scheduling is CTO-216: the scheduler registers ``reconciliation`` as a job and calls
 :func:`run_reconciliation` per tenant on a cadence.
 
-Why a separate table from ``tenant_integration_runs`` — that's a *third-party integration* run log
+Why a separate table from ``tenant_integration_runs``: that's a *third-party integration* run log
 ("Stripe last fired 12s ago"). This is the *reconciler* run log ("we re-checked attribution and 180
 events arrived late"). Different questions, different tables.
 """
@@ -61,7 +61,7 @@ def compute_late_arrivals(
 ) -> tuple[int, int, int]:
     """Pure late-arrival stats over (event_occurred_at, matched_span_ts) pairs.
 
-    ``events`` is a sequence of ``(occurred_at, span_ts)`` — a business event's ``OccurredAt`` and
+    ``events`` is a sequence of ``(occurred_at, span_ts)``: a business event's ``OccurredAt`` and
     the ``Timestamp`` of the span it matched. An event is *late* when ``occurred_at`` is more than
     :data:`LATE_THRESHOLD_SECONDS` after ``span_ts`` (i.e. the value event landed well after the
     work that produced it).
@@ -70,7 +70,7 @@ def compute_late_arrivals(
     *late* events only (the ones that breached the threshold), as whole seconds. With no late
     events, returns ``(0, 0, 0)``.
 
-    Pure and side-effect-free — this is the unit-testable heart of the pipeline.
+    Pure and side-effect-free; this is the unit-testable heart of the pipeline.
     """
     lags: list[float] = []
     for occurred_at, span_ts in events:
@@ -110,7 +110,7 @@ class ReconciliationRun:
 class ReconciliationStore:
     """Tiny Postgres-backed CRUD over ``reconciliation_runs``.
 
-    Tenant-scoped — every query takes ``tenant_id`` from upstream auth so a buggy caller can't cross
+    Tenant-scoped: every query takes ``tenant_id`` from upstream auth so a buggy caller can't cross
     tenants. Mirrors :class:`gateway.tenant_integrations.TenantIntegrationStore`.
     """
 
@@ -120,7 +120,7 @@ class ReconciliationStore:
     def get_latest(self, tenant_id: str) -> ReconciliationRun | None:
         """Return the most recent reconciliation run for the tenant, or ``None`` if none exist.
 
-        ``None`` is the honest "no reconciler run yet" state — the dashboard surfaces it as a
+        ``None`` is the honest "no reconciler run yet" state, the dashboard surfaces it as a
         stale / em-dash card and the web fn falls back to its mock.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -234,7 +234,7 @@ class _ClickHouseEventSource(Protocol):
     """Minimal surface the orchestrator needs from a ClickHouse client.
 
     Kept as a Protocol so :func:`run_reconciliation` is trivially fakeable in tests without standing
-    up ClickHouse — the unit-testable core is :func:`compute_late_arrivals`; this orchestrator just
+    up ClickHouse: the unit-testable core is :func:`compute_late_arrivals`; this orchestrator just
     glues a CH scan to the store.
     """
 
@@ -259,7 +259,7 @@ class ClickHouseLateArrivalSource:
 
     The ``ASOF INNER JOIN`` is what expresses "at or before": ClickHouse resolves it to the nearest
     preceding row per key. INNER, so an event with no preceding span for that user contributes
-    nothing rather than a fabricated lag of zero — an event we cannot pair is not an event that
+    nothing rather than a fabricated lag of zero: an event we cannot pair is not an event that
     arrived on time.
 
     BOUNDING THE SCAN (CTO-219). The first cut of this query capped the EVENT side with
@@ -410,7 +410,7 @@ def run_reconciliation(
     try:
         pairs = ch_source.fetch_event_span_pairs(tenant_id)
         events_late, median_lag, p95_lag = compute_late_arrivals(pairs)
-    except Exception as exc:  # noqa: BLE001 — a failed scan must still record a (failed) run
+    except Exception as exc:  # noqa: BLE001 - a failed scan must still record a (failed) run
         logger.warning("reconciliation scan failed for tenant %s: %s", tenant_id, exc)
         status = "failed"
     finished_at = datetime.now(tz=timezone.utc)

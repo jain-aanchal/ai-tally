@@ -4,7 +4,7 @@
 Pulls the last N days of bandwidth-out spend for EVERY egress provider the tenant has configured
 (Vercel / Cloudflare / AWS) and lands one synthetic ``egress`` span per provider per day, so a tenant
 that just enabled the connector doesn't start with an empty Egress column. Idempotent on
-``(tenant_id, provider, day)`` — the base connector's emitter skips any day that already has a
+``(tenant_id, provider, day)``; the base connector's emitter skips any day that already has a
 synthetic span, so re-running never double-counts, and the distinct-provider span id means multiple
 providers sum cleanly.
 
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     config_store = TenantEgressConfigStore(settings)
     configs = config_store.load_configs(args.tenant)
     if not configs:
-        logger.error("tenant %s has no tenant_egress_config rows — nothing to backfill", args.tenant)
+        logger.error("tenant %s has no tenant_egress_config rows, nothing to backfill", args.tenant)
         return 2
 
     store = ClickHouseStore(settings)

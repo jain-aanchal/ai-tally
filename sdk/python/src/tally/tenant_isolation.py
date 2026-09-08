@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Multi-tenant isolation — query admission, tenant-scope enforcement, resource caps (CTO-30).
+"""Multi-tenant isolation: query admission, tenant-scope enforcement, resource caps (CTO-30).
 
 A shared multi-tenant cluster (CTO-18) has one non-negotiable rule: **one tenant must never starve
 another and must never read another's data** (spec §11). This module is the pure-logic layer that
 enforces it above the storage engine:
 
-* :class:`QueryConcurrencyLimiter` — caps the number of in-flight *expensive* queries per tenant
+* :class:`QueryConcurrencyLimiter`: caps the number of in-flight *expensive* queries per tenant
   (default 4) so a single tenant's heavy dashboard can't monopolize the cluster.
-* :class:`TenantQueryGuard` — refuses any query that isn't scoped to exactly the requesting tenant.
+* :class:`TenantQueryGuard`: refuses any query that isn't scoped to exactly the requesting tenant.
   An unscoped query (no tenant predicate) would scan the whole cluster; a query referencing another
   tenant is a data-isolation breach. Both are blocked (the negative-test guarantee).
-* :func:`resource_group_for` — generates the per-tenant ClickHouse Resource Group settings
+* :func:`resource_group_for`: generates the per-tenant ClickHouse Resource Group settings
   (memory + concurrency + CPU weight). The cluster applies them; this is the source of the values.
-* :func:`rank_heavy_tenants` / :func:`recommend_shard_promotions` — the documented shard-promotion
+* :func:`rank_heavy_tenants` / :func:`recommend_shard_promotions`, the documented shard-promotion
   path: rank tenants by load and surface the top-N that should be promoted off the shared shard.
 
 Cluster-side application (real ClickHouse Resource Groups) and shard-migration tooling are infra /
@@ -58,7 +58,7 @@ class QueryAdmissionError(RuntimeError):
 class QueryConcurrencyLimiter:
     """Thread-safe per-tenant in-flight query counter with a hard cap.
 
-    Limits are per tenant and independent — one tenant hitting its cap never affects another.
+    Limits are per tenant and independent; one tenant hitting its cap never affects another.
     """
 
     def __init__(self, max_concurrent: int = DEFAULT_MAX_CONCURRENT_QUERIES) -> None:
@@ -86,7 +86,7 @@ class QueryConcurrencyLimiter:
             return self._in_flight.get(tenant_id, 0)
 
     def try_acquire(self, tenant_id: str) -> AdmissionOutcome:
-        """Reserve a slot if under the cap. Never raises — returns an outcome."""
+        """Reserve a slot if under the cap. Never raises; returns an outcome."""
         if not tenant_id:
             return AdmissionOutcome(False, tenant_id, 0, 0, reason="missing tenant_id")
         with self._lock:
@@ -241,10 +241,10 @@ def rank_heavy_tenants(loads: Iterable[TenantLoad], *, top_n: int = 10) -> tuple
 def recommend_shard_promotions(
     loads: Iterable[TenantLoad], *, threshold_score: float = DEFAULT_PROMOTION_SCORE
 ) -> tuple[str, ...]:
-    """Tenant ids whose load exceeds the promotion threshold — promote them off the shared shard.
+    """Tenant ids whose load exceeds the promotion threshold; promote them off the shared shard.
 
     The documented promotion path: (1) flag here, (2) provision a dedicated shard, (3) dual-write +
-    backfill, (4) cut reads over, (5) drop from the shared shard. Steps 2–5 are migration tooling
+    backfill, (4) cut reads over, (5) drop from the shared shard. Steps 2-5 are migration tooling
     (out of scope per CTO-30); this function owns step 1, the decision.
     """
     candidates = [t for t in loads if t.load_score >= threshold_score]

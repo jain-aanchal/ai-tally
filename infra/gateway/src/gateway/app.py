@@ -1,11 +1,11 @@
 """FastAPI ingest gateway.
 
-POST /v1/batches — accept a :class:`tally.wire.BatchRequest` (JSON), authenticate, dedupe on
+POST /v1/batches: accept a :class:`tally.wire.BatchRequest` (JSON), authenticate, dedupe on
 (tenant_id, batch_id), enrich each span's cost authoritatively, clamp clock skew, and write spans +
 business events + identity links into ClickHouse.
 
 The heavy lifting (envelope, idempotency, cost recompute, skew clamp) is the SDK's already-tested
-pure logic — this module is just the HTTP + storage shell.
+pure logic; this module is just the HTTP + storage shell.
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ async def lifespan(app: FastAPI):
     # CTO-176: write path for the cloud cost-connector config rows (compute / egress /
     # vercel). Until now those rows could only be inserted straight into Postgres.
     app.state.cost_connector_admin = CostConnectorAdmin(settings)
-    # Per-tenant guardrail registry (CTO-116) — the SDK polls /v1/tenant/guardrails on its
+    # Per-tenant guardrail registry (CTO-116): the SDK polls /v1/tenant/guardrails on its
     # config-refresh window and enforces matching rules in-process. Shadow rules emit span
     # attrs but never alter the call; enabled rules do.
     app.state.tenant_guardrails = TenantGuardrailStore(settings)
@@ -327,9 +327,9 @@ async def lifespan(app: FastAPI):
     # what still holds after a restart or across replicas.
     app.state.revenue_ingestor = WebhookIngestor()
     # Replay infra (CTO-113): per-tenant opt-in sampling + cross-provider projection.
-    # The blob store is in-memory by default — swappable for MinIO/S3 via app.state override in
+    # The blob store is in-memory by default, swappable for MinIO/S3 via app.state override in
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
-    # (sink wired to a list for v1 — the projection API reads from it directly).
+    # (sink wired to a list for v1; the projection API reads from it directly).
     app.state.tenant_replay = TenantReplayStore(settings)
     app.state.replay_blob_store = _build_replay_blob_store(settings)
     app.state.replay_sample_index = []  # list[ReplaySampleRow]
@@ -361,7 +361,7 @@ async def lifespan(app: FastAPI):
     # judge calls accumulate in-memory until the ClickHouse writeback path lands.
     app.state.tenant_eval = TenantEvalStore(settings)
     app.state.eval_runs = []  # list[EvalRunRow]
-    # Per-tenant HMAC key registry — used to hash Stripe customer emails into the same
+    # Per-tenant HMAC key registry: used to hash Stripe customer emails into the same
     # UserIdHash space the SDK uses, so the attribution join lights up (CTO-110).
     app.state.hmac_registry = HmacKeyRegistry()
     # Tenant name <-> tenants.id UUID (CTO-185). Both spellings reach the gateway and each derives
@@ -415,7 +415,7 @@ async def lifespan(app: FastAPI):
         monthly_quota=settings.monthly_quota_spans,
     )
     # Known feature tags aren't loaded yet (per-tenant Postgres lookup is a follow-up), so the
-    # unknown-tag flag is disabled for now — schema + PII checks are always on.
+    # unknown-tag flag is disabled for now; schema + PII checks are always on.
     app.state.validator = SpanValidator(max_span_bytes=settings.max_span_bytes)
     app.state.backpressure = Backpressure(soft_limit=settings.backpressure_soft_limit)
     # HEAD-path billing meter (CTO-84/85/86): counts distinct traces + feature tags before any
@@ -477,7 +477,7 @@ async def lifespan(app: FastAPI):
             scheduler.job_count,
         )
     # Auto-discover provider model lineups (CTO-109). Fail-soft: if both providers
-    # are unreachable AND there's no cached file, we still boot — just with an empty
+    # are unreachable AND there's no cached file, we still boot, just with an empty
     # list and a WARNING. Demos read app.state.models so they don't hardcode SKUs
     # like claude-3-5-haiku-latest that the provider may retire out from under them.
     try:
@@ -487,8 +487,8 @@ async def lifespan(app: FastAPI):
             anth_ids = sorted(m.id for m in app.state.models if m.provider == "anthropic")
             logger.info("models: openai=%s anthropic=%s", openai_ids, anth_ids)
         else:
-            logger.warning("models: discovery returned no entries — booting without a lineup")
-    except Exception as exc:  # noqa: BLE001 — discovery must never crash boot
+            logger.warning("models: discovery returned no entries, booting without a lineup")
+    except Exception as exc:  # noqa: BLE001 - discovery must never crash boot
         logger.warning("models: discovery raised, defaulting to empty list: %s", exc)
         app.state.models = []
     # CTO-243: keep the replay/eval projection cache warm out-of-band, so the first Compare /
@@ -869,7 +869,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         client_ts = span.get("timestamp_ns")
         client_ts_ns = client_ts if isinstance(client_ts, int) else batch.client_send_ts_ns
         skew = assess(client_ts_ns, server_recv_ns)
-        # Meter at HEAD — before the analytics sampling decision — so the billable trace count is
+        # Meter at HEAD, before the analytics sampling decision, so the billable trace count is
         # exact regardless of sample_rate (CTO-84/85). Drops/sampling must never lower the bill.
         trace_id = span.get("TraceId") or span.get("trace_id")
         feature_tag = result.attributes.get(GenAI.FEATURE_TAG)
@@ -919,7 +919,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
             )
         )
 
-    # If every span was rejected (and there were spans), nothing to write — REJECTED, no retry.
+    # If every span was rejected (and there were spans), nothing to write: REJECTED, no retry.
     rejected_only = bool(batch.resource_spans) and not rows
     if rejected_only:
         resp = BatchResponse(
@@ -936,7 +936,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     if buffer is not None:
         # Buffered path (CTO-37): hand spans to the burst buffer (drained to ClickHouse off the hot
         # path) and ack immediately, so a burst or a slow ClickHouse never yields a 5xx. Overflow past
-        # the buffer's high-water mark is shed as retryable partial errors — backpressure, not failure.
+        # the buffer's high-water mark is shed as retryable partial errors: backpressure, not failure.
         produced = buffer.produce_rows(batch.tenant_id, rows)
         accepted = produced.accepted
         for i in range(produced.rejected):
@@ -1189,7 +1189,7 @@ async def set_tenant_connector(
 ) -> JSONResponse:
     """Enable or disable one cost-layer connector for the caller's tenant.
 
-    Body: ``{"layer": "vector", "enabled": true, "notes": "optional"}``. Idempotent — re-enabling an
+    Body: ``{"layer": "vector", "enabled": true, "notes": "optional"}``. Idempotent: re-enabling an
     already-enabled connector is a no-op, disabling an absent one stamps a tombstone row.
     """
     _require_service_token(authorization)
@@ -1300,7 +1300,7 @@ def list_tenant_guardrails(
     """List guardrail rules for the caller's tenant (CTO-116).
 
     The SDK polls this on its config-refresh interval; the dashboard renders the same payload.
-    Rules in 'shadow' state are evaluated and observed but never alter agent behavior — that's the
+    Rules in 'shadow' state are evaluated and observed but never alter agent behavior; that's the
     safe staging step before flipping to 'enabled'.
     """
     _require_service_token(authorization)
@@ -1494,7 +1494,7 @@ async def connect_tenant_stripe(
 
     Body: ``{"webhook_secret": "whsec_...", "stripe_account_id": "acct_..." (optional)}``.
     Idempotent: pasting the same secret twice is a no-op on the audit log. The response carries
-    a *fingerprint* of the secret (last 4 chars) so the dashboard can show "connected" — the raw
+    a *fingerprint* of the secret (last 4 chars) so the dashboard can show "connected"; the raw
     secret is never re-exposed.
     """
     _require_service_token(authorization)
@@ -1527,7 +1527,7 @@ def get_tenant_stripe(
     authorization: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Read the safe (no-secret) view of a tenant's Stripe config — used by the connectors tile."""
+    """Read the safe (no-secret) view of a tenant's Stripe config, used by the connectors tile."""
     _require_service_token(authorization)
     tenant_id = _service_token_tenant(x_tenant_id)
     store: TenantStripeStore = app.state.tenant_stripe
@@ -1568,7 +1568,7 @@ def get_tenant_reconciliation_status(
 
     Drives the /features "Attribution diagnostics" card: late-arrival event count, median lateness,
     and how long ago the reconciler last ran. ``run`` is ``None`` when no pass has ever run for the
-    tenant — the honest first-render state, which the web fn turns into a null so the route falls
+    tenant, the honest first-render state, which the web fn turns into a null so the route falls
     back to its mock.
     """
     _require_service_token(authorization)
@@ -2298,7 +2298,7 @@ async def stripe_webhook(
 ) -> JSONResponse:
     """Stripe webhook ingest (CTO-110).
 
-    Route shape: ``POST /v1/stripe/webhook?tenant=<tenant_id>`` — Stripe can't add custom headers,
+    Route shape: ``POST /v1/stripe/webhook?tenant=<tenant_id>``; Stripe can't add custom headers,
     so the tenant is encoded in the URL (the tenant's Stripe dashboard configures it once at
     connect time). Verification + idempotency + insert happens here; we ack 200 on every path
     that isn't a hard rejection so Stripe doesn't redeliver.
@@ -2325,7 +2325,7 @@ async def stripe_webhook(
             now_s=int(time.time()),
         )
     except StripeSignatureError as exc:
-        # Don't echo the body — just the failure reason. The signature header itself is fine to
+        # Don't echo the body, just the failure reason. The signature header itself is fine to
         # mention but we drop it from log lines defensively.
         logger.warning("stripe webhook signature rejected (tenant=%s): %s", tenant, exc)
         raise HTTPException(status_code=400, detail=f"signature rejected: {exc}") from exc
@@ -2341,7 +2341,7 @@ async def stripe_webhook(
 
     mapped = map_stripe_event(event)
     if mapped is None:
-        # Unsupported type — ack so Stripe doesn't retry. This is the right behavior even if the
+        # Unsupported type: ack so Stripe doesn't retry. This is the right behavior even if the
         # tenant points a "send all events" subscription at us; we silently drop what we don't map.
         return JSONResponse(
             {"ok": True, "skipped": True, "reason": "unsupported event type"},
@@ -2403,7 +2403,7 @@ async def stripe_webhook(
     store: ClickHouseStore = app.state.store
     try:
         store.insert_business_events(tenant, [ev])
-    except Exception:  # noqa: BLE001 — never crash the gateway on a CH blip
+    except Exception:  # noqa: BLE001 - never crash the gateway on a CH blip
         logger.exception("clickhouse insert (stripe webhook) failed for tenant %s", tenant)
         # 503 → Stripe will retry, which is exactly what we want on a transient outage.
         raise HTTPException(status_code=503, detail="storage unavailable") from None
@@ -2411,7 +2411,7 @@ async def stripe_webhook(
     seen.add(key)
 
     # CTO-117: stamp the integration run so the /connectors page lights up the Stripe card.
-    # Best-effort — a postgres outage here must not turn a 200 into a 500 (Stripe would retry
+    # Best-effort: a postgres outage here must not turn a 200 into a 500 (Stripe would retry
     # and we'd double-count the business_event).
     integrations: TenantIntegrationStore = app.state.tenant_integrations
     try:
@@ -2466,7 +2466,7 @@ def tenant_coverage(
 
     try:
         operation_counts: dict[str, int] | None = store.coverage_operation_counts(tenant_id)
-    except Exception:  # noqa: BLE001 — an unreachable store is "unknown", never "not covered"
+    except Exception:  # noqa: BLE001 - an unreachable store is "unknown", never "not covered"
         logger.exception("coverage span probe failed for tenant %s", tenant_id)
         operation_counts = None
 
@@ -2475,7 +2475,7 @@ def tenant_coverage(
         account: AccountSignal | None = AccountSignal(
             total_rows=total, attributed_rows=attributed
         )
-    except Exception:  # noqa: BLE001 — same rule for the rollup read
+    except Exception:  # noqa: BLE001 - same rule for the rollup read
         logger.exception("coverage account probe failed for tenant %s", tenant_id)
         account = None
 
@@ -2487,7 +2487,7 @@ def tenant_coverage(
 
 
 # --------------------------------------------------------------------------------------------
-# Unit economics — CAC inputs (CTO-111).
+# Unit economics: CAC inputs (CTO-111).
 # --------------------------------------------------------------------------------------------
 
 
@@ -2585,7 +2585,7 @@ def get_tenant_unit_economics_config(
 ) -> JSONResponse:
     """LTV/CAC band thresholds for the caller's tenant (CTO-126).
 
-    Returns ``config: null`` when the tenant has no row — the web classify helpers then fall back to
+    Returns ``config: null`` when the tenant has no row; the web classify helpers then fall back to
     the hardcoded B2B-SaaS defaults. Same per-tenant auth as the CAC route.
     """
     _require_service_token(authorization)
@@ -2643,7 +2643,7 @@ def get_tenant_revenue_source_config(
 ) -> JSONResponse:
     """Revenue source config for the caller's tenant (CTO-194).
 
-    Returns ``config: null`` when the tenant has no row — the web reader then applies the defaults
+    Returns ``config: null`` when the tenant has no row; the web reader then applies the defaults
     (every source counts; ValueType monetary + mrr are revenue; refunds net off). Same per-tenant
     auth as the unit-economics route.
     """
@@ -2701,7 +2701,7 @@ async def upsert_tenant_revenue_source_config(
 
 
 # --------------------------------------------------------------------------------------------
-# CSV revenue upload (CTO-198) — for tenants whose revenue lives in a spreadsheet, not an API.
+# CSV revenue upload (CTO-198): for tenants whose revenue lives in a spreadsheet, not an API.
 # --------------------------------------------------------------------------------------------
 
 # Bound on the request body. A monthly finance export of even 50k accounts is well under a
@@ -2761,7 +2761,7 @@ def _revenue_policy_note(tenant_id: str) -> str | None:
     """
     try:
         config = app.state.tenant_revenue_sources.get(tenant_id)
-    except Exception:  # noqa: BLE001 — an advisory note must never fail the upload
+    except Exception:  # noqa: BLE001 - an advisory note must never fail the upload
         logger.exception("revenue source config lookup failed for tenant %s", tenant_id)
         return None
     if config is None or not config.revenue_sources:
@@ -2841,7 +2841,7 @@ async def upload_revenue_csv(
         try:
             store.delete_business_events_by_id_prefix(tenant_id, UPLOAD_SOURCE, prefix)
             store.insert_business_events(tenant_id, list(snapshot.events))
-        except Exception:  # noqa: BLE001 — never crash the gateway on a CH blip
+        except Exception:  # noqa: BLE001 - never crash the gateway on a CH blip
             logger.exception("clickhouse write (revenue upload) failed for tenant %s", tenant_id)
             raise HTTPException(status_code=503, detail="storage unavailable") from None
         try:
@@ -3037,7 +3037,7 @@ def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, 
 
 
 # --------------------------------------------------------------------------------------------
-# Replay infrastructure (CTO-113) — sampling config, capture, projection.
+# Replay infrastructure (CTO-113): sampling config, capture, projection.
 # --------------------------------------------------------------------------------------------
 
 
@@ -3048,7 +3048,7 @@ def get_tenant_replay_config(
 ) -> JSONResponse:
     """Read the caller's replay-sampling config (CTO-113).
 
-    Defaults to ``enabled=false`` when the tenant has no row yet — sampling is opt-in.
+    Defaults to ``enabled=false`` when the tenant has no row yet; sampling is opt-in.
     """
     _require_service_token(authorization)
     tenant_id = _service_token_tenant(x_tenant_id)
@@ -3064,7 +3064,7 @@ async def set_tenant_replay_config(
 ) -> JSONResponse:
     """Toggle / tune replay sampling for the caller's tenant (CTO-113).
 
-    Body fields (all optional — only what changes is updated):
+    Body fields (all optional, only what changes is updated):
     ``{enabled?: bool, sample_rate?: 0..1, retention_days?: int>0, daily_budget_usd?: number>=0}``.
     """
     _require_service_token(authorization)
@@ -3198,7 +3198,7 @@ async def project_replay(
     Body::
 
         {
-          "tenant_id": "...",           # optional — falls back to control-plane resolution
+          "tenant_id": "...",           # optional, falls back to control-plane resolution
           "feature_tag": "research",    # optional filter
           "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4.5"}, ...],
           "sample_size": 50             # optional, default 50
@@ -3267,7 +3267,7 @@ async def project_replay(
     # Pick samples stratified by token quintile (re-use the sampler's logic on the index).
     selected = _pick_for_projection(matching, sample_size)
 
-    # Executor — uses a deterministic mock client by default so tests don't need a network.
+    # Executor: uses a deterministic mock client by default so tests don't need a network.
     # Production deployments wire a real provider client here via app.state override.
     client = getattr(app.state, "replay_candidate_client", None) or _mock_candidate_client
     executor = ReplayExecutor(
@@ -3335,7 +3335,7 @@ async def project_replay(
         projection_missing_body += excluded_missing_body
         avg_cost = (cost_sum / replayed) if replayed > 0 else 0
         # Honest extrapolation: avg cost per call × corpus size, scaled by a 30/sample-window-days
-        # factor of 30 — we don't track window days yet, so v1 just reports avg × corpus.
+        # factor of 30; we don't track window days yet, so v1 just reports avg × corpus.
         projected_monthly_cost = int(round(avg_cost * samples_available))
         sorted_lat = sorted(latencies)
         p50 = sorted_lat[len(sorted_lat) // 2] if sorted_lat else 0
@@ -3395,10 +3395,10 @@ async def project_replay_estimate(
     Body::
 
         {
-          "tenant_id": "...",            # optional — falls back to control-plane resolution
+          "tenant_id": "...",            # optional, falls back to control-plane resolution
           "feature_tag": "research",     # optional filter
           "candidate_model": {"provider": "anthropic", "model": "claude-haiku-4-5"},
-          "system_prompt_override": "...",  # optional — applied to the envelope before pricing
+          "system_prompt_override": "...",  # optional, applied to the envelope before pricing
           "sample_size": 50              # optional, default 50; sized to min(sample_size, available)
         }
 
@@ -3442,7 +3442,7 @@ async def project_replay_estimate(
     diagnostics = {
         "context_fidelity": "resolved-context replay (no live retrieval)",
         "prompt_override_applied": bool(system_prompt_override),
-        # The override length is estimated at 4 chars/token — no real tokenizer in v1.
+        # The override length is estimated at 4 chars/token; no real tokenizer in v1.
         "token_estimate": "4-chars-per-token (no live tokenizer)",
         "replay_cost_micro_usd": 0,
     }
@@ -3522,7 +3522,7 @@ async def project_replay_estimate(
 
     replayed = len(results) - excluded_budget - excluded_missing_body
 
-    # CTO-241: nothing left to replay because every selected body was gone — return the honest
+    # CTO-241: nothing left to replay because every selected body was gone; return the honest
     # "insufficient corpus" shape (empty per_candidate) instead of a zero-filled projection.
     if replayed == 0 and excluded_missing_body > 0:
         diagnostics["missing_body_count"] = excluded_missing_body
@@ -3584,7 +3584,7 @@ def _todays_spend(rows: list, tenant_id: str) -> int:
 
 
 async def _mock_candidate_client(call: CandidateCall) -> CandidateResponse:
-    """Deterministic mock — echoes back token counts from the envelope so executor tests are
+    """Deterministic mock: echoes back token counts from the envelope so executor tests are
     self-contained. Production deployments inject a real provider-routing client via
     ``app.state.replay_candidate_client``.
 
@@ -3620,7 +3620,7 @@ def get_tenant_eval_config(
 ) -> JSONResponse:
     """Read the caller's pairwise-LLM-judge eval config (CTO-114).
 
-    Defaults to ``enabled=false`` when the tenant has no row yet — eval is opt-in (judge calls
+    Defaults to ``enabled=false`` when the tenant has no row yet; eval is opt-in (judge calls
     burn real provider budget).
     """
     _require_service_token(authorization)
@@ -3637,7 +3637,7 @@ async def set_tenant_eval_config(
 ) -> JSONResponse:
     """Toggle / tune eval-harness for the caller's tenant (CTO-114).
 
-    Body fields (all optional — only what changes is updated):
+    Body fields (all optional, only what changes is updated):
     ``{enabled?: bool, judge_model?: str, daily_budget_usd?: number>=0}``.
     """
     _require_service_token(authorization)
@@ -3671,7 +3671,7 @@ async def project_eval(
     Body::
 
         {
-          "tenant_id": "...",           # optional — falls back to control-plane resolution
+          "tenant_id": "...",           # optional, falls back to control-plane resolution
           "feature_tag": "research",    # optional filter
           "candidate_models": [{"provider": "anthropic", "model": "claude-haiku-4-5"}, ...],
           "sample_size": 50             # optional, default 50
@@ -3681,7 +3681,7 @@ async def project_eval(
     belong to this tenant (optionally filtered by feature_tag), pair the candidate's response
     with the original captured response, and ask the judge which one better follows the
     instruction. The aggregate ``win_rate`` is ``candidate_wins / (candidate_wins + current_wins
-    + ties)`` — errors are excluded from the denominator (they tell us the judge failed, not
+    + ties)``; errors are excluded from the denominator (they tell us the judge failed, not
     that the candidate did).
 
     Returns per-candidate::
@@ -3850,7 +3850,7 @@ async def project_eval(
         non_error = current_wins + candidate_wins + ties
         win_rate = (candidate_wins / non_error) if non_error > 0 else 0.0
         # Wilson 95% interval for binomial proportion. Kept on the gateway side too so callers
-        # without a Wilson helper get usable numbers — the web layer's wilsonInterval matches.
+        # without a Wilson helper get usable numbers; the web layer's wilsonInterval matches.
         lo, hi = _wilson_interval(candidate_wins, non_error)
         per_candidate.append({
             "provider": provider,
@@ -3921,7 +3921,7 @@ def _extract_response(envelope: dict) -> str:
 
 
 def _estimate_judge_cost(catalog, model: str, *texts: str) -> int:
-    """Rough pre-flight cost estimate — 4 chars/token, fixed 50-token output budget for the
+    """Rough pre-flight cost estimate: 4 chars/token, fixed 50-token output budget for the
     short A/B/TIE answer. Used only for the budget check; the row's actual CostMicroUsd uses
     real token counts from the judge response.
     """

@@ -21,10 +21,10 @@ Design
   than importing the ledger/meter modules (which live on their own branches), so
   this ships off ``main`` on its own.
 * **Money.** Amounts are integer **micro-USD** internally (the codebase-wide
-  invariant — see :mod:`tally.schema`). They convert to integer **cents** only
+  invariant; see :mod:`tally.schema`). They convert to integer **cents** only
   at the Stripe boundary, since Stripe charges in the smallest currency unit.
 * **Idempotency.** Usage reporting is keyed by the record's idempotency key, so
-  retries never double-bill — mirroring the ledger's guarantee.
+  retries never double-bill, mirroring the ledger's guarantee.
 
 Nothing here logs or persists a Stripe secret key; the real client adapter is
 responsible for holding credentials out of this layer.
@@ -177,7 +177,7 @@ class DunningPolicy:
 
     ``retry_schedule_days`` is the delay (days from the failed charge) for each
     successive attempt. Once attempts exceed ``max_attempts`` the subscription
-    is canceled. A customer is **never** silently dropped — cancellation is an
+    is canceled. A customer is **never** silently dropped; cancellation is an
     explicit, surfaced state.
     """
 
@@ -257,7 +257,7 @@ def record_payment_failure(
 
     Increments the attempt counter, moves to PAST_DUE and schedules a retry
     until ``max_attempts`` is exceeded, at which point the subscription is
-    canceled. Never raises on a canceled input — returns a CANCEL no-op.
+    canceled. Never raises on a canceled input; returns a CANCEL no-op.
     """
     pol = policy if policy is not None else DunningPolicy()
     if sub.is_canceled:
@@ -482,7 +482,7 @@ class FakeStripeClient:
         self, subscription_id: str, meter: Meter, quantity: int, idempotency_key: str
     ) -> bool:
         if idempotency_key in self._seen_keys:
-            return False  # duplicate — already counted
+            return False  # duplicate, already counted
         self._seen_keys.add(idempotency_key)
         key = (subscription_id, meter)
         self._usage[key] = self._usage.get(key, 0) + quantity

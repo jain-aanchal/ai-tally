@@ -5,15 +5,15 @@ The attribution view used to sum revenue with a hardcoded ``business_events.Sour
 filter. ``Source`` is an unconstrained ``LowCardinality(String)`` set by whichever connector
 ingested the row, so a tenant on any other biller had every revenue event silently dropped.
 
-``business_events.ValueType`` is the correct discriminator — it is a real enum
-(``monetary`` / ``count`` / ``mrr`` / ``refund``) — and it is what the web reader keys off now.
+``business_events.ValueType`` is the correct discriminator: it is a real enum
+(``monetary`` / ``count`` / ``mrr`` / ``refund``), and it is what the web reader keys off now.
 This module owns the optional per-tenant NARROWING of that default: which ``Source`` values count
 as revenue, and whether recurring ``mrr`` amounts are summed alongside one-off ``monetary`` ones.
 
 A tenant with no row gets the defaults (every source counts; monetary + mrr count; refunds net
 off), so the migration cannot break an existing tenant.
 
-Reads/writes go through ``GET/POST /v1/tenant/revenue-sources/config`` — the web app never touches
+Reads/writes go through ``GET/POST /v1/tenant/revenue-sources/config``; the web app never touches
 Postgres directly (same rule as :mod:`gateway.tenant_unit_economics`). Every upsert appends a row to
 ``tenant_revenue_source_config_changes`` keyed by a client-supplied ``change_id`` UUID, so a retried
 request is idempotent: both the config write and the audit row are no-ops on replay.
@@ -32,14 +32,14 @@ from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 class RevenueSourceConfigError(ValueError):
-    """Caller-facing validation error — surfaces as HTTP 422 in the gateway."""
+    """Caller-facing validation error, surfaces as HTTP 422 in the gateway."""
 
 
 @dataclass(frozen=True, slots=True)
 class RevenueSourceConfig:
     """One (tenant) row of revenue source configuration."""
 
-    # None means "every business_events.Source counts" — the default, and NOT the same as an empty
+    # None means "every business_events.Source counts", the default, and NOT the same as an empty
     # list, which is rejected on the way in.
     revenue_sources: tuple[str, ...] | None
     include_mrr: bool
@@ -61,7 +61,7 @@ def _normalize_sources(v: object) -> tuple[str, ...] | None:
     """Validate + canonicalize the source list.
 
     ``None`` (or a missing key) means "every source counts". Sources are lowercased and de-duped
-    because ``business_events.Source`` is compared case-insensitively by the reader — the connector
+    because ``business_events.Source`` is compared case-insensitively by the reader; the connector
     ids on the /connectors page are lowercase, but hand-written config should not have to be.
     """
     if v is None:
@@ -79,7 +79,7 @@ def _normalize_sources(v: object) -> tuple[str, ...] | None:
             out.append(s)
     if not out:
         # "No source counts as revenue" is indistinguishable from a misconfiguration and would
-        # blank the dashboard — the exact failure mode this config exists to fix. Send null to mean
+        # blank the dashboard, the exact failure mode this config exists to fix. Send null to mean
         # "all sources" instead.
         raise RevenueSourceConfigError(
             "revenue_sources must name at least one source, or be null for all sources"
@@ -170,7 +170,7 @@ class TenantRevenueSourceStore:
 
         On a new change_id: capture the current row as ``before`` (NULL if absent), apply the
         upsert, append an audit row with both before/after JSON. On a replayed change_id: no config
-        write — return the existing row unchanged.
+        write, return the existing row unchanged.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             tenant_id = resolve_tenant_uuid(cur, tenant_id)
@@ -196,14 +196,14 @@ class TenantRevenueSourceStore:
             )
             reserved = cur.fetchone()
             if reserved is None:
-                # change_id already applied — replay is a no-op. Return the current row.
+                # change_id already applied: replay is a no-op. Return the current row.
                 conn.commit()
                 if before is not None:
                     return before
                 cur.execute(_SELECT, (tenant_id,))
                 row = cur.fetchone()
                 if row is None:
-                    raise RuntimeError("change_id reserved but config absent — out-of-band delete?")
+                    raise RuntimeError("change_id reserved but config absent; out-of-band delete?")
                 return _row_to_config(row)
 
             cur.execute(

@@ -6,7 +6,7 @@
 
 ## Acceptance criteria
 
-<!-- The acceptance criteria from the ticket — check them off as you go. -->
+<!-- The acceptance criteria from the ticket. Check them off as you go. -->
 
 - [ ]
 - [ ]

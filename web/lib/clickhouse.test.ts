@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // CTO-115: queryCurrentModel latency/error suppression.
 //
-// We exercise the SUT by stubbing the @clickhouse/client query() method through vi.mock —
+// We exercise the SUT by stubbing the @clickhouse/client query() method through vi.mock;
 // the function under test is the small adapter that converts rows into the typed return value
 // (and applies the n < 50 suppression rule), so we don't need a real ClickHouse to test it.
 
@@ -40,7 +40,7 @@ beforeEach(() => {
   queryMock.mockReset();
 });
 
-describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
+describe("queryCurrentModel: latency/error suppression (CTO-115)", () => {
   it("returns null when ClickHouse has no rows (route falls back to mock)", async () => {
     const { queryCurrentModel } = await freshSut();
     respond(null);
@@ -64,7 +64,7 @@ describe("queryCurrentModel — latency/error suppression (CTO-115)", () => {
     expect(out!.sampleCount).toBe(12);
     expect(out!.latencyP95Ms).toBeNull();
     expect(out!.errorRate).toBeNull();
-    // Cost projection still runs — it's a sum, not a quantile.
+    // Cost projection still runs: it's a sum, not a quantile.
     expect(out!.monthlyCostMicroUsd).toBe(Math.round((1_400_000 * 30) / 7));
   });
 
@@ -132,11 +132,11 @@ describe("queryDistinctBusinessEventNames (CTO-140)", () => {
 // CTO-171: guard the Compare candidate list against silently shipping a retired model id.
 //
 // The gateway discovers its live provider lineup at boot but does not expose it over HTTP yet
-// (no `/v1/models` route — that's the follow-up), so DEFAULT_CANDIDATES stays hardcoded. This
+// (no `/v1/models` route; that's the follow-up), so DEFAULT_CANDIDATES stays hardcoded. This
 // test is the safety net: it mirrors the current, catalog-priced ids from the SDK's seed_catalog()
 // (sdk/python/src/tally/pricing.py) and asserts every candidate is one of them. A retired id like
-// `gpt-4o-mini` — which is still *priced* in the catalog for backward compat but is NOT a model we
-// want the switcher to surface — must not appear. If seed_catalog() gains/loses a current model,
+// `gpt-4o-mini`, which is still *priced* in the catalog for backward compat but is NOT a model we
+// want the switcher to surface, must not appear. If seed_catalog() gains/loses a current model,
 // update KNOWN_CURRENT_CANDIDATES here in the same change.
 // CTO-146: per-rule trip counts sourced from guardrail-verdict spans.
 //
@@ -144,7 +144,7 @@ describe("queryDistinctBusinessEventNames (CTO-140)", () => {
 //   runsThisWeek           = every verdict row for the rule (it was evaluated)
 //   wouldHaveFiredThisWeek = verdict ∈ {enforced, shadow_observed}
 // We stub the ClickHouse rows the ARRAY JOIN would produce and assert the mapping.
-describe("queryGuardrailActivity — verdict-span trip counts (CTO-146)", () => {
+describe("queryGuardrailActivity: verdict-span trip counts (CTO-146)", () => {
   it("maps verdict rows to runs/wouldFire counts per rule", async () => {
     const { queryGuardrailActivity } = await freshSut();
     respondRows([
@@ -165,8 +165,8 @@ describe("queryGuardrailActivity — verdict-span trip counts (CTO-146)", () => 
 
   it("counts a shadow rule's would-fires without counting them as enforcement", async () => {
     // A rule fully in shadow: every fire is shadow_observed, so wouldFire tracks would-have-fired,
-    // and it never enforces. The query does not distinguish enforced vs shadow in wouldFire — both
-    // count toward 'would have fired' — which is exactly the graduation signal.
+    // and it never enforces. The query does not distinguish enforced vs shadow in wouldFire: both
+    // count toward 'would have fired', which is exactly the graduation signal.
     const { queryGuardrailActivity } = await freshSut();
     respondRows([{ ruleId: "gr_shadow", runs: "1000", wouldFire: "47" }]);
     const activity = await queryGuardrailActivity();
@@ -176,11 +176,11 @@ describe("queryGuardrailActivity — verdict-span trip counts (CTO-146)", () => 
     expect(a.wouldHaveFiredThisWeek).toBeLessThan(a.runsThisWeek);
   });
 
-  it("is honest about a rule with no telemetry — absent from the map (renders as —)", async () => {
+  it("is honest about a rule with no telemetry: absent from the map (renders as —)", async () => {
     const { queryGuardrailActivity } = await freshSut();
     respondRows([{ ruleId: "gr_active", runs: "500", wouldFire: "5" }]);
     const activity = await queryGuardrailActivity();
-    // A rule the query never saw is simply not in the map — the caller leaves its counts at 0,
+    // A rule the query never saw is simply not in the map; the caller leaves its counts at 0,
     // which the UI renders as `—`, never a fabricated number.
     expect(activity!.has("gr_never_ran")).toBe(false);
     expect(activity!.get("gr_active")).toEqual({ runsThisWeek: 500, wouldHaveFiredThisWeek: 5 });
@@ -236,7 +236,7 @@ describe("DEFAULT_CANDIDATES guard (CTO-171)", () => {
 
 // CTO-169: reconciler "last run" freshness is derived from the real reconciliation_runs source
 // (gateway GET /v1/tenant/reconciliation/status), not a hardcoded constant. Honest-null when the
-// reconciler has never run or the gateway is unavailable — the caller renders `—`.
+// reconciler has never run or the gateway is unavailable; the caller renders `—`.
 describe("queryReconcilerLastRun (CTO-169)", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => {
@@ -312,7 +312,7 @@ function respondAccountCosts() {
   respondRows(FIXTURE.map((r) => ({ account: r.account, layer: r.layer, cost: String(r.usd) })));
 }
 
-describe("queryAccountCosts — reconciliation (CTO-187)", () => {
+describe("queryAccountCosts: reconciliation (CTO-187)", () => {
   it("per-account plus unattributed equals the tenant direct total", async () => {
     const { queryAccountCosts } = await freshSut();
     respondAccountCosts();
@@ -370,7 +370,7 @@ describe("queryAccountCosts — reconciliation (CTO-187)", () => {
   });
 });
 
-describe("queryAccountCosts — SQL contract (CTO-187)", () => {
+describe("queryAccountCosts: SQL contract (CTO-187)", () => {
   async function sqlOf(): Promise<string[]> {
     const { queryAccountCosts } = await freshSut();
     respondAccountCosts();
@@ -831,7 +831,7 @@ describe("queryAccountStitching (CTO-184)", () => {
 // The point of this query is which days it REFUSES to hand a forecast. Each test stubs the three
 // reads in order (bounds, money, settlement evidence) and asserts on the settled/unsettled split.
 
-describe("querySettledCostSeries — settled-day rule (CTO-207)", () => {
+describe("querySettledCostSeries: settled-day rule (CTO-207)", () => {
   const bounds = (windowStart: string, today: string, periodStart: string, windowDays: number) =>
     respondRows([{ windowStart, periodStart, today, windowDays }]);
 

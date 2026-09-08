@@ -1,18 +1,18 @@
-"""Vercel compute + egress cost connector (CTO-163) — offline tests, NO live cloud calls.
+"""Vercel compute + egress cost connector (CTO-163): offline tests, NO live cloud calls.
 
 Pins the contract the /cost Compute + Egress columns depend on for a Vercel-hosted app:
 
   * The SAME Vercel usage payload splits into compute (Function invocations + GB-hours) and egress
-    (bandwidth) with NO cross-layer double-count — compute ignores bandwidth, egress ignores compute.
+    (bandwidth) with NO cross-layer double-count: compute ignores bandwidth, egress ignores compute.
   * The connector lands ONE synthetic ``compute`` span/day (GenAiSystem='vercel') with the day's
-    compute total as EstimatedCost (cost set directly — no catalog enrichment).
+    compute total as EstimatedCost (cost set directly, no catalog enrichment).
   * Egress double-count reconciliation with CTO-144: by default (``emit_egress=False``) the connector
-    emits NO egress span — CTO-144's egress connector owns it. With the gate on it DOES emit egress,
+    emits NO egress span; CTO-144's egress connector owns it. With the gate on it DOES emit egress,
     and the span id is IDENTICAL to CTO-144's, so the base span_exists guard collapses any overlap.
   * Backfill is idempotent; a failed fetch records 'failed' and emits NO span.
 
 Reuses the CTO-143 base + CTO-144 egress connector verbatim: everything Vercel-specific is behind an
-injected fake usage fetcher / fake store — no test touches requests, ClickHouse, or Postgres.
+injected fake usage fetcher / fake store: no test touches requests, ClickHouse, or Postgres.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def _fixture(name: str) -> object:
 
 
 class FakeStore:
-    """In-memory stand-in for ClickHouseStore — records inserted rows, answers span_exists."""
+    """In-memory stand-in for ClickHouseStore: records inserted rows, answers span_exists."""
 
     def __init__(self) -> None:
         self.rows: list[tuple[object, ...]] = []
@@ -113,7 +113,7 @@ def test_parse_vercel_compute_sums_only_function_compute() -> None:
 
 
 def test_compute_and_egress_split_the_same_payload_disjointly() -> None:
-    """Compute keeps function_* lines; egress keeps bandwidth lines — no item counts twice."""
+    """Compute keeps function_* lines; egress keeps bandwidth lines: no item counts twice."""
     payload = _fixture("usage.json")
     compute = parse_vercel_compute(payload)
     egress = parse_vercel_usage(payload)  # CTO-144's reciprocal parser
@@ -180,7 +180,7 @@ def test_gated_egress_emits_compute_and_egress_one_each() -> None:
 
 def test_gated_egress_span_id_matches_cto144_path() -> None:
     """The gated egress span is byte-identical in id to CTO-144's egress connector for the same day,
-    so if BOTH ever ran the base span_exists guard collapses them — no double-count is possible."""
+    so if BOTH ever ran the base span_exists guard collapses them: no double-count is possible."""
     day = date(2026, 7, 1)
     store = FakeStore()
 
@@ -205,7 +205,7 @@ def test_gated_egress_span_id_matches_cto144_path() -> None:
 
 def test_both_paths_same_store_do_not_double_count_egress() -> None:
     """Belt-and-braces: run CTO-144's egress AND this connector's gated egress on one store; the
-    second insert is skipped by span_exists — one egress row total."""
+    second insert is skipped by span_exists: one egress row total."""
     day = date(2026, 7, 1)
     store = FakeStore()
     EgressCostConnector(

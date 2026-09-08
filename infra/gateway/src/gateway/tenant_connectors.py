@@ -1,12 +1,12 @@
 """Per-tenant cost-layer connector declarations (CTO-107).
 
 The dashboard "Partial data" banner used to fire whenever any cost layer reported zero. With only
-the LLM connector wired today, the banner was permanent — useless as a signal. We fix that by
+the LLM connector wired today, the banner was permanent, useless as a signal. We fix that by
 declaring per-tenant which connectors are *enabled*; the banner now fires only when an enabled
 connector goes silent. A layer that was never enabled doesn't contribute to partiality.
 
 This module is the small Postgres surface the gateway exposes to the dashboard. Reads and writes
-both go through ``GET/POST /v1/tenant/connectors`` — the web app never touches Postgres directly.
+both go through ``GET/POST /v1/tenant/connectors``; the web app never touches Postgres directly.
 The row itself is the audit trail: ``enabled_at`` / ``disabled_at`` / ``notes`` are kept around so
 toggles never delete history.
 """
@@ -30,7 +30,7 @@ ALLOWED_LAYERS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ConnectorDeclaration:
-    """One (tenant, layer) row — enabled when ``disabled_at is None``."""
+    """One (tenant, layer) row, enabled when ``disabled_at is None``."""
 
     layer: str
     enabled: bool
@@ -96,7 +96,7 @@ class TenantConnectorStore:
 
         Enabling re-uses the existing row (clears ``disabled_at``, keeps the original ``enabled_at``)
         so the row remains a single audit-friendly record of intent. Disabling stamps ``disabled_at``
-        with ``now()`` — we never delete, so the history is intact.
+        with ``now()``; we never delete, so the history is intact.
         """
         if layer not in ALLOWED_LAYERS:
             raise ValueError(f"unknown layer '{layer}'")

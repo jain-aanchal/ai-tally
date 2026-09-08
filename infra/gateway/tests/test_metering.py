@@ -84,7 +84,7 @@ def test_meter_commitment_reconciles_against_raw_ingest() -> None:
     raw = {"trace_1", "trace_2", "trace_3"}
     for tid in raw:
         m.record(T, tid, period="2026-05")
-    # Recomputing the commitment over the raw distinct set must match the meter's — that is the
+    # Recomputing the commitment over the raw distinct set must match the meter's; that is the
     # reconciliation check billing runs to prove the count wasn't tampered with.
     assert m.commitment(T, "2026-05") == commitment(raw)
 
@@ -95,7 +95,7 @@ def test_meter_commitment_reconciles_against_raw_ingest() -> None:
 def test_head_count_is_independent_of_sampling() -> None:
     roll = UsageRollup()
     # Meter every trace at HEAD, then a sampler keeps only 1-in-10 for analytics. The billed count
-    # must stay at the full number — sampling down does not reduce the bill.
+    # must stay at the full number; sampling down does not reduce the bill.
     for i in range(100):
         trace_id = f"trace_{i}"
         roll.record_trace(T, trace_id, MAY)

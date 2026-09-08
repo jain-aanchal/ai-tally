@@ -167,5 +167,5 @@ def test_rotation_edges_bridge_identity_across_versions():
     # A conversion attributed under the NEW key still reaches the pre-rotation (old-key) identity.
     resolved = graph.resolve_identity("t1", new_hash.value)
     assert old_hash.value in resolved
-    # ...and tenant isolation holds — t2 sees nothing.
+    # ...and tenant isolation holds: t2 sees nothing.
     assert graph.resolve_identity("t2", new_hash.value) == {new_hash.value}

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-48 — OpenAI auto-instrumentation, tested with a fake client (no network)."""
+"""CTO-48: OpenAI auto-instrumentation, tested with a fake client (no network)."""
 
 from __future__ import annotations
 

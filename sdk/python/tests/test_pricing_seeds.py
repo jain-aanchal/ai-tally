@@ -54,7 +54,7 @@ def test_gpt_4o_mini_priced_and_cheap() -> None:
 
 
 def test_gpt_4_turbo_priced_no_cached_tier() -> None:
-    # No CACHED_INPUT tier listed — uncached usage should still compute fine.
+    # No CACHED_INPUT tier listed; uncached usage should still compute fine.
     _cost("openai", "gpt-4-turbo")
 
 
@@ -68,7 +68,7 @@ def test_text_embedding_3_large_priced() -> None:
     res = enrich_cost(span, seed_catalog(), at=AT)
     # Embedding rate is INPUT-only in the catalog, but enrich_cost looks up INPUT
     # for prompt tokens. The seed entry is keyed as EMBEDDING which compute_cost
-    # doesn't read — so for the embedding model the cost path is the prompt-token
+    # doesn't read, so for the embedding model the cost path is the prompt-token
     # line, which is *not* priced. That's fine for now: just assert the call
     # doesn't blow up and that catalog_miss is recorded as expected (no INPUT entry).
     # This matches today's compute_cost_micro_usd behavior; future work (CTO-53)
@@ -103,7 +103,7 @@ def test_gemini_2_5_pro_priced() -> None:
 
 
 def test_gemini_3_flash_priced() -> None:
-    # The id the /compare mock lists — must not be a catalog miss.
+    # The id the /compare mock lists; must not be a catalog miss.
     _cost("google", "gemini-3-flash")
 
 
@@ -111,7 +111,7 @@ def test_gemini_flash_cheaper_than_pro() -> None:
     assert _cost("google", "gemini-2.5-flash") < _cost("google", "gemini-2.5-pro")
 
 
-# --- Amazon Bedrock (CTO-157) — managed LLM provider, own price dimension ----
+# --- Amazon Bedrock (CTO-157): managed LLM provider, own price dimension ----
 
 
 def test_bedrock_claude_sonnet_priced() -> None:
@@ -135,7 +135,7 @@ def test_bedrock_sonnet_repriced_above_anthropic_direct() -> None:
     assert _cost("bedrock", "anthropic.claude-sonnet-4-5") > _cost("anthropic", "claude-sonnet-4-5")
 
 
-# --- Vertex AI Vector Search (CTO-151) — Vector cost layer, per-call ----
+# --- Vertex AI Vector Search (CTO-151): Vector cost layer, per-call ----
 
 
 def test_vertex_vector_query_priced() -> None:
@@ -155,7 +155,7 @@ def test_vertex_vector_upsert_priced() -> None:
 
 
 def test_vertex_node_hours_deferred_not_priced() -> None:
-    # Node-hours are a compute cost deferred to CTO-150 — must not be on the Vector layer.
+    # Node-hours are a compute cost deferred to CTO-150; must not be on the Vector layer.
     cost, ver = compute_call_cost_micro_usd(
         seed_catalog(), "vertex", "node-hour", PriceType.VECTOR_CALL
     )

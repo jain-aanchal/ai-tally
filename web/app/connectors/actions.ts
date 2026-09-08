@@ -24,7 +24,7 @@ export async function toggleConnectorAction(
   }
   const result = await setConnectorEnabled(layer as Layer, enabled);
   if (!result.ok) return { ok: false, error: result.error };
-  // Both surfaces (Home, Cost) consult the banner state — revalidate everything served by the
+  // Both surfaces (Home, Cost) consult the banner state; revalidate everything served by the
   // dashboard so a toggle is visible without a hard refresh.
   revalidatePath("/", "layout");
   return { ok: true };

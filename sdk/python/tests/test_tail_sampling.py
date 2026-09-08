@@ -72,7 +72,7 @@ def test_top_k_most_expensive_always_included() -> None:
 
 def test_retry_loop_and_step_cap_runs_always_included() -> None:
     runs = _workload(1000)
-    # mark two cheap runs as pathological — they'd never survive a cost-weighted sample otherwise.
+    # mark two cheap runs as pathological; they'd never survive a cost-weighted sample otherwise.
     runs[3] = HistoricalRun("r0003", cost_micro_usd=400, hit_retry_loop=True)
     runs[7] = HistoricalRun("r0007", cost_micro_usd=800, hit_step_cap=True)
     sample = tail_weighted_sample(runs, TailSampleConfig(sample_size=180, seed=99))

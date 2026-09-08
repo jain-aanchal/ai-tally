@@ -4,7 +4,7 @@
 An app can route its model calls through the **Vercel AI Gateway**, which proxies OpenAI /
 Anthropic / Google / Bedrock / ... behind a single OpenAI-compatible endpoint. If ai-tally
 recorded such a call naively it would either lose the spend behind the gateway hop or mislabel
-it generically ``"vercel"`` — neither of which prices correctly against the catalog.
+it generically ``"vercel"``, neither of which prices correctly against the catalog.
 
 This module maps the **gateway response metadata** back onto the TRUE upstream provider + model,
 so a call proxied through the gateway records a span whose ``gen_ai.system`` /
@@ -14,19 +14,19 @@ catalog exactly as it does for a direct SDK call (same as the CTO-149 / CTO-157 
 
 Resolution (see :func:`resolve_upstream`):
 
-* **provider** — from an explicit provider slug in the metadata, else the prefix of the
+* **provider**: from an explicit provider slug in the metadata, else the prefix of the
   namespaced model id (Vercel model ids are ``"<creator>/<model>"``, e.g. ``"openai/gpt-4o-mini"``).
   Creator slugs are normalised to the catalog's provider keys via :data:`_PROVIDER_ALIASES`.
-* **model** — the bare model id (the part after ``"<creator>/"``), or an explicit model field.
-* **usage** — the gateway's own token counts are PREFERRED (OpenAI-compatible
+* **model**: the bare model id (the part after ``"<creator>/"``), or an explicit model field.
+* **usage**: the gateway's own token counts are PREFERRED (OpenAI-compatible
   ``prompt_tokens`` / ``completion_tokens`` / ``prompt_tokens_details.cached_tokens`` and the
   AI-SDK ``inputTokens`` / ``outputTokens`` / ``cachedInputTokens`` shapes are both accepted). If
   the gateway omits usage, an optional caller-supplied ``fallback_usage`` (token-counted at the
-  call site — never a message body) is used instead.
+  call site, never a message body) is used instead.
 
 **Unknown-safe:** if the upstream provider/model can't be resolved from the metadata, the call is
 attributed to :data:`UNKNOWN` (``"unknown"``). The catalog has no ``unknown`` price, so
-``enrich_cost`` reports ``catalog_miss`` and the cost lands null — the dashboard renders ``—``.
+``enrich_cost`` reports ``catalog_miss`` and the cost lands null; the dashboard renders ``—``.
 We NEVER guess a provider or fabricate a model id.
 
 Counts only, never bodies: this helper reads token counts and model ids from response metadata; it
@@ -130,7 +130,7 @@ def _resolve_provider_model(md: Mapping[str, Any]) -> tuple[str | None, str | No
 
     slug = explicit_provider or creator
     provider = _PROVIDER_ALIASES.get(slug.lower()) if slug is not None else None
-    # An unknown slug is still a real provider signal we shouldn't discard silently — but we won't
+    # An unknown slug is still a real provider signal we shouldn't discard silently, but we won't
     # invent a catalog key for it. Pass it through verbatim; the catalog decides if it prices.
     if provider is None and slug is not None:
         provider = slug.lower()
@@ -180,7 +180,7 @@ def resolve_upstream(
     """Map Vercel AI Gateway response metadata onto true-upstream ``(provider, model, usage)``.
 
     Prefers the gateway's own usage numbers; if it reports none, uses ``fallback_usage`` (which the
-    caller may have token-counted locally — never a message body), else zero usage. When the
+    caller may have token-counted locally, never a message body), else zero usage. When the
     provider or model can't be resolved, attributes to :data:`UNKNOWN` with ``resolved=False`` so
     the cost enriches to null rather than a guess.
     """
@@ -188,7 +188,7 @@ def resolve_upstream(
     usage = _parse_usage(metadata) or fallback_usage or Usage(0, 0, 0)
 
     if not provider or not model:
-        # Can't price what we can't name — attribute to unknown, never guess.
+        # Can't price what we can't name: attribute to unknown, never guess.
         return UpstreamAttribution(
             provider=provider or UNKNOWN,
             model=model or UNKNOWN,
@@ -210,7 +210,7 @@ def record_gateway_llm_call(
 
     Thin convenience over :func:`resolve_upstream` + ``TallyClient.record_llm_call`` so a
     gateway-proxied call is a one-liner. Returns the ``LlmCallResult``. Unknown upstreams flow
-    through as ``provider="unknown"`` (cost null) — the call is still recorded, never dropped.
+    through as ``provider="unknown"`` (cost null); the call is still recorded, never dropped.
     """
     att = resolve_upstream(metadata, fallback_usage=fallback_usage)
     return client.record_llm_call(

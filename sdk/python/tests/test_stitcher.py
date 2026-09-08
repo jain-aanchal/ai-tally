@@ -186,7 +186,7 @@ def test_touch_outside_window_unattributed():
 
 
 def test_uses_occurred_at_not_now():
-    # touch is 25 days before the EVENT (which itself occurred a year ago) — still inside window
+    # touch is 25 days before the EVENT (which itself occurred a year ago), still inside window
     occurred = NOW - timedelta(days=365)
     s = Stitcher(rules=[_rule(days=30)], touches=MemoryTouchStore())
     s.touches.add_touch(T, _touch(at=occurred - timedelta(days=25)))  # type: ignore[union-attr]
@@ -223,7 +223,7 @@ def test_restitch_on_late_identity_edge():
     # initial stitch fails (no edge)
     assert s.stitch(pending[0]) == []
     assert (T, "ev1") in s.unattributed
-    # later, an alias edge arrives — re-stitch should attribute
+    # later, an alias edge arrives; re-stitch should attribute
     new_edge = IdentityEdge(
         "u_anon", IdentityType.ANONYMOUS_ID, "u_alice", IdentityType.USER_ID,
         observed_at=NOW + timedelta(hours=6),
@@ -261,4 +261,4 @@ def test_unknown_event_name_is_ignored_not_unattributed():
     s = Stitcher(rules=[_rule()], touches=MemoryTouchStore())
     out = s.stitch(_event(name="random_event"))
     assert out == []
-    assert s.unattributed == {}  # not "unattributed" — just not a value event
+    assert s.unattributed == {}  # not "unattributed", just not a value event

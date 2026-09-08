@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Span schema — OpenTelemetry ``gen_ai.*`` semantic conventions plus ai-tally extensions.
+"""Span schema: OpenTelemetry ``gen_ai.*`` semantic conventions plus ai-tally extensions.
 
 A single namespace (``gen_ai.*``). We do not fork the convention; our additions are namespaced
 under ``gen_ai.*`` and proposed upstream where missing (notably cost).
@@ -67,7 +67,7 @@ class GenAI:
 
     RESOLVED_CONTEXT_REF = "gen_ai.resolved_context_ref"
 
-    # Context-window drop signals (CTO-118). Counts/token counts ONLY — never the dropped
+    # Context-window drop signals (CTO-118). Counts/token counts ONLY, never the dropped
     # message text. Matches the bar set by the edge-proxy: no field here could hold a prompt.
     CONTEXT_DROPPED_MESSAGES = "gen_ai.context.dropped_messages"  # int, count of trimmed messages
     CONTEXT_DROPPED_TOKENS = "gen_ai.context.dropped_tokens"  # int, total tokens trimmed
@@ -75,13 +75,13 @@ class GenAI:
 
     # Stratified-sampling provenance (CTO-119). The stratum the head-time sampler placed this trace
     # in ("body" | "mid" | "tail") plus the stratum's configured keep rate. Distinct from the
-    # existing per-span `SampleRate` weight used for billing extrapolation — this pair lets the DQ
+    # existing per-span `SampleRate` weight used for billing extrapolation; this pair lets the DQ
     # surface compute per-stratum confidence bands without inferring them from cost histograms.
     SAMPLING_STRATUM = "gen_ai.sampling.stratum"  # str, "body" | "mid" | "tail"
     SAMPLING_RATE = "gen_ai.sampling.rate"  # float, 0..1
 
 
-# Known operation names (open set — unknown values are allowed but should be lowercase tokens).
+# Known operation names (open set; unknown values are allowed but should be lowercase tokens).
 OPERATIONS = frozenset(
     {"chat", "completion", "embeddings", "tool", "agent", "rerank", "vector"}
 )
@@ -103,7 +103,7 @@ _INT_KEYS = frozenset(
         GenAI.CONTEXT_DROPPED_TOKENS,
     }
 )
-# Float keys — context-window utilization (CTO-118) and stratum keep-rate (CTO-119).
+# Float keys: context-window utilization (CTO-118) and stratum keep-rate (CTO-119).
 _FLOAT_KEYS = frozenset({GenAI.CONTEXT_WINDOW_USED_PCT, GenAI.SAMPLING_RATE})
 _STR_KEYS = frozenset(
     {

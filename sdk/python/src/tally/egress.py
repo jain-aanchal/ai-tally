@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Egress — bounded buffer, batch processor, pluggable transport, backoff.
+"""Egress: bounded buffer, batch processor, pluggable transport, backoff.
 
 Implements CTO-49.
 

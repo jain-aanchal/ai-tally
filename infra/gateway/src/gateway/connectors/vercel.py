@@ -8,10 +8,10 @@ with CTO-144 so a Vercel app's full infra cost sits next to its LLM spend on /co
 Both layers are pulled from the SAME Vercel usage/billing API payload (``items[]``), split by line
 item ``type``:
 
-  * **compute** — ``function_invocations`` + ``function_duration`` (GB-hours) line items, summed to
+  * **compute**:  ``function_invocations`` + ``function_duration`` (GB-hours) line items, summed to
     ONE ``compute`` span/day via the reused :class:`gateway.connectors.compute.ComputeCostConnector`
     (``operation='compute'``, ``GenAiSystem='vercel'``).
-  * **egress**  — ``bandwidth`` line items, ONE ``egress`` span/day. This is the SAME data CTO-144's
+  * **egress**:   ``bandwidth`` line items, ONE ``egress`` span/day. This is the SAME data CTO-144's
     :class:`gateway.connectors.egress.VercelBandwidthClient` already ingests.
 
 Egress double-count reconciliation with CTO-144
@@ -26,14 +26,14 @@ Vercel egress span here would double-count on the /cost Egress column. Two safeg
      ``egress_provider='vercel'`` (so exactly one path emits).
   2. **Same span id (defence in depth).** When it does emit egress, this connector routes through the
      CTO-144 ``EgressCostConnector`` + ``VercelBandwidthClient`` verbatim, so the synthetic span id is
-     ``synthetic_span_id(tenant, 'vercel', 'egress', day)`` — IDENTICAL to the id CTO-144 would
+     ``synthetic_span_id(tenant, 'vercel', 'egress', day)``, IDENTICAL to the id CTO-144 would
      produce. Even if both paths ran for the same day, the base ``span_exists`` guard collapses them
      to one row: no double-count is structurally possible.
 
 Everything else reuses the CTO-143 base verbatim (emitter, idempotency guard, run contract, run
 recorder). Structure mirrors the sibling connectors: a PURE parse function unit-tested against a
 recorded fixture, and thin fetch-then-parse clients with the HTTP dep imported LAZILY so the gateway
-and the whole test suite import without ``requests``. Tests inject a fake fetcher — no network.
+and the whole test suite import without ``requests``. Tests inject a fake fetcher, no network.
 
 Credentials by reference only: ``access_token_ref`` is a Secret Manager reference the prod wrapper
 resolves; the raw Vercel token never appears in the DB, this module, or logs. Honest-under-uncertainty:
@@ -64,14 +64,14 @@ VERCEL_PROVIDER = "vercel"
 
 #: Vercel usage line-item ``type`` values that belong to the COMPUTE layer: Function invocations and
 #: Function duration (GB-hours). ``'compute'`` is accepted as a generic fallback (some payloads label
-#: the Serverless Functions line item simply ``compute``). ``bandwidth`` is DELIBERATELY excluded — it
+#: the Serverless Functions line item simply ``compute``). ``bandwidth`` is DELIBERATELY excluded: it
 #: is egress and must never leak into the compute total (that would double-count across layers).
 _COMPUTE_TYPES = frozenset({"function_invocations", "function_duration", "compute"})
 
 
 @dataclass(frozen=True, slots=True)
 class VercelConfig(ConnectorConfig):
-    """One tenant's Vercel connector config — the loaded ``tenant_vercel_config`` row.
+    """One tenant's Vercel connector config, the loaded ``tenant_vercel_config`` row.
 
     Extends :class:`ConnectorConfig`: ``cloud_provider`` is pinned to ``'vercel'`` so the reused
     compute/egress connectors key their synthetic spans on the right provider, and ``credentials_ref``
@@ -79,7 +79,7 @@ class VercelConfig(ConnectorConfig):
 
     ``team_id`` / ``project_id`` are the PUBLIC Vercel identifiers the usage query is scoped to (not
     secrets). ``enabled`` lets a tenant keep the row but pause the connector. ``emit_egress`` is the
-    CTO-144 reconciliation gate (default ``False`` — egress via CTO-144's egress connector).
+    CTO-144 reconciliation gate (default ``False``; egress via CTO-144's egress connector).
     """
 
     team_id: str = ""
@@ -95,7 +95,7 @@ class VercelConfig(ConnectorConfig):
 class VercelRunResult:
     """Combined outcome of one Vercel connector cycle: the compute run, plus egress if the gate is on.
 
-    ``egress`` is ``None`` when ``emit_egress`` is ``False`` (the default — Vercel egress is owned by
+    ``egress`` is ``None`` when ``emit_egress`` is ``False`` (the default; Vercel egress is owned by
     CTO-144's egress connector, so this connector does not touch it).
     """
 
@@ -110,7 +110,7 @@ def parse_vercel_compute(response: dict[str, object]) -> list[DailyCost]:
     """Parse a Vercel usage/billing response into per-day COMPUTE totals (micro-USD).
 
     Expects ``items[]`` each with a ``date`` (``YYYY-MM-DD``), an ``amount`` (decimal USD string) and
-    a ``type``. Only ``type in _COMPUTE_TYPES`` (Function invocations + GB-hours) items are summed —
+    a ``type``. Only ``type in _COMPUTE_TYPES`` (Function invocations + GB-hours) items are summed;
     ``bandwidth`` items are IGNORED so compute never double-counts the egress layer. Same-day items
     (invocations + duration, possibly several rows) collapse to ONE total; ``$0`` days are dropped.
 
@@ -143,7 +143,7 @@ class VercelUsageClient:
 
     ``http_getter`` is the seam tests use to supply a recorded payload; when absent (prod), ``requests``
     is imported LAZILY and the Vercel access token is resolved from ``config.credentials_ref`` by the
-    deployment's Secret Manager wiring (out of scope here — the token never lands in this module).
+    deployment's Secret Manager wiring (out of scope here; the token never lands in this module).
     """
 
     def __init__(self, http_getter=None, *, api_base: str = "https://api.vercel.com") -> None:
@@ -228,7 +228,7 @@ class VercelCostConnector:
     def _egress_connector(self) -> EgressCostConnector:
         # Reuse CTO-144's egress connector + Vercel bandwidth client VERBATIM. The bandwidth client's
         # http_getter is this connector's usage fetch, so egress parses the same payload via CTO-144's
-        # parse_vercel_usage — identical rows AND identical synthetic span id to the CTO-144 path.
+        # parse_vercel_usage; identical rows AND identical synthetic span id to the CTO-144 path.
         return EgressCostConnector(
             store=self._store,
             recorder=self._recorder,

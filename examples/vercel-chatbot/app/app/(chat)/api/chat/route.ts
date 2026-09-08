@@ -62,7 +62,7 @@ function resolveRealProvider(modelId: string): "openai" | "anthropic" {
 // ai-tally (CTO-137): fixed per-tool price table in micro-USD. Tool calls have
 // no provider token cost, so we attach a small flat price per invocation; the
 // gateway buckets these (gen_ai.operation.name='tool') into the Cost tab's
-// Tools layer. Demo-seed pricing — not a real billing model.
+// Tools layer. Demo-seed pricing, not a real billing model.
 const TOOL_COST_MICRO_USD: Record<string, number> = {
   getWeather: 1_000,
   createDocument: 5_000,
@@ -74,7 +74,7 @@ const TOOL_COST_MICRO_USD: Record<string, number> = {
 // ai-tally (CTO-137): scan finished assistant message parts for tool
 // invocations and emit one tool span each. The AI SDK encodes tool calls as
 // parts with a `type` like "tool-getWeather" (or a legacy "tool-invocation"
-// / "dynamic-tool" part carrying `toolName`). Best-effort — never throws into
+// / "dynamic-tool" part carrying `toolName`). Best-effort, never throws into
 // the stream.
 function emitToolSpans(
   messages: { role: string; parts?: unknown[] }[],
@@ -318,7 +318,7 @@ export async function POST(request: Request) {
           // (not just the synthetic driver) produces dashboard telemetry. The
           // last user message text drives feature-tag classification; usage
           // tokens drive the gateway's cost computation. Failure here is
-          // swallowed inside postSpan — never breaks the user's stream.
+          // swallowed inside postSpan; never breaks the user's stream.
           onFinish: async ({ usage, text }) => {
             const lastUserMessage = [...modelMessages]
               .reverse()

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Model auto-discovery — fetch the live model lineup from provider APIs.
+"""Model auto-discovery: fetch the live model lineup from provider APIs.
 
 Implements CTO-109. Solves the "claude-3-5-haiku-latest got retired and broke the demo"
 class of problem: callers ask for ``latest_anthropic("haiku")`` instead of naming a SKU,
@@ -19,8 +19,8 @@ API keys come from ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``GOOGLE_API_KEY
 ``GEMINI_API_KEY``). They are never logged.
 
 Env overrides:
-    ``TALLY_MODELS_REFRESH=1``      — bypass the cache TTL, always fetch live.
-    ``TALLY_PINNED_MODELS=<path>``  — skip discovery entirely, load this file.
+    ``TALLY_MODELS_REFRESH=1``:       bypass the cache TTL, always fetch live.
+    ``TALLY_PINNED_MODELS=<path>``:   skip discovery entirely, load this file.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from pathlib import Path
 
 logger = logging.getLogger("tally.models")
 
-# 24h TTL on the cached models file. Provider model lineups change in days, not seconds —
+# 24h TTL on the cached models file. Provider model lineups change in days, not seconds;
 # refreshing on every boot would just spam their /v1/models endpoint.
 CACHE_TTL_SECONDS = 24 * 60 * 60
 
@@ -93,7 +93,7 @@ _FAMILY_RULES: list[tuple[re.Pattern[str], str]] = [
     # image / moderation / instruct / search / legacy-base models, and many carry a chat
     # keyword in their id (e.g. "gpt-4o-mini-tts", "gpt-4o-realtime-preview"). Without this
     # guard they'd fall through to the "mini"/"flagship" buckets below, and resolveLatest
-    # could hand one to the chat-completions path — which 404s with "not a chat model".
+    # could hand one to the chat-completions path, which 404s with "not a chat model".
     # Route them to "other" so a chat family only ever contains chat-capable models. This
     # sits AFTER the embedding rule (embeddings are a real cost family) and BEFORE the
     # OpenAI chat buckets. o1/o3/o4 reasoning "mini"s are chat-capable, so they're not listed.
@@ -114,7 +114,7 @@ _FAMILY_RULES: list[tuple[re.Pattern[str], str]] = [
 def classify_family(model_id: str) -> str:
     """Bucket a model id into a coarse capability/price family.
 
-    The buckets are deliberately coarse — they're consumer-facing labels ("the current
+    The buckets are deliberately coarse: they're consumer-facing labels ("the current
     cheapest Claude") not a faithful model taxonomy. Anything that doesn't match one
     of the well-known keywords lands in ``"other"`` (legacy GPT-3.5, custom fine-tunes, etc).
     """
@@ -146,7 +146,7 @@ def _http_get_json(url: str, headers: dict[str, str], timeout: float) -> dict:
 def fetch_openai_models(api_key: str, *, timeout: float = 5.0) -> list[ModelInfo]:
     """Hit OpenAI's ``GET /v1/models`` and return the parsed lineup.
 
-    OpenAI returns ``{"data": [{"id": ..., "created": <unix-ts>}, ...]}`` — there's no
+    OpenAI returns ``{"data": [{"id": ..., "created": <unix-ts>}, ...]}``; there's no
     explicit "deprecated_at" field, so we leave it ``None``.
     """
     payload = _http_get_json(
@@ -175,7 +175,7 @@ def fetch_anthropic_models(api_key: str, *, timeout: float = 5.0) -> list[ModelI
     """Hit Anthropic's ``GET /v1/models`` and return the parsed lineup.
 
     Anthropic returns ``{"data": [{"id": ..., "created_at": <iso8601>, ...}]}``. The
-    API requires the ``anthropic-version`` header — without it the request 400s.
+    API requires the ``anthropic-version`` header; without it the request 400s.
     """
     payload = _http_get_json(
         "https://api.anthropic.com/v1/models",
@@ -205,7 +205,7 @@ def fetch_anthropic_models(api_key: str, *, timeout: float = 5.0) -> list[ModelI
 def fetch_google_models(api_key: str, *, timeout: float = 5.0) -> list[ModelInfo]:
     """Hit Google's Gemini ``GET /v1beta/models`` and return the parsed lineup.
 
-    The Gemini API returns ``{"models": [{"name": "models/gemini-2.5-flash", ...}]}`` — the
+    The Gemini API returns ``{"models": [{"name": "models/gemini-2.5-flash", ...}]}``: the
     id lives under ``name`` with a ``models/`` prefix that we strip to the bare id (so it
     matches the catalog + Compare ``gemini-*`` slugs). The key is passed as the ``?key=``
     query param (Gemini's convention), not a bearer header. There's no per-model created/
@@ -243,11 +243,11 @@ def fetch_google_models(api_key: str, *, timeout: float = 5.0) -> list[ModelInfo
 def _default_bedrock_client(region: str | None):
     """Build a boto3 ``bedrock`` (control-plane) client via the AWS default credential chain.
 
-    Imported lazily because ``boto3`` is an OPTIONAL dependency — the SDK is dep-light and must
+    Imported lazily because ``boto3`` is an OPTIONAL dependency; the SDK is dep-light and must
     import fine without it. Callers that want Bedrock discovery either install ``boto3`` or inject
     their own client. Region resolves from the ``region`` arg, then ``AWS_REGION`` /
     ``AWS_DEFAULT_REGION``. Credentials come from the standard chain (env vars, shared config,
-    SSO, instance/task role) — no raw keys are handled here.
+    SSO, instance/task role); no raw keys are handled here.
     """
     import boto3  # optional dep; ImportError is caught by the discover_models fail-soft path
 
@@ -258,13 +258,13 @@ def _default_bedrock_client(region: str | None):
 def fetch_bedrock_models(*, client=None, region: str | None = None) -> list[ModelInfo]:
     """List Amazon Bedrock foundation models via the Bedrock control-plane (CTO-157).
 
-    Uses the ``bedrock`` client's ``list_foundation_models`` (NOT ``bedrock-runtime`` — the
+    Uses the ``bedrock`` client's ``list_foundation_models`` (NOT ``bedrock-runtime``; the
     control plane is where the catalog lives). ``client`` is injectable so tests never hit AWS;
     when omitted, a boto3 client is built via :func:`_default_bedrock_client` using the AWS
     default credential chain.
 
     Response shape: ``{"modelSummaries": [{"modelId": "anthropic.claude-...", ...}]}``. The
-    ``modelId`` is used verbatim as the ``ModelInfo.id`` — it matches what a Bedrock caller
+    ``modelId`` is used verbatim as the ``ModelInfo.id``; it matches what a Bedrock caller
     passes as ``gen_ai.request_model`` and the ``bedrock/`` catalog slugs.
 
     Only TEXT-output (chat/completion) models are returned: a summary whose ``outputModalities``
@@ -299,7 +299,7 @@ def _aws_configured() -> bool:
 
     We can't validate credentials without a call, so this is a cheap gate on the default-chain
     signals (a region plus some credential source). When false, Bedrock discovery is skipped
-    entirely — exactly like a missing ``GOOGLE_API_KEY`` skips Google.
+    entirely, exactly like a missing ``GOOGLE_API_KEY`` skips Google.
     """
     has_region = bool(os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
     has_creds = bool(
@@ -322,7 +322,7 @@ def load_cached(path: Path = DEFAULT_CACHE_PATH) -> list[ModelInfo] | None:
     """Return the cached list iff the file exists and is younger than the TTL.
 
     Uses file mtime vs ``time.time()`` rather than parsing any "fetched_at" inside the
-    JSON — saves a round-trip through the body and means a manual ``touch`` is enough
+    JSON; saves a round-trip through the body and means a manual ``touch`` is enough
     to extend the TTL.
     """
     if not path.exists():
@@ -338,7 +338,7 @@ def load_cached(path: Path = DEFAULT_CACHE_PATH) -> list[ModelInfo] | None:
 
 
 def _load_unchecked(path: Path) -> list[ModelInfo] | None:
-    """Read the cache file without applying the TTL — for fail-soft fallback."""
+    """Read the cache file without applying the TTL, for fail-soft fallback."""
     if not path.exists():
         return None
     try:
@@ -357,7 +357,7 @@ def latest(provider: str, family: str, models: list[ModelInfo]) -> ModelInfo | N
     """Pick the current best model in ``(provider, family)``.
 
     Rules, in order:
-        1. Skip anything marked ``deprecated_at`` — these are sunset.
+        1. Skip anything marked ``deprecated_at``; these are sunset.
         2. Prefer ids *without* a date suffix (the moving alias beats the pinned snapshot).
         3. Within each preference tier, sort by ``created_at`` descending so newer wins.
     """
@@ -439,7 +439,7 @@ def discover_models(
             openai_err = exc
             logger.warning("models: openai fetch failed: %s", exc)
     else:
-        logger.info("models: OPENAI_API_KEY not set — skipping openai discovery")
+        logger.info("models: OPENAI_API_KEY not set, skipping openai discovery")
 
     if anthropic_key:
         try:
@@ -448,7 +448,7 @@ def discover_models(
             anthropic_err = exc
             logger.warning("models: anthropic fetch failed: %s", exc)
     else:
-        logger.info("models: ANTHROPIC_API_KEY not set — skipping anthropic discovery")
+        logger.info("models: ANTHROPIC_API_KEY not set, skipping anthropic discovery")
 
     if google_key:
         try:
@@ -462,11 +462,11 @@ def discover_models(
             google_err = exc
             logger.warning("models: google parse failed: %s", exc)
     else:
-        logger.info("models: GOOGLE_API_KEY/GEMINI_API_KEY not set — skipping google discovery")
+        logger.info("models: GOOGLE_API_KEY/GEMINI_API_KEY not set, skipping google discovery")
 
     # Bedrock is behind an injectable client (tests never touch AWS). Attempt it when a client
-    # is injected OR the AWS default credential chain looks configured. Fail-soft on EVERY error
-    # — missing boto3 (ImportError), no/invalid creds, region issues, or a botocore API error must
+    # is injected OR the AWS default credential chain looks configured. Fail-soft on EVERY error:
+    # missing boto3 (ImportError), no/invalid creds, region issues, or a botocore API error must
     # skip Bedrock, never crash discovery. boto3's exception hierarchy can't be imported when boto3
     # isn't installed, so this catch is intentionally broad.
     if bedrock_client is not None or _aws_configured():
@@ -476,7 +476,7 @@ def discover_models(
             bedrock_err = exc
             logger.warning("models: bedrock fetch failed: %s", exc)
     else:
-        logger.info("models: AWS creds/region not set — skipping bedrock discovery")
+        logger.info("models: AWS creds/region not set, skipping bedrock discovery")
 
     if discovered:
         try:
@@ -486,12 +486,12 @@ def discover_models(
         _log_summary(discovered)
         return discovered
 
-    # Both providers unreachable (or unconfigured) — fall back to whatever's on disk,
+    # Both providers unreachable (or unconfigured): fall back to whatever's on disk,
     # even if stale. Boot must not crash just because a /v1/models call timed out.
     stale = _load_unchecked(cache_path)
     if stale is not None:
         logger.warning(
-            "models: live fetch failed (openai=%s anthropic=%s google=%s bedrock=%s) — "
+            "models: live fetch failed (openai=%s anthropic=%s google=%s bedrock=%s), "
             "using stale cache (%d entries)",
             openai_err,
             anthropic_err,
@@ -502,7 +502,7 @@ def discover_models(
         return stale
 
     logger.warning(
-        "models: no live data and no cache (openai=%s anthropic=%s google=%s bedrock=%s) — "
+        "models: no live data and no cache (openai=%s anthropic=%s google=%s bedrock=%s), "
         "booting with empty list",
         openai_err,
         anthropic_err,

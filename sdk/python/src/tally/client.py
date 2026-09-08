@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""TallyClient — the SDK entrypoint.
+"""TallyClient: the SDK entrypoint.
 
 Ties the spine together: schema (CTO-47) + safety (CTO-45) + context (CTO-46) + sampling (CTO-50)
 + pricing (CTO-52) + egress (CTO-49), with a cohesive high-level ``record_llm_call()`` API.
 
-Every public method runs inside the safety boundary so a bug in the SDK — or a pluggable
-exporter/transport — never escapes into the customer's code path. Guardrail *enforcement* is the
+Every public method runs inside the safety boundary so a bug in the SDK, or a pluggable
+exporter/transport, never escapes into the customer's code path. Guardrail *enforcement* is the
 one intentional exception and lives behind :meth:`guard` (it may raise, by design, for the agent
 framework to catch); ``record_llm_call`` itself never raises.
 """
@@ -36,7 +36,7 @@ from tally.schema import SpanFields, build_span_attributes
 _log = logging.getLogger("tally")
 
 # Tool + vector per-call prices now live in the versioned price catalog (CTO-141) under
-# PriceType.TOOL_CALL / PriceType.VECTOR_CALL — the inline ``_TOOL_PRICING`` / ``_VECTOR_PRICING``
+# PriceType.TOOL_CALL / PriceType.VECTOR_CALL; the inline ``_TOOL_PRICING`` / ``_VECTOR_PRICING``
 # stopgap dicts (PR #111 / #116) were removed. ``record_tool_call`` / ``record_vector_call`` resolve
 # the rate via ``compute_call_cost_micro_usd`` when the caller omits ``cost_micro_usd``.
 
@@ -78,7 +78,7 @@ class LlmCallResult:
 class EmbeddingCallResult:
     """Result of :meth:`TallyClient.record_embedding_call` (CTO-136).
 
-    Mirrors :class:`LlmCallResult` but without sampling fields — embeddings always emit.
+    Mirrors :class:`LlmCallResult` but without sampling fields; embeddings always emit.
     """
 
     trace_id: str | None
@@ -167,7 +167,7 @@ class TallyClient:
         """Record an LLM call end-to-end. Never raises.
 
         ``provider`` is a free-form string used verbatim as ``gen_ai.system`` and as the
-        catalog lookup key — there is no provider allowlist, so any provider the catalog
+        catalog lookup key; there is no provider allowlist, so any provider the catalog
         prices (``"openai"``, ``"anthropic"``, ``"google"``, ...) works. Gemini / Vertex AI
         callers pass ``provider="google"`` and map the Google usage fields onto ``Usage``:
         ``promptTokenCount`` -> ``input_tokens``, ``candidatesTokenCount`` -> ``output_tokens``,
@@ -235,7 +235,7 @@ class TallyClient:
             )
             attrs = build_span_attributes(fields)
             # NB: sample_rate travels at the batch level (wire Sampling, §12.2), not as a span
-            # attribute — so the span stays schema-conformant. It's returned in the result.
+            # attribute, so the span stays schema-conformant. It's returned in the result.
             if decision.keep:
                 self._emit(attrs)
 
@@ -373,7 +373,7 @@ class TallyClient:
             cost_micro: int | None = None
             catalog_version: str | None = None
             if self.catalog is not None:
-                # Embeddings are priced under PriceType.EMBEDDING, not INPUT — use the
+                # Embeddings are priced under PriceType.EMBEDDING, not INPUT; use the
                 # embedding-specific resolver so seeded embedding rates actually apply.
                 cost_micro, version = compute_embedding_cost_micro_usd(
                     self.catalog,
@@ -505,10 +505,10 @@ class TallyClient:
 
         _do()
 
-    # --- guardrails (may raise, by design — pre-call check) ---
+    # --- guardrails (may raise, by design; pre-call check) ---
     def guard(self, state: GuardrailState, config: GuardrailConfig) -> Verdict:
         """Consult guardrails before the next call. May raise CostLimitExceededException in
-        GRACEFUL/HARD_STOP modes — that propagation is intentional (the agent framework catches it
+        GRACEFUL/HARD_STOP modes; that propagation is intentional (the agent framework catches it
         and degrades). Not wrapped in the safety boundary."""
         return self.guardrails.evaluate(state, config)
 

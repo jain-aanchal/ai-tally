@@ -1,17 +1,17 @@
-"""Egress cost-layer connector (CTO-144) — offline tests, NO live cloud calls.
+"""Egress cost-layer connector (CTO-144): offline tests, NO live cloud calls.
 
 Pins the contract the /cost Egress column depends on:
 
   * Vercel / Cloudflare / AWS fixtures parse to the correct per-day micro-USD totals (Cloudflare's
     bytes-out priced at the tenant's usd_per_gb rate; a missing rate fails soft, never a guess).
   * The connector lands ONE synthetic span per provider per day with GenAiOperation='egress' and the
-    day's total as EstimatedCost (cost set directly — no catalog enrichment).
-  * MULTIPLE providers for one tenant sum with NO double-counting — distinct provider ⇒ distinct
+    day's total as EstimatedCost (cost set directly, no catalog enrichment).
+  * MULTIPLE providers for one tenant sum with NO double-counting: distinct provider ⇒ distinct
     synthetic span id ⇒ three independent spans for the same day.
   * Backfill is idempotent; a failed fetch records 'failed' and emits NO span.
 
 Reuses the CTO-143 base verbatim: EgressCostConnector only wires the fetch. Everything
-provider-specific is behind an injected fake BillingClient / fake store — no test touches boto3,
+provider-specific is behind an injected fake BillingClient / fake store: no test touches boto3,
 requests, Cloudflare, ClickHouse, or Postgres.
 """
 
@@ -52,7 +52,7 @@ def _fixture(name: str) -> object:
 
 
 class FakeStore:
-    """In-memory stand-in for ClickHouseStore — records inserted rows, answers span_exists."""
+    """In-memory stand-in for ClickHouseStore: records inserted rows, answers span_exists."""
 
     def __init__(self) -> None:
         self.rows: list[tuple[object, ...]] = []
@@ -119,7 +119,7 @@ def test_parse_cloudflare_bytes_sums_across_zones() -> None:
 
 
 def test_parse_aws_egress_response_daily_totals() -> None:
-    # Egress reuses compute's AWS parser — only the Cost Explorer Filter differs.
+    # Egress reuses compute's AWS parser; only the Cost Explorer Filter differs.
     costs = parse_aws_cost_response(_fixture("aws_egress_cost_explorer.json"))
     assert costs == [
         DailyCost(day=date(2026, 7, 1), cost_micro_usd=4_000_000),
@@ -220,7 +220,7 @@ def test_multiple_providers_sum_without_double_counting() -> None:
         cfg = _config(provider, usd_per_gb=Decimal("0.10") if provider == "cloudflare" else None)
         connector.run(cfg, day=day)
 
-    # One span per provider — distinct span ids keyed on provider, no collision, no overwrite.
+    # One span per provider: distinct span ids keyed on provider, no collision, no overwrite.
     assert len(store.rows) == 3
     span_ids = {r[_SPAN_ID] for r in store.rows}
     assert len(span_ids) == 3

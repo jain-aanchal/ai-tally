@@ -47,7 +47,7 @@ describe("applyIntegrationStatus", () => {
     expect(byId.stripe.state).toBe("healthy");
     expect(byId.segment.state).toBe("failing");
     expect(byId.hubspot.state).toBe("failing");
-    // The tenant declared no Pendo run — must remain not-connected, no fabricated stats.
+    // The tenant declared no Pendo run; must remain not-connected, no fabricated stats.
     expect(byId.pendo.state).toBe("not-connected");
     expect(byId.pendo.row).toBeNull();
   });

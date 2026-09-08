@@ -3,7 +3,7 @@
 Each ingest worker needs a per-tenant credential to reach the third party (Segment source
 write-key, HubSpot OAuth token, Pendo integration key). Mirroring the tradeoff documented in
 :mod:`gateway.tenant_stripe` / ``0003_tenant_stripe_config.sql``, this module never stores the raw
-credential — the control plane holds a *reference* (a Secret Manager / Vault / KMS handle) and a
+credential; the control plane holds a *reference* (a Secret Manager / Vault / KMS handle) and a
 :class:`SecretResolver` dereferences it at run time.
 
 That indirection is what lets the invariant "credentials by reference" hold end-to-end: the worker
@@ -23,14 +23,14 @@ import psycopg
 
 from gateway.config import Settings
 
-# The connectors this table serves. Stripe is intentionally excluded — it has its own config table
+# The connectors this table serves. Stripe is intentionally excluded: it has its own config table
 # (``tenant_stripe_config``) because its webhook path needs the raw signing secret to verify HMACs.
 ALLOWED_SECRET_CONNECTORS: frozenset[str] = frozenset({"segment", "hubspot", "pendo"})
 
 
 @dataclass(frozen=True, slots=True)
 class IntegrationSecret:
-    """One ``tenant_integration_secrets`` row — a credential *reference*, never the raw key.
+    """One ``tenant_integration_secrets`` row, a credential *reference*, never the raw key.
 
     ``config`` holds only non-secret connector knobs (base-urls, portal id). ``secret_ref`` is the
     handle the :class:`SecretResolver` turns into a live token.
@@ -63,7 +63,7 @@ class SecretResolver(Protocol):
 class EnvSecretResolver:
     """Dev / self-hosted resolver: the ``secret_ref`` names an environment variable.
 
-    Raises :class:`KeyError` when the variable is absent — deliberately without echoing any value,
+    Raises :class:`KeyError` when the variable is absent, deliberately without echoing any value,
     so a resolution failure can be surfaced to ``record_run`` without leaking the credential.
     """
 
@@ -106,7 +106,7 @@ class TenantIntegrationSecretStore:
     ) -> IntegrationSecret:
         """Insert or rotate the (tenant, connector) credential reference.
 
-        Rotating is the same op as connecting again — one row per (tenant, connector); a rotate
+        Rotating is the same op as connecting again: one row per (tenant, connector); a rotate
         clears any prior ``disconnected_at`` so the worker resumes.
         """
         if connector_id not in ALLOWED_SECRET_CONNECTORS:

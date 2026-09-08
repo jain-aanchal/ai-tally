@@ -2,7 +2,7 @@
 """Backfill the GCP compute cost layer for a tenant (CTO-150).
 
 Pulls the last N days of GCP compute spend from the tenant's Cloud Billing BigQuery *export* table
-(GCP has no fine-grained REST cost API — the export is the source of truth) and lands one synthetic
+(GCP has no fine-grained REST cost API; the export is the source of truth) and lands one synthetic
 ``compute`` span per day, so a tenant that just enabled the GCP connector doesn't start with an empty
 Compute column.
 
@@ -13,7 +13,7 @@ span id from ``(tenant, provider, operation, day)`` and skips any day that alrea
 re-running the same window never double-counts.
 
 Config (billing-export table, label filter, credential reference) is read from
-``tenant_compute_config``; a tenant without a row — or one whose provider isn't ``gcp`` — is a no-op.
+``tenant_compute_config``; a tenant without a row, or one whose provider isn't ``gcp``, is a no-op.
 The export table falls back to ``TALLY_COMPUTE_GCP_DEFAULT_BILLING_EXPORT_TABLE`` when the tenant row
 leaves it blank. A failed fetch records a ``failed`` run and emits NO span (never a guess).
 """
@@ -56,11 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     config_store = TenantComputeConfigStore(settings)
     config = config_store.load_config(args.tenant)
     if config is None:
-        logger.error("tenant %s has no tenant_compute_config row — nothing to backfill", args.tenant)
+        logger.error("tenant %s has no tenant_compute_config row, nothing to backfill", args.tenant)
         return 2
     if config.cloud_provider != "gcp":
         logger.error(
-            "tenant %s is configured for provider=%s, not gcp — use backfill_compute.py",
+            "tenant %s is configured for provider=%s, not gcp; use backfill_compute.py",
             args.tenant,
             config.cloud_provider,
         )

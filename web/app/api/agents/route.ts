@@ -26,7 +26,7 @@ export async function GET(req: Request) {
   // filter state to a day count the ClickHouse-derived window clamps and interpolates.
   const windowDays = rangeDays(parseFilters(searchParams).range);
   // Read agents telemetry and the reconciler's real last-run in parallel. The freshness signal is
-  // the real reconciliation_runs value (CTO-169) — or null when the reconciler has never run / the
+  // the real reconciliation_runs value (CTO-169), or null when the reconciler has never run / the
   // gateway is unavailable, which the page renders as `—` rather than a fabricated constant.
   const [live, reconcilerLastRunMinutesAgo] = await Promise.all([
     queryAgents({ tag, run, agent }, windowDays),

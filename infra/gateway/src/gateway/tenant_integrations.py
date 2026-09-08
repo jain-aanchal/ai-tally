@@ -2,12 +2,12 @@
 
 The /connectors page in the web app shows a card per third-party integration (Stripe, Segment,
 HubSpot, Pendo, …) with three honest states: connected-and-healthy, connected-and-failing, or
-not-connected. The status comes from this module — workers (Stripe webhook handler today; the
+not-connected. The status comes from this module: workers (Stripe webhook handler today; the
 Segment / HubSpot / Pendo pollers as they land) call :meth:`TenantIntegrationStore.record_run`
 after each cycle, and the dashboard reads :meth:`TenantIntegrationStore.get_status` to render
 the cards.
 
-Why a separate module from :mod:`gateway.tenant_connectors` — that's the *cost-layer* declaration
+Why a separate module from :mod:`gateway.tenant_connectors`: that's the *cost-layer* declaration
 (CTO-107), which says "this tenant has the LLM cost connector enabled". This module is the
 *third-party integration* run log, which says "the Stripe webhook last fired 12s ago, 1 event".
 They look similar but answer different questions, so they live in different tables.
@@ -30,7 +30,7 @@ from gateway.tenant_lookup import resolve_tenant_uuid
 from gateway.validation import _EMAIL_RE, _FORBIDDEN_PII_KEYS
 
 # The set of third-party integrations we track. Cost-layer connectors (llm/vector/tools/…) are
-# a separate concern — see :mod:`gateway.tenant_connectors`. New integrations must be added to
+# a separate concern; see :mod:`gateway.tenant_connectors`. New integrations must be added to
 # the CHECK constraint in 0007_tenant_integration_runs.sql in lockstep.
 ALLOWED_CONNECTORS: frozenset[str] = frozenset(
     {"stripe", "segment", "hubspot", "pendo", "rudderstack"}
@@ -39,7 +39,7 @@ ALLOWED_CONNECTORS: frozenset[str] = frozenset(
 RunStatus = Literal["success", "partial", "failed"]
 _ALLOWED_STATUSES: frozenset[str] = frozenset({"success", "partial", "failed"})
 
-# Max length we persist for an error message. Errors longer than this are truncated — the UI
+# Max length we persist for an error message. Errors longer than this are truncated; the UI
 # only ever shows the first ~80 chars anyway, so the rest is log noise.
 _ERROR_MAX_LEN = 500
 
@@ -75,7 +75,7 @@ def scrub_error_message(msg: str | None) -> str | None:
 
     * If the message contains a forbidden-key marker (``email=``, ``user.email``, ``phone``…)
       we collapse the message to a coarse ``[redacted: contained PII key]`` rather than try to
-      parse-and-strip — too easy to get wrong.
+      parse-and-strip; too easy to get wrong.
     * Replace anything matching the e-mail regex with ``[redacted-email]``. Stripe / HubSpot
       error bodies sometimes embed the customer's email; that must never reach storage.
 
@@ -89,7 +89,7 @@ def scrub_error_message(msg: str | None) -> str | None:
     lowered = s.lower()
     for key in _FORBIDDEN_PII_KEYS:
         # Word-ish boundaries so we don't trip on legitimate substrings (e.g. "femaily" or
-        # "user_idle") — paranoid but cheap.
+        # "user_idle"), paranoid but cheap.
         if re.search(rf"(^|[^a-z0-9_]){re.escape(key)}([^a-z0-9_]|=|:|$)", lowered):
             return "[redacted: contained PII key]"
     s = _EMAIL_RE.sub("[redacted-email]", s)
@@ -101,7 +101,7 @@ def scrub_error_message(msg: str | None) -> str | None:
 class TenantIntegrationStore:
     """Tiny Postgres-backed CRUD over ``tenant_integration_runs``.
 
-    Every method is tenant-scoped — the SQL takes ``tenant_id`` from upstream auth so a buggy
+    Every method is tenant-scoped: the SQL takes ``tenant_id`` from upstream auth so a buggy
     caller can't accidentally cross tenants.
     """
 
@@ -111,7 +111,7 @@ class TenantIntegrationStore:
     def get_status(self, tenant_id: str) -> list[IntegrationStatus]:
         """Return one row per (tenant, connector) the tenant has ever had a run for.
 
-        Empty list when nothing has run yet — the dashboard renders that as "Not connected"
+        Empty list when nothing has run yet; the dashboard renders that as "Not connected"
         across the board, which is the honest first-render state for a fresh tenant.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -153,7 +153,7 @@ class TenantIntegrationStore:
         """Stamp the outcome of one worker / webhook cycle.
 
         Upserts the (tenant, connector) row. ``event_count`` is added to ``total_events_24h``
-        and ``total_events_7d`` — we leave the trailing-window decay to a periodic vacuum job
+        and ``total_events_7d``: we leave the trailing-window decay to a periodic vacuum job
         (out of scope for this ticket); over-counting in the dashboard is preferable to
         under-counting because it stays directionally honest about activity.
 

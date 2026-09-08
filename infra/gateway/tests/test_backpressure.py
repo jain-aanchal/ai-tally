@@ -47,7 +47,7 @@ def test_is_retryable_classification() -> None:
     assert is_retryable(503) is True
     assert is_retryable(500) is True
     assert is_retryable(502) is True
-    # 4xx contract errors (other than 429) are terminal — retrying replays the rejection.
+    # 4xx contract errors (other than 429) are terminal; retrying replays the rejection.
     assert is_retryable(400) is False
     assert is_retryable(401) is False
     assert is_retryable(403) is False

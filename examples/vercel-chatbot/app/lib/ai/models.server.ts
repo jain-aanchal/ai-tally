@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // CTO-170: server-only resolution of the chatbot model picker.
 //
-// resolveModel.ts reads .tally/models.json via node:fs, so this module — and
-// anything that imports it — must stay on the server. The `server-only` import
+// resolveModel.ts reads .tally/models.json via node:fs, so this module, and
+// anything that imports it, must stay on the server. The `server-only` import
 // makes that a hard build error if a "use client" component ever pulls it in.
 // The client imports the plain pinned data shape from ./models directly; the chat
 // route, /api/models, and server actions import the discovery-RESOLVED shape here.
@@ -11,7 +11,7 @@
 // fallback when .tally/models.json is missing/stale, and the catalog guard below
 // rejects any resolved id that isn't priced in the SDK seed catalog. So offline
 // (or with TALLY_SKIP_MODEL_REFRESH=1 / TALLY_PINNED_MODELS, which gate run.sh's
-// cache refresh) the lineup collapses back to today's literals — never a 404 or an
+// cache refresh) the lineup collapses back to today's literals, never a 404 or an
 // unpriced ($0) model. When a provider retires a SKU, the next launch's refreshed
 // cache makes resolveLatest() pick the replacement with no code change here.
 import "server-only";
@@ -32,7 +32,7 @@ import {
 // Resolve one (provider, family) slot against the discovery cache, returning a
 // prefixed `<provider>/<id>`. Falls back to the pinned prefixed id when discovery
 // has nothing (resolveLatest's own fallback) OR when the resolved id isn't
-// catalog-priced — offering an unpriced model would show $0 on the dashboard
+// catalog-priced; offering an unpriced model would show $0 on the dashboard
 // (catalog_miss), which is worse than pinning a slightly-older priced SKU.
 function resolveSlot(slot: ModelSlot, pinnedPrefixedId: string): string {
   const slash = pinnedPrefixedId.indexOf("/");

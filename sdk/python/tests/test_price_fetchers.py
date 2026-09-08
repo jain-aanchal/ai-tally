@@ -23,7 +23,7 @@ VALID_FROM = date(2026, 7, 1)
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    """Any attempt to open a real network connection fails — proves tests never hit the network."""
+    """Any attempt to open a real network connection fails; proves tests never hit the network."""
     import socket
     import urllib.request
 
@@ -56,7 +56,7 @@ def test_openai_parses_exact_rows():
         ("openai", "gpt-4o-mini", "input", "0.16"),
         ("openai", "gpt-4o-mini", "cached_input", "0.08"),
         ("openai", "gpt-4o-mini", "output", "0.64"),
-        # gpt-4-turbo has no cached-input tier in the fixture — no CACHED_INPUT row emitted.
+        # gpt-4-turbo has no cached-input tier in the fixture; no CACHED_INPUT row emitted.
         ("openai", "gpt-4-turbo", "input", "10.20"),
         ("openai", "gpt-4-turbo", "output", "30.30"),
     }

@@ -3,7 +3,7 @@
 
 Parses Anthropic's published pricing table, recorded as a small HTML fragment
 (``tests/fixtures/pricing/anthropic.html``). Demonstrates the HTML-source path (OpenAI/Google use
-JSON). Uses the stdlib :mod:`html.parser` — no new dependency.
+JSON). Uses the stdlib :mod:`html.parser`, no new dependency.
 
 The recorded table has a header row plus one row per model:
 ``model | input | cached input | output`` (rates USD per million tokens). ``CACHED_INPUT`` maps to

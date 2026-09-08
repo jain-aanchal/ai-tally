@@ -83,7 +83,7 @@ def test_unknown_top_level_fields_tolerated() -> None:
             "tenant_id": "t-local",
             "sdk_version": "test",
             "resource_spans": [_good(1)],
-            "future_field": {"some": "thing"},  # unknown — must not break ingest
+            "future_field": {"some": "thing"},  # unknown, must not break ingest
             "another_new_knob": 42,
         }
         r = c.post("/v1/batches", json=body)

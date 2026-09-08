@@ -74,7 +74,7 @@ export interface AgentsPayload {
   agents: AgentSummary[];
   runs: AgentRun[];
   // Real reconciler last-run in minutes (CTO-169), or null when the reconciler has never run /
-  // the source is unavailable — rendered as `—` (no freshness badge) rather than a fake number.
+  // the source is unavailable, rendered as `—` (no freshness badge) rather than a fake number.
   reconcilerLastRunMinutesAgo: number | null;
 }
 

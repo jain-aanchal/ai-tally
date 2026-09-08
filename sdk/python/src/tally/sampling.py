@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic, stratified, whole-trace sampling — with billing decoupled from sampling.
+"""Deterministic, stratified, whole-trace sampling, with billing decoupled from sampling.
 
 Implements CTO-50.
 
 Why stratified: agent cost is a power law. Uniform sampling would lose the expensive tail (the
 part that matters) and add huge variance to extrapolated cost. So we sample the cheap, high-volume
 body down and keep the expensive tail at ~100%. Extrapolated analytics cost is then computed
-per-stratum as ``sum(cost_i / sample_rate_i)`` — the tail is exact, error is confined to the cheap
+per-stratum as ``sum(cost_i / sample_rate_i)``: the tail is exact, error is confined to the cheap
 body where it is harmless.
 
 Why deterministic + whole-trace: the keep/drop decision is a pure function of ``trace_id`` (+ the
@@ -119,7 +119,7 @@ class Sampler:
 
 @dataclass(slots=True)
 class BillingMeter:
-    """Head-count meter — counts every trace BEFORE the sampling decision.
+    """Head-count meter: counts every trace BEFORE the sampling decision.
 
     Tamper-evidence and reconciliation against ingest live server-side (CTO-84); this is the SDK
     hook that guarantees a billable trace is counted exactly once regardless of sampling.

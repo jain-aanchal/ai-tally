@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Unit Economics page (CTO-121): renders CAC flavors / payback / LTV from the already-wired libs
 // (web/lib/cac.ts + web/lib/unitEconomics.ts). Band colors come from the lib's `ltvCacBand` /
-// `paybackBand` classifiers — NO hardcoded thresholds live in this file. The cutoffs are per-tenant
+// `paybackBand` classifiers; NO hardcoded thresholds live in this file. The cutoffs are per-tenant
 // configurable (CTO-126): resolved thresholds come from /api/unit-economics/config and thread into
 // every classify call; a tenant with no override falls back to the hardcoded defaults.
 

@@ -8,7 +8,7 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
 export interface CacPeriod {
-  /** ISO date — first day of the month, e.g. "2026-01-01". */
+  /** ISO date: first day of the month, e.g. "2026-01-01". */
   periodStart: string;
   periodEnd: string;
   currency: string;
@@ -60,14 +60,14 @@ function fromApi(p: CacApiPeriod): CacPeriod {
 
 export interface CacQueryResult {
   periods: CacPeriod[];
-  /** Per-period economics keyed by `periodStart` — only months where finance entered BOTH ARPA
+  /** Per-period economics keyed by `periodStart`: only months where finance entered BOTH ARPA
    *  and gross margin. Months missing either are omitted, so the page renders payback/LTV "—". */
   economics: Record<string, PeriodEconomics>;
 }
 
 /**
  * Fetch all CAC periods for the tenant, newest first, plus the revenue-side economics map (CTO-145).
- * Returns empty `periods`/`economics` when the gateway is unreachable or has no data — the caller
+ * Returns empty `periods`/`economics` when the gateway is unreachable or has no data; the caller
  * falls back to the labelled mock, which is the right behavior for CI / fresh clones.
  */
 export async function queryCacPeriods(): Promise<CacQueryResult> {
@@ -118,7 +118,7 @@ function economicsFromApi(p: CacApiPeriod): PeriodEconomics | null {
  * Page-level economic assumptions that do NOT come from the gateway's cac_periods wire shape.
  *
  * CAC periods carry spend + customer counts only. Computing payback and LTV additionally needs the
- * revenue side — ARPA (average revenue per account / month) and gross margin — which the CAC
+ * revenue side, ARPA (average revenue per account / month) and gross margin, which the CAC
  * backend does not store. Until a revenue source is wired (the Stripe-backed business_events table,
  * see unitEconomics.ts `valuePerUser`), the page reads these from a per-period companion record.
  *
@@ -130,13 +130,13 @@ export interface PeriodEconomics {
   arpaMicroUsd: number;
   /** Gross margin as a fraction in [0,1], e.g. 0.78 for 78%. */
   grossMarginPct: number;
-  /** Expected retention in months — drives LTV. */
+  /** Expected retention in months; drives LTV. */
   retentionMonths: number;
 }
 
 /**
  * Mock CAC periods for local dev / CI / fresh clones, used when the gateway is unreachable.
- * CLEARLY LABELLED MOCK — not real telemetry. Newest-first, mirroring the gateway's
+ * CLEARLY LABELLED MOCK, not real telemetry. Newest-first, mirroring the gateway's
  * `queryCacPeriods` ordering. The latest two months are unlocked (still editable); older months are
  * `locked` (prior-month-closed). One month deliberately omits its economics record so the page's
  * honest-null path (payback/LTV → "—") is exercised by the demo, and one has zero paid customers so
@@ -211,7 +211,7 @@ export const MOCK_PERIOD_ECONOMICS: Record<string, PeriodEconomics> = {
 };
 
 /**
- * Default first month finance should fill — the *next* un-entered month.
+ * Default first month finance should fill: the *next* un-entered month.
  *
  * Finance fills serially, in chronological order; the form should not default to the current
  * month (gives the impression the previous month is already done) and definitely not default to

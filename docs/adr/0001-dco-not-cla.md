@@ -11,11 +11,11 @@ ai-tally is going public under the Apache License 2.0. Open-source projects
 typically use one of two mechanisms to establish that contributors have the
 right to license their patches:
 
-- A **Contributor License Agreement (CLA)** — a legal contract each
+- A **Contributor License Agreement (CLA)**, a legal contract each
   contributor (or their employer) signs once, often via a bot. Gives the
   project a broad, sometimes exclusive, copyright license. Examples: Apache
   Software Foundation, Google.
-- The **Developer Certificate of Origin (DCO)** — a per-commit attestation
+- The **Developer Certificate of Origin (DCO)**, a per-commit attestation
   added as a `Signed-off-by:` trailer. No separate contract; the certification
   is the text at <https://developercertificate.org/>. Examples: Linux kernel,
   Docker, Kubernetes (post-2017).

@@ -86,7 +86,7 @@ def test_build_payloads_writes_scrubbed_envelope() -> None:
 
 def test_stratified_sample_overweights_high_token_runs() -> None:
     # 95 cheap and 5 expensive candidates. At a base sample rate of 5%, naive uniform sampling
-    # would catch ~5 cheap + 0.25 expensive — the expensive stratum would mostly miss. The
+    # would catch ~5 cheap + 0.25 expensive; the expensive stratum would mostly miss. The
     # sampler over-weights the top quintile, so we expect to see the expensive runs picked
     # disproportionately.
     cheap = [_candidate(input_tokens=10, output_tokens=10, trace=f"c{i}") for i in range(95)]

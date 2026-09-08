@@ -6,7 +6,7 @@
 
 It fetches (live by default, or from ``--fixtures DIR`` for an offline/deterministic run), proposes
 a diff against ``seed_catalog()``, prints the human-readable review artifact, and exits. It never
-publishes — a human reviews the artifact and approves separately (see README). Exit code is 2 when
+publishes; a human reviews the artifact and approves separately (see README). Exit code is 2 when
 any provider was skipped (so a scheduler/CI can alert), else 0.
 """
 

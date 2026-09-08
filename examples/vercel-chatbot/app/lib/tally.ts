@@ -1,4 +1,4 @@
-// ai-tally: added file. Helper module — POSTs spans + CDP events to the local
+// ai-tally: added file. Helper module: POSTs spans + CDP events to the local
 // ai-tally gateway and classifies prompts into feature tags. CTO-106 retired
 // the gpt-5-mini pinning workaround that previously sat here: outbound spans
 // now carry real provider/model on the standard gen_ai.* attributes and the
@@ -95,7 +95,7 @@ function hexId(bytes: number): string {
   return crypto.randomBytes(bytes).toString("hex");
 }
 
-// ai-tally: stable per-session pseudo-hash. Real demo, fake users — we only
+// ai-tally: stable per-session pseudo-hash. Real demo, fake users; we only
 // need a 64-char hex string the gateway's PII check accepts.
 export function sessionUserHash(sessionId: string): string {
   return crypto.createHash("sha256").update(`tally-demo:${sessionId}`).digest("hex");
@@ -129,7 +129,7 @@ export async function postSpan(input: SpanInput): Promise<void> {
     timestamp_ns: Date.now() * 1_000_000,
     duration_ns: Math.max(0, Math.round((input.durationMs ?? 0) * 1_000_000)),
     status_code: 1,
-    // gen_ai.* — real provider/model since CTO-106 expanded the seed catalog
+    // gen_ai.*: real provider/model since CTO-106 expanded the seed catalog
     // to cover them. The gateway's enrich_cost computes authoritative cost
     // from input_tokens + output_tokens; we don't send an estimated cost hint.
     "gen_ai.system": input.realProvider,
@@ -158,7 +158,7 @@ export async function postSpan(input: SpanInput): Promise<void> {
       body: JSON.stringify(batch),
     });
   } catch (err) {
-    // The demo is best-effort — never fail the chat completion because the
+    // The demo is best-effort; never fail the chat completion because the
     // gateway hiccuped. Print so the operator notices in `run.sh` output.
     console.warn("[tally] postSpan failed:", (err as Error).message);
   }
@@ -170,16 +170,16 @@ export async function postSpan(input: SpanInput): Promise<void> {
 // Embeddings (the LAYER_CASE expression). These helpers build the same batch
 // shape as postSpan and reuse every structural field (ServiceName, trace/span
 // ids via hexId, timestamp_ns, duration_ns, user_id_hash). Best-effort like
-// the existing helpers — never break the chat completion on a gateway hiccup.
+// the existing helpers; never break the chat completion on a gateway hiccup.
 
 export interface ToolSpanInput {
   sessionId: string;
   userHash?: string;
-  /** gen_ai.system — which provider/runtime owns the tool call. */
+  /** gen_ai.system: which provider/runtime owns the tool call. */
   provider: string;
-  /** gen_ai.tool.name — e.g. "getWeather". */
+  /** gen_ai.tool.name: e.g. "getWeather". */
   tool: string;
-  /** gen_ai.tool.cost_micro_usd — fixed price-table value in micro-USD. */
+  /** gen_ai.tool.cost_micro_usd: fixed price-table value in micro-USD. */
   costMicroUsd: number;
   runId?: string;
   featureTagOverride?: FeatureTag;
@@ -189,7 +189,7 @@ export async function postToolSpan(input: ToolSpanInput): Promise<void> {
   const userHash = input.userHash ?? sessionUserHash(input.sessionId);
 
   const span: Record<string, unknown> = {
-    // structural — identical conventions to postSpan
+    // structural: identical conventions to postSpan
     ServiceName: "vercel-chatbot",
     SpanName: "tool.execution",
     trace_id: hexId(16),
@@ -197,7 +197,7 @@ export async function postToolSpan(input: ToolSpanInput): Promise<void> {
     timestamp_ns: Date.now() * 1_000_000,
     duration_ns: 0,
     status_code: 1,
-    // gen_ai.* — operation 'tool' buckets into the Cost tab's Tools layer.
+    // gen_ai.*: operation 'tool' buckets into the Cost tab's Tools layer.
     "gen_ai.system": input.provider,
     "gen_ai.operation.name": "tool",
     "gen_ai.tool.name": input.tool,
@@ -231,13 +231,13 @@ export async function postToolSpan(input: ToolSpanInput): Promise<void> {
 export interface EmbeddingSpanInput {
   sessionId: string;
   userHash?: string;
-  /** gen_ai.system — e.g. "openai". */
+  /** gen_ai.system: e.g. "openai". */
   provider: string;
-  /** gen_ai.request.model — e.g. "text-embedding-3-small". */
+  /** gen_ai.request.model: e.g. "text-embedding-3-small". */
   model: string;
-  /** gen_ai.usage.input_tokens — tokens embedded. */
+  /** gen_ai.usage.input_tokens: tokens embedded. */
   inputTokens: number;
-  /** gen_ai.cost.estimated_micro_usd — computed at the model's $/Mtok rate. */
+  /** gen_ai.cost.estimated_micro_usd: computed at the model's $/Mtok rate. */
   costMicroUsd: number;
   runId?: string;
 }
@@ -248,7 +248,7 @@ export async function postEmbeddingSpan(
   const userHash = input.userHash ?? sessionUserHash(input.sessionId);
 
   const span: Record<string, unknown> = {
-    // structural — identical conventions to postSpan
+    // structural: identical conventions to postSpan
     ServiceName: "vercel-chatbot",
     SpanName: "embeddings",
     trace_id: hexId(16),
@@ -256,7 +256,7 @@ export async function postEmbeddingSpan(
     timestamp_ns: Date.now() * 1_000_000,
     duration_ns: 0,
     status_code: 1,
-    // gen_ai.* — operation 'embeddings' buckets into the Cost tab's
+    // gen_ai.*: operation 'embeddings' buckets into the Cost tab's
     // Embeddings layer.
     "gen_ai.system": input.provider,
     "gen_ai.operation.name": "embeddings",

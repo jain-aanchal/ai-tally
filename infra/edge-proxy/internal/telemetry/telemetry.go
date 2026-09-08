@@ -5,7 +5,7 @@
 // proxy) so the self-hostable binary (CTO-43) and the cloud binary share one wire format: a
 // self-hosted proxy in a customer VPC emits byte-identical telemetry to the cloud proxy, differing
 // only in the `deployment` label. Encode is the single source of truth for that format, so the
-// parity guarantee is structural — both deployments call the same encoder.
+// parity guarantee is structural; both deployments call the same encoder.
 //
 // Initiative 2 sec 6.3 / sec 8: the destination is the gateway's existing POST /v1/batches, and the
 // payload is a tally.wire.BatchRequest carrying one span. Reusing the SDK's ingest contract rather

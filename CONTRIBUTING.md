@@ -5,12 +5,12 @@ for AI products, and we welcome issues, discussion, and pull requests.
 
 ## Ways to contribute
 
-- **Report bugs** — open an issue with steps to reproduce, expected vs. actual behavior,
+- **Report bugs**: open an issue with steps to reproduce, expected vs. actual behavior,
   and your environment (OS, Python/Node versions, Docker version).
-- **Propose features** — open an issue describing the problem first, before the solution.
-- **Improve docs** — fixes to `README.md`, [`RUNNING.md`](./RUNNING.md), or inline docs are
+- **Propose features**: open an issue describing the problem first, before the solution.
+- **Improve docs**: fixes to `README.md`, [`RUNNING.md`](./RUNNING.md), or inline docs are
   always welcome and a great first contribution.
-- **Send patches** — see the workflow below.
+- **Send patches**: see the workflow below.
 
 ## Development setup
 
@@ -46,7 +46,7 @@ npx vitest run        # unit tests
 
 1. Fork the repo and create a topic branch from `main`
    (e.g. `feat/connector-anthropic`, `fix/clock-skew-clamp`).
-2. Make your change with tests. Keep PRs focused — one logical change per PR.
+2. Make your change with tests. Keep PRs focused: one logical change per PR.
 3. Run the relevant checks above; CI must be green.
 4. Open a PR with a clear description: what changed, why, and how you verified it.
 5. A maintainer will review. Please be responsive to feedback.
@@ -83,7 +83,7 @@ Signed-off-by: Jane Doe <jane@example.com>
 ```
 
 By adding this line you certify the statements in the
-[DCO](https://developercertificate.org/) — paraphrased: that you wrote the
+[DCO](https://developercertificate.org/), paraphrased: that you wrote the
 patch (or have the right to submit it) and that you're licensing it under the
 project's open-source license.
 

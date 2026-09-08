@@ -1,7 +1,7 @@
 # ai-tally edge proxy (CTO-39)
 
-The zero-code ingestion path. A customer changes one env var — points `OPENAI_BASE_URL` at this
-proxy and adds an `X-Tenant-Key` header — and every OpenAI call now flows through ai-tally with
+The zero-code ingestion path. A customer changes one env var (points `OPENAI_BASE_URL` at this
+proxy and adds an `X-Tenant-Key` header) and every OpenAI call now flows through ai-tally with
 **no SDK, no code change**. Requests are forwarded to the real provider byte-for-byte; the only
 thing we keep is a metadata-only telemetry record.
 
@@ -12,7 +12,7 @@ and the customer-key vault ([CTO-42]) are deliberately out of scope here and lay
 ## Why a separate Go binary (not the Python gateway)
 
 The proxy sits in the *synchronous* request path of every customer LLM call, so its latency is
-added to theirs. The budget is **p99 < 3ms added overhead** — miss it and customers route around
+added to theirs. The budget is **p99 < 3ms added overhead**; miss it and customers route around
 us. That rules out a GC-pause-prone interpreted hot path; a small, stdlib-only Go binary with a hot
 connection pool holds the budget with two orders of magnitude to spare (measured ~100µs p99 on
 loopback; see below). The async ingest gateway (`../gateway`, FastAPI) stays in Python because it's
@@ -24,9 +24,9 @@ These are enforced by tests, not just documented:
 
 1. **Bodies are never mutated.** Request and response bodies stream straight through
    `httputil.ReverseProxy`. We never buffer, rewrite, or persist them.
-   (`TestTransparentForwarding`, `TestLargeBodyForwardedByteForByte` — 1 MiB exact-echo.)
+   (`TestTransparentForwarding`, `TestLargeBodyForwardedByteForByte`: 1 MiB exact-echo.)
 2. **Telemetry is metadata only.** `TraceRecord` carries method, path, status, byte *counts*,
-   timing, and the resolved tenant/model/token scalars — never content. The tenant key it holds
+   timing, and the resolved tenant/model/token scalars, never content. The tenant key it holds
    authenticates the ingest POST and is never a field in the emitted payload. Byte counts come from
    counting readers/writers that tally as bytes pass, without copying them. There is structurally no
    field that could hold a prompt, completion, or provider key.
@@ -53,17 +53,17 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_ACCOUNT_ID_HASH_HEADER` | `X-Tally-Account-Id-Hash` | optional control header carrying the **already-hashed** account id (stripped before upstream), see below |
 | `EDGE_PROXY_REQUIRE_TENANT` | `false` | reject requests missing the tenant header with `400` |
 | `EDGE_PROXY_UPSTREAM_TIMEOUT` | `10m` | per-request bound (generous: completions stream for minutes) |
-| `EDGE_PROXY_MODE` | `passthrough` | `passthrough` (app sends the provider key) or `broker` (provider key stays in KMS — see below) |
-| `EDGE_PROXY_BROKER_FILE` | — | path to the KMS-export JSON; **required** when `EDGE_PROXY_MODE=broker` |
+| `EDGE_PROXY_MODE` | `passthrough` | `passthrough` (app sends the provider key) or `broker` (provider key stays in KMS, see below) |
+| `EDGE_PROXY_BROKER_FILE` | - | path to the KMS-export JSON; **required** when `EDGE_PROXY_MODE=broker` |
 | `EDGE_PROXY_BROKER_TTL` | `5m` | how long a minted credential is reused before re-minting |
 | `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
-| `EDGE_PROXY_TELEMETRY_URL` | — | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
-| `EDGE_PROXY_INGEST_TOKEN` | — | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
-| `EDGE_PROXY_TENANT_ID` | — | your tenant **UUID**, claimed in the batch envelope for every record the edge-key cache did not resolve. **Required when the gateway runs with auth disabled** (`TALLY_REQUIRE_API_KEY=false`), which cannot derive a tenant from the credential and refuses a batch claiming none with `422`. A tenant name is rejected at startup |
-| `EDGE_PROXY_ROUTES` | — | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
+| `EDGE_PROXY_TELEMETRY_URL` | - | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
+| `EDGE_PROXY_INGEST_TOKEN` | - | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
+| `EDGE_PROXY_TENANT_ID` | - | your tenant **UUID**, claimed in the batch envelope for every record the edge-key cache did not resolve. **Required when the gateway runs with auth disabled** (`TALLY_REQUIRE_API_KEY=false`), which cannot derive a tenant from the credential and refuses a batch claiming none with `422`. A tenant name is rejected at startup |
+| `EDGE_PROXY_ROUTES` | - | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
 | `EDGE_PROXY_ROUTE_MODE` | `host` | `host` (match on hostname, hosted default) or `path` (match+strip a leading prefix) |
-| `EDGE_PROXY_KEYS_URL` | — | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
-| `EDGE_PROXY_SERVICE_TOKEN` | — | server-only bearer token the proxy sends to `EDGE_PROXY_KEYS_URL` (required when it is set) |
+| `EDGE_PROXY_KEYS_URL` | - | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
+| `EDGE_PROXY_SERVICE_TOKEN` | - | server-only bearer token the proxy sends to `EDGE_PROXY_KEYS_URL` (required when it is set) |
 | `EDGE_PROXY_KEYS_REFRESH_INTERVAL` | `45s` | how often the key cache polls the feed; also the proxy-path revocation SLA |
 
 `/healthz` is the one path the proxy owns (liveness); everything else is forwarded.
@@ -161,8 +161,8 @@ In the cloud default (`passthrough`) the customer's app sends the provider key o
 the proxy forwards it untouched. Regulated customers don't want that key in their application code
 at all. **Broker mode** keeps the provider key in the customer's KMS: the app sends *only* an
 ai-tally tenant key, and the proxy mints a short-lived provider credential and injects it on the way
-upstream. The minted token is applied to the outgoing request header only — never logged, never put
-in a `TraceRecord` — preserving the same in-memory-only guarantee as passthrough. An unknown tenant
+upstream. The minted token is applied to the outgoing request header only, never logged, never put
+in a `TraceRecord`, preserving the same in-memory-only guarantee as passthrough. An unknown tenant
 fails closed with `403`; a broker outage fails closed with `502` (never an unauthenticated upstream
 call).
 
@@ -192,7 +192,7 @@ go run ./cmd/edge-proxy
 
 ### Telemetry parity
 
-A self-hosted proxy emits the **same** metadata-only records as the cloud proxy — same fields, same
+A self-hosted proxy emits the **same** metadata-only records as the cloud proxy: same fields, same
 wire shape, differing only in a `tally.deployment` label (`self-host` vs `cloud`). Set
 `EDGE_PROXY_TELEMETRY_URL` to your gateway's `/v1/batches` to enable shipping; leave it empty to run
 the proxy fully dark. Parity is guaranteed by a single serialization path (`telemetry.Encode`)
@@ -280,8 +280,8 @@ invented.
 
 ### Container image
 
-A multi-stage [`Dockerfile`](Dockerfile) builds a fully static binary and ships it on `scratch` — no
-shell, package manager, or OS surface — running as a non-root numeric uid (~10 MB image):
+A multi-stage [`Dockerfile`](Dockerfile) builds a fully static binary and ships it on `scratch`: no
+shell, package manager, or OS surface, running as a non-root numeric uid (~10 MB image):
 
 ```bash
 docker build -t ai-tally-edge-proxy:dev infra/edge-proxy
@@ -296,7 +296,7 @@ docker run --rm -p 8088:8088 \
 
 [`deploy/helm/edge-proxy`](deploy/helm/edge-proxy) packages the proxy for Kubernetes (Deployment +
 Service + ConfigMap, optional HPA, locked-down non-root pod, `/healthz` probes). Broker keys come
-from either an inline value (dev) or — recommended — a Secret you render from your KMS out-of-band:
+from either an inline value (dev) or (recommended) a Secret you render from your KMS out-of-band:
 
 ```bash
 # dev / quick trial: inline keys (renders a Secret for you)
@@ -348,7 +348,7 @@ BenchmarkProxyOverhead   ~64µs/op
 ```
 
 Real deployments add network RTT to the provider on top of this, but that RTT exists with or
-without the proxy — the *added* overhead is the proxy's own processing, which is what the budget
+without the proxy; the *added* overhead is the proxy's own processing, which is what the budget
 governs.
 
 [CTO-40]: https://linear.app/cto-assist/issue/CTO-40

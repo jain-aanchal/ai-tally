@@ -9,7 +9,7 @@ import (
 
 // defaultTransport is tuned for low per-request overhead: a warm connection pool so the common
 // case reuses a keep-alive connection and pays ~zero setup cost, plus HTTP/2 to the provider.
-// Keeping connections hot is what makes the p99 < 3ms overhead budget achievable — a cold TLS
+// Keeping connections hot is what makes the p99 < 3ms overhead budget achievable; a cold TLS
 // handshake would blow it instantly, so we never want to pay one on the hot path.
 func defaultTransport() *http.Transport {
 	return &http.Transport{

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""/v1/tenant/revenue-sources/config — round-trip + idempotency + validation (CTO-194)."""
+"""/v1/tenant/revenue-sources/config: round-trip + idempotency + validation (CTO-194)."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _payload(change_id: str = "chg-1", **overrides):
 
 
 def test_get_absent_returns_null_config(client: TestClient) -> None:
-    # No row means "use the defaults" — the web reader must never be handed a fabricated config.
+    # No row means "use the defaults": the web reader must never be handed a fabricated config.
     r = client.get("/v1/tenant/revenue-sources/config", headers={"X-Tenant-Id": T})
     assert r.status_code == 200, r.text
     assert r.json()["config"] is None
@@ -100,7 +100,7 @@ def test_null_sources_means_every_source_counts(client: TestClient) -> None:
 
 
 def test_empty_source_list_rejected(client: TestClient) -> None:
-    # "Nothing is revenue" silently blanks the dashboard — the exact bug CTO-194 fixes.
+    # "Nothing is revenue" silently blanks the dashboard, the exact bug CTO-194 fixes.
     r = client.post(
         "/v1/tenant/revenue-sources/config",
         headers={"X-Tenant-Id": T},

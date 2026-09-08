@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// CTO-145: the gateway-backed economics mapping — ARPA + gross margin light up payback/LTV, and a
+// CTO-145: the gateway-backed economics mapping: ARPA + gross margin light up payback/LTV, and a
 // period missing either field stays honest-null ("—").
 
 import { afterEach, describe, expect, it, vi } from "vitest";

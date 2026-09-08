@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-243 — tool and vector spend must reach the EstimatedCost column, not read as $0.
+"""CTO-243: tool and vector spend must reach the EstimatedCost column, not read as $0.
 
 The SDK writes per-call spend to ``gen_ai.tool.cost_micro_usd``. Nothing promoted that carrier into
 the canonical cost attribute, so every tool and vector span was written with EstimatedCost 0 and a

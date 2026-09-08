@@ -50,7 +50,7 @@ export function RevenueUpload({ snapshots, unreachable }: Props) {
         setRowErrors(result.rowErrors);
         return;
       }
-      // Replace, never append — the same rule the write path enforces, applied to the view so a
+      // Replace, never append: the same rule the write path enforces, applied to the view so a
       // re-upload of a period cannot appear twice in the table either.
       setRows((prev) => {
         const byPeriod = new Map(prev.map((r) => [r.period, r]));

@@ -1,19 +1,19 @@
 """Stratified sampler + PII scrubber for replay capture (CTO-113).
 
 Sampling is per-tenant opt-in and stratified by ``(feature_tag, token-count quintile)`` so that
-*small-but-expensive* runs — short prompt, huge response, exotic model — don't get drowned out by
+*small-but-expensive* runs (short prompt, huge response, exotic model) don't get drowned out by
 the long tail of cheap chat turns. The sample target is ``sample_rate`` of the batch overall, but
 within that we over-weight high-token strata so the replay set covers cost outliers.
 
 PII scrubbing runs **before** the resolved-context payload is written to object storage. Three
 classes of redaction:
 
-* **emails** — the same regex `gateway.validation` rejects at ingest (defense in depth)
-* **API keys** — common prefixes (sk-, sk_live_, sk_test_, whsec_, rk_, pk_, xoxb-, ghp_, ...)
-* **postal addresses** — a deliberately conservative regex (street-number + street + city); we
+* **emails**: the same regex `gateway.validation` rejects at ingest (defense in depth)
+* **API keys**: common prefixes (sk-, sk_live_, sk_test_, whsec_, rk_, pk_, xoxb-, ghp_, ...)
+* **postal addresses**: a deliberately conservative regex (street-number + street + city); we
   prefer false negatives over false positives, but the obvious cases get caught.
 
-Output of the sampler is :class:`ReplaySamplePayload` records — the gateway hands those to its
+Output of the sampler is :class:`ReplaySamplePayload` records; the gateway hands those to its
 object_store wrapper and then writes an index row to ClickHouse.
 """
 
@@ -32,7 +32,7 @@ from gateway.validation import _EMAIL_RE
 
 # Common provider API-key prefixes. Match the prefix then a run of url-safe key chars; tuned to
 # *catch* secrets like `sk-test_abc123_xyz` without eating arbitrary tokens that happen to share
-# a prefix. Keep this list narrow and additive — false positives mean less useful replay corpora.
+# a prefix. Keep this list narrow and additive; false positives mean less useful replay corpora.
 _API_KEY_RE = re.compile(
     r"\b("
     r"sk-[A-Za-z0-9_\-]{12,}"
@@ -48,7 +48,7 @@ _API_KEY_RE = re.compile(
 )
 
 # Postal-address heuristic: digits + street name + suffix (St/Ave/Rd/Blvd/Ln/Dr/Way/Ct/Pl).
-# Deliberately conservative — we'd rather miss a weird format than redact every number.
+# Deliberately conservative: we'd rather miss a weird format than redact every number.
 _ADDRESS_RE = re.compile(
     r"\b\d{1,5}\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?\s+"
     r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Way|Court|Ct|Place|Pl)\b",
@@ -75,7 +75,7 @@ def scrub_pii(text: str) -> str:
 
 
 def scrub_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Recursively scrub a JSON-like payload — strings get :func:`scrub_pii`, structure is preserved."""
+    """Recursively scrub a JSON-like payload: strings get :func:`scrub_pii`, structure is preserved."""
     if isinstance(payload, str):
         return scrub_pii(payload)
     if isinstance(payload, dict):
@@ -111,13 +111,13 @@ class ReplaySamplePayload:
     real_model: str
     input_tokens: int
     output_tokens: int
-    # The PII-scrubbed JSON envelope, serialized — what the executor will replay.
+    # The PII-scrubbed JSON envelope, serialized: what the executor will replay.
     scrubbed_json: bytes
     pii_scrubbed: bool = True
 
 
 def _token_quintile(total_tokens: int, ceilings: Sequence[int]) -> int:
-    """0..4 — which quintile of the batch's token-count distribution this span sits in."""
+    """0..4: which quintile of the batch's token-count distribution this span sits in."""
     for i, ceiling in enumerate(ceilings):
         if total_tokens <= ceiling:
             return i
@@ -143,7 +143,7 @@ def stratified_sample(
 
     Strata are ``(feature_tag, token-quintile)``. Within a stratum we sample uniformly. Strata
     in the **top token quintile** are sampled at 2x the base rate (capped at 1.0), so the replay
-    corpus over-represents costly tail traffic — exactly the runs where a cheaper candidate model
+    corpus over-represents costly tail traffic, exactly the runs where a cheaper candidate model
     pays off the most.
 
     Deterministic given ``rng``. For prod ingest the caller passes ``random.Random(span_id)`` or
@@ -157,7 +157,7 @@ def stratified_sample(
     token_totals = [c.input_tokens + c.output_tokens for c in candidates]
     ceilings = _compute_quintile_ceilings(token_totals)
 
-    # Bucket by (feature_tag, quintile). Each bucket samples independently — uniform within.
+    # Bucket by (feature_tag, quintile). Each bucket samples independently, uniform within.
     buckets: dict[tuple[str, int], list[SampleCandidate]] = {}
     for c, total in zip(candidates, token_totals, strict=True):
         q = _token_quintile(total, ceilings)
@@ -170,7 +170,7 @@ def stratified_sample(
         effective_rate = min(1.0, effective_rate)
         target = max(0, int(round(len(bucket) * effective_rate)))
         if target == 0 and effective_rate > 0 and rng.random() < effective_rate * len(bucket):
-            # Tiny buckets — preserve a chance to sample at all so a singleton outlier stratum
+            # Tiny buckets: preserve a chance to sample at all so a singleton outlier stratum
             # isn't always dropped.
             target = 1
         if target >= len(bucket):

@@ -6,9 +6,9 @@ Each fetcher satisfies the scaffold's :class:`~tally.pricing_scraper.PriceFetche
 (``.provider`` + ``.fetch(*, version, valid_from) -> list[PriceEntry]``) and flows through the
 existing :class:`~tally.pricing_scraper.PriceScraper` unchanged.
 
-* :class:`OpenAIPriceFetcher` — parses OpenAI API pricing (recorded JSON).
-* :class:`AnthropicPriceFetcher` — parses Anthropic pricing (recorded HTML table).
-* :class:`GooglePriceFetcher` — parses Google Gemini API pricing (recorded JSON).
+* :class:`OpenAIPriceFetcher`: parses OpenAI API pricing (recorded JSON).
+* :class:`AnthropicPriceFetcher`: parses Anthropic pricing (recorded HTML table).
+* :class:`GooglePriceFetcher`: parses Google Gemini API pricing (recorded JSON).
 
 Raw content comes through an injectable ``fetch_raw`` callable so tests feed recorded fixtures and
 never hit the network; a stdlib-only best-effort live fetch is the default. See :mod:`.job` for the

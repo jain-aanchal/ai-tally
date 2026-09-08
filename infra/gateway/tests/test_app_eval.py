@@ -173,7 +173,7 @@ def test_eval_empty_tenant(client: TestClient) -> None:
 def test_eval_returns_per_candidate_with_winrate_and_ci(client: TestClient) -> None:
     _seed_samples_and_runs(n=30)
     # Force a deterministic judge that always picks the candidate (verdict letter depends on
-    # A/B placement, so emit literal "A" half the time and "B" half — but simplest: emit
+    # A/B placement, so emit literal "A" half the time and "B" half, but simplest: emit
     # nondeterministic letter via "TIE" so all rows are tie verdicts).
     async def tie_judge(call: JudgeCall) -> JudgeResponse:
         return JudgeResponse(text="TIE", input_tokens=200, output_tokens=2)
@@ -223,7 +223,7 @@ def test_eval_candidate_wins_aggregate(client: TestClient) -> None:
     )
     body = r.json()
     cand = body["per_candidate"][0]
-    # Sanity: both verdicts must appear (i.e. A/B was actually randomized — not all candidate_wins
+    # Sanity: both verdicts must appear (i.e. A/B was actually randomized, not all candidate_wins
     # nor all current_wins). The split won't be exactly 20/20 but it should be in a wide band.
     assert cand["candidate_wins"] > 5
     assert cand["current_wins"] > 5

@@ -8,7 +8,7 @@ never a replacement and never reads back into the product.
 
 By design this module **reuses CTO-154's machinery so both sinks emit identical facts**:
 
-* the same :class:`~gateway.bq_export.ExportTableSpec` set (:data:`~gateway.bq_export.ALL_SPECS`) —
+* the same :class:`~gateway.bq_export.ExportTableSpec` set (:data:`~gateway.bq_export.ALL_SPECS`):
   spans / business_events / attribution / daily rollups, the same columns, the same natural keys and
   the same incremental watermark columns;
 * the same :class:`~gateway.bq_export.ClickHouseExportReader` (``client.query(sql).result_rows``),
@@ -19,8 +19,8 @@ By design this module **reuses CTO-154's machinery so both sinks emit identical 
 What differs is only the **sink**: instead of an upsert-by-key ``MERGE`` into BigQuery, rows are
 written to ``s3://<bucket>/<prefix>/<table>/dt=YYYY-MM-DD/data.parquet`` as Parquet, one object per
 day partition. Idempotency is **per day partition**: a partition write upserts the partition's rows
-on the same natural key ClickHouse dedupes on (read-merge-write), so replaying a pass — or picking up
-more rows for a day already partially exported — never duplicates and never drops earlier rows.
+on the same natural key ClickHouse dedupes on (read-merge-write), so replaying a pass, or picking up
+more rows for a day already partially exported, never duplicates and never drops earlier rows.
 
 **Optional, lazy-imported deps.** ``pyarrow`` (Parquet encode) and ``boto3`` (S3 put) live behind the
 ``[athena]`` extra and are imported *inside* the real sink only, so this module imports and the
@@ -112,7 +112,7 @@ def partition_prefix(dataset_ref: str, spec: ExportTableSpec, day: date) -> str:
 # --- Athena / Redshift DDL ---------------------------------------------------------------------
 
 # BigQuery standard-SQL type -> Athena (Hive/Presto) type. Kept as a pure mapping so the DDL is
-# generated from the *same* BQField schema the BigQuery sink uses — one schema, two dialects.
+# generated from the *same* BQField schema the BigQuery sink uses, one schema, two dialects.
 _ATHENA_TYPES: dict[str, str] = {
     "STRING": "string",
     "INT64": "bigint",
@@ -198,8 +198,8 @@ class InMemoryS3ParquetSink:
     """Dict-backed sink used by tests and local dev.
 
     Idempotent **per day partition** and by the same natural key ClickHouse dedupes on:
-    ``write_partition`` merges rows into the partition keyed by the key tuple, so replaying a pass —
-    or exporting more rows for a day already partially written — never duplicates and never drops
+    ``write_partition`` merges rows into the partition keyed by the key tuple, so replaying a pass,
+    or exporting more rows for a day already partially written, never duplicates and never drops
     earlier rows of that partition.
     """
 
@@ -254,7 +254,7 @@ class Boto3S3ParquetSink:
     the incoming rows on the natural key, and re-uploaded as a single Parquet object. This mirrors the
     BigQuery sink's staging + ``MERGE`` upsert, at partition granularity, so a replayed pass is safe.
 
-    NB: exercised only against live S3 — the unit suite drives :class:`InMemoryS3ParquetSink`. See
+    NB: exercised only against live S3; the unit suite drives :class:`InMemoryS3ParquetSink`. See
     docs/athena-export.md for the runbook.
     """
 
@@ -327,7 +327,7 @@ def load_s3_parquet_sink(bucket: str, *, region: str | None = None) -> S3Parquet
     """Lazily construct the real S3 sink; raises if the ``[athena]`` extra is absent.
 
     Auth is left to the default AWS credential chain (instance/role profile, IRSA, or an assumed
-    role referenced per-tenant) — this function never takes a raw secret key.
+    role referenced per-tenant); this function never takes a raw secret key.
     """
     try:
         import boto3  # noqa: F401, PLC0415 - lazy optional import by design

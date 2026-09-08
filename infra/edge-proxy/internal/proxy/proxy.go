@@ -7,12 +7,12 @@
 //
 // Design invariants:
 //   - Bodies are never mutated or persisted. In the default pass-through mode they are never even
-//     buffered — we count bytes as they stream; that's it. In the opt-in provider-protocol mode
+//     buffered: we count bytes as they stream; that's it. In the opt-in provider-protocol mode
 //     (CTO-167) a bounded copy of the response is teed aside transiently to parse scalar usage
 //     metadata (model, token counts) and then discarded: content is never logged, stored, or handed
 //     to a Sink, and the bytes still stream to the client unbuffered on the wire.
 //   - The customer's provider key (Authorization header, or Gemini's ?key= / x-goog-api-key) is
-//     forwarded as-is and never read into any field, log line, or stored struct — it lives only in
+//     forwarded as-is and never read into any field, log line, or stored struct; it lives only in
 //     the in-flight request.
 //   - Stateless: no per-request state survives the response, so instances scale horizontally.
 //   - FlushInterval -1 streams responses immediately, so SSE token streams pass through with no
@@ -142,7 +142,7 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 			// Send the upstream's own Host so TLS SNI and provider routing are correct.
 			pr.Out.Host = rt.upstream.Host
 		},
-		// Stream every write straight to the client — critical for SSE completions.
+		// Stream every write straight to the client, critical for SSE completions.
 		FlushInterval: -1,
 		Transport:     defaultTransport(),
 		ErrorHandler:  errorHandler,
@@ -175,7 +175,7 @@ func routeFromContext(ctx context.Context) resolvedRoute {
 type metaKey struct{}
 
 // captureMeta wraps the upstream response body so scalar metadata (model, token usage) is parsed
-// out as it streams — without buffering it on the wire or retaining any content. It is installed as
+// out as it streams, without buffering it on the wire or retaining any content. It is installed as
 // the ReverseProxy's ModifyResponse only when a provider protocol is configured.
 func (p *Proxy) captureMeta(resp *http.Response) error {
 	if resp.Body == nil || resp.Request == nil {
@@ -257,7 +257,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Broker mode: mint a short-lived provider credential for this tenant from the customer's KMS
 	// and inject it, replacing whatever (if anything) the client sent. The minted token is applied
-	// only to the outgoing request header — never logged or recorded in the TraceRecord — preserving
+	// only to the outgoing request header, never logged or recorded in the TraceRecord, preserving
 	// the in-memory-only key guarantee. A miss (unknown tenant / broker down) fails the request
 	// rather than forwarding an unauthenticated call.
 	if p.broker != nil {

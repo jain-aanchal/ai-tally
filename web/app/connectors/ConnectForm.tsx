@@ -2,7 +2,7 @@
 "use client";
 
 // Connect / edit / disconnect one cloud cost connector (CTO-176). Before this, the page could only
-// say "configured in the backend connector runner" — config rows had to be inserted into Postgres
+// say "configured in the backend connector runner"; config rows had to be inserted into Postgres
 // by hand. The form posts through a server action to the gateway, which owns all field validation.
 //
 // Credentials are references, never raw keys. The field asks for a Secret Manager / KMS / ARN

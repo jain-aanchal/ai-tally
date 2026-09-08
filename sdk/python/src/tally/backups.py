@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Backup & disaster-recovery policy logic — schedule, restore-drill, IR runbook (CTO-77).
+"""Backup & disaster-recovery policy logic: schedule, restore-drill, IR runbook (CTO-77).
 
 Durability is a promise we make about *other people's data*. This module is the pure-logic layer
 that encodes that promise so it can be tested without standing up real backup infra (spec §12):
 
-* :class:`BackupPolicy` — what gets backed up, how often, how long it's retained, and that it lands
-  in a *different* region (cross-region is the point — a region loss must not lose the backup).
-* :class:`BackupSchedule` — given a policy and a clock, when the next backup is due and whether the
+* :class:`BackupPolicy`: what gets backed up, how often, how long it's retained, and that it lands
+  in a *different* region (cross-region is the point: a region loss must not lose the backup).
+* :class:`BackupSchedule`: given a policy and a clock, when the next backup is due and whether the
   most recent one is overdue (a silently-stalled backup is the classic DR failure).
-* :class:`RestoreDrill` — the actual test of the promise: take a backup, restore it, measure the
+* :class:`RestoreDrill`, the actual test of the promise: take a backup, restore it, measure the
   RTO (time-to-restore) and RPO (data-loss window) and check them against the contractual targets
   (4h RTO / 1h RPO, spec §12.2). A backup you've never restored is a hope, not a backup.
-* :class:`Environment` / :func:`synthetic_record` — dev/staging/prod isolation and synthetic-data
+* :class:`Environment` / :func:`synthetic_record`: dev/staging/prod isolation and synthetic-data
   generation so non-prod environments never hold real customer data.
-* :class:`IncidentClass` / :func:`runbook_steps` — the incident-response runbook keyed by incident
+* :class:`IncidentClass` / :func:`runbook_steps`: the incident-response runbook keyed by incident
   class, so the on-call has a documented path per failure mode.
 
 The cluster-side backup execution (ClickHouse ``BACKUP``, Postgres ``pg_dump``/WAL archiving,
 cross-region object replication), the scheduler that fires these, the annual tabletop exercise, the
-public subprocessor list / pentest / VDP — all infra and ops follow-ups. This module owns the
+public subprocessor list / pentest / VDP, all infra and ops follow-ups. This module owns the
 *policy and the verification logic*: the targets, the overdue math, the pass/fail of a drill.
 """
 
@@ -118,7 +118,7 @@ class BackupPolicy:
 class BackupSchedule:
     """Pairs a policy with the timestamp of the last successful backup to answer 'are we current?'.
 
-    A backup that silently stops firing is the classic DR failure mode — the data looks safe right
+    A backup that silently stops firing is the classic DR failure mode: the data looks safe right
     up until you need it. ``is_overdue`` makes the stall observable.
     """
 
@@ -155,11 +155,11 @@ class RestoreDrill:
     """A single restore exercise and its measured outcome against the RTO/RPO targets.
 
     * achieved **RTO** = ``restore_completed_at - restore_started_at`` (how long recovery took).
-    * achieved **RPO** = ``restore_started_at - backup_taken_at`` (the data-loss window — everything
+    * achieved **RPO** = ``restore_started_at - backup_taken_at`` (the data-loss window: everything
       written after the backup snapshot is lost on restore).
 
     The drill *passes* only if both achieved values are within their targets. A failed drill is a
-    finding, not an error — it's exactly what the exercise exists to surface.
+    finding, not an error; it's exactly what the exercise exists to surface.
     """
 
     target: BackupTarget
@@ -260,7 +260,7 @@ def assert_no_real_data(environment: Environment) -> None:
 def synthetic_record(environment: Environment, seed: int) -> dict[str, str]:
     """Deterministic synthetic span-ish record for a non-prod environment (never real PII).
 
-    Keyed on ``(environment, seed)`` so test fixtures are reproducible. Refuses to run for PROD —
+    Keyed on ``(environment, seed)`` so test fixtures are reproducible. Refuses to run for PROD:
     synthetic data has no place in production, and producing it there would be a footgun.
     """
     if environment is Environment.PROD:
@@ -328,5 +328,5 @@ def runbook_steps(incident_class: IncidentClass) -> tuple[str, ...]:
 def overdue_schedules(
     schedules: Iterable[BackupSchedule], *, as_of: datetime, grace: timedelta = timedelta(0)
 ) -> tuple[BackupSchedule, ...]:
-    """Filter a set of schedules down to those that are overdue — the alerting surface."""
+    """Filter a set of schedules down to those that are overdue: the alerting surface."""
     return tuple(s for s in schedules if s.is_overdue(as_of=as_of, grace=grace))

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wire envelope + idempotency — the SDK↔ingest batch contract (transport-agnostic).
+"""Wire envelope + idempotency: the SDK↔ingest batch contract (transport-agnostic).
 
 Implements CTO-32.
 
@@ -8,7 +8,7 @@ wire format is a later infra ticket; this pure-Python layer lets us build and te
 idempotency, and dedup semantics now.
 
 Idempotency: a batch carries a client-generated ``batch_id`` (UUIDv7, time-ordered). The gateway
-dedupes on ``(tenant_id, batch_id)`` for 24h — a replayed batch returns the original response
+dedupes on ``(tenant_id, batch_id)`` for 24h; a replayed batch returns the original response
 without re-processing. Within a batch, spans dedupe on ``(trace_id, span_id)``, business events on
 ``business_event_id``, identity links on ``(identity_a, identity_b, source)``.
 
@@ -162,8 +162,8 @@ class ServerHints:
 
     The client should treat these as the new ceiling until the next response updates them: flush no
     more often than ``flush_interval_ms``, send no more than ``max_batch_size`` items per batch,
-    apply ``sample_rate_override`` when present (gateway-directed shedding), and — on a retryable
-    response — wait ``retry_after_ms`` before resending.
+    apply ``sample_rate_override`` when present (gateway-directed shedding), and, on a retryable
+    response, wait ``retry_after_ms`` before resending.
     """
 
     flush_interval_ms: int = 5000

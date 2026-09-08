@@ -1,4 +1,4 @@
-"""Per-tenant Stripe webhook config — small Postgres surface for CTO-110.
+"""Per-tenant Stripe webhook config: small Postgres surface for CTO-110.
 
 Mirrors :mod:`gateway.tenant_connectors`: tiny, tenant-scoped CRUD, no cross-tenant queries. The
 gateway's ``/v1/stripe/webhook`` endpoint reads the row to fetch the signing secret; the dashboard
@@ -22,7 +22,7 @@ from gateway.tenant_lookup import resolve_tenant_uuid
 
 @dataclass(frozen=True, slots=True)
 class StripeConfig:
-    """One ``tenant_stripe_config`` row — the secret is loaded eagerly because the webhook
+    """One ``tenant_stripe_config`` row: the secret is loaded eagerly because the webhook
     handler needs it on every delivery. Don't pass this object anywhere it might land in a log."""
 
     tenant_id: str
@@ -36,7 +36,7 @@ class StripeConfig:
         return self.disconnected_at is None
 
     def as_safe_dict(self) -> dict[str, object]:
-        """Public-safe view — the secret is replaced by a fingerprint so the dashboard can
+        """Public-safe view: the secret is replaced by a fingerprint so the dashboard can
         show "connected (whsec_•••dE2k)" without ever round-tripping the raw secret."""
         suffix = self.webhook_secret[-4:] if self.webhook_secret else ""
         return {
@@ -89,7 +89,7 @@ class TenantStripeStore:
         stripe_account_id: str | None = None,
         actor: str | None = None,
     ) -> StripeConfig:
-        """Insert or rotate the row. Rotating is the same op as connecting again — we keep one row
+        """Insert or rotate the row. Rotating is the same op as connecting again: we keep one row
         per tenant and let the audit table carry the history. Idempotent on the audit side too:
         the ``change_id`` is a deterministic UUID5 over (tenant, secret) so a tenant pasting the
         same secret twice produces only one row."""
@@ -129,7 +129,7 @@ class TenantStripeStore:
             )
             row = cur.fetchone()
             assert row is not None
-            # Audit row — UUID5 keyed on (tenant, secret) so retried pastes don't duplicate.
+            # Audit row: UUID5 keyed on (tenant, secret) so retried pastes don't duplicate.
             change_id = uuid.uuid5(
                 uuid.NAMESPACE_URL, f"stripe-change|{resolved}|{kind}|{webhook_secret}"
             )

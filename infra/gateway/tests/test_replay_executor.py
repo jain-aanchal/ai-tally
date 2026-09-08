@@ -1,4 +1,4 @@
-"""Replay executor — budget cap, concurrency, and write-through tests (CTO-113)."""
+"""Replay executor: budget cap, concurrency, and write-through tests (CTO-113)."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def test_replay_writes_run_row() -> None:
     assert row.candidate_model == "claude-haiku-4-5"
     assert row.input_tokens == 200
     assert row.output_tokens == 80
-    # Authoritative cost from the SDK catalog — non-zero for a known model.
+    # Authoritative cost from the SDK catalog: non-zero for a known model.
     assert row.cost_micro_usd > 0
 
 
@@ -196,7 +196,7 @@ def test_replay_proceeds_when_within_budget() -> None:
 # --- Concurrency --------------------------------------------------------------
 
 def test_replay_respects_per_tenant_concurrency_limit() -> None:
-    """10 concurrent replays for the same tenant — at most MAX_CONCURRENT_PER_TENANT run at once."""
+    """10 concurrent replays for the same tenant: at most MAX_CONCURRENT_PER_TENANT run at once."""
     in_flight = 0
     peak = 0
     lock = asyncio.Lock()

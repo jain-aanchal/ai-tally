@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""OpenAI Chat Completions extractor — version 1 (``openai_v1``).
+"""OpenAI Chat Completions extractor, version 1 (``openai_v1``).
 
 Implements CTO-41.
 
@@ -13,12 +13,12 @@ dict defined by :mod:`tally.schema`:
 Tool-call accounting: each tool/function call present in ``choices[].message.tool_calls`` is emitted
 as its own attribute dict carrying ``gen_ai.tool.name`` / ``gen_ai.tool.call_id`` and the
 ``gen_ai.operation.name == "tool"``, alongside the primary ``chat`` dict. This represents the
-cost/usage shape of tool-calling turns within the existing schema — the schema has a home for a tool
+cost/usage shape of tool-calling turns within the existing schema; the schema has a home for a tool
 name and id, but *not* for a raw tool-call count, so a count is intentionally omitted rather than
 fabricated as a new key (noted in the PR body).
 
-Defensive by construction: missing/null ``usage``, missing fields, and unexpected types never raise
-— the extractor returns whatever subset it can salvage. No message content or secrets are ever read,
+Defensive by construction: missing/null ``usage``, missing fields, and unexpected types never raise;
+the extractor returns whatever subset it can salvage. No message content or secrets are ever read,
 only usage/metadata.
 """
 

@@ -14,7 +14,7 @@ export const mockSpend: SpendSummary = {
   reconciledMicroUsd: 25_220_000_000, // ~48% reconciled
   reconciledThrough: "2026-06-12",
   byLayer: {
-    llm: 38_200_000_000, // 73% — the bulk
+    llm: 38_200_000_000, // 73%, the bulk
     vector: 6_800_000_000, // 13%
     tools: 4_100_000_000, // 8%
     compute: 2_400_000_000, // 4.5%

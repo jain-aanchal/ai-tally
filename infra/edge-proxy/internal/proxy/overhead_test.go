@@ -35,7 +35,7 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 
 // measure issues n sequential GETs against url with a keep-alive client and returns sorted
 // latencies. The first warmup requests are discarded so we never charge a cold TLS/connection
-// setup to the steady-state measurement — exactly how the proxy runs in production (hot pool).
+// setup to the steady-state measurement, exactly how the proxy runs in production (hot pool).
 func measure(t testing.TB, client *http.Client, url string, warmup, n int) []time.Duration {
 	t.Helper()
 	return measureWith(t, client, url, nil, warmup, n)

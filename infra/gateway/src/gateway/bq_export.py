@@ -7,10 +7,10 @@ product.
 
 What it mirrors, incrementally, per tenant:
 
-* ``otel_spans``            — one BQ row per span (counts/tokens/cost, **never message text**)
-* ``business_events``       — conversion / revenue events
-* ``attribution_records``   — stitched value→feature attributions
-* ``daily_feature_rollup``  — the daily cost/usage rollup (uniq states merged to plain counts)
+* ``otel_spans``:             one BQ row per span (counts/tokens/cost, **never message text**)
+* ``business_events``:        conversion / revenue events
+* ``attribution_records``:    stitched value→feature attributions
+* ``daily_feature_rollup``:   the daily cost/usage rollup (uniq states merged to plain counts)
 
 Design mirrors the repo's existing patterns:
 
@@ -20,14 +20,14 @@ Design mirrors the repo's existing patterns:
 * a :mod:`gateway.reconciliation`-style pure orchestrator (``run_export``) over injected
   reader / sink / watermark stores, so the incremental + idempotency logic is unit-testable with
   no live ClickHouse or BigQuery;
-* the ClickHouse read uses ``client.query(sql).result_rows`` — the same surface
+* the ClickHouse read uses ``client.query(sql).result_rows``, the same surface
   :meth:`gateway.store.ClickHouseStore.ping` uses.
 
 **No bodies, by construction (CTO-118 / CTO-125).** The exported tables hold no message bodies:
 we reuse the span-side ``_is_body_key`` guard to (a) assert at import time that no exported column
 is body-keyed and (b) strip any body-keyed entry out of the ``SpanAttributes`` JSON map before it
 leaves. The replay candidate-response text (CTO-125, ``replay_runs.ResponseText``) is a separate
-opt-in tier and is *explicitly excluded* here — none of the export specs read a replay table.
+opt-in tier and is *explicitly excluded* here: none of the export specs read a replay table.
 """
 
 from __future__ import annotations
@@ -67,14 +67,14 @@ class BQField:
 class ExportTableSpec:
     """How one ClickHouse source table maps to one BigQuery table.
 
-    * ``watermark_column`` — the monotonically-advancing column used for incremental reads.
-    * ``key_columns``      — the same natural key ClickHouse dedupes on; the sink upserts on it so
+    * ``watermark_column``:  the monotonically-advancing column used for incremental reads.
+    * ``key_columns``:       the same natural key ClickHouse dedupes on; the sink upserts on it so
                              re-runs never duplicate.
-    * ``json_columns``     — columns exported as a BQ ``JSON`` column (the long-tail
+    * ``json_columns``:      columns exported as a BQ ``JSON`` column (the long-tail
                              ``SpanAttributes`` / ``RawPayload`` maps).
-    * ``source_exprs``     — optional SQL expression overriding a column's source (used for the
+    * ``source_exprs``:      optional SQL expression overriding a column's source (used for the
                              rollup's ``uniqMerge``/``sum`` aggregates).
-    * ``group_by``         — non-empty only for aggregate specs (the rollup); drives ``GROUP BY``.
+    * ``group_by``:          non-empty only for aggregate specs (the rollup); drives ``GROUP BY``.
     """
 
     name: str
@@ -185,7 +185,7 @@ ATTRIBUTION_SPEC = ExportTableSpec(
     ),
 )
 
-# daily_feature_rollup: the uniq HLL states can't be exported raw — merge them to plain counts,
+# daily_feature_rollup: the uniq HLL states can't be exported raw; merge them to plain counts,
 # and sum the SummingMergeTree measures across parts, grouped by the rollup's natural key.
 DAILY_ROLLUP_SPEC = ExportTableSpec(
     name="daily_feature_rollup",
@@ -324,7 +324,7 @@ class GoogleBigQuerySink:
     rather than appends. The BQ client is injected (already lazily imported) to keep this class
     importable for typing even when the extra is absent.
 
-    NB: exercised only against a live BigQuery project — the unit suite drives
+    NB: exercised only against a live BigQuery project; the unit suite drives
     :class:`InMemoryBigQuerySink`. See docs/bigquery-export.md for the runbook.
     """
 
@@ -371,7 +371,7 @@ def load_bigquery_sink(project_id: str | None = None) -> BigQuerySink:
     """Lazily construct the real BigQuery sink; raises if the ``[bigquery]`` extra is absent.
 
     Auth is left to the client's default credential chain (ADC / Workload Identity / a
-    ``GOOGLE_APPLICATION_CREDENTIALS`` Secret Manager mount) — this function never takes a raw key.
+    ``GOOGLE_APPLICATION_CREDENTIALS`` Secret Manager mount); this function never takes a raw key.
     """
     try:
         from google.cloud import bigquery  # noqa: PLC0415 - lazy optional import by design

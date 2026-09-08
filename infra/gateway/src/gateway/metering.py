@@ -1,14 +1,14 @@
-"""Server-side metering — tamper-evident head counts + billing-period rollups (CTO-84/85/86).
+"""Server-side metering: tamper-evident head counts + billing-period rollups (CTO-84/85/86).
 
 Two billable units (spec §6.1):
 
-* **Billable traces** — counted at ingest HEAD, *before* any sampling decision, so the invoice is
+* **Billable traces**: counted at ingest HEAD, *before* any sampling decision, so the invoice is
   exact regardless of the analytics sample rate (CTO-84). Sampling analytics down must never reduce
   the billed count.
 * **Distinct active feature tags** per tenant per billing period (CTO-85).
 
-Both are **tamper-evident**: each ``(tenant, period)`` carries a content *commitment* — a
-collision-resistant hash over the sorted set of distinct ids — that can be recomputed from raw
+Both are **tamper-evident**: each ``(tenant, period)`` carries a content *commitment* (a
+collision-resistant hash over the sorted set of distinct ids) that can be recomputed from raw
 ingest to detect dropped or injected records. **Closed periods are immutable** (CTO-86): once a
 billing period is closed its usage record is frozen and further records for it are rejected.
 
@@ -59,8 +59,8 @@ class DistinctMeter:
     """Counts distinct ids per ``(tenant, period)`` with a tamper-evident commitment.
 
     The shared engine behind both the head trace-count meter (CTO-84) and the feature-count meter
-    (CTO-85). ``record`` is idempotent per id, so counting the same trace/feature twice — e.g. an
-    at-least-once redelivery — never inflates the count.
+    (CTO-85). ``record`` is idempotent per id, so counting the same trace/feature twice (e.g. an
+    at-least-once redelivery) never inflates the count.
     """
 
     _ids: dict[_TenantPeriod, set[str]] = field(
@@ -100,7 +100,7 @@ DEFAULT_PLAN_LIMIT = PlanLimit(plan="free", trace_limit=100_000, feature_limit=2
 
 @dataclass(frozen=True, slots=True)
 class UsageRecord:
-    """Per-tenant per-period usage — the unit the dashboard and billing both consume (CTO-86)."""
+    """Per-tenant per-period usage, the unit the dashboard and billing both consume (CTO-86)."""
 
     tenant_id: str
     period: str

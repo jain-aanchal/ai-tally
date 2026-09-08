@@ -1,7 +1,7 @@
 // ai-tally: added file. A self-contained, no-auth, no-DB chat route used by
 // the `make chatbot-demo` traffic driver. The upstream `(chat)/api/chat/route.ts`
 // is wired to NextAuth + Postgres + Vercel Blob which the demo deliberately
-// doesn't depend on — so the driver hits this minimal endpoint instead.
+// doesn't depend on, so the driver hits this minimal endpoint instead.
 // Every `gen_ai.*` and `chatbot.*` attribute is identical to what the patched
 // upstream route would emit, so the workflow-2/3/4 dashboards see the same
 // shape regardless of which path produced it.
@@ -20,7 +20,7 @@ import {
 // ai-tally (CTO-137): the synthetic driver hits THIS route (not the upstream
 // (chat) UI route), so to fill the Cost tab's Tools bar on a live
 // `make chatbot-demo` we detect tool-shaped prompts here and emit a matching
-// tool span. Same fixed price table as the UI route. Demo-seed pricing — not a
+// tool span. Same fixed price table as the UI route. Demo-seed pricing, not a
 // real billing model.
 const TOOL_COST_MICRO_USD: Record<string, number> = {
   getWeather: 1_000,
@@ -31,7 +31,7 @@ const TOOL_COST_MICRO_USD: Record<string, number> = {
 };
 
 // Map a prompt to the demo tool it would have triggered, mirroring the upstream
-// route's tool set. Keyword-based and intentionally coarse — this is scripted
+// route's tool set. Keyword-based and intentionally coarse; this is scripted
 // demo traffic, not a real tool router.
 function inferDemoTool(prompt: string): string | undefined {
   const t = prompt.toLowerCase();
@@ -196,7 +196,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ai-tally: emit the cost span on the happy path. Fire-and-forget — never
+  // ai-tally: emit the cost span on the happy path. Fire-and-forget; never
   // block the response on the gateway being slow.
   void postSpan({
     sessionId: body.sessionId,

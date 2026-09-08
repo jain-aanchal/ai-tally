@@ -258,7 +258,7 @@ describe("<DataTable />", () => {
     render(<DataTable columns={COLUMNS} rows={makeRows(25)} rowKey={(r) => r.id} pageSize={10} />);
     expect(bodyRows()).toHaveLength(10);
     expect(screen.getByText("Page 1 of 3")).toBeTruthy();
-    expect(screen.getByText("1–10 of 25")).toBeTruthy();
+    expect(screen.getByText("1-10 of 25")).toBeTruthy();
 
     const prev = screen.getByRole("button", { name: "Previous" });
     const next = screen.getByRole("button", { name: "Next" });
@@ -266,13 +266,13 @@ describe("<DataTable />", () => {
 
     fireEvent.click(next);
     expect(bodyRows()[0][0]).toBe("acct-010");
-    expect(screen.getByText("11–20 of 25")).toBeTruthy();
+    expect(screen.getByText("11-20 of 25")).toBeTruthy();
     expect((prev as HTMLButtonElement).disabled).toBe(false);
 
     // Last page holds the 5-row remainder and Next goes dead.
     fireEvent.click(next);
     expect(bodyRows()).toHaveLength(5);
-    expect(screen.getByText("21–25 of 25")).toBeTruthy();
+    expect(screen.getByText("21-25 of 25")).toBeTruthy();
     expect((next as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.click(prev);

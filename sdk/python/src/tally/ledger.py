@@ -4,7 +4,7 @@
 Billing has to be defensible. When a customer disputes an invoice we need to show, line by line,
 exactly which usage was billed and prove the record was not altered after the fact. This module
 is the append-only book of record that sits between *finalized usage* (whatever upstream metering
-produced — this module is deliberately agnostic about how usage is measured) and the billing
+produced; this module is deliberately agnostic about how usage is measured) and the billing
 integration (Stripe, CTO-90).
 
 Three properties, each load-bearing:
@@ -12,13 +12,13 @@ Three properties, each load-bearing:
 - **Append-only + tamper-evident.** Every entry carries a hash chain: ``entry_hash = H(prev_hash
   || canonical(entry))``. Changing any past entry (amount, tenant, timestamp) breaks the chain
   from that point forward, and :meth:`UsageLedger.verify` localizes the first broken link. This is
-  the same construction as a blockchain / Merkle log, minus distribution — one writer, one chain
+  the same construction as a blockchain / Merkle log, minus distribution: one writer, one chain
   per tenant scope.
 - **Reconcilable.** :meth:`UsageLedger.reconcile` compares ledger totals against an independent
   ingest count so we can detect dropped or duplicated usage before it reaches an invoice.
 - **Idempotent export.** Each usage record carries an ``idempotency_key``; appending the same key
   twice is a no-op, and exporting an already-exported entry never bills it again. Re-running an
-  export job is safe — no double-billing.
+  export job is safe, no double-billing.
 
 Money is integer micro-USD throughout (see :mod:`tally.schema`). Pure-Python, no infra: the
 backing store is an injected :class:`LedgerStore` (in-memory by default) so dev/test never needs a
@@ -35,7 +35,7 @@ from typing import Protocol, runtime_checkable
 
 from tally.schema import DEFAULT_CURRENCY, micro_to_usd
 
-#: Genesis link — the ``prev_hash`` of the very first entry in a chain.
+#: Genesis link: the ``prev_hash`` of the very first entry in a chain.
 GENESIS_HASH = "0" * 64
 
 
@@ -116,7 +116,7 @@ class LedgerEntry:
         )
 
     def recompute_hash(self) -> str:
-        """Recompute ``entry_hash`` from the payload — used by :meth:`UsageLedger.verify`."""
+        """Recompute ``entry_hash`` from the payload, used by :meth:`UsageLedger.verify`."""
         return hashlib.sha256(self.canonical_payload().encode("utf-8")).hexdigest()
 
     def as_dict(self) -> dict[str, object]:
@@ -143,7 +143,7 @@ class LedgerEntry:
 @runtime_checkable
 class LedgerStore(Protocol):
     """Persistence boundary. The default is in-memory; a production impl would back this with an
-    append-only table. The ledger only ever appends and updates the export marker — it never
+    append-only table. The ledger only ever appends and updates the export marker; it never
     deletes or rewrites billed fields."""
 
     def append(self, entry: LedgerEntry) -> None: ...
@@ -158,7 +158,7 @@ class LedgerStore(Protocol):
 
 
 class InMemoryLedgerStore:
-    """Default :class:`LedgerStore` — a per-tenant list. No infra; safe for dev/test."""
+    """Default :class:`LedgerStore`, a per-tenant list. No infra; safe for dev/test."""
 
     __slots__ = ("_by_tenant", "_keys")
 
@@ -222,7 +222,7 @@ class ReconciliationResult:
 
     @property
     def count_drift(self) -> int:
-        """``ledger_count - ingest_count`` — positive means the ledger has extra (possible double
+        """``ledger_count - ingest_count``: positive means the ledger has extra (possible double
         count), negative means usage was dropped before reaching the ledger."""
         return self.ledger_count - self.ingest_count
 
@@ -256,7 +256,7 @@ class InvoiceLine:
 
 @dataclass(frozen=True, slots=True)
 class InvoiceExport:
-    """An idempotent billing export — the shape Stripe (CTO-90) consumes.
+    """An idempotent billing export, the shape Stripe (CTO-90) consumes.
 
     ``newly_exported_sequences`` are the entries this call actually marked as exported; on a re-run
     it is empty and ``total_micro_usd`` reflects only the (zero) new charges, so re-export never
@@ -380,7 +380,7 @@ class UsageLedger:
 
         A tamper (changed amount/tenant/timestamp) changes that entry's recomputed hash, so either
         its own ``entry_hash`` no longer matches or the *next* entry's ``prev_hash`` no longer
-        matches — both are caught here.
+        matches; both are caught here.
         """
         entries = self._store.entries(tenant_id)
         expected_prev = GENESIS_HASH
@@ -405,7 +405,7 @@ class UsageLedger:
     def reconcile(self, tenant_id: str, ingest_count: int) -> ReconciliationResult:
         """Compare the ledger entry count against an independent ingest count.
 
-        ``reconciled`` is true only when the counts match exactly *and* the chain verifies — a
+        ``reconciled`` is true only when the counts match exactly *and* the chain verifies; a
         broken chain can never be considered reconciled.
         """
         entries = self._store.entries(tenant_id)

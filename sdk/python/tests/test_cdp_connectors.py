@@ -332,7 +332,7 @@ def test_registry_register():
 
 
 # --------------------------------------------------------------------------- #
-# Ingestor — idempotency, late/replay, routing
+# Ingestor: idempotency, late/replay, routing
 # --------------------------------------------------------------------------- #
 def _track(mid, revenue, ts="2026-05-01T00:00:00Z"):
     return {

@@ -4,7 +4,7 @@ The pattern every cloud-billing connector shares:
 
   1. Load a per-tenant control-plane config row (which provider, which credential reference, which
      cost-allocation tag filter).
-  2. Fetch the day's spend from the provider's billing API — behind an INJECTABLE client so tests
+  2. Fetch the day's spend from the provider's billing API, behind an INJECTABLE client so tests
      never touch the network and so egress (CTO-144) can plug in its own fetchers.
   3. Aggregate to one total per day and emit ONE synthetic span carrying that total as the cost.
   4. Record the run outcome (success / failed) on the control-plane row.
@@ -15,7 +15,7 @@ the same emitter / run contract / recorder are reused verbatim.
 
 Synthetic-span approach (matches the gateway ingest path in :mod:`gateway.mapping`): the cost is
 already authoritative from the billing API, so we set ``gen_ai.cost.estimated_micro_usd`` directly
-and reuse :func:`gateway.mapping.span_to_row` — we do NOT route through catalog cost enrichment
+and reuse :func:`gateway.mapping.span_to_row`; we do NOT route through catalog cost enrichment
 (there is no model to price). ``CostSource`` lands as ``'estimated'`` because a cost is present,
 which is correct: it's an estimate from the provider's *un-invoiced* Cost Explorer / Billing
 numbers, not a reconciled invoice. (Since CTO-244 a span with no cost attribute would instead land
@@ -27,7 +27,7 @@ double-count. Each synthetic span gets a DETERMINISTIC id derived from
 ``store.span_exists`` before inserting and skips a day that is already present. Backfill re-runs are
 therefore safe.
 
-Honest-under-uncertainty: a failed fetch records a ``failed`` run and emits NO span — never a
+Honest-under-uncertainty: a failed fetch records a ``failed`` run and emits NO span, never a
 guessed number.
 """
 
@@ -46,14 +46,14 @@ from gateway.mapping import span_to_row
 
 logger = logging.getLogger(__name__)
 
-# Fixed identity for synthetic billing spans. Not a real service/span — labelled so they're
+# Fixed identity for synthetic billing spans. Not a real service/span; labelled so they're
 # obviously connector-emitted when someone eyeballs otel_spans.
 _SERVICE_NAME = "cloud-billing"
 
 
 @dataclass(frozen=True, slots=True)
 class ConnectorConfig:
-    """One tenant's cloud-billing connector config — the loaded control-plane row.
+    """One tenant's cloud-billing connector config, the loaded control-plane row.
 
     ``credentials_ref`` is a Secret Manager / KMS / ARN reference (or ``'aws-default-chain'``),
     NEVER raw credentials. ``tag_filter`` is the cost-allocation tag set the AWS billing query is
@@ -61,7 +61,7 @@ class ConnectorConfig:
 
     The last two fields are GCP-only (CTO-150) and stay empty for AWS: ``bq_billing_export_table`` is
     the fully-qualified Cloud Billing BigQuery *export* table (``project.dataset.table``) the GCP
-    source reads — GCP has no fine-grained REST cost API, so the BQ export is the source of truth —
+    source reads (GCP has no fine-grained REST cost API, so the BQ export is the source of truth)
     and ``label_filter`` is the GCP label set the export query is scoped to (default
     ``{'tally-workload': 'ai'}``; GCP label keys can't contain ``:`` so they use ``-``, unlike the
     AWS cost-allocation ``tag_filter``).
@@ -130,7 +130,7 @@ class RunRecorder(Protocol):
     """Records a connector run outcome on the tenant's control-plane row.
 
     Mirrors :meth:`gateway.tenant_integrations.TenantIntegrationStore.record_run`. Egress reuses the
-    same shape — ``connector_id`` distinguishes ``'compute'`` from ``'egress'``.
+    same shape: ``connector_id`` distinguishes ``'compute'`` from ``'egress'``.
     """
 
     def record_run(
@@ -142,7 +142,7 @@ def synthetic_span_id(tenant_id: str, provider: str, operation: str, day: date) 
     """Deterministic ``(trace_id, span_id)`` for a connector's synthetic span.
 
     Stable across runs so re-emitting the same ``(tenant, provider, operation, day)`` produces the
-    same ids — the idempotency guard keys off ``span_id``. TraceId is 32 hex chars, SpanId 16, to
+    same ids; the idempotency guard keys off ``span_id``. TraceId is 32 hex chars, SpanId 16, to
     match the otel id widths the rest of the pipeline assumes.
     """
     digest = hashlib.sha256(
@@ -166,7 +166,7 @@ class CloudBillingConnector(ABC):
         dispatch across several clients (compute does this for aws vs. gcp).
     """
 
-    #: Set by subclass — the ``gen_ai.operation.name`` written on synthetic spans and the
+    #: Set by subclass: the ``gen_ai.operation.name`` written on synthetic spans and the
     #: connector_id used for run recording. ``'compute'`` here; ``'egress'`` in CTO-144.
     operation: str = ""
 
@@ -191,7 +191,7 @@ class CloudBillingConnector(ABC):
     ) -> list[DailyCost]:
         """Fetch per-day spend for ``config`` over ``[start_day, end_day]`` (inclusive).
 
-        Must raise on a failed fetch — :meth:`run` turns that into a ``failed`` run with no span.
+        Must raise on a failed fetch; :meth:`run` turns that into a ``failed`` run with no span.
         """
         raise NotImplementedError
 
@@ -205,7 +205,7 @@ class CloudBillingConnector(ABC):
         return self._run_range(config, start_day=day, end_day=day)
 
     def run_backfill(self, config: ConnectorConfig, *, start_day: date, end_day: date) -> RunResult:
-        """Backfill ``[start_day, end_day]`` in one fetch. Idempotent — re-running skips days that
+        """Backfill ``[start_day, end_day]`` in one fetch. Idempotent: re-running skips days that
         already have a synthetic span (see :meth:`emit_cost_span`), so no double-counting.
         """
         return self._run_range(config, start_day=start_day, end_day=end_day)
@@ -214,7 +214,7 @@ class CloudBillingConnector(ABC):
         provider = config.cloud_provider
         try:
             costs = self.fetch_daily_costs(config, start_day=start_day, end_day=end_day)
-        except Exception as exc:  # noqa: BLE001 — a failed fetch must NOT emit a guessed span.
+        except Exception as exc:  # noqa: BLE001 - a failed fetch must NOT emit a guessed span
             logger.warning(
                 "compute connector fetch failed tenant=%s provider=%s: %s",
                 config.tenant_id,
@@ -269,7 +269,7 @@ class CloudBillingConnector(ABC):
 
         Returns ``True`` if a row was inserted, ``False`` if it was skipped because a span for this
         ``(tenant, provider, operation, day)`` already exists (idempotency guard) or the cost is
-        non-positive (nothing to record — a $0 day is not worth a synthetic span).
+        non-positive (nothing to record; a $0 day is not worth a synthetic span).
 
         The cost is set DIRECTLY (no catalog enrichment) and the row is built with the same
         :func:`gateway.mapping.span_to_row` the live ingest path uses, so the synthetic row is

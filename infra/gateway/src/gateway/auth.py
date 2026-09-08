@@ -1,6 +1,6 @@
 """API-key auth against the Postgres control plane.
 
-Keys are never stored raw — ``api_keys.key_hash`` holds the SHA-256 hex of the token. We hash the
+Keys are never stored raw: ``api_keys.key_hash`` holds the SHA-256 hex of the token. We hash the
 presented bearer token and look up a non-revoked row, returning its tenant_id **and scope**
 (``read`` / ``write`` / ``admin``). Ingest (writing spans) requires ``write`` or ``admin``; a
 read-only key is rejected with ``FORBIDDEN_SCOPE`` (CTO-33).
