@@ -1149,51 +1149,181 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
 // The value of the fix is that it is applied to ALL of the reads rather than to the ones that
 // looked risky: a surface where some panels dedupe and some do not is worse than one where none do,
 // because two panels then disagree and neither is obviously wrong. That property spans ~40 query
-// sites across five files, which is more than review can hold, so it is asserted against the source
-// text. A query added later that forgets FINAL fails here.
+// sites, which is more than review can hold, so it is asserted against the source text.
+//
+// The guard DISCOVERS its own inputs: it walks web/ and checks every file that mentions otel_spans.
+// A hardcoded file list would only guard the readers that existed when the list was written, and the
+// failure this exists to prevent is a NEW reader (a detector, an /api route) shipping without FINAL.
 describe("otel_spans read paths dedupe (#314)", () => {
-  // Files that build SQL against otel_spans. Listed explicitly rather than globbed so that adding a
-  // new reader is a deliberate act which shows up in this list.
-  const SOURCES = [
-    "clickhouse.ts",
-    "waste/duplicated-work.ts",
-    "waste/no-measured-return.ts",
-    "waste/paid-for-nothing.ts",
-    "waste/wrong-sized-model.ts",
+  // Vitest's root is `web/`, so the walk covers the checkout rather than a bundle.
+  const WEB_ROOT = process.cwd();
+
+  // Build output and dependencies are not source we own, and scanning node_modules is minutes, not
+  // milliseconds.
+  const SKIP_DIRS = new Set([
+    ".git",
+    ".next",
+    ".turbo",
+    ".vercel",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+  ]);
+  const CODE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+
+  // This file is the one exclusion: it carries the guard's own fixtures, including deliberately
+  // un-FINAL'd SQL that the pattern below is supposed to flag.
+  const SELF = "lib/clickhouse.test.ts";
+
+  // Deliberate exemptions, matched as whole query strings so an exemption cannot drift onto a
+  // neighbouring read. queryFirstEventSeen selects the literal 1 and asks only whether a row exists;
+  // a duplicate cannot change a boolean, so FINAL would buy nothing there and it is not free on an
+  // endpoint the onboarding panel polls. Blanked rather than deleted so reported line numbers stay
+  // true to the file on disk.
+  const EXEMPT_READS = [
+    "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1",
   ];
 
-  // The single deliberate exemption, matched as a whole line so it cannot drift. queryFirstEventSeen
-  // selects the literal 1 and asks only whether a row exists; a duplicate cannot change a boolean,
-  // so FINAL would buy nothing there and it is not free on an endpoint the onboarding panel polls.
-  const EXEMPT = "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1";
-
-  // FROM/JOIN otel_spans, plus an optional alias, plus FINAL if it is there.
+  // FROM/JOIN otel_spans, plus an optional database qualifier, an optional `AS`, an optional alias,
+  // and FINAL if it is there. The alias is matched so that a read WITHOUT FINAL still produces a
+  // match to flag: dropping it would turn a missing FINAL into zero matches, which is the silent
+  // pass this guard exists to rule out. Case-insensitive and qualifier-aware for the same reason.
   const READ =
-    /\b(?:FROM|(?:INNER |LEFT |RIGHT |CROSS )?JOIN)\s+otel_spans\b(?:\s+(?!FINAL\b)[A-Za-z_]\w*)?(?:\s+FINAL\b)?/g;
+    /\b(?:FROM|(?:(?:INNER|LEFT|RIGHT|FULL|OUTER|CROSS|ANY|ALL|ASOF|SEMI|ANTI)\s+)*JOIN)\s+(?:[A-Za-z_]\w*\s*\.\s*)?otel_spans\b(?:\s+AS\b)?(?:\s+(?!FINAL\b)[A-Za-z_]\w*)?(?:\s+FINAL\b)?/gi;
 
-  async function source(rel: string): Promise<string> {
-    const { readFile } = await import("node:fs/promises");
-    const { resolve } = await import("node:path");
-    // Vitest's root is `web/`, so these resolve against the checkout rather than the bundle.
-    return readFile(resolve(process.cwd(), "lib", rel), "utf8");
+  const HAS_FINAL = /\bFINAL\b/i;
+
+  // Comments are prose, not reads: several files (and one /api route owned by another PR) describe
+  // the query in a sentence that contains "FROM otel_spans", and failing the build on those would
+  // train contributors to silence the guard. String literals are not parsed, so a `//` inside one
+  // would over-strip; the ">30 reads" check below fails loudly if that ever eats the real SQL.
+  // Blanked in place, newlines kept, so match offsets still map to real line numbers.
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/(^|[^:])\/\/[^\n]*/gm, (m, lead: string) => lead + " ".repeat(m.length - lead.length));
   }
 
-  it.each(SOURCES)("%s reads otel_spans only with FINAL", async (rel) => {
-    // Drop the one exempt query before matching, so the exemption is scoped to that exact text and
-    // not to the file it lives in.
-    const src = (await source(rel)).split(EXEMPT).join("");
-    const missing = (src.match(READ) ?? []).filter((m) => !/\bFINAL\b/.test(m));
-    expect(missing, `${rel}: otel_spans read without FINAL`).toEqual([]);
+  function blank(src: string, literal: string): string {
+    return src.split(literal).join(" ".repeat(literal.length));
+  }
+
+  function lineOf(src: string, index: number): number {
+    return src.slice(0, index).split("\n").length;
+  }
+
+  async function walk(): Promise<string[]> {
+    const { readdir } = await import("node:fs/promises");
+    const { join, relative, sep } = await import("node:path");
+    const found: string[] = [];
+    async function visit(dir: string): Promise<void> {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (!SKIP_DIRS.has(entry.name)) await visit(full);
+        } else if (entry.isFile() && CODE.test(entry.name)) {
+          found.push(relative(WEB_ROOT, full).split(sep).join("/"));
+        }
+      }
+    }
+    await visit(WEB_ROOT);
+    return found.sort();
+  }
+
+  /** Every file under web/ whose text mentions otel_spans, with its comment-stripped source. */
+  async function mentions(): Promise<Array<{ rel: string; src: string }>> {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    const out: Array<{ rel: string; src: string }> = [];
+    for (const rel of await walk()) {
+      if (rel === SELF) continue;
+      const raw = await readFile(resolve(WEB_ROOT, rel), "utf8");
+      if (!raw.includes("otel_spans")) continue;
+      out.push({ rel, src: stripComments(raw) });
+    }
+    return out;
+  }
+
+  function offenders(rel: string, src: string): string[] {
+    let scanned = src;
+    for (const exempt of EXEMPT_READS) scanned = blank(scanned, exempt);
+    const found: string[] = [];
+    for (const m of scanned.matchAll(READ)) {
+      if (HAS_FINAL.test(m[0])) continue;
+      found.push(`${rel}:${lineOf(scanned, m.index)}: ${m[0].replace(/\s+/g, " ").trim()}`);
+    }
+    return found;
+  }
+
+  it("every otel_spans read under web/ says FINAL", async () => {
+    const bad = (await mentions()).flatMap(({ rel, src }) => offenders(rel, src));
+    expect(
+      bad,
+      "otel_spans is a ReplacingMergeTree: read it with FINAL or the panel over-counts replayed " +
+        "spend until a background merge runs. Add FINAL to the read below, or, if the query " +
+        "provably cannot see a duplicate, add its exact SQL to EXEMPT_READS in this file with the " +
+        "reason.",
+    ).toEqual([]);
   });
 
   it("matches the reads it is meant to be guarding", async () => {
-    // Guards the guard: if the pattern ever stops matching, the assertion above passes vacuously.
-    const src = await source("clickhouse.ts");
-    expect((src.match(READ) ?? []).length).toBeGreaterThan(30);
+    // Guards the guard: if the pattern, the walk or the comment stripper ever stops seeing the SQL,
+    // the assertion above passes vacuously.
+    const files = await mentions();
+    const total = files.reduce((n, f) => n + (f.src.match(READ) ?? []).length, 0);
+    expect(total).toBeGreaterThan(30);
+    for (const rel of [
+      "lib/clickhouse.ts",
+      "lib/waste/duplicated-work.ts",
+      "lib/waste/no-measured-return.ts",
+      "lib/waste/paid-for-nothing.ts",
+      "lib/waste/wrong-sized-model.ts",
+    ]) {
+      expect(files.map((f) => f.rel)).toContain(rel);
+    }
   });
 
-  it("keeps the exemption to exactly one query", async () => {
-    const src = await source("clickhouse.ts");
-    expect(src.split(EXEMPT).length - 1).toBe(1);
+  it("keeps the exemption to exactly one query, everywhere it is honored", async () => {
+    // The exemption is stripped from every scanned file, so copying the marker into a detector would
+    // silently exempt it there too. Counting across the same set the exemption applies to is what
+    // makes "exactly one" mean anything.
+    const files = await mentions();
+    for (const exempt of EXEMPT_READS) {
+      const uses = files.reduce((n, f) => n + (f.src.split(exempt).length - 1), 0);
+      expect(uses, `EXEMPT_READS entry is honored in more than one place: ${exempt}`).toBe(1);
+    }
+  });
+
+  it("reads the SQL forms a contributor might actually write", () => {
+    // The pattern is the whole guard, so its two failure modes are pinned here: a FALSE FAILURE on
+    // correct SQL trains people to work around it, and a SILENT PASS on a lowercase or
+    // database-qualified read makes it worthless.
+    const flag = (sql: string) =>
+      [...sql.matchAll(READ)].filter((m) => !HAS_FINAL.test(m[0])).map((m) => m[0]);
+
+    for (const ok of [
+      "FROM otel_spans FINAL",
+      "FROM otel_spans s FINAL",
+      "FROM otel_spans AS s FINAL", // the `AS` form used at clickhouse.ts (attribution_records AS ar FINAL)
+      "from otel_spans as s final",
+      "FROM tally.otel_spans AS s FINAL",
+      "INNER JOIN otel_spans AS s FINAL ON s.UserIdHash = b.UserIdHash",
+      "LEFT JOIN otel_spans FINAL ON 1",
+    ]) {
+      expect(flag(ok), `false failure on correct SQL: ${ok}`).toEqual([]);
+    }
+
+    for (const bad of [
+      "FROM otel_spans WHERE TenantId = {tenant:String}",
+      "FROM otel_spans AS s WHERE 1",
+      "from otel_spans where 1",
+      "FROM tally.otel_spans AS s WHERE 1",
+      "INNER JOIN otel_spans AS s ON s.UserIdHash = b.UserIdHash",
+      "SELECT sum(EstimatedCost) FROM otel_spans GROUP BY Model",
+    ]) {
+      expect(flag(bad), `silent pass on a read without FINAL: ${bad}`).toHaveLength(1);
+    }
   });
 });

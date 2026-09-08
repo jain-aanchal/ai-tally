@@ -23,13 +23,17 @@
 // a literal rather than a value (see the comment there); `clickhouse.test.ts` fails the build if any
 // other otel_spans read drops FINAL.
 //
-// The cost is real but small, and it is bounded by how un-merged the table is rather than by how
-// much data the query reads. Measured on the local corpus (1.54M spans, three tenants): with the
-// table fully merged (one part per partition) FINAL is inside the noise; forced to 372 parts over 31
-// partitions, roughly twelve times un-merged, the heaviest dashboard query goes from 148ms to 200ms
-// of ClickHouse time and the rest move by 25-50ms each. End to end that leaves /waste at ~620ms and
-// Home at ~470ms against a production build, both inside the one-second bar CTO-227 bought back and
-// both inside run-to-run noise. Numbers and method are in the PR for #314.
+// The cost is real. FINAL merges the scanned rows across the parts that hold them, so it scales
+// with BOTH how much data the query reads and how un-merged the table is; only the RATIO between a
+// merged and an un-merged table is bounded by un-mergedness. Measured on the local corpus (1.54M
+// spans, three tenants): with the table fully merged (one part per partition) FINAL is inside the
+// noise; forced to 372 parts over 31 partitions, roughly twelve times un-merged, the heaviest
+// dashboard query goes from 148ms to 200ms of ClickHouse time and the rest move by 25-50ms each.
+// End to end /waste measured 644ms before and 617ms after against a production build, which is a
+// speedup after adding work and therefore noise: the page-level delta is UNMEASURED, not shown to
+// be small, because the run-to-run spread (617-728ms) is wider than any effect this could have. All
+// that is established at page level is that both pages stay inside the one-second bar CTO-227
+// bought back. Numbers and method are in the PR for #314.
 //
 // Server-only: imported solely by Route Handlers pinned to the nodejs runtime (never a client
 // component), so it never reaches the browser bundle.
@@ -2989,6 +2993,20 @@ export async function queryAttribution(
     // ValueAmountMicro is Nullable(Int64), so `sumIf` over a group with no matching row yields NULL
     // rather than 0 and the NULL then swallows the whole subtraction. The `ifNull(..., 0)` inside
     // each sumIf is what keeps a tenant with zero refunds from reporting NULL revenue.
+    //
+    // KNOWN WRONG, SEPARATELY (both predate #314 / CTO-245, do not read the FINAL below as a fix):
+    //
+    // 1. Join fan-out. This sums b.ValueAmountMicro across an INNER JOIN on otel_spans, so a
+    //    business event is counted once per matching span for that user: a user with 30 spans
+    //    contributes their revenue 30 times. FINAL removes the DUPLICATE-SPAN multiplier and nothing
+    //    else, so the figure stays inflated by the real span count. The sibling conversions query
+    //    above survives the same join only because uniqExact collapses the fan-out; a sum cannot.
+    //    The fix is to aggregate business_events before joining (or drop the join and filter users
+    //    by a subquery), which changes the number this panel shows and needs its own change.
+    // 2. Float dollars in SQL. The `/ 1000000` divides integer micro-USD inside ClickHouse, so the
+    //    value arrives already converted and already floating, against the money invariant (integer
+    //    micro-USD end to end, converted at the boundary only). It should return micro-USD and let
+    //    micro() do the conversion.
     const positiveTypes = positiveValueTypes(policy);
     const sourceFilter = revenueSourceFilter(policy, "b");
     const revenueRows = await rowsP<{
