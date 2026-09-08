@@ -85,7 +85,19 @@ class Proposal:
 
     @property
     def layers_wired(self) -> list[str]:
-        return sorted({e.kind for e in self.edits})
+        """Layers that actually meter after this diff lands.
+
+        A block with an unfilled hole is inserted commented out, so it meters nothing. It
+        must never be counted here: a summary that lists ``vector`` because a commented-out
+        record_vector_call was inserted is a summary claiming work the diff did not do
+        (CLAUDE.md: honest under uncertainty).
+        """
+        return sorted({e.kind for e in self.edits if not e.holes_to_fill})
+
+    @property
+    def layers_inserted_inactive(self) -> list[str]:
+        """Layers whose block was inserted but commented out pending a hole being filled."""
+        return sorted({e.kind for e in self.edits if e.holes_to_fill})
 
     @property
     def holes(self) -> list[str]:
@@ -103,10 +115,12 @@ def account_candidates(repo_dir: Path) -> list[dict[str, str]]:
     """
     seen: set[tuple[str, str]] = set()
     out: list[dict[str, str]] = []
-    from .repo_scan import python_files  # local import keeps the scan surface in one module
+    # Local import keeps the scan surface in one module. _read is the tolerant reader: one
+    # unreadable file in the repo must not abort the whole run.
+    from .repo_scan import _read, python_files
 
     for path in python_files(repo_dir):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _read(path)
         for kind, pattern in _CANDIDATE_PATTERNS:
             for match in pattern.finditer(text):
                 key = (kind, match.group(1))
@@ -254,7 +268,12 @@ def _propose_call_sites(
 ) -> None:
     """The layer-specific record_* edits, each adapted to its real call site."""
     matched = list(proposal.detection.get("matched_recipes", []))
-    sites: list[CallSite] = find_call_sites(repo_dir, matched, catalog=cat, limit=max_call_sites)
+    sites: list[CallSite]
+    sites, weak = find_call_sites(repo_dir, matched, catalog=cat, limit=max_call_sites)
+    for match in weak:
+        # A pattern hit the scan could not bind to the recipe's library. Reported, never
+        # turned into a record_* call that would attribute the wrong provider.
+        proposal.gaps.append(gap(match.reason, recipe_id=match.recipe_id))
     for site in sites:
         recipe = cat.get(site.recipe_id)
         if site.source_line.startswith(("return ", "yield ")):

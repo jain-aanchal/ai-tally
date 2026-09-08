@@ -273,8 +273,23 @@ not merely promised here:
   (and `rebase`, `cherry-pick`, `reset`) is on neither, so no code path reaches one. The PR
   waits for a human.
 - **It keeps no source.** The clone is shallow, lives in a temporary directory, and is
-  deleted in a `finally` on every exit path including a refused run. What the run returns is
-  paths, counts, generated code and gaps, never your source.
+  deleted in a `finally` on every exit path including a refused run, and by a SIGTERM /
+  SIGINT handler so a runner that stops the job does not leave the clone behind either. A
+  `SIGKILL` cannot be caught by anything, so the promise is every exit path the process
+  controls. A cleanup that fails is reported in `cleanup_error`, never swallowed. What the
+  run returns is paths, counts, generated code and gaps, never your source.
 - **It invents nothing.** Every line it writes comes from the recipe catalog. A value it
   cannot derive from the call site stays a visible `<FILL:...>` hole, and a block with a hole
   is inserted commented out so nothing runs on a guessed value.
+- **It claims nothing it did not do.** `layers_wired` (in the JSON result, the commit
+  subject and the PR table) lists only blocks that actually meter. A block inserted
+  commented out is reported separately as inactive.
+- **It never commits code that does not compile.** Every block goes in at a statement
+  boundary resolved from the parsed file, and every patched Python file is run through
+  `compile()` before anything is written. A file it cannot patch cleanly is left untouched
+  and reported as a gap.
+
+Each run gets its own branch (`tally/onboarding/<run id>`); pass `--branch-suffix` to name
+it yourself. If the branch is already on the remote the run stops and says so instead of
+failing at push. If the push succeeds but the PR call does not, the exit is non-zero and the
+printed result carries `orphan_branch` so you can find the branch it left.

@@ -160,6 +160,92 @@ def test_redact_strips_the_secret_from_anything_surfaced():
     assert guards.redact("clean", None) == "clean"
 
 
+# --- the operator's own flags are allowlisted too --------------------------- #
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        'X"; touch /tmp/PWNED; :"',
+        "TOKEN; rm -rf /",
+        "TOKEN$(id)",
+        "TOKEN`id`",
+        "2TOKEN",
+        "",
+        "TOKEN NAME",
+    ],
+)
+def test_a_token_env_name_that_could_carry_shell_syntax_is_refused(name):
+    # --token-env is interpolated into the GIT_ASKPASS helper. Unvalidated it is a shell
+    # expression in the one module whose whole thesis is allowlisting.
+    with pytest.raises(SecurityViolation):
+        guards.assert_token_env_name_allowed(name)
+    with pytest.raises(SecurityViolation):
+        BotConfig(repo="acme/widgets", token_env=name)
+
+
+def test_the_askpass_helper_cannot_be_written_with_an_injected_name(tmp_path: Path):
+    runner = GitRunner(_config(), tmp_path)
+    # A config that got past construction (a mutated field, a subclass) is still refused at
+    # the point the helper is written.
+    object.__setattr__(runner.config, "token_env", 'X"; touch pwned; :"')
+    with pytest.raises(SecurityViolation):
+        runner._askpass_path()
+    assert not (tmp_path / "askpass.sh").exists()
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "acme/widgets?ref=x",
+        "acme/widgets#frag",
+        "acme/wid gets",
+        "acme/..",
+        "acme/widgets/pulls",
+    ],
+)
+def test_a_repo_that_would_make_the_checked_path_differ_from_the_sent_one_is_refused(repo):
+    # The endpoint allowlist matches the path the bot builds. "acme/widgets?ref=x" matches
+    # ^/repos/[^/]+/[^/]+/pulls$ while urllib sends POST /repos/acme/widgets with a query.
+    with pytest.raises(SecurityViolation):
+        BotConfig(repo=repo, token_env=TOKEN_ENV)
+
+
+def test_a_refs_heads_namespaced_default_branch_is_still_refused():
+    # refs/heads/main and main are the same branch to git, so the refusal compares
+    # normalized names rather than raw strings.
+    with pytest.raises(SecurityViolation):
+        guards.assert_push_target_allowed("refs/heads/main", "main")
+    with pytest.raises(SecurityViolation):
+        guards.assert_push_target_allowed("main", "refs/heads/main")
+    with pytest.raises(SecurityViolation):
+        guards.assert_push_target_allowed("refs/heads/refs/heads/main", "main")
+
+
+def test_the_push_path_inspects_the_flags_it_actually_passes(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv(TOKEN_ENV, "ghp_secret_value")
+    repo = _init_repo(tmp_path / "repo")
+    runner = GitRunner(_config(), tmp_path)
+    with pytest.raises(SecurityViolation) as exc:
+        runner.push_branch(repo, "tally/onboarding/x", "main", flags=("--force",))
+    assert "force" in str(exc.value)
+    assert runner.commands == [], "the refused push never reached git"
+
+
+def test_two_runs_get_two_branch_names():
+    # A fixed fallback suffix made the second run against a repo die at push with a bare
+    # non-fast-forward error and no PR.
+    first = BotConfig(repo="acme/widgets", token_env=TOKEN_ENV)
+    second = BotConfig(repo="acme/widgets", token_env=TOKEN_ENV)
+    assert first.branch_name() != second.branch_name()
+    assert first.branch_name().startswith("tally/onboarding/")
+    # An explicit suffix is still honoured verbatim.
+    assert (
+        BotConfig(repo="acme/widgets", token_env=TOKEN_ENV, branch_suffix="run-1").branch_name()
+        == "tally/onboarding/run-1"
+    )
+
+
 def _init_repo(path: Path) -> Path:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)

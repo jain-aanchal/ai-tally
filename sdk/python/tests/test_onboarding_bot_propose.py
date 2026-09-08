@@ -136,8 +136,9 @@ def test_applying_the_proposal_writes_valid_marked_python(tmp_path: Path):
     proposal = build_proposal(
         repo, account_source='request.headers.get("X-Customer-Id")', feature_tag="ask"
     )
-    touched = apply_proposal(repo, proposal)
-    assert touched == ["app/main.py"]
+    patched_result = apply_proposal(repo, proposal)
+    assert patched_result.files_changed == ["app/main.py"]
+    assert patched_result.gaps == []
 
     patched = (repo / "app" / "main.py").read_text()
     compile(patched, "main.py", "exec")  # the diff must be syntactically valid Python
@@ -146,6 +147,68 @@ def test_applying_the_proposal_writes_valid_marked_python(tmp_path: Path):
     assert "tally.with_account(" in patched
     # import tally is added once, not per edit.
     assert patched.count("import tally\n") == 1
+
+
+def test_a_commented_out_block_is_never_reported_as_a_wired_layer(tmp_path: Path):
+    proposal = build_proposal(
+        sample_repo(tmp_path),
+        account_source='request.headers.get("X-Customer-Id")',
+        feature_tag="ask",
+    )
+    vector = next(e for e in proposal.edits if e.kind == "vector")
+    assert vector.holes_to_fill, "this block is inserted commented out"
+    # It meters nothing, so it is not a wired layer anywhere the run reports one.
+    assert "vector" not in proposal.layers_wired
+    assert "vector" in proposal.layers_inserted_inactive
+    assert set(proposal.layers_wired) == {"startup", "account"}
+
+
+def test_a_call_matched_from_another_library_is_a_gap_not_a_mislabelled_edit(tmp_path: Path):
+    # A repo with both pinecone and sqlalchemy: session.query(...) is not a Pinecone call,
+    # and a record_vector_call(provider="pinecone") after it would meter the wrong thing.
+    repo = tmp_path / "mixed"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("pinecone\nsqlalchemy\n")
+    (repo / "db.py").write_text(
+        "from sqlalchemy.orm import Session\n\n\n"
+        "def rows(session: Session, q):\n"
+        "    result = session.query(q).all()\n"
+        "    return result\n"
+    )
+    proposal = build_proposal(repo, account_source=None)
+
+    assert not any(e.path == "db.py" for e in proposal.edits)
+    assert any(
+        "imports none of" in g["reason"] and g.get("recipe_id") == "vector.pinecone.query"
+        for g in proposal.gaps
+    )
+
+
+def test_a_pattern_inside_a_comment_or_a_string_is_not_a_call_site(tmp_path: Path):
+    repo = tmp_path / "prose"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("pinecone\n")
+    (repo / "notes.py").write_text(
+        "from pinecone import Pinecone\n\n"
+        "# call index.query(vector=[0.1], top_k=3) to search\n"
+        'DOC = """index.query(vector=[0.1], top_k=3)"""\n'
+    )
+    proposal = build_proposal(repo, account_source=None)
+    assert not any(e.kind == "vector" for e in proposal.edits)
+
+
+def test_tally_init_is_not_dropped_into_a_test_fixture(tmp_path: Path):
+    # A startup site found only under tests/ is not the process the developer deploys.
+    # Reporting that is honest; instrumenting the test run and leaving the real entrypoint
+    # unmetered is not.
+    repo = tmp_path / "tested"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "requirements.txt").write_text("fastapi\nopenai\n")
+    (repo / "tests" / "test_app.py").write_text("from fastapi import FastAPI\n\napp = FastAPI()\n")
+    proposal = build_proposal(repo, account_source=None)
+
+    assert not any(e.kind == "startup" for e in proposal.edits)
+    assert any("no recognisable startup site" in g["reason"] for g in proposal.gaps)
 
 
 def test_a_block_with_an_unfilled_hole_is_inserted_inactive_not_invented(tmp_path: Path):

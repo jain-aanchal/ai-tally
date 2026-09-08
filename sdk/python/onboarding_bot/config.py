@@ -17,12 +17,29 @@ same settings page when the run is done.
 from __future__ import annotations
 
 import os
+import secrets
+import time
 from dataclasses import dataclass, field
 
-from .guards import SecurityViolation
+from .guards import (
+    SecurityViolation,
+    assert_repo_part_allowed,
+    assert_token_env_name_allowed,
+)
 
 DEFAULT_TOKEN_ENV = "TALLY_ONBOARDING_GITHUB_TOKEN"
 DEFAULT_BRANCH_PREFIX = "tally/onboarding"
+
+
+def new_run_id() -> str:
+    """A per-run branch suffix: a UTC date plus random hex.
+
+    A fixed suffix makes the second run against a repo collide with the first branch and
+    die at push with a bare non-fast-forward error and no PR (CTO-261). A run id is the
+    smallest thing that makes two runs two branches; the date keeps the name readable for
+    the developer who has to find it.
+    """
+    return f"{time.strftime('%Y%m%d', time.gmtime())}-{secrets.token_hex(3)}"
 
 
 @dataclass(frozen=True)
@@ -45,22 +62,36 @@ class BotConfig:
     feature_tag: str | None = None
     branch_prefix: str = DEFAULT_BRANCH_PREFIX
     branch_suffix: str = ""
-    """Appended to the generated branch name; a run id in production, fixed in tests."""
+    """Appended to the generated branch name; a run id in production, fixed in tests.
+
+    Left empty it is filled once, at construction, with :func:`new_run_id`, so two runs
+    against the same repo are two branches rather than a push collision."""
 
     labels: list[str] = field(default_factory=list)
     max_call_sites: int = 25
     """Cap on instrumented call sites so one run stays a reviewable diff, not a rewrite."""
 
+    def __post_init__(self) -> None:
+        # Validated here rather than at the point of use so a malformed run refuses before
+        # it clones anything, and so no unchecked operator string reaches the credential
+        # helper or the endpoint allowlist (CTO-261 section 9).
+        assert_token_env_name_allowed(self.token_env)
+        _owner, _name = self.owner_and_name
+        if not self.branch_suffix:
+            object.__setattr__(self, "branch_suffix", new_run_id())
+
     def branch_name(self) -> str:
-        suffix = self.branch_suffix or "wire-tally"
-        return f"{self.branch_prefix}/{suffix}"
+        return f"{self.branch_prefix}/{self.branch_suffix}"
 
     @property
     def owner_and_name(self) -> tuple[str, str]:
         parts = self.repo.split("/")
         if len(parts) != 2 or not all(parts):
             raise SecurityViolation(f"repo must be 'owner/name', got {self.repo!r}")
-        return parts[0], parts[1]
+        owner, name = parts
+        assert_repo_part_allowed(owner, field="owner")
+        assert_repo_part_allowed(name, field="name")
+        return owner, name
 
 
 def resolve_token(config: BotConfig) -> str:

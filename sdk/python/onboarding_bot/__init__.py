@@ -19,13 +19,14 @@ Two properties hold the whole component together:
   * The section 9 posture is code, not prose: :mod:`onboarding_bot.guards` refuses a push to
     a default branch, refuses every git subcommand and GitHub endpoint outside the narrow
     set a reviewed PR needs (merge is on neither list), and redacts the token from anything
-    the component emits. The working clone is deleted in a ``finally``.
+    the component emits. The working clone is deleted in a ``finally`` and by a SIGTERM /
+    SIGINT handler, so a stopped hosted run leaves no clone behind either.
 """
 
 from .config import DEFAULT_TOKEN_ENV, BotConfig, resolve_token
 from .guards import SecurityViolation
 from .propose import ACCOUNT_QUESTION, Proposal, ProposedEdit, account_question, build_proposal
-from .run import RunResult, pr_body, run_bot
+from .run import RunFailed, RunResult, pr_body, run_bot
 
 __all__ = [
     "BotConfig",
@@ -38,6 +39,7 @@ __all__ = [
     "account_question",
     "build_proposal",
     "RunResult",
+    "RunFailed",
     "run_bot",
     "pr_body",
 ]
