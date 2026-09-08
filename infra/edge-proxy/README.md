@@ -58,7 +58,7 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_BROKER_TTL` | `5m` | how long a minted credential is reused before re-minting |
 | `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
 | `EDGE_PROXY_TELEMETRY_URL` | — | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
-| `EDGE_PROXY_INGEST_TOKEN` | — | **fallback** bearer for those POSTs, used only for records that carry no tenant key of their own (single-tenant self-host without `EDGE_PROXY_REQUIRE_TENANT`); normally the presented `X-Tenant-Key` authenticates |
+| `EDGE_PROXY_INGEST_TOKEN` | — | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
 | `EDGE_PROXY_ROUTES` | — | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
 | `EDGE_PROXY_ROUTE_MODE` | `host` | `host` (match on hostname, hosted default) or `path` (match+strip a leading prefix) |
 | `EDGE_PROXY_KEYS_URL` | — | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
@@ -217,20 +217,43 @@ traffic does and lands in the same `otel_spans` columns:
 Method, path, byte counts, upstream-failure flag and the deployment label ride along as span
 attributes and land in `SpanAttributes`, so nothing about this needed a schema change.
 
-**Auth.** Each POST carries `Authorization: Bearer <the tenant key the caller presented>`. That key
-is the caller's own ai-tally api key, so the gateway resolves it to the same tenant the proxy did
-and every batch is authenticated by the tenant it belongs to, which is what makes the hosted
-multi-tenant deployment correct by construction. The key travels on the header only; it is never a
-field in the body and never logged. `EDGE_PROXY_INGEST_TOKEN` is the fallback for a deployment
-whose requests carry no tenant key at all. With neither available the record is shed and counted
-(`HTTPSink.Unauthenticated()`) rather than posted unattributable.
+The route's provider label is mapped to the `gen_ai.system` value the rest of the product uses:
+`gemini` ships as **`google`**, because that is the provider string the price catalog keys Google
+models under and it compares by exact equality. Without the mapping every hosted Gemini span would
+be permanently uncostable and would aggregate separately from the same org's SDK Gemini spans.
+(`TestGeminiShipsAsGoogleSystem`.)
 
-**Unknown stays unknown.** Token counts are nullable end to end: a streamed response, a body past
-the metadata scan cap, and an error response all leave them absent from the JSON, so they reach
-storage as NULL. A `0` would read downstream as a real call that consumed nothing. Same for the
-model and the provider: omitted when they could not be extracted, which makes the span honestly
-unpriceable rather than priced against a guess. (`TestUnknownTokensSerializeAsNullNeverZero`,
+**Auth.** Each POST carries `Authorization: Bearer <the tenant key the caller presented>`, but only
+when the edge-key cache actually **resolved** that key. A resolved key is the caller's own ai-tally
+api key, so the gateway resolves it to the same tenant the proxy did and every batch is
+authenticated by the tenant it belongs to, which is what makes the hosted multi-tenant deployment
+correct by construction. An unresolved `X-Tenant-Key` is just a client-controlled string, not a
+credential, so it never becomes an outgoing bearer: `EDGE_PROXY_INGEST_TOKEN` is used instead. With
+neither available the record is shed and counted (`HTTPSink.Unauthenticated()`) rather than posted
+unattributable. The key travels on the header only; it is never a field in the body and never
+logged.
+
+**Failure is never silent.** A config that can authenticate nothing (`EDGE_PROXY_TELEMETRY_URL` set,
+no `EDGE_PROXY_INGEST_TOKEN`, no `EDGE_PROXY_KEYS_URL`) is warned about at startup rather than
+logging a destination the proxy will never write to (`Config.Warnings()`). At runtime the sink
+reports what it shed once a minute and again at shutdown, and stays silent when it shed nothing.
+Per-item refusals count too: the gateway reports validation failures as `partial_errors` inside an
+HTTP **200** body, so the sink parses the ack and counts any span the gateway did not accept
+(`HTTPSink.Rejected()`), logging the error codes but never the gateway's per-item messages, which
+can echo request detail.
+
+**Unknown stays unknown on the wire.** A streamed response, a body past the metadata scan cap, and
+an error response all leave the token counts absent from the emitted JSON rather than serialized as
+`0`, which would read downstream as a real call that consumed nothing. Same for the model and the
+provider: omitted when they could not be extracted, which makes the span honestly unpriceable rather
+than priced against a guess. (`TestUnknownTokensSerializeAsNullNeverZero`,
 `TestZeroTokensStillSerialize`.)
+
+That guarantee currently ends at the proxy's outbound wire. The gateway's mapping coerces a missing
+count to `0` and the `otel_spans` token columns are non-nullable `UInt32`, so an omitted count still
+lands as `0` in storage today. Carrying the unknown through as a real `NULL` needs a gateway and
+schema change tracked separately; what the proxy guarantees is that it is not the place the `0` is
+invented.
 
 ### Container image
 

@@ -45,10 +45,11 @@ proxy:
   # /v1/batches requests (e.g. https://ingest.ai-tally.com/v1/batches). Empty disables telemetry
   # shipping entirely (the proxy still works; it just emits nothing).
   #
-  # Each batch is authenticated by the tenant key the caller presented, so no credential is
-  # configured here. A single-tenant install whose callers send no tenant key needs the
-  # EDGE_PROXY_INGEST_TOKEN fallback instead; that is a secret, so set it on the Deployment from
-  # your own Secret rather than through this chart's ConfigMap.
+  # Each batch is authenticated by the tenant key the caller presented, provided the edge-key cache
+  # resolved it, so a deployment with keysURL set needs no credential here. Any other install (no
+  # key feed, or callers that send no tenant key) needs the EDGE_PROXY_INGEST_TOKEN fallback, or its
+  # telemetry is shed unauthenticated and the proxy warns about it at startup. That token is a
+  # secret, so set it on the Deployment from your own Secret rather than through this ConfigMap.
   telemetryURL: ""
 
 # --- key broker (broker mode only) -------------------------------------------------------------

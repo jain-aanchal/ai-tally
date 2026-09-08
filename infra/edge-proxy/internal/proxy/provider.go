@@ -22,8 +22,10 @@ import (
 //
 // The token counts are pointers, not plain int64s, because "the provider did not report usage"
 // (streaming, an error response, a body past the scan cap) and "the provider reported zero" are
-// different facts and telemetry must not conflate them. A nil count stays NULL all the way to
-// storage; a fabricated 0 would read downstream as a real, free call.
+// different facts and telemetry must not conflate them. A nil count is omitted from the emitted
+// wire rather than serialized, so the proxy never invents the number; a fabricated 0 would read
+// downstream as a real, free call. (Storage does not yet preserve the distinction: see the note in
+// internal/telemetry on the pending gateway and schema change.)
 type responseMeta struct {
 	Model            string
 	PromptTokens     *int64

@@ -187,8 +187,10 @@ func TestEncodeCarriesResolvedFields(t *testing.T) {
 }
 
 // TestUnknownTokensSerializeAsNullNeverZero is the honest-under-uncertainty guard. A streamed
-// response (or one past the metadata scan cap) reports no usage; that span must reach storage with
-// NULL token counts. Emitting 0 would read downstream as a real call that consumed nothing.
+// response (or one past the metadata scan cap) reports no usage; that span must leave the proxy
+// with the counts absent, never as 0, which would read downstream as a real call that consumed
+// nothing. Whether the absence survives as a NULL in storage is a separate, pending gateway and
+// schema change; this test pins the half the proxy owns.
 func TestUnknownTokensSerializeAsNullNeverZero(t *testing.T) {
 	rec := sampleRecord()
 	rec.PromptTokens = nil
@@ -231,6 +233,62 @@ func TestZeroTokensStillSerialize(t *testing.T) {
 	}
 	if v, ok := span["gen_ai.usage.output_tokens"]; !ok || v != float64(0) {
 		t.Errorf("a reported 0 must serialize, got %#v (present=%v)", v, ok)
+	}
+}
+
+// TestGeminiShipsAsGoogleSystem: the route protocol label is "gemini", but the price catalog keys
+// Google models under "google" and matches the provider by exact string equality. Shipping the
+// route label verbatim left every hosted Gemini span uncostable and split the provider dimension
+// away from the same org's SDK spans, so the mapping happens at the encoder boundary.
+func TestGeminiShipsAsGoogleSystem(t *testing.T) {
+	for _, tc := range []struct{ provider, want string }{
+		{"gemini", "google"},
+		{"openai", "openai"},
+		{"anthropic", "anthropic"},
+	} {
+		rec := sampleRecord()
+		rec.Provider = tc.provider
+		body, err := Encode(DeploymentCloud, rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decodeSpan(t, body)["gen_ai.system"]; got != tc.want {
+			t.Errorf("provider %q shipped gen_ai.system %v, want %q", tc.provider, got, tc.want)
+		}
+	}
+}
+
+// TestEmptyProviderStaysOmitted: pure pass-through extracts no provider, and the mapping must not
+// turn that unknown into a value.
+func TestEmptyProviderStaysOmitted(t *testing.T) {
+	rec := sampleRecord()
+	rec.Provider = ""
+	body, err := Encode(DeploymentCloud, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, present := decodeSpan(t, body)["gen_ai.system"]; present {
+		t.Errorf("gen_ai.system present as %#v for an unextracted provider", v)
+	}
+}
+
+// TestRandomHexIsUnique guards the batch_id path: identical ids across batches would collide on the
+// gateway's (tenant_id, batch_id) idempotency key and every batch after the first would be dropped
+// as a replay.
+func TestRandomHexIsUnique(t *testing.T) {
+	seen := make(map[string]bool, 128)
+	for i := 0; i < 128; i++ {
+		v := randomHex(16)
+		if len(v) != 32 {
+			t.Fatalf("randomHex(16) = %q, want 32 hex chars", v)
+		}
+		if v == strings.Repeat("0", 32) {
+			t.Fatal("randomHex returned an all-zeros id")
+		}
+		if seen[v] {
+			t.Fatalf("randomHex repeated %q", v)
+		}
+		seen[v] = true
 	}
 }
 
@@ -343,6 +401,180 @@ func TestHTTPSinkShedsUnauthenticatedRecords(t *testing.T) {
 	}
 	if got := sink.Unauthenticated(); got != 1 {
 		t.Fatalf("Unauthenticated() = %d, want 1", got)
+	}
+}
+
+// TestHTTPSinkIgnoresUnresolvedTenantKey: the X-Tenant-Key header is client-controlled, and a value
+// the edge-key cache never resolved is not a credential. Sending it anyway lets a caller put bytes
+// Go refuses in a header (a newline here) into every outgoing request, failing client.Do once per
+// proxied call: an attacker-triggerable log flood. An unresolved key must fall back to the
+// configured ingest token and must never reach the wire.
+func TestHTTPSinkIgnoresUnresolvedTenantKey(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotAuth string
+		hits    int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rec := sampleRecord()
+	rec.TenantKey = "tk_live_bogus\nX-Injected: 1"
+	rec.TenantId = "" // the cache did not resolve it
+
+	sink := NewHTTPSink(Options{URL: srv.URL, Deployment: DeploymentCloud, IngestToken: "svc_token"})
+	sink.Record(rec)
+	sink.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("collector got %d posts, want 1 (the unresolved key must not break the request)", hits)
+	}
+	if gotAuth != "Bearer svc_token" {
+		t.Fatalf("Authorization = %q, want the configured ingest token", gotAuth)
+	}
+}
+
+// TestHTTPSinkShedsUnresolvedKeyWithoutToken: with an unresolved key and no ingest token there is
+// still nothing that can authenticate the batch, so it is shed and counted rather than posted with
+// an arbitrary caller-supplied string as the bearer.
+func TestHTTPSinkShedsUnresolvedKeyWithoutToken(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rec := sampleRecord()
+	rec.TenantId = ""
+	sink := NewHTTPSink(Options{URL: srv.URL, Deployment: DeploymentCloud})
+	sink.Record(rec)
+	sink.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("posted %d batches with an unresolved key, want 0", hits)
+	}
+	if got := sink.Unauthenticated(); got != 1 {
+		t.Fatalf("Unauthenticated() = %d, want 1", got)
+	}
+}
+
+// TestHTTPSinkCountsPartialRejection is the visibility fix: the gateway reports per-item validation
+// failures as partial_errors inside an HTTP 200 body, so a status check alone reads a batch whose
+// only span was thrown away (PII_DETECTED here) as a success.
+func TestHTTPSinkCountsPartialRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"batch_id":"b1","status":"partial","accepted_spans":0,` +
+			`"partial_errors":[{"item_id":"#0","code":"PII_DETECTED",` +
+			`"message":"account_id_hash is not hex"}],"replayed":false}`))
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var lines []string
+	sink := NewHTTPSink(Options{
+		URL: srv.URL, Deployment: DeploymentCloud,
+		Logf: func(format string, args ...any) {
+			mu.Lock()
+			lines = append(lines, fmt.Sprintf(format, args...))
+			mu.Unlock()
+		},
+	})
+	sink.Record(sampleRecord())
+	sink.Close()
+
+	if got := sink.Rejected(); got != 1 {
+		t.Fatalf("Rejected() = %d, want 1", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "PII_DETECTED") {
+		t.Fatalf("rejection code not logged: %q", joined)
+	}
+	// The gateway's per-item message can echo request detail, so a telemetry failure must not become
+	// its own leak: codes are logged, messages never are.
+	if strings.Contains(joined, "account_id_hash is not hex") {
+		t.Fatalf("gateway message echoed into the proxy log: %q", joined)
+	}
+}
+
+// TestHTTPSinkCountsNothingOnCleanAck: a fully accepted batch must not be counted as loss, and a
+// healthy sink must stay silent.
+func TestHTTPSinkCountsNothingOnCleanAck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"batch_id":"b1","status":"accepted","accepted_spans":1,` +
+			`"partial_errors":[]}`))
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var lines int
+	sink := NewHTTPSink(Options{
+		URL: srv.URL, Deployment: DeploymentCloud,
+		Logf: func(string, ...any) { mu.Lock(); lines++; mu.Unlock() },
+	})
+	sink.Record(sampleRecord())
+	sink.Close()
+
+	if got := sink.Stats(); got.Any() {
+		t.Fatalf("clean ack counted as loss: %+v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if lines != 0 {
+		t.Fatalf("healthy sink logged %d lines, want silence", lines)
+	}
+}
+
+// TestReportLossSpeaksOnlyWhenSomethingWasShed: the counters are otherwise unreachable outside
+// tests, which is how a total telemetry failure stayed silent. A report names the delta once and
+// does not repeat itself while the totals hold still.
+func TestReportLossSpeaksOnlyWhenSomethingWasShed(t *testing.T) {
+	var lines []string
+	sink := NewHTTPSink(Options{
+		URL: "http://127.0.0.1:1", Deployment: DeploymentCloud,
+		Logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
+	})
+	defer sink.Close()
+
+	sink.ReportLoss()
+	if len(lines) != 0 {
+		t.Fatalf("reported %v with nothing shed", lines)
+	}
+
+	rec := sampleRecord()
+	rec.TenantId = ""
+	rec.TenantKey = ""
+	sink.Record(rec)
+	// Drain deterministically: Close is the flush barrier, so use a second sink-free wait instead.
+	for sink.Unauthenticated() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	sink.ReportLoss()
+	if len(lines) != 1 || !strings.Contains(lines[0], "1 unauthenticated") {
+		t.Fatalf("want one report naming the unauthenticated shed, got %v", lines)
+	}
+	sink.ReportLoss()
+	if len(lines) != 1 {
+		t.Fatalf("repeated a report with no new loss: %v", lines)
 	}
 }
 

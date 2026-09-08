@@ -133,10 +133,11 @@ type Config struct {
 	// single-span batches (the gateway's POST /v1/batches). Empty disables telemetry shipping
 	// (NopSink), as in the CTO-39 core.
 	TelemetryURL string
-	// IngestToken is the fallback bearer for those POSTs, used only when a record carries no tenant
-	// key of its own. Normally the presented X-Tenant-Key authenticates the batch, which is what
-	// keeps the hosted multi-tenant deployment attributing each batch to its own tenant; a
-	// single-tenant self-host that runs without RequireTenant sets this instead. It is a reference
+	// IngestToken is the fallback bearer for those POSTs, used for every record that did not present
+	// a tenant key the edge-key cache resolved. Normally the presented X-Tenant-Key authenticates the
+	// batch, which is what keeps the hosted multi-tenant deployment attributing each batch to its own
+	// tenant; a self-host with no edge-key feed, or one running without RequireTenant, sets this
+	// instead and Warnings() says so at startup when it is missing. It is a reference
 	// to a deployment secret (env var rendered from Secret Manager / KMS), never a key we mint.
 	IngestToken string
 
@@ -323,6 +324,34 @@ func FromEnv(lookup Env) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Warnings returns operator-facing problems with a configuration that parses cleanly but will not
+// behave as the operator intends. They are warnings rather than errors because none of them is
+// wrong for every deployment, and refusing to boot would break a proxy that is deliberately running
+// without telemetry.
+//
+// The case that motivated this: the default self-host config (EDGE_PROXY_TELEMETRY_URL set, no
+// EDGE_PROXY_INGEST_TOKEN, RequireTenant off, no edge-key feed) ships exactly zero telemetry, since
+// no record can produce a credential, while startup still logs a cheerful "telemetry -> <url>". A
+// total, permanent failure must not be silent.
+func (c Config) Warnings() []string {
+	var out []string
+	if c.TelemetryURL == "" || c.IngestToken != "" {
+		return out
+	}
+	// Only a key the edge-key cache resolved is used as a bearer, so with no feed configured no
+	// record can ever authenticate itself and the ingest token is the only possible credential.
+	if c.KeysURL == "" {
+		out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
+			"EDGE_PROXY_KEYS_URL is unset: no record can be authenticated, so every span will be shed "+
+			"and NO telemetry will reach ingest")
+	} else if !c.RequireTenant {
+		out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
+			"EDGE_PROXY_REQUIRE_TENANT is off: telemetry for any request that arrives without a "+
+			"resolvable tenant key will be shed unauthenticated")
+	}
+	return out
 }
 
 // parseRoutes builds the route table from EDGE_PROXY_ROUTES. Two wire forms are accepted:
