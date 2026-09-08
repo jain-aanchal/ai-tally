@@ -102,7 +102,12 @@ export interface Comparison {
   diagnostics: {
     samplesReplayed: number | null;
     samplesAvailable: number | null;
-    excludedRateLimited: number | null;
+    /**
+     * #329: there is no `excludedRateLimited`. No source has ever produced one (the replay
+     * projection reports a budget-exclusion count, not a rate-limit one), so the page's row for it
+     * could never render anything but a blank. An honest blank that is structurally permanent is
+     * noise, not information; the row and the field are gone until a source exists.
+     */
     replayCostMicroUsd: MicroUSD | null;
     contextFidelity: "resolved-context replay (no live retrieval)" | "live retrieval";
     /**
@@ -220,7 +225,6 @@ export const comparison: Comparison = {
   diagnostics: {
     samplesReplayed: null,
     samplesAvailable: null,
-    excludedRateLimited: null,
     replayCostMicroUsd: null,
     contextFidelity: "resolved-context replay (no live retrieval)",
     reconcilerLastRunMinutesAgo: 18,

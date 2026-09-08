@@ -27,10 +27,12 @@ describe("systemKind", () => {
     expect(systemKind("  Pinecone ")).toBe("vector");
   });
 
-  it("leaves LLM providers and anything unrecognised as llm rather than guessing", () => {
+  it("names known LLM providers llm and anything unrecognised unknown rather than guessing", () => {
     expect(systemKind("openai")).toBe("llm");
     expect(systemKind("anthropic")).toBe("llm");
-    expect(systemKind("some-future-vendor")).toBe("llm");
+    // #329: an unrecognised system is not assumed to be an LLM. It renders no badge either way,
+    // but the model no longer claims a layer it has no evidence for.
+    expect(systemKind("some-future-vendor")).toBe("unknown");
   });
 });
 

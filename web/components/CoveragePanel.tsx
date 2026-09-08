@@ -3,7 +3,7 @@
 //
 // What the developer needs to see after a wired change runs is not "connected", it is WHICH of the
 // five layers is actually flowing and, for every layer that is not, why. So each row states its
-// case: a covered layer shows the span count that proves it, a dark layer says whether it is
+// case: a covered layer shows the count that proves it, a dark layer says whether it is
 // awaiting its first event or simply unwired, and a layer we could not read renders the honest
 // blank with the reason on hover rather than a zero (CLAUDE.md).
 //
@@ -22,8 +22,9 @@ import {
   unknownCoverage,
 } from "@/lib/firstEvent";
 // #320 item 4: a layer proven by a single span read "1 spans". Shared with step 2's readout, which
-// counts the same spans, so the two never drift apart on wording either.
-import { spanCountLabel } from "@/lib/onboarding";
+// counts the same spans, so the two never drift apart on wording either. #329: the label also
+// carries the UNIT, because the account layer's count is rollup rows and not spans at all.
+import { provingCountLabel } from "@/lib/onboarding";
 
 /** Exported so the onboarding page's shared coverage poll runs on the same cadence (#320). */
 export const COVERAGE_POLL_MS = 5000;
@@ -114,11 +115,11 @@ export function CoveragePanel({
                 <div className="mt-0.5 text-xs text-muted">{layer.reason}</div>
               </div>
               <div className="flex shrink-0 items-center gap-3">
-                <span className="text-xs text-muted" title="spans proving this layer">
+                <span className="text-xs text-muted" title="the evidence proving this layer">
                   {layer.provingSpans === null ? (
                     <Blank reason={layer.reason} />
                   ) : (
-                    spanCountLabel(layer.provingSpans)
+                    provingCountLabel(layer.layer, layer.provingSpans)
                   )}
                 </span>
                 <span
@@ -133,7 +134,9 @@ export function CoveragePanel({
       </ul>
 
       <div className="mt-4 border-t border-edge pt-3 text-xs text-muted">
-        {covered}/{shown.length} layers proven by a span
+        {/* #329: not "proven by a span" any more. Four layers are, and the account layer is
+            proven by attributed rollup rows, which the row itself now says in its own unit. */}
+        {covered}/{shown.length} layers proven
         {unknown > 0 ? `, ${unknown} could not be read` : ""}
       </div>
     </section>

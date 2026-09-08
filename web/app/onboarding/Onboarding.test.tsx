@@ -21,7 +21,6 @@ const creds: TenantProxyCredentials = {
 const progress: OnboardingProgress = {
   signedUpAt: 1_000_000,
   copiedConfigAt: null,
-  firstTraceAt: null,
   firstDashboardAt: null,
 };
 
@@ -83,8 +82,8 @@ describe("onboarding step 2", () => {
     );
     render(<Onboarding initialProgress={progress} creds={creds} />);
     await waitFor(() => expect(screen.getByText(/First trace received/)).toBeTruthy());
-    expect(screen.getByText(/1\/5 layers proven by a span/)).toBeTruthy();
-    expect(screen.queryByText(/0\/5 layers proven by a span/)).toBeNull();
+    expect(screen.getByText(/1\/5 layers proven/)).toBeTruthy();
+    expect(screen.queryByText(/0\/5 layers proven/)).toBeNull();
     expect(screen.getAllByText("4 spans").length).toBe(2);
   });
 
@@ -105,22 +104,55 @@ describe("onboarding step 2", () => {
 
   it("withholds a time-to-first-trace it never measured", () => {
     render(<Onboarding initialProgress={progress} creds={creds} initialLayers={coveredLayers()} />);
-    // The probe proves a trace arrived; it does not say WHEN. Back-filling the clock here would turn
-    // "we noticed spans just now" into a 5-minute-target measurement nobody took.
+    // The probe proves a trace arrived; it does not say WHEN. #329: no path measures the arrival at
+    // all now, so the duration and its 5-minute verdict are gone rather than permanently blank.
     expect(screen.queryByText(/under the 5-minute target/)).toBeNull();
     expect(screen.queryByText(/^in /)).toBeNull();
   });
 
-  it("still reports a duration the funnel actually timed", () => {
+  // #329 finding 3. #320 deleted the old poll and the "Send a test trace" button and put nothing on
+  // the write side, so the funnel stopped recording first_trace entirely. The probe transition
+  // reports it now, flagged `noticed` because the probe cannot say when the trace arrived.
+  it("reports first_trace to the funnel as a noticed stage, once", async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url) === "/api/onboarding" && init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)));
+          return new Response(JSON.stringify({ event: null }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ layers: coveredLayers() }), { status: 200 });
+      }),
+    );
+    render(<Onboarding initialProgress={progress} creds={creds} initialLayers={coveredLayers()} />);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toEqual({ stage: "first_trace", noticed: true });
+  });
+
+  it("reports nothing to the funnel while the probe cannot be read", async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url) === "/api/onboarding" && init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)));
+          return new Response(JSON.stringify({ event: null }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ layers: unknownCoverage("probe down") }), {
+          status: 200,
+        });
+      }),
+    );
     render(
       <Onboarding
-        initialProgress={{ ...progress, firstTraceAt: progress.signedUpAt + 30_000 }}
+        initialProgress={progress}
         creds={creds}
-        initialLayers={coveredLayers()}
+        initialLayers={unknownCoverage("probe down")}
       />,
     );
-    expect(screen.getByText("30s")).toBeTruthy();
-    expect(screen.getByText(/under the 5-minute target/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/We cannot tell whether a trace/)).toBeTruthy());
+    expect(posts).toHaveLength(0);
   });
 
   // The right-rail checklist used to track its own client-side flag, so it could disagree with step

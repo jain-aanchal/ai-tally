@@ -34,9 +34,6 @@ import type { MicroUSD } from "@/lib/types";
 const NO_REPLAY_REASON =
   "no cross-provider replay has run for this workload, so there is nothing replayed to count or cost";
 
-const NO_EXCLUSION_COUNT_REASON =
-  "the replay projection does not report a rate-limit exclusion count, so this is unknown rather than zero";
-
 /**
  * A diagnostics row whose value may be an honest blank ({@link Diag} takes a plain string, so a
  * blank rendered through it would lose the reason that has to travel with it).
@@ -218,16 +215,8 @@ export default async function ComparePage({
               )
             }
           />
-          <DiagNode
-            k="excluded (rate limits)"
-            v={
-              diagnostics.excludedRateLimited === null ? (
-                <Blank reason={NO_EXCLUSION_COUNT_REASON} />
-              ) : (
-                diagnostics.excludedRateLimited.toLocaleString()
-              )
-            }
-          />
+          {/* #329: the "excluded (rate limits)" row is gone. Nothing ever measured it, so it
+              rendered a blank on every code path. The blank was honest and the row was noise. */}
           <DiagNode
             k="replay cost"
             v={<Money micro={diagnostics.replayCostMicroUsd} reason={NO_REPLAY_REASON} />}

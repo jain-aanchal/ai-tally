@@ -12,6 +12,7 @@ import {
   queryReconcilerLastRun,
   queryReplayCandidates,
   type EvalCandidateRow,
+  type ReplayProjection,
 } from "@/lib/clickhouse";
 
 // CTO-114: minimum sample count before a candidate's pairwise-LLM-judge win-rate is shown as
@@ -35,9 +36,26 @@ const WORKLOAD_WINDOW_DAYS = 7;
 const NO_REPLAY_DIAGNOSTICS = {
   samplesReplayed: null,
   samplesAvailable: null,
-  excludedRateLimited: null,
   replayCostMicroUsd: null,
 } as const;
+
+/**
+ * The replay corpus counts a projection actually measured (#329).
+ *
+ * These describe the replay CORPUS, not the candidate table, which is why they are derived
+ * separately from `replay_source`: a projection can exist on a branch that still ships fixture
+ * candidate rows, and nulling its counts there put a measured number behind a blank whose reason
+ * read "no cross-provider replay has run for this workload". A wrong reason on a blank is its own
+ * honesty failure, so whenever the projection exists we report what it counted.
+ */
+function replayDiagnostics(replay: ReplayProjection | null) {
+  if (!replay) return NO_REPLAY_DIAGNOSTICS;
+  return {
+    samplesReplayed: replay.per_candidate.reduce((s, c) => s + c.samples_replayed, 0),
+    samplesAvailable: replay.samples_available,
+    replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
+  };
+}
 
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
@@ -93,10 +111,20 @@ export async function GET(req: Request) {
       ...comparison,
       current: { ...comparison.current, qualityScore: null },
       candidates,
-      // #320: no replay ran on this path, so every replay count is null. The fixture used to ship
-      // 4,200 / 87,400 / $42.30 here and the page printed them as measurements.
-      diagnostics: { ...comparison.diagnostics, ...NO_REPLAY_DIAGNOSTICS, reconcilerLastRunMinutesAgo },
-      replay_source: replay ? "replay" : "mock",
+      // #320: the fixture used to ship 4,200 / 87,400 / $42.30 here and the page printed them as
+      // measurements. #329: null is only right when there is nothing to count. A projection can
+      // come back with no incumbent behind it (a replay corpus is opted into per workload and does
+      // not need a current-model cost row), and those counts are real, so they are reported.
+      diagnostics: {
+        ...comparison.diagnostics,
+        ...replayDiagnostics(replay),
+        reconcilerLastRunMinutesAgo,
+      },
+      // #329: "mock" describes the candidate rows above, which are the fixture's on this branch
+      // whether or not a projection exists, because rescaling a candidate onto a monthly basis
+      // needs the incumbent's call volume and there is no incumbent here. Calling this "replay"
+      // told a consumer the cost table came from a replay it did not come from.
+      replay_source: "mock",
     });
   }
 
@@ -187,9 +215,6 @@ export async function GET(req: Request) {
         ...comparison.diagnostics,
         samplesReplayed: totalReplayed,
         samplesAvailable: replay.samples_available,
-        // #320: the projection carries a budget-exclusion count per candidate, not a rate-limit
-        // one, so there is no honest number for this row here either. Blank with the reason.
-        excludedRateLimited: null,
         replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
         contextFidelity:
           (replay.diagnostics.context_fidelity as

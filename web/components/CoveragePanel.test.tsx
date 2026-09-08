@@ -85,7 +85,7 @@ describe("CoveragePanel", () => {
 
   it("counts only span-proven layers in the summary", () => {
     render(<CoveragePanel initialLayers={layers()} poll={false} />);
-    expect(screen.getByText(/1\/5 layers proven by a span/)).toBeTruthy();
+    expect(screen.getByText(/1\/5 layers proven/)).toBeTruthy();
     expect(screen.getByText(/1 could not be read/)).toBeTruthy();
   });
 
@@ -96,12 +96,12 @@ describe("CoveragePanel", () => {
     expect(screen.getAllByText("Unknown")).toHaveLength(5);
     rerender(<CoveragePanel initialLayers={layers()} poll={false} />);
     expect(screen.getByText("Flowing")).toBeTruthy();
-    expect(screen.getByText(/1\/5 layers proven by a span/)).toBeTruthy();
+    expect(screen.getByText(/1\/5 layers proven/)).toBeTruthy();
   });
 
   it("starts unknown rather than claiming anything before the probe answers", () => {
     render(<CoveragePanel poll={false} />);
     expect(screen.getAllByText("Unknown")).toHaveLength(5);
-    expect(screen.getByText(/0\/5 layers proven by a span/)).toBeTruthy();
+    expect(screen.getByText(/0\/5 layers proven/)).toBeTruthy();
   });
 });

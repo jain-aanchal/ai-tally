@@ -35,7 +35,9 @@ describe("compare", () => {
   it("fixture carries no fabricated replay counts", () => {
     expect(comparison.diagnostics.samplesReplayed).toBeNull();
     expect(comparison.diagnostics.samplesAvailable).toBeNull();
-    expect(comparison.diagnostics.excludedRateLimited).toBeNull();
+    // #329: the rate-limit exclusion count is not a null here, it is absent. No source produces
+    // one, so the field and its permanently blank row were removed rather than carried as null.
+    expect(comparison.diagnostics).not.toHaveProperty("excludedRateLimited");
     expect(comparison.diagnostics.replayCostMicroUsd).toBeNull();
     // The methodology label survives: it describes how a replay would be run, not that one was.
     expect(comparison.diagnostics.contextFidelity).toMatch(/resolved-context/);

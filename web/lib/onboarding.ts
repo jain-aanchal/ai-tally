@@ -2,8 +2,9 @@
 // Guided-onboarding model + helpers (CTO-91). The activation funnel that makes self-serve work:
 // signup → copy the proxy config → first trace arrives (<5 min) → first dashboard (<24h).
 //
-// Pure helpers here (typed like the eventual control-plane shapes); the live first-trace detector
-// and funnel-event sink live in the server-only store + route handlers.
+// Pure helpers here (typed like the eventual control-plane shapes); the funnel-event sink lives in
+// the server-only store + route handlers. First-trace evidence comes from the coverage probe, not
+// from a stored timestamp (#329, and see OnboardingProgress).
 
 // The activation targets from spec §15. These are the success metrics the checklist is tied to.
 export const TIME_TO_FIRST_TRACE_TARGET_MS = 5 * 60 * 1000; // 5 minutes
@@ -21,8 +22,17 @@ export type FunnelStage = (typeof FUNNEL_STAGES)[number];
 
 export interface FunnelEvent {
   stage: FunnelStage;
-  /** epoch ms when the stage was reached */
+  /** epoch ms when the stage was reached, or when it was NOTICED if `noticed` is set */
   at: number;
+  /**
+   * True when `at` is when we noticed the stage rather than when it happened (#329).
+   *
+   * The coverage probe is the only thing that can tell us a trace arrived, and it proves arrival
+   * without proving arrival TIME. The stage is still worth recording, so it is recorded with this
+   * flag on it: a consumer measuring activation duration must skip these, because subtracting
+   * signup from a noticing time measures how long the tab was open, not time to first trace.
+   */
+  noticed?: boolean;
 }
 
 export interface TenantProxyCredentials {
@@ -86,19 +96,29 @@ export interface ChecklistStep {
   targetMs?: number;
 }
 
+/**
+ * Funnel timestamps we can actually take.
+ *
+ * There is deliberately no `firstTraceAt` (#329). Nothing in the product measures when a tenant's
+ * first trace arrived: the coverage probe reports counts, not arrival times, and the demo button
+ * that used to stamp the clock is gone. The field it replaced was written by nothing, which left
+ * time-to-first-trace permanently null and the "under the 5-minute target" readout unable to fire.
+ * A timestamp with no source is not an unknown value we render as a blank, it is a measurement we
+ * do not take, so the model does not carry a slot for it. Restoring it means restoring a real
+ * arrival signal from ingest at the same time.
+ */
 export interface OnboardingProgress {
   signedUpAt: number;
   copiedConfigAt: number | null;
-  firstTraceAt: number | null;
   firstDashboardAt: number | null;
 }
 
 /**
  * Extra evidence the checklist should honour beyond the funnel's own timestamps (#320).
  *
- * `firstTraceProven` is the coverage probe saying a span exists. It ticks the step but deliberately
- * does NOT set `firstTraceAt`: the probe proves that a trace arrived, not when, and back-filling the
- * clock would turn "we found spans just now" into a time-to-first-trace measurement nobody took.
+ * `firstTraceProven` is the coverage probe saying a trace arrived. It is the ONLY evidence for that
+ * step now (#329): the probe proves arrival, not arrival time, so nothing here is stamped with a
+ * clock reading that would turn "we found spans just now" into a duration nobody measured.
  */
 export interface ProgressEvidence {
   firstTraceProven?: boolean;
@@ -126,7 +146,7 @@ export function deriveChecklist(
       id: "first_trace",
       title: "Send your first request",
       hint: "We'll detect the first trace automatically. Target: under 5 minutes.",
-      done: p.firstTraceAt !== null || evidence.firstTraceProven === true,
+      done: evidence.firstTraceProven === true,
       targetMs: TIME_TO_FIRST_TRACE_TARGET_MS,
     },
     {
@@ -139,16 +159,16 @@ export function deriveChecklist(
   ];
 }
 
-/** ms from signup to first trace, or null if no trace yet. */
-export function timeToFirstTraceMs(p: OnboardingProgress): number | null {
-  if (p.firstTraceAt === null) return null;
-  return Math.max(0, p.firstTraceAt - p.signedUpAt);
-}
-
+/**
+ * Activation state.
+ *
+ * #329: `timeToFirstTraceMs` and `withinTarget` used to live here and could never be anything but
+ * null/false in the running app, because nothing measured the arrival. They are gone rather than
+ * left as fields no code path can populate; the 5-minute target survives as the checklist hint,
+ * which states a goal instead of reporting a result.
+ */
 export interface ActivationStatus {
-  activated: boolean; // first trace received
-  withinTarget: boolean; // ...and within the 5-min target
-  timeToFirstTraceMs: number | null;
+  activated: boolean; // a trace has been proven to arrive
   completedSteps: number;
   totalSteps: number;
 }
@@ -158,13 +178,8 @@ export function activationStatus(
   evidence: ProgressEvidence = {},
 ): ActivationStatus {
   const steps = deriveChecklist(p, evidence);
-  // Stays null when only the probe proved the trace: the arrival was never timed, so there is no
-  // duration to report and the readout renders nothing rather than a figure off the wall clock.
-  const ttft = timeToFirstTraceMs(p);
   return {
-    activated: p.firstTraceAt !== null || evidence.firstTraceProven === true,
-    withinTarget: ttft !== null && ttft <= TIME_TO_FIRST_TRACE_TARGET_MS,
-    timeToFirstTraceMs: ttft,
+    activated: evidence.firstTraceProven === true,
     completedSteps: steps.filter((s) => s.done).length,
     totalSteps: steps.length,
   };
@@ -189,7 +204,11 @@ export type TraceEvidenceState = "received" | "waiting" | "unknown";
 
 export interface TraceEvidence {
   state: TraceEvidenceState;
-  /** Spans proving a trace arrived, or null when we could not count them. Never 0 standing in. */
+  /**
+   * Spans proving a trace arrived, or null when there is no span count to report: either we could
+   * not count them, or the only covered layer counts rollup rows rather than spans (#329). Never 0
+   * standing in for either.
+   */
   provingSpans: number | null;
   /** Why the evidence says what it says. Always present, so a blank is never unexplained. */
   reason: string;
@@ -201,49 +220,95 @@ export function spanCountLabel(n: number): string {
 }
 
 /**
+ * Label a layer's proving count in the unit that layer actually counts (#329).
+ *
+ * Four of the five layers count spans; the account layer counts rows of daily_account_rollup, which
+ * its own probe reason already says. The panel used to print all five through spanCountLabel, so a
+ * row reading "5,914 rollup row(s) carry a non-empty AccountIdHash" was captioned "5,914 spans".
+ */
+export function provingCountLabel(layer: string | undefined, n: number): string {
+  if (layer === ROLLUP_COUNTED_LAYER) {
+    return `${n.toLocaleString()} ${n === 1 ? "rollup row" : "rollup rows"}`;
+  }
+  return spanCountLabel(n);
+}
+
+/**
+ * The one layer whose proving count is NOT spans (#329).
+ *
+ * The gateway probe counts the four operation layers out of otel_spans, one row per span, keyed by
+ * GenAiOperation, so those four are disjoint and summable. The account layer is counted out of
+ * daily_account_rollup instead (one row per account/day/feature/operation), and its own reason
+ * string says "rollup row(s)". Adding the two together produced a figure that was neither: it moved
+ * by ~2,000 when PR #325 merely rebuilt the rollup, which a span count cannot do.
+ */
+const ROLLUP_COUNTED_LAYER = "account";
+
+const PROBE_SILENT_REASON =
+  "the coverage probe has not answered yet, so we cannot tell whether a trace has arrived";
+
+/**
  * Derive step 2's first-trace evidence from the same per-layer coverage the panel renders.
  *
- * `covered` is only reachable through a positive span count (see parseCoverage), so a "received"
- * here is always backed by a span the panel is showing in the same breath. When no layer is covered
- * but the probe did read at least one layer, the honest answer is "waiting". When every layer came
- * back unknown, the answer is "we could not tell", carrying the probe's own reason.
+ * `covered` is only reachable through a positive proving count (see parseCoverage), so a "received"
+ * here is always backed by evidence the panel is showing in the same breath.
+ *
+ * Two rules keep the rendered sentence true:
+ *
+ *  - Only the four operation layers contribute to the span TOTAL, because only they count spans
+ *    (see ROLLUP_COUNTED_LAYER). The account layer still proves traces arrived, since a rollup row
+ *    cannot exist without spans behind it, so it can carry "received" on its own; it just carries
+ *    it with a null count rather than a number in the wrong unit.
+ *  - "waiting" is a definite negative, so it is only claimed when every layer was readable and none
+ *    of them found anything. A mixed report (some layers readable, some unknown) means the layers
+ *    that could have proven a trace were not all read, and the honest answer is that we cannot tell.
  */
 export function traceEvidenceFromCoverage(
-  layers: readonly { state: string; provingSpans: number | null; reason: string }[],
+  layers: readonly { layer?: string; state: string; provingSpans: number | null; reason: string }[],
 ): TraceEvidence {
-  const covered = layers.filter((l) => l.state === "covered" && (l.provingSpans ?? 0) > 0);
-  if (covered.length > 0) {
-    const spans = covered.reduce((sum, l) => sum + (l.provingSpans ?? 0), 0);
-    const layerWord = covered.length === 1 ? "layer" : "layers";
+  const proven = layers.filter((l) => l.state === "covered" && (l.provingSpans ?? 0) > 0);
+  const spanLayers = proven.filter((l) => l.layer !== ROLLUP_COUNTED_LAYER);
+  if (spanLayers.length > 0) {
+    const spans = spanLayers.reduce((sum, l) => sum + (l.provingSpans ?? 0), 0);
+    const layerWord = spanLayers.length === 1 ? "layer" : "layers";
     return {
       state: "received",
       provingSpans: spans,
-      reason: `${spanCountLabel(spans)} across ${covered.length} ${layerWord} prove traces are arriving`,
+      reason: `${spanCountLabel(spans)} across ${spanLayers.length} ${layerWord} prove traces are arriving`,
     };
   }
-  const readable = layers.filter((l) => l.state !== "unknown");
-  if (readable.length === 0) {
+  if (proven.length > 0) {
+    // Only the account layer is covered: attributed rollup rows exist, which they cannot without
+    // spans behind them. So a trace did arrive, and we say so, without a span count we do not have.
+    return {
+      state: "received",
+      provingSpans: null,
+      reason:
+        "per-customer attribution has rows, which only exist once traces arrive, but no layer " +
+        "returned a span count so there is no number of spans to report",
+    };
+  }
+  const unreadable = layers.filter((l) => l.state === "unknown");
+  if (unreadable.length === layers.length) {
+    return {
+      state: "unknown",
+      provingSpans: null,
+      reason: layers[0]?.reason ?? PROBE_SILENT_REASON,
+    };
+  }
+  if (unreadable.length > 0) {
+    const layerWord = unreadable.length === 1 ? "layer" : "layers";
     return {
       state: "unknown",
       provingSpans: null,
       reason:
-        layers[0]?.reason ??
-        "the coverage probe has not answered yet, so we cannot tell whether a trace has arrived",
+        `no span was found on the layers we could read, but ${unreadable.length} ${layerWord} ` +
+        `could not be read (${unreadable[0].reason}), so we cannot tell whether a trace has arrived`,
     };
   }
   return {
     state: "waiting",
     provingSpans: 0,
-    reason: "the coverage probe ran and found no span for any layer yet",
+    reason: "the coverage probe read every layer and found no span for any of them yet",
   };
-}
-
-/** Format a short ms duration as "3.4s" / "2m 10s" for the activation readout. */
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.round(ms / 100) / 10;
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(ms / 60000);
-  const rem = Math.round((ms - m * 60000) / 1000);
-  return `${m}m ${rem}s`;
 }

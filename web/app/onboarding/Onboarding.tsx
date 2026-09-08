@@ -13,7 +13,7 @@
 // not read leaves step 2 saying so, rather than fabricating a definite "no trace yet".
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { COVERAGE_POLL_MS, CoveragePanel } from "@/components/CoveragePanel";
 import { Blank } from "@/components/HonestValue";
@@ -25,7 +25,6 @@ import {
   type TenantProxyCredentials,
   activationStatus,
   deriveChecklist,
-  formatDuration,
   proxyEnvSnippet,
   proxyPythonSnippet,
   spanCountLabel,
@@ -35,12 +34,15 @@ import {
 const PROBE_SILENT =
   "the coverage probe has not answered yet, so we cannot tell whether a trace has arrived";
 
-async function postFunnel(stage: FunnelStage): Promise<void> {
+// `noticed` marks a stage the page observed rather than performed (#329). It keeps the funnel's
+// first_trace event honest about what its timestamp means: when we spotted the trace, not when it
+// arrived. The server refuses to mirror a noticed stage onto a progress timestamp for that reason.
+async function postFunnel(stage: FunnelStage, noticed = false): Promise<void> {
   try {
     await fetch("/api/onboarding", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ stage }),
+      body: JSON.stringify(noticed ? { stage, noticed: true } : { stage }),
     });
   } catch {
     /* funnel tracking is best-effort */
@@ -69,12 +71,22 @@ export function Onboarding({
 
   // The right rail reads the same evidence as step 2, so the checklist cannot disagree with the
   // panel either. It ticks the step without inventing a timestamp for it: the probe proves a trace
-  // arrived, not WHEN it arrived, so time-to-first-trace stays null unless the funnel timed the
-  // arrival itself. Back-filling Date.now() here would have turned "we noticed spans just now" into
-  // a 5-minute-target measurement nobody took (CLAUDE.md, honest under uncertainty).
+  // arrived, not WHEN it arrived. Back-filling Date.now() here would have turned "we noticed spans
+  // just now" into a 5-minute-target measurement nobody took (CLAUDE.md, honest under uncertainty).
   const probeEvidence = { firstTraceProven: evidence.state === "received" };
   const status = activationStatus(progress, probeEvidence);
   const steps = deriveChecklist(progress, probeEvidence);
+
+  // #329: the write side of the funnel for this stage. The old poll and its "Send a test trace"
+  // button were removed with #320 and nothing replaced them, so first_trace stopped being recorded
+  // at all. The probe transition reports it now, flagged `noticed` so the funnel keeps the stage
+  // without the arrival time, which is the one thing the probe cannot tell us.
+  const reportedFirstTrace = useRef(false);
+  useEffect(() => {
+    if (evidence.state !== "received" || reportedFirstTrace.current) return;
+    reportedFirstTrace.current = true;
+    void postFunnel("first_trace", true);
+  }, [evidence.state]);
 
   // One poll, two readers. Keeps the last honest answer on a failed request: a dropped fetch is not
   // evidence that instrumentation stopped, same rule the panel already applied to its own poll.
@@ -175,16 +187,14 @@ export function Onboarding({
             </p>
 
             {evidence.state === "received" ? (
+              // #329: no duration is reported here. Nothing measures when the first trace
+              // arrived, so the page says that one arrived and how much evidence there is, and
+              // says nothing about how long it took. The span count covers the four operation
+              // layers only; when the sole evidence is attributed rollup rows there is no span
+              // count to give and the sentence simply omits it rather than printing rollup rows
+              // under a "spans" label.
               <div className="rounded-lg border border-good/40 bg-good/10 p-4 text-sm text-good">
-                First trace received
-                {status.timeToFirstTraceMs !== null && (
-                  <>
-                    {" "}
-                    in <strong>{formatDuration(status.timeToFirstTraceMs)}</strong>
-                    {status.withinTarget ? ", under the 5-minute target ✓" : ""}
-                  </>
-                )}
-                .{" "}
+                First trace received.{" "}
                 {evidence.provingSpans !== null && (
                   <>
                     <strong>{spanCountLabel(evidence.provingSpans)}</strong> already prove it.{" "}

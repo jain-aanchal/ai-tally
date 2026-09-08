@@ -52,9 +52,45 @@ export const VECTOR_SYSTEMS: readonly string[] = [
   "elasticsearch",
 ];
 
-/** "vector" for a known vector store, "llm" otherwise. Presentation only (#320). */
-export function systemKind(system: string): "llm" | "vector" {
-  return VECTOR_SYSTEMS.includes(system.trim().toLowerCase()) ? "vector" : "llm";
+/**
+ * `gen_ai.system` values we recognise as LLM providers. Same role as VECTOR_SYSTEMS: it names what
+ * we know, and says nothing about what we do not.
+ */
+export const LLM_SYSTEMS: readonly string[] = [
+  "openai",
+  "anthropic",
+  "azure_openai",
+  "azure",
+  "aws.bedrock",
+  "bedrock",
+  "vertex_ai",
+  "gcp.vertex_ai",
+  "google",
+  "gemini",
+  "cohere",
+  "mistral",
+  "groq",
+  "together",
+  "perplexity",
+  "deepseek",
+  "xai",
+  "ollama",
+];
+
+/**
+ * What kind of system this row names. Presentation only (#320).
+ *
+ * #329: an unrecognised system is "unknown", not "llm". It used to default to "llm", so a vector
+ * vendor nobody had added to the list yet was silently asserted to be an LLM provider by the model,
+ * on a page whose whole subject is which layer the money went to. Nothing renders a kind for
+ * "unknown" (the badge is for known vector stores), so the screen is unchanged: the difference is
+ * that the code no longer holds an assumption it cannot support.
+ */
+export function systemKind(system: string): "llm" | "vector" | "unknown" {
+  const s = system.trim().toLowerCase();
+  if (VECTOR_SYSTEMS.includes(s)) return "vector";
+  if (LLM_SYSTEMS.includes(s)) return "llm";
+  return "unknown";
 }
 
 export interface ProviderAttribution {
