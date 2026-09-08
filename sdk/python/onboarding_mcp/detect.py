@@ -26,12 +26,18 @@ _VECTOR_DBS = {"pinecone", "weaviate", "qdrant_client", "chromadb", "pgvector"}
 _TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
-def _tokens(text: str) -> set[str]:
+def tokenize(text: str) -> set[str]:
+    """Lowercased identifier tokens in ``text``. Shared with ``explain_layer``."""
     return {t.lower() for t in _TOKEN_RE.findall(text)}
 
 
 def _classify(tokens: set[str], vocabulary: set[str]) -> list[str]:
     return sorted(tokens & vocabulary)
+
+
+# The manual LLM recipe. Named here because detect_stack has to say out loud when it
+# would double-meter an already-patched call (CTO-261 review finding 1).
+_MANUAL_LLM_RECIPE = "llm.generic.call"
 
 
 def detect_stack(
@@ -48,17 +54,18 @@ def detect_stack(
             ``call_patterns`` (section 4.2: manifests are the cheap default, excerpts opt-in).
         catalog: override for tests; defaults to the in-tree catalog.
 
-    Returns a dict of detected components plus ``matched_recipes`` (recipe ids that apply)
-    and ``gaps`` (detected components with no recipe).
+    Returns a dict of detected components plus ``matched_recipes`` (recipe ids that apply),
+    ``already_covered`` (coverage the agent must not add a second meter to), and ``gaps``
+    (detected components with no recipe).
     """
     cat = catalog or get_catalog()
-    manifest_tokens = _tokens(manifest)
-    excerpt_tokens = _tokens(import_excerpts)
+    manifest_tokens = tokenize(manifest)
+    excerpt_tokens = tokenize(import_excerpts)
     all_tokens = manifest_tokens | excerpt_tokens
 
     matched: list[str] = []
     for recipe in cat.recipes:
-        import_hit = any(_tokens(imp) & all_tokens for imp in recipe.imports)
+        import_hit = any(tokenize(imp) & all_tokens for imp in recipe.imports)
         pattern_hit = any(pat in import_excerpts for pat in recipe.call_patterns)
         if import_hit or pattern_hit:
             matched.append(recipe.id)
@@ -90,6 +97,26 @@ def detect_stack(
             f"{', '.join(unhandled_web)} but no middleware recipe matched"
         )
 
+    # An auto-instrumented provider is coverage the agent must not add to. tally.init
+    # patches the openai / anthropic clients (CTO-260), so a manual record_llm_call beside
+    # one of those call sites meters the SAME call twice and doubles reported cost, which
+    # corrupts the product's core number. The recipe template carries the warning, but a
+    # template comment is not in the tool OUTPUT: without this marker an agent reading
+    # matched_recipes has nothing telling it the call is already covered (CTO-261 review
+    # finding 1). The recipe still matches when a genuinely unpatched path is present too
+    # (openai alongside ollama is a real stack), so this flags rather than silently drops.
+    already_covered: list[str] = []
+    if llm:
+        already_covered.append(
+            f"llm: {', '.join(llm)} detected. tally.init() auto-instruments these clients "
+            "(CTO-260), so those call sites need no edit. Do NOT add "
+            "tally.record_llm_call beside a patched "
+            "client call: the same call would be metered twice and reported cost would "
+            f"double. Apply {_MANUAL_LLM_RECIPE} only to a call site the patch does not "
+            "reach (a raw /v1/chat/completions POST, bedrock-runtime, ollama, a "
+            "self-hosted or gateway-fronted model)."
+        )
+
     return {
         # All detected web frameworks, so a second framework is never dropped. web_framework keeps
         # the single-framework field prior callers read (the first, alphabetically).
@@ -99,5 +126,6 @@ def detect_stack(
         "agent_frameworks": agents,
         "vector_dbs": vector,
         "matched_recipes": sorted(matched),
+        "already_covered": already_covered,
         "gaps": gaps,
     }

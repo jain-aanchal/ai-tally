@@ -191,10 +191,10 @@ has it installed instead: `"command": "/path/to/.venv/bin/tally-onboarding-mcp"`
 
 | Tool | What it returns |
 |---|---|
-| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match and the gaps that matched nothing |
+| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match, the `already_covered` notes for layers you must not meter twice, and the gaps that matched nothing |
 | `get_recipe` | one machine-readable recipe, by id or by a friendly name (`pinecone`, `fastapi`) |
 | `generate_startup` | the `tally.init()` line for application startup |
-| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line |
+| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line under `startup` (a generated snippet, or a gap with `code: None` if the catalog has no startup recipe, so `startup["code"]` is always safe to read) |
 | `instrument_call_site` | the adapted `record_*` edit for one concrete call site |
 | `explain_layer` | which `record_*` method covers a layer and why, grounded on the live SDK surface |
 | `coverage_report` | per-layer coverage; reports `not_probed` until the probe ships, never a guessed verdict |
@@ -205,5 +205,16 @@ reported gap and the account layer stays unattributed. And it never invents an S
 stack with no recipe comes back as a gap, and every hole it cannot fill from the call site you
 passed is left as a visible `<FILL:...>` marker for you to complete.
 
-Both mcp 1.x (`FastMCP`) and mcp 2.x (`MCPServer`) are supported. Without the extra installed,
-launching the server fails with a clear error rather than starting a server that does nothing.
+One thing the server will not let you do twice. `tally.init()` already patches the `openai` and
+`anthropic` clients in your process, so those call sites need no edit. `detect_stack` reports
+any such provider under `already_covered`, and the manual `llm.generic.call` recipe deliberately
+does not match a patched call shape: adding `record_llm_call` beside one would meter the same
+call twice and double your reported cost. Use that recipe only where the patch does not reach,
+such as a raw `/v1/chat/completions` POST, `bedrock-runtime`, `ollama`, or a self-hosted or
+gateway-fronted model.
+
+Both mcp 1.x (`FastMCP`, 1.2.0 and up) and mcp 2.x (`MCPServer`) are supported. Without the
+extra installed, launching the server fails with a clear error rather than starting a server
+that does nothing. The extra is also what makes the tools usable at all: `onboarding_mcp` ships
+in the base wheel so the console script resolves, but the recipe catalog is YAML and `pyyaml`
+comes with the extra, since the SDK runtime itself stays dependency-free.
