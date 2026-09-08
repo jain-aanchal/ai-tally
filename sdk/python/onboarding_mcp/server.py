@@ -129,9 +129,11 @@ def build_server(server_class: Any = None) -> Any:
         return explain_layer(query)
 
     @server.tool(name="coverage_report")
-    def coverage_report_tool(tenant_key: str) -> dict[str, Any]:
-        """Per-layer coverage (stubbed against the spec contract; probe ships later)."""
-        return coverage_report(tenant_key)
+    def coverage_report_tool(
+        tenant_key: str, wired: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Per-layer coverage from the gateway probe; unknown with a reason when it cannot run."""
+        return coverage_report(tenant_key, wired=wired)
 
     return server
 
