@@ -28,9 +28,8 @@ from onboarding_mcp.coverage_client import (
     fetch_coverage,
 )
 
-CONFIG = CoverageConfig(
-    gateway_url="https://gateway.example/", tenant_id="11111111-2222-3333-4444-555555555555"
-)
+TENANT_UUID = "11111111-2222-3333-4444-555555555555"
+CONFIG = CoverageConfig(gateway_url="https://gateway.example/", tenant_id=TENANT_UUID)
 ENV = {"GATEWAY_SERVICE_TOKEN": "svc-token-value"}
 
 
@@ -224,12 +223,105 @@ def test_missing_configuration_is_unknown_and_names_what_to_set():
     result = coverage_report("k", env={})
     _assert_all_unknown_with_reason(result, "not configured")
     assert "TALLY_GATEWAY_URL" in result["reason"]
-    assert "TALLY_TENANT_ID" in result["reason"]
+    assert "TALLY_MCP_TENANT_ID" in result["reason"]
 
 
 def test_missing_service_token_is_unknown_and_never_an_anonymous_call():
     result = coverage_report("k", transport=_transport(_payload()), config=CONFIG, env={})
     _assert_all_unknown_with_reason(result, "GATEWAY_SERVICE_TOKEN")
+
+
+# ---------------------------------------------------------------------------------------------
+# The tenant variable: the current name, the retired one, and the UUID shape (CTO-261).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_current_tenant_variable_configures_the_probe():
+    sink: list[tuple[str, dict[str, str]]] = []
+    env = {
+        "TALLY_GATEWAY_URL": "https://gw.example",
+        "TALLY_MCP_TENANT_ID": TENANT_UUID,
+        "GATEWAY_SERVICE_TOKEN": "svc-token-value",
+    }
+    result = coverage_report("k", config=None, env=env, transport=_transport(_payload(), sink))
+    assert result["probe_available"] is True
+    assert sink[0][1]["x-tenant-id"] == TENANT_UUID
+
+
+def test_the_retired_tenant_variable_alone_does_not_configure_the_probe():
+    # The whole point of the rename: a stale TALLY_TENANT_ID left in an old taskdef or .env must
+    # never silently scope the report to that tenant.
+    env = {
+        "TALLY_GATEWAY_URL": "https://gw.example",
+        "TALLY_TENANT_ID": TENANT_UUID,
+        "GATEWAY_SERVICE_TOKEN": "svc-token-value",
+    }
+    result = coverage_report("k", config=None, env=env, transport=_transport(_payload()))
+    _assert_all_unknown_with_reason(result, "retired")
+    assert "TALLY_MCP_TENANT_ID" in result["reason"]
+
+
+def test_the_retired_variable_is_not_used_as_a_fallback_value():
+    # Even a perfectly valid UUID under the retired name is refused rather than borrowed.
+    config, reason = config_from_env(
+        {"TALLY_GATEWAY_URL": "https://gw.example", "TALLY_TENANT_ID": TENANT_UUID}
+    )
+    assert config is None
+    assert "rename" in reason
+
+
+def test_the_retired_variable_is_ignored_when_the_current_one_is_set():
+    config, reason = config_from_env(
+        {
+            "TALLY_GATEWAY_URL": "https://gw.example",
+            "TALLY_MCP_TENANT_ID": TENANT_UUID,
+            "TALLY_TENANT_ID": "local-dev",
+        }
+    )
+    assert reason == ""
+    assert config is not None and config.tenant_id == TENANT_UUID
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "local-dev",
+        "abc",
+        "11111111-2222-3333-4444-55555555555",
+        "111111112222333344445555555555555",
+        "{11111111-2222-3333-4444-555555555555}",
+        "urn:uuid:11111111-2222-3333-4444-555555555555",
+    ],
+)
+def test_a_tenant_name_or_malformed_uuid_is_a_reasoned_gap_not_a_query(value):
+    # A name bound into a UUID read filter matches nothing, which would surface as a confident
+    # "nothing is wired". It must never reach the transport at all.
+    calls: list[str] = []
+
+    def send(url, headers, timeout):
+        calls.append(url)
+        return _payload()
+
+    env = {
+        "TALLY_GATEWAY_URL": "https://gw.example",
+        "TALLY_MCP_TENANT_ID": value,
+        "GATEWAY_SERVICE_TOKEN": "svc-token-value",
+    }
+    result = coverage_report("k", config=None, env=env, transport=send)
+    _assert_all_unknown_with_reason(result, "must be your tenant UUID")
+    assert calls == []
+    # A mis-set variable can hold anything, so its value never rides out in the reason.
+    assert value not in json.dumps(result)
+
+
+def test_the_tenant_uuid_check_is_refused_before_the_token_is_read():
+    env = {
+        "TALLY_GATEWAY_URL": "https://gw.example",
+        "TALLY_MCP_TENANT_ID": "local-dev",
+        "GATEWAY_SERVICE_TOKEN": "svc-token-value",
+    }
+    result = coverage_report("k", config=None, env=env, transport=_transport(_payload()))
+    assert "svc-token-value" not in json.dumps(result)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -241,7 +333,7 @@ def test_config_from_env_holds_a_token_reference_not_a_token():
     config, reason = config_from_env(
         {
             "TALLY_GATEWAY_URL": "https://gw.example",
-            "TALLY_TENANT_ID": "abc",
+            "TALLY_MCP_TENANT_ID": TENANT_UUID,
             "TALLY_GATEWAY_SERVICE_TOKEN_ENV": "MY_TOKEN_VAR",
             "MY_TOKEN_VAR": "s3cret",
         }
@@ -328,7 +420,9 @@ def test_a_non_utf8_body_decodes_instead_of_raising():
     ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://gw.example"],
 )
 def test_a_safe_base_url_is_accepted(base):
-    config, reason = config_from_env({"TALLY_GATEWAY_URL": base, "TALLY_TENANT_ID": "abc"})
+    config, reason = config_from_env(
+        {"TALLY_GATEWAY_URL": base, "TALLY_MCP_TENANT_ID": TENANT_UUID}
+    )
     assert reason == ""
     assert config is not None and config.gateway_url == base
 
@@ -344,7 +438,9 @@ def test_a_safe_base_url_is_accepted(base):
     ],
 )
 def test_an_unsafe_base_url_is_a_reasoned_gap_not_an_exception(base):
-    config, reason = config_from_env({"TALLY_GATEWAY_URL": base, "TALLY_TENANT_ID": "abc"})
+    config, reason = config_from_env(
+        {"TALLY_GATEWAY_URL": base, "TALLY_MCP_TENANT_ID": TENANT_UUID}
+    )
     assert config is None
     assert "TALLY_GATEWAY_URL" in reason
     assert "othing is being claimed" in reason
@@ -353,7 +449,7 @@ def test_an_unsafe_base_url_is_a_reasoned_gap_not_an_exception(base):
 def test_a_cleartext_base_is_refused_before_the_token_is_read():
     env = {
         "TALLY_GATEWAY_URL": "http://gw.example",
-        "TALLY_TENANT_ID": "abc",
+        "TALLY_MCP_TENANT_ID": TENANT_UUID,
         "GATEWAY_SERVICE_TOKEN": "svc-token-value",
     }
     result = coverage_report("k", config=None, env=env, transport=_transport(_payload()))

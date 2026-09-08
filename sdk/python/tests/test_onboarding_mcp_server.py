@@ -80,6 +80,9 @@ def test_registered_tools_delegate_to_the_plain_functions(built: RecordingServer
     # Unconfigured, so the probe cannot run: unknown with a reason through the binding too,
     # never a fabricated verdict (CTO-261 section 7).
     monkeypatch.delenv("TALLY_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("TALLY_MCP_TENANT_ID", raising=False)
+    # The retired name too: it is not read, but clearing it keeps this test honest about which
+    # variable the tool actually consults (CTO-261).
     monkeypatch.delenv("TALLY_TENANT_ID", raising=False)
     coverage = built.tools["coverage_report"]("tally_sk_live_x")
     assert coverage["probe_available"] is False
