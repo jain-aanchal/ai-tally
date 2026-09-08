@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // CAC period type + gateway-backed fetch (CTO-111).
 //
 // Shapes match the gateway's /v1/tenant/cac response. Money is micro-USD on the wire (matching
@@ -73,7 +73,7 @@ export interface CacQueryResult {
 export async function queryCacPeriods(): Promise<CacQueryResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cac`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });

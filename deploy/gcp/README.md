@@ -163,6 +163,34 @@ printf 'sk-...'      | gcloud secrets create ai-tally-openai-api-key    --data-f
 printf 'sk-ant-...'  | gcloud secrets create ai-tally-anthropic-api-key --data-file=-
 ```
 
+### The control-plane service token, and when to create it
+
+The `/v1/tenant/*` control plane is gated on a shared **service token** (Initiative 1 §6) whenever
+`gateway.config.requireApiKey` / `TALLY_REQUIRE_API_KEY` is true. The gateway refuses to boot with
+the gate on and no token, so **the secret has to exist before the upgrade that turns the gate on**,
+not after:
+
+```bash
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create ai-tally-gateway-service-token --data-file=-
+```
+
+Then, and only then, point the chart at it:
+
+```yaml
+secretManager:
+  secrets:
+    gatewayServiceToken: ai-tally-gateway-service-token
+```
+
+It ships **empty** in `values.yaml` on purpose. A non-empty default makes an ordinary `helm upgrade`
+of an existing release mount a secret that does not exist yet, and the pods sit in
+`ContainerCreating` with nothing in the logs to explain it. Left empty with `requireApiKey: true`,
+the chart instead fails to render with a message naming this value. The web tier does not need the
+token at all while the gate is off. The gateway reads the same value as
+`TALLY_GATEWAY_SERVICE_TOKEN` and the web tier as `GATEWAY_SERVICE_TOKEN`; the two must match
+exactly, or the dashboard sends no `Authorization` and every control-plane read 401s.
+
+
 > **Not deploy-time secrets:** the **Stripe** webhook signing secret is pasted per-tenant in the
 > dashboard and persisted in Postgres (`db/postgres/0003_tenant_stripe_config.sql`) — protect it by
 > protecting Cloud SQL, not via an env var. Per-tenant **HMAC** user-id keys (CTO-74) live in the
@@ -273,14 +301,31 @@ curl -s localhost:8080/healthz                      # {"status":"ok"}
 
 Then send a batch (the same payload as `RUNNING.md` step 3, pointed at your gateway URL) and confirm
 rows land in ClickHouse. Finally open the web service URL — the **Cost**, **Features**, **Agents**,
-and **Data Quality** pages should render your ingested `local-dev` spans.
+and **Data Quality** pages should render your ingested spans.
 
 ## 9. Point the dashboard at production tenants
 
-The web tier defaults to tenant `local-dev` (matching local dev). For real tenants, set
-`web.config.tenantId` (GKE) or the `TALLY_TENANT_ID` env (Cloud Run), and enable
+On the product path the dashboard does not pin a tenant at all: it resolves the caller's Clerk
+organization to a tenant UUID through the gateway control plane. So leave `web.config.devTenant`
+(GKE) and the `TALLY_DEV_TENANT` env (Cloud Run) **empty**, and keep
 `gateway.config.requireApiKey=true` (the cloud default) so ingest requires
-`Authorization: Bearer <key>` — seed keys with the gateway's `seed.py` against Cloud SQL.
+`Authorization: Bearer <key>`. Seed keys with the gateway's `seed.py` against Cloud SQL.
+
+Two things follow from that, and both bite silently if you get them wrong:
+
+- **Control-plane calls need the service token.** Every `/v1/tenant/*` request carries
+  `Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN`, and with `requireApiKey` on the gateway
+  refuses to boot when the token is empty rather than serve an open control plane. The gateway
+  reads it as `TALLY_GATEWAY_SERVICE_TOKEN` and the web tier reads the same secret as
+  `GATEWAY_SERVICE_TOKEN`; both are wired here as Secret Manager references, so put a real value in
+  the `ai-tally-gateway-service-token` secret (`openssl rand -hex 32`) and never a committed
+  literal. A mismatch surfaces as a `401` on every dashboard control-plane write.
+
+- **If you do pin a tenant, pin the UUID.** `TALLY_DEV_TENANT` / `web.config.devTenant` is a
+  single-tenant demo escape hatch, and its value is bound straight into the ClickHouse read filter
+  (`TenantId = ...`) while spans are tagged with the tenant UUID. The name `local-dev` therefore
+  matches no rows: the stack comes up green and the dashboard renders empty. `make seed` prints the
+  UUID to use. The older `TALLY_TENANT_ID` env is no longer read by the web tier at all.
 
 ---
 

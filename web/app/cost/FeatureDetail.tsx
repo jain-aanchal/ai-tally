@@ -65,7 +65,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
     return () => ctrl.abort();
   }, [feature]);
 
-  const title = `Feature economics — ${feature}`;
+  const title = `Feature economics: ${feature}`;
 
   if (status === "loading" && data === null) {
     return (

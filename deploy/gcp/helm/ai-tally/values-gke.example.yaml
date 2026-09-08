@@ -16,6 +16,7 @@ secretManager:
     clickhousePassword: ai-tally-clickhouse-password
     openaiApiKey: ai-tally-openai-api-key
     anthropicApiKey: ai-tally-anthropic-api-key
+    gatewayServiceToken: ai-tally-gateway-service-token
 
 cloudSql:
   enabled: true
@@ -45,4 +46,6 @@ web:
     repository: us-central1-docker.pkg.dev/MY_PROJECT/ai-tally/web
     tag: "1.0.0"
   config:
-    tenantId: local-dev
+    # Empty: the tenant comes from the caller's Clerk org. To pin one for a demo, use its
+    # UUID (`make seed` prints it), never the name `local-dev`.
+    devTenant: ""

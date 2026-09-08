@@ -191,10 +191,10 @@ has it installed instead: `"command": "/path/to/.venv/bin/tally-onboarding-mcp"`
 
 | Tool | What it returns |
 |---|---|
-| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match and the gaps that matched nothing |
+| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match, the `already_covered` notes for layers you must not meter twice, and the gaps that matched nothing |
 | `get_recipe` | one machine-readable recipe, by id or by a friendly name (`pinecone`, `fastapi`) |
 | `generate_startup` | the `tally.init()` line for application startup |
-| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line |
+| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line under `startup` (a generated snippet, or a gap with `code: None` if the catalog has no startup recipe, so `startup["code"]` is always safe to read) |
 | `instrument_call_site` | the adapted `record_*` edit for one concrete call site |
 | `explain_layer` | which `record_*` method covers a layer and why, grounded on the live SDK surface |
 | `coverage_report` | per-layer coverage read from the gateway's probe: which layers a real span proves are flowing, and why each dark layer is dark |
@@ -231,8 +231,19 @@ reported gap and the account layer stays unattributed. And it never invents an S
 stack with no recipe comes back as a gap, and every hole it cannot fill from the call site you
 passed is left as a visible `<FILL:...>` marker for you to complete.
 
-Both mcp 1.x (`FastMCP`) and mcp 2.x (`MCPServer`) are supported. Without the extra installed,
-launching the server fails with a clear error rather than starting a server that does nothing.
+One thing the server will not let you do twice. `tally.init()` already patches the `openai` and
+`anthropic` clients in your process, so those call sites need no edit. `detect_stack` reports
+any such provider under `already_covered`, and the manual `llm.generic.call` recipe deliberately
+does not match a patched call shape: adding `record_llm_call` beside one would meter the same
+call twice and double your reported cost. Use that recipe only where the patch does not reach,
+such as a raw `/v1/chat/completions` POST, `bedrock-runtime`, `ollama`, or a self-hosted or
+gateway-fronted model.
+
+Both mcp 1.x (`FastMCP`, 1.2.0 and up) and mcp 2.x (`MCPServer`) are supported. Without the
+extra installed, launching the server fails with a clear error rather than starting a server
+that does nothing. The extra is also what makes the tools usable at all: `onboarding_mcp` ships
+in the base wheel so the console script resolves, but the recipe catalog is YAML and `pyyaml`
+comes with the extra, since the SDK runtime itself stays dependency-free.
 
 ## Hosted repo PR bot (CTO-261)
 
@@ -288,8 +299,23 @@ not merely promised here:
   (and `rebase`, `cherry-pick`, `reset`) is on neither, so no code path reaches one. The PR
   waits for a human.
 - **It keeps no source.** The clone is shallow, lives in a temporary directory, and is
-  deleted in a `finally` on every exit path including a refused run. What the run returns is
-  paths, counts, generated code and gaps, never your source.
+  deleted in a `finally` on every exit path including a refused run, and by a SIGTERM /
+  SIGINT handler so a runner that stops the job does not leave the clone behind either. A
+  `SIGKILL` cannot be caught by anything, so the promise is every exit path the process
+  controls. A cleanup that fails is reported in `cleanup_error`, never swallowed. What the
+  run returns is paths, counts, generated code and gaps, never your source.
 - **It invents nothing.** Every line it writes comes from the recipe catalog. A value it
   cannot derive from the call site stays a visible `<FILL:...>` hole, and a block with a hole
   is inserted commented out so nothing runs on a guessed value.
+- **It claims nothing it did not do.** `layers_wired` (in the JSON result, the commit
+  subject and the PR table) lists only blocks that actually meter. A block inserted
+  commented out is reported separately as inactive.
+- **It never commits code that does not compile.** Every block goes in at a statement
+  boundary resolved from the parsed file, and every patched Python file is run through
+  `compile()` before anything is written. A file it cannot patch cleanly is left untouched
+  and reported as a gap.
+
+Each run gets its own branch (`tally/onboarding/<run id>`); pass `--branch-suffix` to name
+it yourself. If the branch is already on the remote the run stops and says so instead of
+failing at push. If the push succeeds but the PR call does not, the exit is non-zero and the
+printed result carries `orphan_branch` so you can find the branch it left.

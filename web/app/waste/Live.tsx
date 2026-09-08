@@ -163,7 +163,7 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
         ))}
       </TileGrid>
 
-      <Card title="Findings — hypotheses with evidence">
+      <Card title="Findings: hypotheses with evidence">
         {report.unavailable ? (
           // Hard failure: the report could not be produced. Render the honest reason, not an empty
           // table that would read as "no waste" (CTO-227).

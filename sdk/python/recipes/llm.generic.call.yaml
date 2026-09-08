@@ -6,8 +6,17 @@ id: llm.generic.call
 kind: llm
 title: "Unpatched LLM call site -> tally.record_llm_call"
 detect:
-  imports: ["httpx", "requests", "boto3", "ollama", "vllm", "together", "groq"]
-  call_patterns: [".chat.completions.create(", "messages.create(", "/v1/chat/completions"]
+  # Deliberately narrow (CTO-261 review findings 1 and 2). Two things must never appear
+  # here. httpx / requests / boto3 sit in nearly every Python app, so listing them made
+  # this recipe match an app with no LLM at all. And .chat.completions.create( /
+  # messages.create( are the shapes tally.init already monkeypatches (CTO-260), so
+  # matching them told an agent to add a second meter beside a call that is already
+  # metered, doubling reported cost. Only genuinely unpatched paths belong here.
+  # boto3 Bedrock is reached through the bedrock-runtime call pattern rather than the
+  # boto3 import, because boto3 on its own is overwhelmingly S3 / DynamoDB.
+  imports: ["ollama", "vllm", "together", "groq"]
+  call_patterns:
+    ["/v1/chat/completions", "bedrock-runtime", "ollama.chat(", "ollama.generate("]
 sdk_surface:
   call: "tally.record_llm_call"
   delegates_to: "tally.client.TallyClient.record_llm_call"
@@ -32,4 +41,4 @@ edit:
 verify:
   layer: llm
   operation_name: "chat"
-notes: "Cost resolves from the versioned catalog keyed by (provider, model); an unpriced pair keeps cost unknown with a one-time WARN rather than reporting a fabricated zero. Pass cached_input_tokens on Usage where the provider reports it."
+notes: "Applies only where tally.init's CTO-260 patch does not reach: a self-hosted or gateway-fronted model, a raw /v1/chat/completions POST, boto3 bedrock-runtime, ollama. Never apply it beside a patched openai / anthropic client call; detect_stack flags that case in already_covered. Cost resolves from the versioned catalog keyed by (provider, model); an unpriced pair keeps cost unknown with a one-time WARN rather than reporting a fabricated zero. Pass cached_input_tokens on Usage where the provider reports it."

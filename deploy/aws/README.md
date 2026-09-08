@@ -185,6 +185,41 @@ aws secretsmanager create-secret --name ai-tally-openai-api-key    --secret-stri
 aws secretsmanager create-secret --name ai-tally-anthropic-api-key --secret-string 'sk-ant-...'
 ```
 
+### The control-plane service token, and when to create it
+
+The `/v1/tenant/*` control plane is gated on a shared **service token** (Initiative 1 §6) whenever
+`gateway.config.requireApiKey` / `TALLY_REQUIRE_API_KEY` is true. The gateway refuses to boot with
+the gate on and no token, so **the secret has to exist before the upgrade that turns the gate on**,
+not after:
+
+```bash
+openssl rand -hex 32 | tr -d '\n' | \
+  xargs -0 -I{} aws secretsmanager create-secret --name ai-tally-gateway-service-token \
+    --secret-string {}
+```
+
+Then, and only then, point the chart at it:
+
+```yaml
+secretsManager:
+  secrets:
+    gatewayServiceToken: ai-tally-gateway-service-token
+```
+
+It ships **empty** in `values.yaml` on purpose. A non-empty default makes an ordinary `helm upgrade`
+of an existing release mount a secret that does not exist yet, and the pods sit in
+`ContainerCreating` with nothing in the logs to explain it. Left empty with `requireApiKey: true`,
+the chart instead fails to render with a message naming this value. The **web tier does not need the
+token at all** while the gate is off, which is why the ECS `web.taskdef.json` does not list it: add
+
+```json
+{ "name": "GATEWAY_SERVICE_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-gateway-service-token" }
+```
+
+to that task def's `secrets` block in the same change that turns the gate on. The gateway reads the
+same value as `TALLY_GATEWAY_SERVICE_TOKEN`; the two must match exactly, or the dashboard sends no
+`Authorization` and every control-plane read 401s.
+
 > **Not deploy-time secrets:** the **Stripe** webhook signing secret is pasted per-tenant in the
 > dashboard and persisted in Postgres (`db/postgres/0003_tenant_stripe_config.sql`) — protect it by
 > protecting RDS, not via an env var. Per-tenant **HMAC** user-id keys (CTO-74) live in the gateway's
@@ -320,10 +355,28 @@ rows land in ClickHouse. Finally open the web URL — the **Cost**, **Features**
 
 ## 9. Point the dashboard at production tenants
 
-The web tier defaults to tenant `local-dev`. For real tenants, set `web.config.tenantId` (EKS) or the
-`TALLY_TENANT_ID` env (ECS `web.taskdef.json`), and keep `gateway.config.requireApiKey=true` (the
-cloud default) so ingest requires `Authorization: Bearer <key>` — seed keys with the gateway's
-`seed.py` against RDS.
+On the product path the dashboard does not pin a tenant at all: it resolves the caller's Clerk
+organization to a tenant UUID through the gateway control plane. So leave `web.config.devTenant`
+(EKS) and the `TALLY_DEV_TENANT` env (ECS `web.taskdef.json`) **empty**, and keep
+`gateway.config.requireApiKey=true` (the cloud default) so ingest requires
+`Authorization: Bearer <key>`. Seed keys with the gateway's `seed.py` against RDS.
+
+Two things follow from that, and both bite silently if you get them wrong:
+
+- **Control-plane calls need the service token.** Every `/v1/tenant/*` request carries
+  `Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN`, and with `requireApiKey` on the gateway
+  refuses to boot when the token is empty rather than serve an open control plane. The gateway
+  reads it as `TALLY_GATEWAY_SERVICE_TOKEN` and the web tier reads the same secret as
+  `GATEWAY_SERVICE_TOKEN`; both taskdefs and both charts reference the
+  `ai-tally-gateway-service-token` Secrets Manager entry, so put a real value in it
+  (`openssl rand -hex 32`) and never a committed literal. A mismatch surfaces as a `401` on every
+  dashboard control-plane write.
+
+- **If you do pin a tenant, pin the UUID.** `TALLY_DEV_TENANT` / `web.config.devTenant` is a
+  single-tenant demo escape hatch, and its value is bound straight into the ClickHouse read filter
+  (`TenantId = ...`) while spans are tagged with the tenant UUID. The name `local-dev` therefore
+  matches no rows: the stack comes up green and the dashboard renders empty. `make seed` prints the
+  UUID to use. The older `TALLY_TENANT_ID` env is no longer read by the web tier at all.
 
 ## 10. Teardown
 

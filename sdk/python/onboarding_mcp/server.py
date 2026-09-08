@@ -9,6 +9,7 @@ an optional runtime dependency, imported lazily so the SDK test suite needs no M
 
 from __future__ import annotations
 
+import importlib.util
 from typing import Any
 
 from onboarding_mcp import (
@@ -38,8 +39,19 @@ TOOL_NAMES = (
 
 _MISSING_MCP = (
     "the 'mcp' package is required to run the onboarding MCP server; install it with "
-    "`pip install 'tally-sdk[mcp]'`. The tools themselves are importable without it."
+    "`pip install 'tally-sdk[mcp]'`. That extra also brings pyyaml, which the recipe "
+    "catalog needs, so the onboarding tools are importable and usable only with it "
+    "(onboarding_mcp is in the base wheel purely so this entrypoint resolves)."
 )
+
+
+def _mcp_installed() -> bool:
+    """True when a top-level ``mcp`` package is importable in this environment."""
+    try:
+        return importlib.util.find_spec("mcp") is not None
+    except (ImportError, ValueError):
+        # ValueError: sys.modules holds a None entry for mcp (how tests simulate absence).
+        return False
 
 
 def load_server_class() -> Any:
@@ -55,12 +67,21 @@ def load_server_class() -> Any:
 
         return MCPServer
     except ImportError:
-        pass
+        # The mcp 2.x module imports siblings of its own, so a partial or broken mcp-2
+        # install raises ImportError for a reason that is NOT "mcp is not installed".
+        # Swallowing it fell through to the 1.x path and reported "install the mcp
+        # package" for an environment where mcp IS installed, the exact misleading error
+        # this work set out to remove. Only a genuinely absent mcp falls through
+        # (CTO-261 review finding 5).
+        if _mcp_installed():
+            raise
     try:
         from mcp.server.fastmcp import FastMCP  # mcp 1.x
 
         return FastMCP
     except ImportError as exc:
+        if _mcp_installed():
+            raise
         raise RuntimeError(_MISSING_MCP) from exc
 
 

@@ -92,11 +92,20 @@ def test_unknown_input_stays_a_gap_through_the_tool_layer(built: RecordingServer
     assert built.tools["generate_middleware"]("fastapi", "  ")["gap"] is True
 
 
-def test_missing_mcp_dependency_raises_a_clear_runtime_error(monkeypatch):
-    # Blocking both module paths in sys.modules makes the import fail the same way an
-    # uninstalled extra does, whether or not mcp happens to be present in this env.
+def _simulate_mcp_absent(monkeypatch) -> None:
+    """Make mcp look uninstalled regardless of what this environment actually has.
+
+    The None entries make the submodule imports fail the way an uninstalled extra does;
+    the top-level None entry is what ``_mcp_installed`` reads, so the "is it really
+    missing?" check agrees instead of re-raising (CTO-261 review finding 5).
+    """
+    monkeypatch.setitem(sys.modules, "mcp", None)
     monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+
+
+def test_missing_mcp_dependency_raises_a_clear_runtime_error(monkeypatch):
+    _simulate_mcp_absent(monkeypatch)
     with pytest.raises(RuntimeError) as excinfo:
         server_mod.load_server_class()
     message = str(excinfo.value)
@@ -105,10 +114,39 @@ def test_missing_mcp_dependency_raises_a_clear_runtime_error(monkeypatch):
 
 
 def test_build_server_propagates_the_missing_dependency_error(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
-    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+    _simulate_mcp_absent(monkeypatch)
     with pytest.raises(RuntimeError):
         server_mod.build_server()
+
+
+def test_broken_mcp_install_reraises_instead_of_claiming_mcp_is_missing(monkeypatch):
+    # Finding 5: the mcp 2.x module imports siblings of its own, so a partial or broken
+    # mcp-2 install raises ImportError for a reason other than "not installed". The old
+    # bare `except ImportError: pass` fell through and told the developer to install a
+    # package they already had. With mcp importable, the real ImportError must surface.
+    monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+    monkeypatch.setattr(server_mod, "_mcp_installed", lambda: True)
+    with pytest.raises(ImportError):
+        server_mod.load_server_class()
+
+
+def test_mcp_extra_requires_a_version_that_actually_ships_fastmcp():
+    # FastMCP was merged into the official mcp SDK in 1.2.0; the 1.0.0 wheel has no
+    # fastmcp module, so a resolver picking 1.0.x / 1.1.x would produce the misleading
+    # "install the mcp package" error for an installed mcp (finding 3).
+    pyproject = tomllib.loads(PYPROJECT.read_text())
+    mcp_extra = pyproject["project"]["optional-dependencies"]["mcp"]
+    pins = [p for p in mcp_extra if p.startswith("mcp")]
+    assert pins == ["mcp>=1.2"], f"unexpected mcp pin: {pins}"
+
+
+def test_missing_mcp_message_does_not_claim_the_tools_import_without_the_extra():
+    # Finding 4: onboarding_mcp is in the base wheel, but catalog.py needs pyyaml, which
+    # only the mcp extra brings. The message must not claim otherwise.
+    message = server_mod._MISSING_MCP
+    assert "importable without it" not in message
+    assert "pyyaml" in message
 
 
 def test_declared_console_entrypoint_resolves():

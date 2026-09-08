@@ -33,7 +33,7 @@ export default async function EstimatePage() {
           <span className="font-mono text-accent">
             {pr.repo}#{pr.number}
           </span>
-          <span className="text-muted"> — </span>
+          <span className="text-muted">: </span>
           <span>{pr.title}</span>
         </div>
       )}

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Cloud cost-connector configuration (CTO-176).
 //
 // Mirrors lib/stripeConnector.ts: the dashboard never talks to Postgres directly, it goes through
@@ -34,7 +34,7 @@ interface ConfigWire {
 export async function queryCostConnectorConfigs(): Promise<CostConnectorConfig[] | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -67,7 +67,7 @@ export async function connectCostConnector(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
       body: JSON.stringify({ connector, ...fields }),
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
@@ -95,7 +95,7 @@ export async function disconnectCostConnector(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/cost-connectors/${connector}`, {
       method: "DELETE",
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
     });

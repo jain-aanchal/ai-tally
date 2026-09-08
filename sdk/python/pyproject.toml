@@ -22,7 +22,11 @@ dev = [
 # pyyaml is a real runtime need here (the recipe catalog is YAML), which is why it is
 # listed again rather than borrowed from dev.
 mcp = [
-    "mcp>=1.0",
+    # >=1.2, not >=1.0: FastMCP was only merged into the official mcp SDK in 1.2.0, so a
+    # resolver landing on 1.0.x / 1.1.x gives a wheel with no fastmcp module and the server
+    # dies with "the 'mcp' package is required" while mcp IS installed, which is exactly the
+    # misleading error this work removes (CTO-261 review finding 3).
+    "mcp>=1.2",
     "pyyaml>=6.0",
 ]
 
@@ -41,6 +45,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 # onboarding_mcp ships in the wheel so the console entrypoint above resolves for an
 # installed SDK; recipes/ is the data the server reads and is forced in below.
+# A wheel's contents cannot vary by extra, so onboarding_mcp is present in the base wheel
+# but is NOT usable from it: the recipe catalog is YAML and pyyaml lives in the mcp extra,
+# which the SDK runtime deliberately does not carry (dependencies = [] above). Importing it
+# without the extra raises a clear, actionable error from catalog.py rather than a bare
+# "No module named 'yaml'", and server.py's message says the same thing (CTO-261 review
+# finding 4). Do not "fix" this by moving pyyaml into dependencies.
 packages = ["src/tally", "onboarding_mcp", "onboarding_bot"]
 force-include = { "recipes" = "onboarding_mcp/recipes" }
 
