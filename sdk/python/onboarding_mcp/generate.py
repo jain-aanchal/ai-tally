@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from onboarding_mcp.catalog import RecipeCatalog, get_catalog
-from onboarding_mcp.detect import tokenize
+from onboarding_mcp.detect import import_token_matches_prose, tokenize
 from onboarding_mcp.sdk_surface import emitted_tally_calls, layer_grounding
 
 _HOLE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -235,15 +235,28 @@ def explain_layer(query: str, *, catalog: RecipeCatalog | None = None) -> dict[s
     if facts is None:
         # Not a bare layer name: try to match the excerpt to a recipe by its detect block.
         # Imports match on identifier-token boundaries, not bare substrings: a plain
-        # substring test lets an ordinary English word inside a question ("together")
-        # or an unrelated dependency name pass as a confident LLM answer, and a
-        # confidently wrong grounded answer is worse than a gap (CTO-261 review
+        # substring test lets an unrelated dependency name pass as a confident LLM answer,
+        # and a confidently wrong grounded answer is worse than a gap (CTO-261 review
         # finding 2, CLAUDE.md "honest under uncertainty").
+        #
+        # A token boundary is not enough for a package whose name is also an ordinary
+        # English word, because the token genuinely IS a word: "let us work through this
+        # together" would otherwise ground on the together.ai import and answer with the
+        # LLM layer. Those names need an import-shaped or package-shaped context here.
+        # This is explain_layer only: detect_stack reads manifests and import excerpts,
+        # where the same token really does mean the dependency is installed, so together.ai
+        # detection keeps working there (CTO-261 review finding 2).
         query_tokens = tokenize(query)
+
+        def _import_hit(imp: str) -> bool:
+            return any(
+                import_token_matches_prose(tok, query, query_tokens) for tok in tokenize(imp)
+            )
+
         for recipe in cat.recipes:
             if not (
                 any(pat in query for pat in recipe.call_patterns)
-                or any(tokenize(imp) & query_tokens for imp in recipe.imports)
+                or any(_import_hit(imp) for imp in recipe.imports)
             ):
                 continue
             grounding = layer_grounding(recipe.verify.get("layer", ""))
