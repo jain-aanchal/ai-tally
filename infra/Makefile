@@ -62,7 +62,13 @@ seed: ## Create a local tenant + API key + feature tags in Postgres
 	@echo "  export TALLY_DEV_TENANT=$(TENANT_UUID)"
 
 demo: ## Send a sample batch through the gateway into ClickHouse
-	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py
+	@# send_batch.py defaults to the tenant NAME, but ingest writes TenantId verbatim while the
+	@# dashboard reads by UUID (Initiative 1, §8), so the default would land rows the UI never shows.
+	@# Fail loudly rather than write invisible rows: an empty UUID means the tenant is not seeded.
+	@test -n "$(strip $(TENANT_UUID))" || { \
+	  echo "cannot resolve the local-dev tenant UUID from Postgres; run 'make up && make seed' first"; \
+	  exit 1; }
+	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py --tenant $(TENANT_UUID)
 
 aider-demo: ## Run Aider against a fixture repo through the edge proxy (needs OPENAI_API_KEY)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \

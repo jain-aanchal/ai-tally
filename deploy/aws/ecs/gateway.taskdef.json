@@ -30,6 +30,7 @@
       "secrets": [
         { "name": "TALLY_POSTGRES_DSN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-postgres-dsn" },
         { "name": "TALLY_CLICKHOUSE_PASSWORD", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-clickhouse-password" },
+        { "name": "TALLY_GATEWAY_SERVICE_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-gateway-service-token" },
         { "name": "OPENAI_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-openai-api-key" },
         { "name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-anthropic-api-key" }
       ],

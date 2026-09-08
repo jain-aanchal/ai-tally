@@ -48,6 +48,12 @@ set +a
 
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
 
+# Tenant-UUID resolution and the service-token preflight, shared with deploy.sh.
+# shellcheck source=deploy/demo/lib-tenant.sh
+source "${SCRIPT_DIR}/lib-tenant.sh"
+
+require_service_token_if_auth_on
+
 CH_USER="${CLICKHOUSE_USER:-tally}"
 CH_PASSWORD="${CLICKHOUSE_PASSWORD:-tally}"
 
@@ -68,6 +74,13 @@ TABLES=(
   replay_samples
 )
 
+# Resolve the tenant BEFORE truncating. If the control plane cannot answer, a nightly run must abort
+# with the old data still on screen rather than empty the tables and then discover it has no tenant
+# to repost under (CTO-243).
+echo "==> Resolving the demo tenant UUID"
+TENANT_UUID="$(resolve_tenant_uuid)"
+echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
+
 echo "==> Truncating ClickHouse telemetry tables"
 for t in "${TABLES[@]}"; do
   echo "    TRUNCATE ${t}"
@@ -83,7 +96,8 @@ echo "==> Re-backfilling 30 days of SYNTHETIC demo spans"
 # Same throwaway-container approach as deploy.sh: no host Node, reaches the gateway internally.
 # --seed: a per-run nonce so batch_ids are fresh and the gateway's 24h dedup never drops a reseed
 #         (see the WHY block above). Override with BACKFILL_SEED if you need a reproducible run.
-# --tenant: pin to the dashboard's tenant so seed data and the rendered tenant cannot drift.
+# --tenant: the resolved tenant UUID, the value the dashboard binds into its ClickHouse read filter,
+#         so seed data and the rendered tenant cannot drift (a NAME here matches no rows).
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
 BACKFILL_SEED="${BACKFILL_SEED:-$(date +%s)}"
 docker run --rm \
@@ -91,6 +105,12 @@ docker run --rm \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
   node:22-bookworm-slim \
-  npx --yes tsx /scripts/backfill-spans.ts --seed "${BACKFILL_SEED}" --tenant "${TALLY_TENANT_ID:-local-dev}"
+  npx --yes tsx /scripts/backfill-spans.ts --seed "${BACKFILL_SEED}" --tenant "${TENANT_UUID}"
+
+# Repair the web tier if it is running without TALLY_DEV_TENANT (for example after a bare
+# `docker compose up` that bypassed deploy.sh). Compose recreates only when the value actually
+# changes, so on a normal nightly run this is a no-op.
+export TALLY_DEV_TENANT="${TENANT_UUID}"
+"${COMPOSE[@]}" up -d web
 
 echo "==> Demo data reset. The dashboard now shows a fresh synthetic 30-day window."

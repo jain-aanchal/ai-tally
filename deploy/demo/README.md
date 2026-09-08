@@ -23,9 +23,10 @@ keep talking to each other over the compose network but are not reachable from t
 | `web.Dockerfile` | Multi-stage build of the Next.js dashboard (standalone, `node:22`), root build context. |
 | `docker-compose.prod.yml` | Overlay: adds `web` + `caddy`, strips host ports off the base services. |
 | `Caddyfile` | `${DOMAIN}` site: automatic TLS, basic-auth, `reverse_proxy web:3000`. Commented gateway-ingest and local-HTTP variants. |
-| `.env.example` | Per-host config: domain, basic-auth user + bcrypt hash, stack creds, tenant. |
+| `.env.example` | Per-host config: domain, basic-auth user + bcrypt hash, stack creds, service token. |
 | `deploy.sh` | Bring the stack up, wait for health, apply DDL, seed + backfill, print the link. |
 | `reseed.sh` | Reset + re-seed the synthetic data (run nightly via cron). |
+| `lib-tenant.sh` | Sourced by both scripts: tenant-UUID resolution and the service-token preflight. |
 
 ## Operator runbook
 
@@ -70,6 +71,25 @@ Edit `deploy/demo/.env`:
   Store only the `$2a$...` hash in `.env`; keep the plaintext to share with testers. `.env` is
   host-specific and is git-ignored - do not commit it.
 
+- Leave `TALLY_GATEWAY_SERVICE_TOKEN` commented out unless you also turn gateway auth on
+  (`TALLY_REQUIRE_API_KEY=true`). If you do turn it on, generate a real token and never commit it:
+
+  ```
+  echo "TALLY_GATEWAY_SERVICE_TOKEN=$(openssl rand -hex 32)" >> deploy/demo/.env
+  ```
+
+  One key covers both tiers: the compose overlay hands the same value to the gateway as
+  `TALLY_GATEWAY_SERVICE_TOKEN` and to the web server as `GATEWAY_SERVICE_TOKEN`. With auth on and
+  the token empty the gateway refuses to boot rather than serve an open control plane, so
+  `deploy.sh` and `reseed.sh` stop up front and say so.
+
+- Do **not** set the tenant by hand. The dashboard reads `TALLY_DEV_TENANT`, and it must hold the
+  tenant **UUID**, not the name `local-dev`: the web binds that value straight into the ClickHouse
+  read filter (`TenantId = ...`) and the backfill tags spans with the UUID, so a name matches no
+  rows and you get an empty dashboard with no error. The UUID only exists after seeding, so
+  `deploy.sh` resolves it from Postgres, hands it to the backfill, and recreates the web service
+  with it. If resolution ever fails, both scripts abort with the reason instead of falling back.
+
 ### 4. Deploy
 
 ```
@@ -77,8 +97,8 @@ Edit `deploy/demo/.env`:
 ```
 
 This builds the images, starts the stack, waits for the gateway to be healthy, applies the
-ClickHouse DDL (including `replay_samples`), seeds the tenant, and backfills 30 days of synthetic
-spans. When it finishes it prints:
+ClickHouse DDL (including `replay_samples`), seeds the tenant, resolves that tenant's UUID and
+points the dashboard at it, then backfills 30 days of synthetic spans. When it finishes it prints:
 
 ```
 URL:   https://demo.example.com
@@ -145,6 +165,33 @@ docker run --rm -v "$PWD/deploy/demo/Caddyfile:/etc/caddy/Caddyfile:ro" \
 For an end-to-end auth check, run Caddy with the commented `:8088` HTTP block from the `Caddyfile`
 proxying to a `web` container on a spare port and `curl` it: no creds -> `401`, correct creds ->
 `200`.
+
+## Troubleshooting
+
+**The dashboard renders but every panel is empty.** Almost always a tenant mismatch: the spans were
+written under one `TenantId` and the dashboard is reading another. Check the two ends agree:
+
+```
+# What the control plane says the tenant UUID is:
+docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+  exec -T postgres psql -U tally -d tally -tAc "SELECT id, name FROM tenants"
+
+# What the web tier is actually reading:
+docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+  exec -T web printenv TALLY_DEV_TENANT
+
+# What ClickHouse actually holds:
+docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+  exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+  --query "SELECT TenantId, count() FROM otel_spans GROUP BY TenantId"
+```
+
+All three must show the same **UUID**. A `local-dev` (the name) in either of the last two means
+something bypassed `deploy.sh`; re-running `./deploy/demo/reseed.sh` re-resolves and repairs it.
+
+**A control-plane write from the dashboard returns 401.** Gateway auth is on and the two tiers hold
+different tokens. They come from the single `TALLY_GATEWAY_SERVICE_TOKEN` key in `.env`, so confirm
+`.env` has it and re-run `deploy.sh`; a hand-edited container env is the usual cause.
 
 ## Feedback
 

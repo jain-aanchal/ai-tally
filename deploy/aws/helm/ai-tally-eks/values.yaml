@@ -64,6 +64,11 @@ secretsManager:
     # to the IRSA role (the SDK uses the role, not a key).
     openaiApiKey: ai-tally-openai-api-key
     anthropicApiKey: ai-tally-anthropic-api-key
+    # Control-plane service token (Initiative 1 §6). The web server presents it as a bearer token
+    # on every /v1/tenant/* call and the gateway refuses to boot without it when
+    # gateway.config.requireApiKey is true. Consumed as TALLY_GATEWAY_SERVICE_TOKEN (gateway)
+    # and GATEWAY_SERVICE_TOKEN (web).
+    gatewayServiceToken: ai-tally-gateway-service-token
   # NOTE on Stripe + HMAC: the Stripe webhook *signing secret* is NOT a gateway env var — it is
   # pasted per-tenant in the dashboard and persisted in Postgres (see db/postgres/0003_*.sql), so it
   # is protected by protecting RDS. Per-tenant HMAC user-id keys (CTO-74) live in the gateway's
@@ -126,7 +131,10 @@ web:
     # The dashboard queries ClickHouse directly AND calls the gateway. The gateway URL defaults to
     # the in-cluster Service; leave blank to auto-derive it from the release name.
     gatewayUrl: ""
-    tenantId: local-dev
+    # Initiative 1 §10: pin a tenant and skip Clerk. Leave EMPTY on the product path. For a
+    # single-tenant demo set the tenant UUID (`make seed` prints it), never the name
+    # `local-dev`: this is bound into the ClickHouse read filter and a name matches no rows.
+    devTenant: ""
     clickhouseDb: default
     clickhouseUser: tally
     dashboardRefreshMs: "5000"   # NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS
