@@ -121,12 +121,23 @@ export function HomeLive({
   // identical number (CTO-228). "Estimated" is always Spend minus Reconciled, so no figure is lost.
   const reconciledPct =
     s.totalMicroUsd === 0 ? 0 : Math.round((s.reconciledMicroUsd / s.totalMicroUsd) * 100);
+
+  // CTO-244. ClickHouse sum() skips NULLs, so when some spans could not be priced the Spend
+  // headline is a LOWER BOUND, not the total. Say so on the tile. We deliberately do NOT blank the
+  // headline: what we know is real money already spent, and hiding it would be its own dishonesty.
+  // What we must never do is present it as complete, which is what the old zero-filled column did.
+  const unpricedSpans = s.unpricedSpanCount ?? 0;
+  const totalSpans = s.spanCount ?? 0;
+  const spendHint =
+    unpricedSpans > 0
+      ? `at least: ${unpricedSpans.toLocaleString()} of ${totalSpans.toLocaleString()} spans in the last ${windowDays} days could not be priced`
+      : `last ${windowDays} days`;
   const tiles = (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <SummaryTile
         label="Spend"
         micro={s.totalMicroUsd}
-        hint={`last ${windowDays} days`}
+        hint={spendHint}
         higherIsBetter={false}
       />
       <SummaryTile
@@ -164,7 +175,9 @@ export function HomeLive({
             {visibleRoi.map((r) => (
               <tr key={r.feature} className="border-t border-edge">
                 <td className="py-1.5">{r.feature}</td>
-                <td className="py-1.5 text-right">{formatUSD(r.costPerUserMicroUsd)}</td>
+                <td className="py-1.5 text-right">
+  <Money micro={r.costPerUserMicroUsd} reason="some spans for this feature could not be priced, so cost per user is unknown" />
+</td>
                 <td className="py-1.5 text-right">
                   {r.valuePerUserMicroUsd === null ? (
                     <span className="text-muted">—</span>

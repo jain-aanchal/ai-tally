@@ -11,6 +11,15 @@ export interface AgentSummary {
   p99MicroUsd: MicroUSD;
   /** log-scale distribution buckets (counts), cheap → expensive */
   distribution: number[];
+  /**
+   * Runs in the window whose cost could not be priced at all (CTO-244).
+   *
+   * They are EXCLUDED from costPerDay/p50/p99/distribution rather than counted as $0. A run we
+   * could not price is not a cheap run, and letting it into the quantile array dragged p50 down
+   * with a number nobody measured. The three figures above are therefore statistics over the
+   * priced runs only; a non-zero value here means they describe a subset and the UI must say so.
+   */
+  unpricedRuns?: number;
 }
 
 export function p99Ratio(a: AgentSummary): number {
@@ -27,7 +36,12 @@ export interface RunSpan {
   spanId: string;
   parentSpanId: string | null;
   name: string;
-  costMicroUsd: MicroUSD;
+  /**
+   * CTO-244: nullable because otel_spans.EstimatedCost is. This is ONE span's cost, so there is no
+   * aggregate to hide an unknown inside: if the call could not be priced, the honest value is null
+   * and the UI renders a blank with a reason. It used to render "$0.00" for a real, billed step.
+   */
+  costMicroUsd: MicroUSD | null;
   durationMs: number;
   status: "ok" | "retry" | "error";
 }
@@ -35,8 +49,14 @@ export interface RunSpan {
 export interface AgentRun {
   runId: string;
   agent: string;
-  totalCostMicroUsd: MicroUSD;
-  multipleOfMedian: number;
+  /**
+   * CTO-244: null when any span in the run is unpriced. A run total is a sum over a handful of
+   * steps, so one missing step materially changes it; reporting the partial sum as "the run cost"
+   * understates the very runs this page exists to flag as expensive.
+   */
+  totalCostMicroUsd: MicroUSD | null;
+  /** Null whenever the run total is unknown, or there is no priced peer median to compare against. */
+  multipleOfMedian: number | null;
   steps: number;
   outcome: "success" | "failed" | "abandoned";
   /** one-sentence auto-generated root cause (CTO-57) */

@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 
 import { Card } from "@/components/Card";
 import { StaleBadge } from "@/components/DataStateBanner";
+import { Blank, Money } from "@/components/HonestValue";
 import { Histogram } from "@/components/Histogram";
 import { type AgentRun, type AgentSummary, p99Ratio } from "@/lib/agents";
 import {
@@ -90,7 +91,15 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
   const summary = data.agents.find((a) => a.name === agent) ?? null;
   const agentRuns = data.runs
     .filter((r) => r.agent === agent)
-    .sort((a, b) => b.totalCostMicroUsd - a.totalCostMicroUsd);
+    // CTO-244: a run whose total is unknown sorts to the TOP of the outlier list. It used to sort
+    // as $0 and vanish to the bottom, hiding the runs we understand least on the page whose whole
+    // job is to surface the runs worth looking at.
+    .sort((a, b) => {
+      if (a.totalCostMicroUsd === null && b.totalCostMicroUsd === null) return 0;
+      if (a.totalCostMicroUsd === null) return -1;
+      if (b.totalCostMicroUsd === null) return 1;
+      return b.totalCostMicroUsd - a.totalCostMicroUsd;
+    });
 
   // No summary for the selected agent means it had no runs in this window. State it; never fabricate.
   if (summary === null) {
@@ -165,8 +174,14 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
                   </Link>
                   <span className="flex items-center gap-3">
                     <OutcomeBadge outcome={r.outcome} />
-                    <span className="tabular-nums">{formatUSD(r.totalCostMicroUsd)}</span>
-                    <span className="text-bad tabular-nums">{r.multipleOfMedian}× median</span>
+                    <span className="tabular-nums">
+                      <Money micro={r.totalCostMicroUsd} reason={UNPRICED_RUN} />
+                    </span>
+                    {r.multipleOfMedian === null ? (
+                      <Blank reason={UNPRICED_RUN} />
+                    ) : (
+                      <span className="text-bad tabular-nums">{r.multipleOfMedian}× median</span>
+                    )}
                   </span>
                 </li>
               ))}
@@ -177,6 +192,9 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
     </Card>
   );
 }
+
+const UNPRICED_RUN =
+  "at least one step in this run could not be priced, so the run total is unknown";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (

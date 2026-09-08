@@ -60,11 +60,77 @@ def test_defaults_for_missing_fields() -> None:
     assert row["FeatureTag"] == "untagged"
     assert row["ServiceName"] == "unknown"
     assert row["SpanName"] == "llm.call"
-    assert row["EstimatedCost"] == Decimal(0)
-    assert row["InputTokens"] == 0
+    # CTO-244: absent usage and an unpriceable call are NULL, not 0. See the tests below.
+    assert row["EstimatedCost"] is None
+    assert row["InputTokens"] is None
     # trace/span ids are generated when absent
     assert row["TraceId"] and isinstance(row["TraceId"], str)
     assert row["SpanId"] and isinstance(row["SpanId"], str)
+
+
+# --- CTO-244: unknown must be representable, and distinguishable from a real zero --------------
+
+
+def test_absent_usage_maps_to_null_not_zero() -> None:
+    """The streamed-response case: the provider never reported usage, so we do not know it.
+
+    Writing 0 here told the dashboard a real, billed call consumed nothing.
+    """
+    row = _row_dict(span_to_row({GenAI.SYSTEM: "openai"}, tenant_id="t1", effective_ts_ns=0))
+    assert row["InputTokens"] is None
+    assert row["OutputTokens"] is None
+    assert row["CachedInputTokens"] is None
+
+
+def test_provider_reported_zero_stays_zero_and_is_distinct_from_unknown() -> None:
+    attrs = {
+        GenAI.USAGE_INPUT_TOKENS: 0,
+        GenAI.USAGE_OUTPUT_TOKENS: 0,
+        GenAI.USAGE_CACHED_INPUT_TOKENS: 0,
+    }
+    row = _row_dict(span_to_row(attrs, tenant_id="t1", effective_ts_ns=0))
+    assert row["InputTokens"] == 0
+    assert row["OutputTokens"] == 0
+    assert row["CachedInputTokens"] == 0
+    # The distinction that did not exist before: a real 0 is not None.
+    assert row["InputTokens"] is not None
+
+
+def test_unparseable_usage_maps_to_null_not_zero() -> None:
+    attrs = {GenAI.USAGE_INPUT_TOKENS: "lots", GenAI.USAGE_OUTPUT_TOKENS: True}
+    row = _row_dict(span_to_row(attrs, tenant_id="t1", effective_ts_ns=0))
+    # A bool is not a token count; neither is a string. Guessing 0 would be a fabricated number.
+    assert row["InputTokens"] is None
+    assert row["OutputTokens"] is None
+
+
+def test_catalog_miss_yields_null_cost_with_a_recorded_reason() -> None:
+    """No priced cost on the span (a catalog miss) must not become $0.00.
+
+    The reason reuses the existing cost-source notion: CostSource = 'unpriced', with the empty
+    PriceCatalogVersion that tally.pricing already returns when a rate is missing.
+    """
+    attrs = {
+        GenAI.SYSTEM: "openai",
+        GenAI.REQUEST_MODEL: "some-model-the-catalog-has-never-heard-of",
+        GenAI.USAGE_INPUT_TOKENS: 1000,
+        GenAI.USAGE_OUTPUT_TOKENS: 250,
+    }
+    row = _row_dict(span_to_row(attrs, tenant_id="t1", effective_ts_ns=0))
+    assert row["EstimatedCost"] is None
+    assert row["CostSource"] == "unpriced"
+    assert row["PriceCatalogVersion"] == ""
+    # Usage was reported even though the cost could not be derived: the two are independent.
+    assert row["InputTokens"] == 1000
+
+
+def test_priced_zero_cost_is_estimated_not_unpriced() -> None:
+    """A genuine 0 micro-USD (e.g. a free-tier rate) is a real price, not an unknown."""
+    row = _row_dict(
+        span_to_row({GenAI.COST_ESTIMATED_MICRO_USD: 0}, tenant_id="t1", effective_ts_ns=0)
+    )
+    assert row["EstimatedCost"] == Decimal(0)
+    assert row["CostSource"] == "estimated"
 
 
 def test_unpromoted_attrs_land_in_span_attributes_map() -> None:

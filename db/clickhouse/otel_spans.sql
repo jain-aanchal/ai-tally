@@ -57,15 +57,27 @@ CREATE TABLE IF NOT EXISTS otel_spans
     GenAiResponseModel     LowCardinality(String),
     GenAiOperation         LowCardinality(String),
     GenAiToolName          LowCardinality(String),
-    InputTokens            UInt32                   CODEC(T64, ZSTD(1)),
-    OutputTokens           UInt32                   CODEC(T64, ZSTD(1)),
-    CachedInputTokens      UInt32                   CODEC(T64, ZSTD(1)),
+    -- CTO-244: usage is NULLABLE because "we do not know" is a real, common state and it is not 0.
+    -- The motivating case is a streamed response through the edge proxy: usage cannot be scanned
+    -- off the stream, so the provider never tells us how many tokens the call consumed. Storing 0
+    -- there made the dashboard read a real, billed call as one that consumed nothing, silently
+    -- understating spend. A provider-reported 0 still stores as 0 and stays distinguishable from
+    -- NULL. T64 is retained: it composes with Nullable on integer types.
+    InputTokens            Nullable(UInt32)         CODEC(T64, ZSTD(1)),
+    OutputTokens           Nullable(UInt32)         CODEC(T64, ZSTD(1)),
+    CachedInputTokens      Nullable(UInt32)         CODEC(T64, ZSTD(1)),
 
     -- Cost (dual-track; Decimal64(8), NOT Float64)
-    EstimatedCost          Decimal64(8)             CODEC(ZSTD(1)),
+    --
+    -- CTO-244: EstimatedCost is NULLABLE for the same reason. A price-catalog miss, or usage we
+    -- never learned, cannot be priced, and $0.00 is a lie about a call that really did cost money.
+    -- CostSource carries the WHY: 'unpriced' means we could not put a number on this span, so a
+    -- reader can say so instead of summing a fabricated zero. PriceCatalogVersion is '' on those
+    -- rows, which is the same empty-version signal tally.pricing already uses for a catalog miss.
+    EstimatedCost          Nullable(Decimal64(8))   CODEC(ZSTD(1)),
     ReconciledCost         Nullable(Decimal64(8))   CODEC(ZSTD(1)),
     CostCurrency           LowCardinality(String),
-    CostSource             Enum8('estimated' = 1, 'reconciled' = 2),
+    CostSource             Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3),
     PriceCatalogVersion    LowCardinality(String),
 
     -- Agent context
@@ -151,3 +163,33 @@ ALTER TABLE otel_spans
 ALTER TABLE otel_spans
     ADD COLUMN IF NOT EXISTS AccountIdHash           FixedString(64) DEFAULT '' CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS AccountIdHashKeyVersion LowCardinality(String);
+
+-- CTO-244 migration: make usage and estimated cost NULLABLE, and teach CostSource to say why.
+--
+-- WHY. UInt32 and Decimal64(8) have no way to spell "unknown", so ingest was coercing an absent
+-- token count or an unpriceable call to 0. The dashboard then read a real, billed call as one that
+-- consumed nothing and cost nothing. That breaks the repo's first invariant (an unknown value is
+-- null, never 0) and it understates spend in the single most common case there is: a streamed
+-- response through the edge proxy, where usage cannot be scanned off the stream.
+--
+-- This is NOT the additive `ADD COLUMN IF NOT EXISTS` pattern used above. `MODIFY COLUMN` widening
+-- a type to its Nullable form is a real mutation: ClickHouse rewrites the affected parts in the
+-- background (watch system.mutations). It is safe to replay because modifying a column to the type
+-- it already has is a no-op, so `make ch-migrate` stays idempotent. Ingest is not blocked while it
+-- runs. Widening UInt32 -> Nullable(UInt32) and Decimal64(8) -> Nullable(Decimal64(8)) loses no
+-- value. Extending the CostSource enum keeps 1 and 2 on their existing labels, so already-written
+-- rows keep their meaning.
+--
+-- THE CUTOVER IS AMBIGUOUS AND WE DO NOT PAPER OVER IT. Rows written before this migration hold 0
+-- where the truth was EITHER a genuine provider-reported zero OR an unknown that ingest flattened.
+-- Nothing recorded which, so nothing can tell them apart now. There is deliberately no backfill:
+-- guessing which zeros "should" be NULL would fabricate exactly the kind of number this change
+-- exists to remove. Consequence, stated plainly: token and cost figures covering any period before
+-- the cutover may UNDERSTATE real spend, and no query can quantify by how much. Post-cutover rows
+-- are honest. See RUNNING.md ("Nullable usage and cost").
+ALTER TABLE otel_spans
+    MODIFY COLUMN InputTokens       Nullable(UInt32)       CODEC(T64, ZSTD(1)),
+    MODIFY COLUMN OutputTokens      Nullable(UInt32)       CODEC(T64, ZSTD(1)),
+    MODIFY COLUMN CachedInputTokens Nullable(UInt32)       CODEC(T64, ZSTD(1)),
+    MODIFY COLUMN EstimatedCost     Nullable(Decimal64(8)) CODEC(ZSTD(1)),
+    MODIFY COLUMN CostSource        Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3);

@@ -156,7 +156,12 @@ export async function GET(req: Request) {
         ...comparison.current,
         model: live.model,
         provider: live.provider,
-        monthlyCostMicroUsd: live.monthlyCostMicroUsd,
+        // CTO-244: an unknown incumbent cost maps to 0 here deliberately, because 0 is this
+        // payload's existing "no baseline" sentinel: web/app/compare/page.tsx gates on
+        // `current.monthlyCostMicroUsd === 0` and renders the empty-state banner instead of a
+        // dollar figure. So the page shows "no baseline", not a fabricated $0.00/mo, and the
+        // recommendation built above states the actual reason.
+        monthlyCostMicroUsd: live.monthlyCostMicroUsd ?? 0,
         // CTO-115: live p95 / error from otel_spans over the same 7-day window. `null` when
         // fewer than 50 spans landed — page renders "—" so we never fabricate.
         latencyP95Ms: live.latencyP95Ms,
@@ -193,7 +198,13 @@ export async function GET(req: Request) {
   //      to the user's actual workload size. Still an approximation — real ratios depend on token
   //      mix, which is what workflow-5 replay actually solves — but it's no longer absurd.
   const mockCurrentCost = comparison.current.monthlyCostMicroUsd;
-  const scale = mockCurrentCost > 0 ? live.monthlyCostMicroUsd / mockCurrentCost : 0;
+  // CTO-244: with an unknown live cost there is nothing to anchor the rescale to. Scale 0 collapses
+  // every candidate to $0, which would read as a free alternative, so the branch below hands
+  // deriveRecommendation the null and it refuses to project at all.
+  const scale =
+    mockCurrentCost > 0 && live.monthlyCostMicroUsd !== null
+      ? live.monthlyCostMicroUsd / mockCurrentCost
+      : 0;
   const candidates = comparison.candidates
     .filter((c) => c.model !== live.model)
     .map((c) => {

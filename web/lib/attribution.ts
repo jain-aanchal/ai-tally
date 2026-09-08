@@ -104,16 +104,25 @@ export function buildProviderRow(
   costMicroUsd: MicroUSD,
   // Optional revenue side — provider rows are unchanged when no Stripe data exists.
   revenue?: { revenueMicroUsd: MicroUSD; distinctUsers: number } | null,
+  /**
+   * Spans for this provider that could not be priced (CTO-244). Non-zero means `costMicroUsd` is a
+   * lower bound, so every per-unit figure derived from it is understated by an unknowable amount:
+   * the cost numerator skips those spans while the conversion and user denominators still count
+   * them. Those ratios are nulled rather than published; the sum itself is kept because it is real
+   * money already spent, and the caller reports the coverage alongside it.
+   */
+  unpricedSpans = 0,
 ): ProviderAttribution {
   const { p, lo, hi } = wilsonInterval(conversions, sessions);
+  const costKnown = unpricedSpans === 0;
   const costPerConversion =
-    conversions > 0 ? Math.round(costMicroUsd / conversions) : null;
+    costKnown && conversions > 0 ? Math.round(costMicroUsd / conversions) : null;
   // Revenue lights up only when Stripe events exist for *this* provider. Without users we have
   // no denominator, so the row stays honest with nulls.
   let valuePerUser: MicroUSD | null = null;
   let marginPerUser: MicroUSD | null = null;
   let marginPct: number | null = null;
-  if (revenue && revenue.distinctUsers > 0 && revenue.revenueMicroUsd !== 0) {
+  if (costKnown && revenue && revenue.distinctUsers > 0 && revenue.revenueMicroUsd !== 0) {
     valuePerUser = Math.round(revenue.revenueMicroUsd / revenue.distinctUsers);
     const costPerUser = Math.round(costMicroUsd / revenue.distinctUsers);
     marginPerUser = valuePerUser - costPerUser;

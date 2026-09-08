@@ -30,6 +30,7 @@ import {
 import { ExploreChartCard } from "@/components/ExploreChartCard";
 import { FilterBar } from "@/components/FilterBar";
 import { Histogram } from "@/components/Histogram";
+import { Blank, Money } from "@/components/HonestValue";
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
@@ -43,6 +44,31 @@ import {
 import { formatUSD, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
+
+const UNPRICED_RUN =
+  "at least one step in this run could not be priced, so the run total is unknown";
+
+/**
+ * Coverage marker for a per-agent figure computed over the priced runs only (CTO-244).
+ *
+ * The alternative was to blank cost/day, p50 and p99 outright whenever a single run was unpriced,
+ * which would empty the table for one bad span. These are statistics over a population, so naming
+ * the excluded runs is the honest disclosure; a per-RUN figure still blanks, because there is no
+ * population to be a statistic over.
+ */
+function PartialRuns({ n }: { n: number }) {
+  return (
+    <span
+      title={`Excludes ${n} run${n === 1 ? "" : "s"} that could not be priced, so this is a lower bound.`}
+      className="ml-1 cursor-help text-muted underline decoration-dotted decoration-muted/60 underline-offset-4"
+    >
+      <span aria-hidden>*</span>
+      <span className="sr-only">
+        Excludes {n} run{n === 1 ? "" : "s"} that could not be priced, so this is a lower bound.
+      </span>
+    </span>
+  );
+}
 
 export interface AgentsPayload {
   agents: AgentSummary[];
@@ -93,9 +119,23 @@ export function AgentsLive({
   // introduced. A null when there is nothing to reduce keeps the honest-blank posture over a fake 0.
   const totalCostPerDay = agents.reduce((s, a) => s + a.costPerDayMicroUsd, 0);
   const priciestAgent = maxBy(agents, (a) => a.costPerDayMicroUsd);
-  const sortedRuns = runs.slice().sort((a, b) => b.totalCostMicroUsd - a.totalCostMicroUsd);
-  const topOutlier = maxBy(runs, (r) => r.totalCostMicroUsd);
-  const outlierTotal = runs.reduce((s, r) => s + r.totalCostMicroUsd, 0);
+  // CTO-244: a run with an unpriced step has an unknown total. It sorts to the TOP of the outlier
+  // list (unknown is the strongest reason to look, and as $0 it used to sink to the bottom), it is
+  // excluded from maxBy so it cannot win "top outlier" with a fabricated figure, and it makes the
+  // flagged-outlier total unknown rather than a silently smaller sum.
+  const sortedRuns = runs.slice().sort((a, b) => {
+    if (a.totalCostMicroUsd === null && b.totalCostMicroUsd === null) return 0;
+    if (a.totalCostMicroUsd === null) return -1;
+    if (b.totalCostMicroUsd === null) return 1;
+    return b.totalCostMicroUsd - a.totalCostMicroUsd;
+  });
+  const topOutlier = maxBy(
+    runs.filter((r) => r.totalCostMicroUsd !== null),
+    (r) => r.totalCostMicroUsd ?? 0,
+  );
+  const unpricedRuns = runs.filter((r) => r.totalCostMicroUsd === null).length;
+  const outlierTotal =
+    unpricedRuns > 0 ? null : runs.reduce((s, r) => s + (r.totalCostMicroUsd ?? 0), 0);
 
   // The FilterBar's feature filter lists the agents themselves (agents are features in the cost
   // model): filtering to one narrows the live chart to that agent's spend.
@@ -120,12 +160,16 @@ export function AgentsLive({
           label="Top outlier run"
           micro={topOutlier?.value ?? null}
           reason="no outlier runs captured"
-          hint={topOutlier ? `${topOutlier.row.multipleOfMedian}× median` : undefined}
+          hint={topOutlier?.row.multipleOfMedian != null ? `${topOutlier.row.multipleOfMedian}× median` : undefined}
         />
         <SummaryTile
           label="Flagged outlier spend"
           micro={runs.length > 0 ? outlierTotal : null}
-          reason="no outlier runs captured"
+          reason={
+            unpricedRuns > 0
+              ? `${unpricedRuns} of ${runs.length} flagged runs could not be priced, so the total is unknown`
+              : "no outlier runs captured"
+          }
           hint={`${runs.length} run${runs.length === 1 ? "" : "s"}`}
         />
       </TileGrid>
@@ -157,7 +201,12 @@ export function AgentsLive({
                 <tr key={a.name} className="border-t border-edge">
                   <td className="py-2 font-medium">{a.name}</td>
                   <td className="py-2 text-right tabular-nums">{a.runsPerDay.toLocaleString()}</td>
-                  <td className="py-2 text-right tabular-nums">{formatUSD(a.costPerDayMicroUsd)}</td>
+                  {/* CTO-244: these three describe the PRICED runs only. When some runs could not
+                      be priced, say so on the figure rather than let it read as the whole agent. */}
+                  <td className="py-2 text-right tabular-nums">
+                    {formatUSD(a.costPerDayMicroUsd)}
+                    {(a.unpricedRuns ?? 0) > 0 && <PartialRuns n={a.unpricedRuns ?? 0} />}
+                  </td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(a.p50MicroUsd)}</td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(a.p99MicroUsd)}</td>
                   <td className="py-2 text-right tabular-nums">
@@ -187,8 +236,14 @@ export function AgentsLive({
               </Link>
               <span className="flex items-center gap-3">
                 <OutcomeBadge outcome={r.outcome} />
-                <span className="tabular-nums">{formatUSD(r.totalCostMicroUsd)}</span>
-                <span className="text-bad tabular-nums">{r.multipleOfMedian}× median</span>
+                <span className="tabular-nums">
+                  <Money micro={r.totalCostMicroUsd} reason={UNPRICED_RUN} />
+                </span>
+                {r.multipleOfMedian === null ? (
+                  <Blank reason={UNPRICED_RUN} />
+                ) : (
+                  <span className="text-bad tabular-nums">{r.multipleOfMedian}× median</span>
+                )}
               </span>
             </li>
           ))}

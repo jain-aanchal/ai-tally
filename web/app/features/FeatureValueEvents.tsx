@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Card } from "@/components/Card";
+import { Money } from "@/components/HonestValue";
 import { type FeatureEconomics, margin } from "@/lib/features";
 import { formatUSD } from "@/lib/types";
 
@@ -122,7 +123,9 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
                 return (
                   <tr key={f.feature} className="border-t border-edge">
                     <td className="py-2 font-medium">{f.feature}</td>
-                    <td className="py-2 text-right tabular-nums">{formatUSD(f.costPerUserMicroUsd)}</td>
+                    <td className="py-2 text-right tabular-nums">
+  <Money micro={f.costPerUserMicroUsd} reason="some spans for this feature could not be priced, so cost per user is unknown" />
+</td>
                     <td className="py-2 text-right tabular-nums">
                       {f.valuePerUserMicroUsd === null ? <Dash /> : formatUSD(f.valuePerUserMicroUsd)}
                     </td>

@@ -16,9 +16,10 @@ the same emitter / run contract / recorder are reused verbatim.
 Synthetic-span approach (matches the gateway ingest path in :mod:`gateway.mapping`): the cost is
 already authoritative from the billing API, so we set ``gen_ai.cost.estimated_micro_usd`` directly
 and reuse :func:`gateway.mapping.span_to_row` — we do NOT route through catalog cost enrichment
-(there is no model to price). ``CostSource`` lands as ``'estimated'`` (mapping's default), which is
-correct: it's an estimate from the provider's *un-invoiced* Cost Explorer / Billing numbers, not a
-reconciled invoice.
+(there is no model to price). ``CostSource`` lands as ``'estimated'`` because a cost is present,
+which is correct: it's an estimate from the provider's *un-invoiced* Cost Explorer / Billing
+numbers, not a reconciled invoice. (Since CTO-244 a span with no cost attribute would instead land
+as ``'unpriced'`` with a NULL ``EstimatedCost``; connectors always supply one, so they never do.)
 
 Idempotency: ``otel_spans`` is a plain ``MergeTree`` (no dedup), so re-running a day would
 double-count. Each synthetic span gets a DETERMINISTIC id derived from

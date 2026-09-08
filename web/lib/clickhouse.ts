@@ -156,6 +156,22 @@ export function micro(decimalUsd: string | number | null | undefined): number {
   return Math.round((Number.isFinite(n) ? n : 0) * 1_000_000);
 }
 
+/**
+ * Decimal string (USD) -> integer micro-USD, preserving "we do not know" as `null`.
+ *
+ * CTO-244. `micro()` above maps a JSON `null` to 0, which is the right default for a `sum()` (an
+ * empty set really did cost nothing measurable) but a lie for anything that can be genuinely
+ * unknown: a single span's cost, or an aggregate over a slice where every row was unpriced.
+ * ClickHouse serialises a Nullable column as JSON `null` in JSONEachRow, and `Nullable(Decimal)`
+ * arrives as `null` rather than `"0"`, so this is the only place that distinction survives into JS.
+ * Feed the result to `<Money micro={...} reason={...} />`, which renders the honest blank.
+ */
+export function microOrNull(decimalUsd: string | number | null | undefined): number | null {
+  if (decimalUsd === null || decimalUsd === undefined || decimalUsd === "\\N") return null;
+  const n = typeof decimalUsd === "number" ? decimalUsd : parseFloat(decimalUsd);
+  return Number.isFinite(n) ? Math.round(n * 1_000_000) : null;
+}
+
 function zeroLayers(): SpendByLayer {
   return { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 };
 }
@@ -253,10 +269,23 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
     // window stays ClickHouse-clock derived (CTO-203), never the Node clock. `w - 1` keeps the
     // historical 29-day-for-30 form so the default view is byte-for-byte unchanged.
     const w = clampWindowDays(windowDays);
-    const totals = await rows<{ total: string; estimated: string; reconciled: string; recThrough: string | null }>(
+    // CTO-244: `unpriced` / `spans` travel with the totals. sum() skips NULLs, so without them the
+    // headline would silently be a lower bound whenever anything in the window could not be priced.
+    // Note the estimated/reconciled split no longer adds up to the total: an 'unpriced' span is in
+    // neither bucket, which is exactly why the count has to be reported alongside.
+    const totals = await rows<{
+      total: string;
+      estimated: string;
+      reconciled: string;
+      recThrough: string | null;
+      unpriced: string;
+      spans: string;
+    }>(
       db,
       `SELECT
          sum(EstimatedCost) AS total,
+         countIf(EstimatedCost IS NULL) AS unpriced,
+         count() AS spans,
          sumIf(EstimatedCost, CostSource = 'estimated') AS estimated,
          sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
@@ -276,11 +305,15 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
     for (const r of byLayerRows) {
       if ((LAYERS as readonly string[]).includes(r.layer)) byLayer[r.layer] = micro(r.cost);
     }
-    const t = totals[0] ?? { total: "0", estimated: "0", reconciled: "0", recThrough: null };
+    const t = totals[0] ?? {
+      total: "0", estimated: "0", reconciled: "0", recThrough: null, unpriced: "0", spans: "0",
+    };
     return {
       totalMicroUsd: micro(t.total),
       estimatedMicroUsd: micro(t.estimated),
       reconciledMicroUsd: micro(t.reconciled),
+      unpricedSpanCount: parseInt(t.unpriced, 10) || 0,
+      spanCount: parseInt(t.spans, 10) || 0,
       // No reconciled data yet → boundary in the far past so everything reads as estimated.
       reconciledThrough: t.recThrough && t.recThrough !== "\\N" ? t.recThrough : "1970-01-01",
       byLayer,
@@ -316,10 +349,19 @@ export async function queryOutliers(windowDays = 30): Promise<CostOutlier[] | nu
     // User-selectable window (CTO-226): rolling `now() - INTERVAL w DAY`, w a bound-checked int
     // (injection-safe), anchored on the ClickHouse clock (CTO-203), never the Node clock.
     const w = clampWindowDays(windowDays);
-    const out = await rows<{ runId: string; agent: string; cost: string; mult: string | null }>(
+    // CTO-244. Three things change once EstimatedCost is Nullable:
+    //   - `unpriced` marks a run whose sum covers only part of its spans, so `cost` is NULL for it
+    //     rather than a partial total that would rank it as cheaper than it is.
+    //   - the median divides only FULLY-PRICED runs. Mixing partial sums into the denominator would
+    //     depress it and inflate every multiple measured against it.
+    //   - unknown-cost runs sort FIRST. `ORDER BY cost DESC` puts NULLs last in ClickHouse, so an
+    //     expensive run we could not price could never surface as an outlier, which is precisely
+    //     backwards for a detector whose job is to find the runs worth looking at.
+    const out = await rows<{ runId: string; agent: string; cost: string | null; mult: string | null }>(
       db,
       `WITH runs AS (
-         SELECT TraceId AS runId, any(ServiceName) AS agent, sum(EstimatedCost) AS cost
+         SELECT TraceId AS runId, any(ServiceName) AS agent,
+                if(countIf(EstimatedCost IS NULL) > 0, NULL, sum(EstimatedCost)) AS cost
          FROM otel_spans
          WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY
            AND ServiceName != '' AND ServiceName != 'unknown'
@@ -327,17 +369,18 @@ export async function queryOutliers(windowDays = 30): Promise<CostOutlier[] | nu
          GROUP BY TraceId
        )
        SELECT runId, agent, cost,
-              cost / nullIf((SELECT quantileExact(0.5)(cost) FROM runs), 0) AS mult
+              cost / nullIf((SELECT quantileExact(0.5)(cost) FROM runs WHERE cost IS NOT NULL), 0) AS mult
        FROM runs
-       ORDER BY cost DESC
+       ORDER BY cost IS NULL DESC, cost DESC
        LIMIT 5`,
       tenant,
     );
     return out.map((r) => ({
       runId: r.runId,
       agent: r.agent || "untagged",
-      costMicroUsd: micro(r.cost),
-      multipleOfMedian: r.mult ? Math.round(parseFloat(r.mult) * 10) / 10 : 1,
+      costMicroUsd: microOrNull(r.cost),
+      // Was `: 1` - a fabricated, reassuring "1x median" for the run we understand least.
+      multipleOfMedian: r.mult ? Math.round(parseFloat(r.mult) * 10) / 10 : null,
     }));
   });
 }
@@ -1505,6 +1548,7 @@ async function accountDetail(
       `SELECT TraceId AS runId,
               any(ServiceName) AS agent,
               sum(EstimatedCost) AS cost,
+              countIf(EstimatedCost IS NULL) AS unpriced,
               count() AS steps,
               max(StatusCode) AS maxStatus
        FROM otel_spans
@@ -1547,8 +1591,10 @@ async function accountDetail(
 // the last 30 days and only emit above a sane threshold (no fabricated alerts — returns [] when
 // nothing qualifies).
 //
-//   1. Uncosted tool/agent activity — `GenAiOperation = 'tool'` spans with `EstimatedCost = 0`,
-//      i.e. tools running without a cost attached. Emitted only above UNCOSTED_TOOL_THRESHOLD.
+//   1. Uncosted tool/agent activity: `GenAiOperation = 'tool'` spans with no cost attached, i.e.
+//      `EstimatedCost IS NULL` (the post-CTO-244 representation of "we could not price this") or
+//      `= 0` (how the same condition was flattened before that cutover). Emitted only above
+//      UNCOSTED_TOOL_THRESHOLD.
 //   2. High LLM-calls-per-session ratio — features whose avg LLM spans per SessionId exceeds
 //      LLM_PER_SESSION_THRESHOLD, a classic retry-loop / fan-out cost smell.
 //
@@ -1593,13 +1639,19 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
     );
     const totalSpend = micro(totalRows[0]?.total ?? "0");
 
-    // Rule 1: uncosted tool/agent activity. Count tool spans with EstimatedCost = 0 per feature,
+    // Rule 1: uncosted tool/agent activity. Count tool spans with no cost attached per feature,
     // alongside that feature's total spend (for the impact ranking).
+    //
+    // CTO-244: `EstimatedCost = 0` alone would silently stop firing. Since EstimatedCost became
+    // Nullable, an unpriceable tool span writes NULL, and `NULL = 0` is NULL, not true, so countIf
+    // would skip exactly the spans this rule exists to find. `IS NULL` catches post-cutover rows;
+    // `= 0` still catches pre-cutover rows, where an unknown was flattened to zero. Both are
+    // "uncosted tool activity" as far as this alert is concerned.
     const uncostedRows = await rowsP<{ feature: string; uncosted: string; featureCost: string }>(
       db,
       `SELECT
          if(FeatureTag != '', FeatureTag, ServiceName) AS feature,
-         countIf(GenAiOperation = 'tool' AND EstimatedCost = 0) AS uncosted,
+         countIf(GenAiOperation = 'tool' AND (EstimatedCost IS NULL OR EstimatedCost = 0)) AS uncosted,
          sum(EstimatedCost) AS featureCost
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY ${tagClause}
@@ -1696,9 +1748,11 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
     // User-selectable window (CTO-226): bound-checked int (injection-safe), rolling and anchored on
     // the ClickHouse clock (CTO-203). Default 30 keeps every existing caller byte-for-byte unchanged.
     const w = clampWindowDays(windowDays);
-    const cost = await rows<{ feature: string; cost: string; users: string }>(
+    const cost = await rows<{ feature: string; cost: string; users: string; unpriced: string }>(
       db,
-      `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users
+      // CTO-244: `unpriced` gates the cost-per-user ratio below. See FeatureEconomics.
+      `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users,
+              countIf(EstimatedCost IS NULL) AS unpriced
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY AND FeatureTag != ''
        GROUP BY FeatureTag
@@ -1762,7 +1816,11 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
 
     return cost.map((r) => {
       const users = Math.max(1, parseInt(r.users, 10) || 1);
-      const costPerUserMicroUsd = Math.round(micro(r.cost) / users);
+      // CTO-244: a feature with ANY unpriced span has an unknown cost per user. sum() skips those
+      // spans but uniqExact(UserIdHash) counts their users, so the ratio would divide a partial
+      // numerator by a complete denominator and understate spend per user by an unknowable amount.
+      const costPerUserMicroUsd =
+        (parseInt(r.unpriced, 10) || 0) > 0 ? null : Math.round(micro(r.cost) / users);
       const a = attrByFeature.get(r.feature);
 
       const conversions = a ? parseInt(a.conversions, 10) || 0 : 0;
@@ -1803,7 +1861,11 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
       const valuePerUserMicroUsd = Math.round((parseInt(a!.value_micro, 10) || 0) / matchedUsers);
       // payback = cost / (value per day). Guard div-by-zero: no value ⇒ payback unknowable.
       const valuePerDay = valuePerUserMicroUsd / 30;
-      const paybackDays = valuePerDay > 0 ? Math.round(costPerUserMicroUsd / valuePerDay) : null;
+      // Payback inherits the unknown: an unknown cost per user cannot yield a known payback.
+      const paybackDays =
+        costPerUserMicroUsd !== null && valuePerDay > 0
+          ? Math.round(costPerUserMicroUsd / valuePerDay)
+          : null;
       const attributionRate = totalUsers > 0 ? matchedUsers / totalUsers : null;
 
       return {
@@ -2113,11 +2175,17 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
     // similar costs); heroic for tail (rare, expensive) — flagged in CTO-119 as a follow-up
     // where a bootstrap estimator may be warranted. n<30 → null (page renders "—") rather than
     // a meaninglessly wide band.
-    const strata = await rows<{ stratum: string; rate: string; n: string; mean: string; std: string }>(
+    const strata = await rows<{ stratum: string; rate: string; n: string; spans: string; mean: string; std: string }>(
       db,
+      // CTO-244: `n` counts PRICED spans, not all spans. avg/stddevPop skip NULLs, so pairing them
+      // with a total count would divide a priced-only spread by an all-spans sample size and report
+      // a confidence interval NARROWER than the data supports, on the one page whose job is to
+      // state uncertainty honestly. `spans` keeps the true total so the caller can say what share
+      // of the stratum the band actually covers.
       `SELECT SamplingStratum AS stratum,
               avg(SamplingRate) AS rate,
-              count() AS n,
+              countIf(EstimatedCost IS NOT NULL) AS n,
+              count() AS spans,
               avg(EstimatedCost) AS mean,
               stddevPop(EstimatedCost) AS std
        FROM otel_spans
@@ -2129,11 +2197,17 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
     );
     const Z95 = 1.96;
     const byStratum = new Map(strata.map((r) => {
-      const n = parseInt(r.n, 10) || 0;
+      // CTO-244: `priced` is the sample the band is actually computed from; `spans` is the stratum.
+      // The n>=30 gate now applies to the priced count, and the band is suppressed entirely when
+      // any span in the stratum is unpriced: a coefficient-of-variation half-width derived from a
+      // biased subset of the costs is worse than no band, and the page renders "—" for a null.
+      const priced = parseInt(r.n, 10) || 0;
+      const spans = parseInt(r.spans, 10) || 0;
       const mean = parseFloat(r.mean) || 0;
       const std = parseFloat(r.std) || 0;
-      const ci = n >= 30 && mean > 0 ? (Z95 * std) / mean / Math.sqrt(n) : null;
-      return [r.stratum, { rate: parseFloat(r.rate) || 0, ci, spans: n }];
+      const complete = priced === spans;
+      const ci = complete && priced >= 30 && mean > 0 ? (Z95 * std) / mean / Math.sqrt(priced) : null;
+      return [r.stratum, { rate: parseFloat(r.rate) || 0, ci, spans }];
     }));
     const sampling: SampleByStratum[] = (["tail", "mid", "body"] as const).map((s) => {
       const row = byStratum.get(s);
@@ -2176,6 +2250,20 @@ interface RunAgg {
   steps: string;
   maxStatus: string;
   tsEpoch: string;
+  /** CTO-244: spans in this run that could not be priced. Non-zero => `cost` is a partial sum. */
+  unpriced?: string;
+}
+
+/**
+ * A run's total cost, or null when any of its spans is unpriced (CTO-244).
+ *
+ * A trace is a handful of steps, not a large sample, so a single unpriced step can dominate the
+ * total. Returning the partial sum would systematically understate exactly the runs this view
+ * exists to surface as unusually expensive.
+ */
+function runCost(a: RunAgg): number | null {
+  if ((parseInt(a.unpriced ?? "0", 10) || 0) > 0) return null;
+  return microOrNull(a.cost);
 }
 
 // Order-of-magnitude histogram bucket (micro-USD) → 10 buckets, cheap → expensive.
@@ -2199,7 +2287,8 @@ function toRunSpan(s: SpanRowRaw): RunSpan {
     spanId: s.spanId,
     parentSpanId: s.parentSpanId || null,
     name: s.name,
-    costMicroUsd: micro(s.cost),
+    // CTO-244: microOrNull, not micro. A per-span cost has nothing to average away an unknown.
+    costMicroUsd: microOrNull(s.cost),
     durationMs: Math.round((parseInt(s.durNs, 10) || 0) / 1e6),
     status: parseInt(s.status, 10) === 2 ? "error" : "ok",
   };
@@ -2230,20 +2319,33 @@ async function fetchSpansFor(
   return grouped;
 }
 
-function whyExpensive(spans: RunSpan[], total: number): string {
-  if (spans.length === 0 || total <= 0) return "No cost breakdown available for this run.";
-  const top = [...spans].sort((a, b) => b.costMicroUsd - a.costMicroUsd)[0];
-  const pct = Math.round((top.costMicroUsd / total) * 100);
+function whyExpensive(spans: RunSpan[], total: number | null): string {
+  // CTO-244: an unpriced step must not be silently treated as the cheapest one. Concentration is a
+  // share of the run total, and neither the share nor the total means anything while a step in the
+  // run has no price, so say that instead of naming a runner-up as the culprit.
+  const unpriced = spans.filter((s) => s.costMicroUsd === null).length;
+  if (unpriced > 0) {
+    return `Cost breakdown unavailable: ${unpriced} of ${spans.length} steps could not be priced.`;
+  }
+  if (spans.length === 0 || total === null || total <= 0) {
+    return "No cost breakdown available for this run.";
+  }
+  const top = [...spans].sort((a, b) => (b.costMicroUsd ?? 0) - (a.costMicroUsd ?? 0))[0];
+  const pct = Math.round(((top.costMicroUsd ?? 0) / total) * 100);
   return `${pct}% of run cost concentrated in ${top.name} across ${spans.length} steps.`;
 }
 
 function buildRun(agg: RunAgg, spans: RunSpan[], agentMedian: number): AgentRun {
-  const total = micro(agg.cost);
+  // CTO-244: a run with any unpriced step has an unknown total, and `multipleOfMedian` must then be
+  // null rather than the old fallback of 1. "1x median" is a fabricated, reassuring number for
+  // precisely the run we know least about.
+  const total = spans.some((s) => s.costMicroUsd === null) ? null : runCost(agg);
   return {
     runId: agg.runId,
     agent: agg.agent || "untagged",
     totalCostMicroUsd: total,
-    multipleOfMedian: agentMedian > 0 ? Math.round((total / agentMedian) * 10) / 10 : 1,
+    multipleOfMedian:
+      total !== null && agentMedian > 0 ? Math.round((total / agentMedian) * 10) / 10 : null,
     steps: parseInt(agg.steps, 10) || spans.length,
     // Only success/failed are inferable from OTel StatusCode (2 = error); abandoned isn't tracked.
     outcome: parseInt(agg.maxStatus, 10) === 2 ? "failed" : "success",
@@ -2278,6 +2380,7 @@ export async function queryAgents(
       `SELECT TraceId AS runId,
               any(ServiceName) AS agent,
               sum(EstimatedCost) AS cost,
+              countIf(EstimatedCost IS NULL) AS unpriced,
               count() AS steps,
               max(StatusCode) AS maxStatus,
               toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
@@ -2305,7 +2408,12 @@ export async function queryAgents(
     const agentMedian = new Map<string, number>();
 
     const agents: AgentSummary[] = [...byAgent.entries()].map(([name, list]) => {
-      const costs = list.map((r) => micro(r.cost));
+      // CTO-244: unpriced runs are EXCLUDED, not zeroed. micro() maps a NULL sum to 0, and a 0 in
+      // this array is not inert: costBucket() files it in the cheapest histogram bucket and
+      // quantile() drags p50/p99 down with a number nobody measured. Dropping them makes every
+      // figure below a statistic over the priced runs, which `unpricedRuns` then discloses.
+      const costs = list.map(runCost).filter((c): c is number => c !== null);
+      const unpricedRuns = list.length - costs.length;
       agentMedian.set(name, median(costs));
       const distribution = new Array(10).fill(0);
       for (const c of costs) distribution[costBucket(c)]++;
@@ -2322,12 +2430,25 @@ export async function queryAgents(
         p50MicroUsd: quantile(costs, 0.5),
         p99MicroUsd: quantile(costs, 0.99),
         distribution,
+        unpricedRuns,
       };
     });
     agents.sort((a, b) => b.costPerDayMicroUsd - a.costPerDayMicroUsd);
 
     // Top expensive runs across all agents (with span trees) for the run list / drill-down.
-    const topAggs = [...aggs].sort((a, b) => micro(b.cost) - micro(a.cost)).slice(0, 12);
+    // CTO-244: an unpriced run sorts FIRST, not last. Its cost is unknown, and the whole purpose of
+    // this list is "which runs should you look at?" - "we cannot price this one" is the strongest
+    // possible reason to look. Ranking it as $0 buried it at the bottom.
+    const topAggs = [...aggs]
+      .sort((a, b) => {
+        const ca = runCost(a);
+        const cb = runCost(b);
+        if (ca === null && cb === null) return 0;
+        if (ca === null) return -1;
+        if (cb === null) return 1;
+        return cb - ca;
+      })
+      .slice(0, 12);
     const spansByRun = await fetchSpansFor(db, tenant, topAggs.map((a) => a.runId));
     const runs = topAggs.map((a) =>
       buildRun(a, spansByRun[a.runId] ?? [], agentMedian.get(a.agent) ?? 0),
@@ -2342,6 +2463,7 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
     const aggs = await rowsP<RunAgg>(
       db,
       `SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost,
+              countIf(EstimatedCost IS NULL) AS unpriced,
               count() AS steps, max(StatusCode) AS maxStatus, toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
        FROM otel_spans
        WHERE TenantId = {tenant:String} AND TraceId = {runId:String}
@@ -2351,15 +2473,22 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
     const agg = aggs[0];
     if (!agg) return null;
 
-    const peers = await rowsP<{ cost: string }>(
+    // CTO-244: only fully-priced peers form the median. A partial peer sum would pull the median
+    // down and inflate every run's "Nx median" against it.
+    const peers = await rowsP<{ cost: string; unpriced: string }>(
       db,
-      `SELECT sum(EstimatedCost) AS cost FROM otel_spans
+      `SELECT sum(EstimatedCost) AS cost, countIf(EstimatedCost IS NULL) AS unpriced
+       FROM otel_spans
        WHERE TenantId = {tenant:String} AND FeatureTag = {agent:String}
          AND Timestamp >= now() - INTERVAL 30 DAY
        GROUP BY TraceId`,
       { tenant, agent: agg.agent },
     );
-    const agentMedian = median(peers.map((p) => micro(p.cost)));
+    const agentMedian = median(
+      peers
+        .filter((p) => (parseInt(p.unpriced, 10) || 0) === 0)
+        .map((p) => micro(p.cost)),
+    );
     const spans = (await fetchSpansFor(db, tenant, [runId]))[runId] ?? [];
     return buildRun(agg, spans, agentMedian);
   });
@@ -2737,12 +2866,13 @@ export async function queryAttribution(
       : "";
 
     // sessions per provider (distinct session ids per real provider).
-    const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string }>(
+    const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string; unpriced: string }>(
       db,
       `SELECT
          ${providerExpr} AS provider,
          uniqExact(s.SessionId) AS sessions,
-         sum(s.EstimatedCost) AS cost
+         sum(s.EstimatedCost) AS cost,
+         countIf(s.EstimatedCost IS NULL) AS unpriced
        FROM otel_spans s
        WHERE s.TenantId = {tenant:String}
          AND s.Timestamp >= ${windowSql}
@@ -2855,7 +2985,11 @@ export async function queryAttribution(
       const conversions = convByProvider.get(r.provider) ?? 0;
       const costMicro = micro(r.cost);
       const revenue = revenueByProvider.get(r.provider) ?? null;
-      return buildProviderRow(r.provider, sessions, conversions, costMicro, revenue);
+      // CTO-244: pass the unpriced count so the per-conversion and per-user ratios blank instead
+      // of dividing a partial cost by a complete denominator.
+      return buildProviderRow(
+        r.provider, sessions, conversions, costMicro, revenue, parseInt(r.unpriced, 10) || 0,
+      );
     });
     perProvider.sort((a, b) => b.sessions - a.sessions);
 
@@ -2896,8 +3030,16 @@ export async function queryAttribution(
       costMicroUsd: perProvider.reduce((s, p) => s + p.costMicroUsd, 0),
       costPerConversionMicroUsd: null as number | null,
     };
+    // CTO-244: if ANY provider row has an unknown cost per conversion, the roll-up of all of them
+    // is unknown too. A total built from a partial numerator and a complete denominator is wrong,
+    // not merely small.
+    const anyUnpriced = perProvider.some(
+      (p) => p.conversions > 0 && p.costPerConversionMicroUsd === null,
+    );
     totals.costPerConversionMicroUsd =
-      totals.conversions > 0 ? Math.round(totals.costMicroUsd / totals.conversions) : null;
+      !anyUnpriced && totals.conversions > 0
+        ? Math.round(totals.costMicroUsd / totals.conversions)
+        : null;
 
     if (perProvider.length === 0) return emptyReport(filters);
     return { filters, perProvider, totals, dailyByProvider, isMock: false };
@@ -2952,7 +3094,10 @@ export const MIN_SPANS_FOR_LATENCY_ERROR = 50;
 export async function queryCurrentModel(): Promise<{
   model: string;
   provider: string;
-  monthlyCostMicroUsd: number;
+  // CTO-244: null when the 7-day window contains a span we could not price. See the note at the
+  // projection below: a partial cost projected against a full call count is a wrong ratio, not a
+  // smaller one, and the /api/compare route must render "—" rather than a savings figure.
+  monthlyCostMicroUsd: number | null;
   // CTO-231: the current model's full-traffic call count over the same window, projected to a
   // 30-day month exactly like monthlyCostMicroUsd. The /api/compare route needs a full-traffic
   // call volume to rescale each candidate's replayed-corpus cost onto the incumbent's basis
@@ -2970,6 +3115,7 @@ export async function queryCurrentModel(): Promise<{
       model: string;
       provider: string;
       cost7d: string;
+      unpriced7d: string | number;
       // ClickHouse can serialize numeric aggregates as either JSON numbers or strings
       // (count() over UInt64 frequently lands as a string). Accept both at the boundary.
       p95Ms: string | number | null;
@@ -2996,6 +3142,7 @@ export async function queryCurrentModel(): Promise<{
            any(GenAiSystem)
          ) AS provider,
          sum(EstimatedCost) AS cost7d,
+         countIf(EstimatedCost IS NULL) AS unpriced7d,
          quantileExact(0.95)(if(DurationNs > 0, DurationNs, NULL)) / 1e6 AS p95Ms,
          countIf(StatusCode = 2) / count() AS errRate,
          count() AS sampleCount
@@ -3010,7 +3157,18 @@ export async function queryCurrentModel(): Promise<{
     );
     if (out.length === 0 || !out[0].model) return null;
     // Cost over 7 days → linearly projected to a 30-day month. Honest about what this is.
-    const monthlyCostMicroUsd = Math.round((micro(out[0].cost7d) * 30) / 7);
+    //
+    // CTO-244: null when any span in the window was unpriced. This figure is weighed against a
+    // candidate's (per-call cost × monthlyCalls), and monthlyCalls projects ALL calls while the
+    // cost sum covers only priced ones. Mismatched denominators here fabricate a savings
+    // percentage out of a coverage gap, which is the same class of bug the comment above records
+    // this code having already shipped once (the bogus ~100% reduction).
+    const unpriced7d =
+      typeof out[0].unpriced7d === "number"
+        ? out[0].unpriced7d
+        : parseInt(out[0].unpriced7d, 10) || 0;
+    const monthlyCostMicroUsd =
+      unpriced7d > 0 ? null : Math.round((micro(out[0].cost7d) * 30) / 7);
     const sampleCount =
       typeof out[0].sampleCount === "number"
         ? out[0].sampleCount

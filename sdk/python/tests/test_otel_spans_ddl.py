@@ -40,9 +40,22 @@ def test_tenant_id_first_in_order_by(ddl):
 
 
 def test_cost_is_decimal_not_float(ddl):
-    assert "EstimatedCost          Decimal64(8)" in ddl
+    assert "EstimatedCost          Nullable(Decimal64(8))" in ddl
     assert "ReconciledCost         Nullable(Decimal64(8))" in ddl
     assert "EstimatedCost          Float" not in ddl
+
+
+def test_unknown_is_representable(ddl_code):
+    """CTO-244: usage and estimated cost must be able to say "we do not know".
+
+    Non-nullable columns forced ingest to write 0 for an unknown, which reported a real billed
+    call as free. This guards the fix against being quietly reverted to UInt32/Decimal64.
+    """
+    for col in ("InputTokens", "OutputTokens", "CachedInputTokens"):
+        assert re.search(rf"\b{col}\s+Nullable\(UInt32\)", ddl_code), \
+            f"{col} must be Nullable(UInt32) so an absent count is not stored as 0"
+    # CostSource carries WHY a cost is NULL, reusing the existing cost-source enum.
+    assert "'unpriced' = 3" in ddl_code
 
 
 def test_dual_track_and_key_version_columns(ddl):

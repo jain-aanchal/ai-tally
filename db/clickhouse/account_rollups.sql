@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS daily_account_rollup
     EstimatedCost       Decimal64(8),
     ReconciledCost      Decimal64(8),
     SpanCount           UInt64,
+    -- CTO-244. otel_spans.EstimatedCost is Nullable: a call we could not price is unpriced, not
+    -- free. sum() skips those rows, so EstimatedCost above is a LOWER BOUND on what this account
+    -- really cost. This counter is what keeps that from being silent. A caller that finds it
+    -- non-zero must label the figure partial rather than rank an under-count as a total.
+    UnpricedSpanCount   UInt64,
     UserCountState      AggregateFunction(uniq, FixedString(64))
 )
 ENGINE = SummingMergeTree
@@ -66,7 +71,21 @@ PARTITION BY toYYYYMM(Day)
 -- while making the grain of a row honest: one row per account per day per feature per operation.
 ORDER BY (TenantId, AccountIdHash, Day, FeatureTag, GenAiOperation);
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS daily_account_rollup_mv
+-- CTO-244 migration for an EXISTING deployment. The CREATE TABLE above is IF NOT EXISTS and so is
+-- a no-op on a live stack; add the coverage counter explicitly. `AFTER SpanCount` keeps the
+-- physical column order identical to the CREATE TABLE. DEFAULT 0 makes it metadata-only, and on
+-- pre-cutover rows that 0 means "nobody counted", NOT "there were no unknowns": before the cutover
+-- an unpriced call was indistinguishable from a free one. Those figures may understate spend and
+-- cannot be corrected after the fact. See the CTO-244 note in otel_spans.sql and RUNNING.md.
+--
+-- The MV is DROPped and recreated rather than CREATE ... IF NOT EXISTS, because a materialized
+-- view's SELECT cannot be ALTERed and IF NOT EXISTS would silently leave the old definition in
+-- place. Dropping a `TO`-table MV leaves the target table and all its history untouched.
+ALTER TABLE daily_account_rollup
+    ADD COLUMN IF NOT EXISTS UnpricedSpanCount UInt64 DEFAULT 0 AFTER SpanCount;
+
+DROP VIEW IF EXISTS daily_account_rollup_mv;
+CREATE MATERIALIZED VIEW daily_account_rollup_mv
 TO daily_account_rollup
 AS SELECT
     TenantId,
@@ -74,13 +93,17 @@ AS SELECT
     AccountIdHash,
     FeatureTag,
     GenAiOperation,
-    sum(EstimatedCost)                     AS EstimatedCost,
+    -- CTO-244: ifNull sits OUTSIDE the aggregate (an all-NULL group sums to NULL) so the result
+    -- stays non-Nullable for the SummingMergeTree column. The honesty lives in UnpricedSpanCount
+    -- below, not in this sum.
+    ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8)) AS EstimatedCost,
     -- ReconciledCost is Nullable on otel_spans and NOT NULL here. ifNull(..., 0) is what makes the
     -- SummingMergeTree column safe to sum: a NULL would poison the total. A day that has not been
     -- reconciled therefore reads as 0 reconciled, and callers compare against EstimatedCost rather
     -- than treating 0 as "this cost nothing".
-    sum(ifNull(ReconciledCost, toDecimal64(0, 8))) AS ReconciledCost,
+    ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
     count()                                AS SpanCount,
+    countIf(otel_spans.EstimatedCost IS NULL) AS UnpricedSpanCount,
     uniqState(UserIdHash)                  AS UserCountState
 FROM otel_spans
 GROUP BY TenantId, Day, AccountIdHash, FeatureTag, GenAiOperation;
@@ -109,9 +132,10 @@ GROUP BY TenantId, Day, AccountIdHash, FeatureTag, GenAiOperation;
 --          AccountIdHash,
 --          FeatureTag,
 --          GenAiOperation,
---          sum(EstimatedCost)                             AS EstimatedCost,
---          sum(ifNull(ReconciledCost, toDecimal64(0, 8))) AS ReconciledCost,
+--          ifNull(sum(otel_spans.EstimatedCost), toDecimal64(0, 8))  AS EstimatedCost,
+--          ifNull(sum(otel_spans.ReconciledCost), toDecimal64(0, 8)) AS ReconciledCost,
 --          count()                                        AS SpanCount,
+--          countIf(EstimatedCost IS NULL)                 AS UnpricedSpanCount,
 --          uniqState(UserIdHash)                          AS UserCountState
 --      FROM otel_spans
 --      WHERE Timestamp < '<cutoff>'          -- see the double-count warning below
