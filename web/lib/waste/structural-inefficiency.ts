@@ -170,7 +170,7 @@ function med0(n: number): number {
 function detectContextBloat(rows: StructuralRunRow[]): WasteFinding[] {
   const outliersByFeature = new Map<string, Outlier[]>();
 
-  for (const cohort of groupBy(rows, (r) => `${r.feature} ${r.model}`).values()) {
+  for (const cohort of groupBy(rows, (r) => `${r.feature}\u0000${r.model}`).values()) {
     if (cohort.length < MIN_COHORT_RUNS) continue;
     const { median: med, cutoff } = outlierGate(cohort.map((r) => r.inputTokens));
     for (const run of cohort) {
@@ -349,6 +349,11 @@ export async function collectStructuralInefficiency(
     // is judged in the cohort of the model that actually did the work. steps = span count, exactly
     // what queryAgents reports. Compute/egress spans are excluded: they are tenant infrastructure, not
     // agent steps, and would inflate both signals. `w` is a clamped int (injection-safe).
+    //
+    // #314: FINAL, like every other otel_spans read (the rationale is in lib/clickhouse.ts). This
+    // detector sums EstimatedCost per run and counts spans as steps, so an un-merged duplicate would
+    // both inflate the run's cost and add a phantom step, which is enough to push a run over the
+    // outlier gate and invent a finding.
     const raw = await rowsPCached<StructuralRunRaw>(
       db,
       `SELECT TraceId AS runId,
@@ -359,7 +364,7 @@ export async function collectStructuralInefficiency(
               sum(OutputTokens) AS outputTokens,
               count() AS steps,
               sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL ${w} DAY
          AND ServiceName != '' AND ServiceName != 'unknown'
