@@ -569,10 +569,17 @@ MCP server (new top-level component, e.g. `infra/onboarding-mcp/` or
   bound to a given header, call-site adaptation, and the no-recipe gap path
   (returns a reported gap, never a fabricated record).
 
-Hosted PR bot (P2, new component):
+Hosted PR bot (P2, new component, `sdk/python/onboarding_bot/`):
 
 - the detect -> retrieve -> ask -> propose loop (§3) as a Claude Agent SDK headless
   bot or GitHub app, opening reviewed PRs under scoped access (§4.3, §9).
+- built as the headless bot form (P2), reusing `onboarding_mcp`'s catalog, detection
+  and generators so all three delivery forms stay consistent (§4.1). A GitHub App
+  remains the hardening path (§11 Q5).
+- `onboarding_bot/guards.py` enforces the §9 posture in code: allowlisted git
+  subcommands and GitHub endpoints (merge is on neither), a refused push to any
+  default or protected branch, and token redaction. Asserted by
+  `tests/test_onboarding_bot_guards.py`.
 
 Gateway (`infra/gateway/src/gateway/`):
 

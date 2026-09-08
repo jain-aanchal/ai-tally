@@ -34,6 +34,9 @@ mcp = [
 # The stdio entrypoint a coding agent's MCP config launches (see README "Connect your
 # coding agent"). Fails with a clear RuntimeError when the mcp extra is absent.
 tally-onboarding-mcp = "onboarding_mcp.server:main"
+# CTO-261 P2: the hosted repo PR bot. Stdlib only (urllib + git), so it needs no extra;
+# the scoped GitHub token is supplied by reference in the environment, never as a flag.
+tally-onboarding-bot = "onboarding_bot.run:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -48,7 +51,7 @@ build-backend = "hatchling.build"
 # without the extra raises a clear, actionable error from catalog.py rather than a bare
 # "No module named 'yaml'", and server.py's message says the same thing (CTO-261 review
 # finding 4). Do not "fix" this by moving pyyaml into dependencies.
-packages = ["src/tally", "onboarding_mcp"]
+packages = ["src/tally", "onboarding_mcp", "onboarding_bot"]
 force-include = { "recipes" = "onboarding_mcp/recipes" }
 
 [tool.ruff]
