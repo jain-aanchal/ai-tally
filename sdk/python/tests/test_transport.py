@@ -340,3 +340,99 @@ def test_retry_hint_parsing():
     assert _retry_hint_ms({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, b"") is None
     assert _retry_hint_ms({}, b"not json") is None
     assert _retry_hint_ms({}, b'{"retry_after_ms":"soon"}') is None
+
+
+# --- #315 review: the hot-path invariant, damped shed logging, directly tracked counters ---
+
+
+def test_encode_happens_outside_the_lock(monkeypatch):
+    # The lock is held only for brief state transitions, never for work: serializing a full batch
+    # under it stalls every export() on the hot path once per flush, which the module docstring and
+    # CTO-260 §5 forbid. Probe it from inside the encode: _lock is not reentrant, so a successful
+    # non-blocking acquire on the flushing thread proves the encode is not holding it.
+    import tally.transport as transport_mod
+
+    real_encode = transport_mod.encode_request
+    seen: list[bool] = []
+    t = _transport(_RecordingSender())
+
+    def probing_encode(batch):
+        free = t._lock.acquire(blocking=False)
+        seen.append(free)
+        if free:
+            t._lock.release()
+        return real_encode(batch)
+
+    monkeypatch.setattr(transport_mod, "encode_request", probing_encode)
+    for i in range(3):
+        t.export({"n": i})
+    assert t.flush_once() is True
+    assert seen == [True]  # encoded exactly once, and with the lock free
+
+
+def test_export_is_not_blocked_by_an_in_flight_encode(monkeypatch):
+    # The same invariant from the producer's side: a slow encode must not hold up export().
+    import tally.transport as transport_mod
+
+    real_encode = transport_mod.encode_request
+    in_encode = threading.Event()
+    release_encode = threading.Event()
+    t = _transport(_RecordingSender())
+
+    def slow_encode(batch):
+        in_encode.set()
+        release_encode.wait(timeout=5.0)
+        return real_encode(batch)
+
+    monkeypatch.setattr(transport_mod, "encode_request", slow_encode)
+    t.export({"n": 0})
+    flusher = threading.Thread(target=t.flush_once)
+    flusher.start()
+    assert in_encode.wait(timeout=5.0)
+    exported = threading.Thread(target=t.export, args=({"n": 1},))
+    exported.start()
+    exported.join(timeout=2.0)
+    assert not exported.is_alive()  # would hang if the encode ran under _lock
+    release_encode.set()
+    flusher.join(timeout=5.0)
+    assert t.pending() == 1  # the span exported mid-flush is still queued, not lost
+
+
+def test_shed_warning_is_damped_per_cause(caplog):
+    # A rotated key answers 401 on every flush forever. The counters stay exact; the log must not
+    # emit one WARNING per flush for the life of the process.
+    import logging
+
+    from tally.transport import _SHED_LOG_EVERY
+
+    t = _transport(_ScriptedSender([SendResult(401)] * 400))
+    with caplog.at_level(logging.WARNING, logger="tally"):
+        for i in range(_SHED_LOG_EVERY + 1):
+            t.export({"n": i})
+            t.flush_once()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    # One line for the first shed, one rolled-up summary at the interval. Not 101 lines.
+    assert len(warnings) == 2
+    assert "shed 1 span(s)" in warnings[0].getMessage()
+    assert "status 401" in warnings[1].getMessage()
+    # The record is the counters, and it is complete.
+    assert t.shed_counts()["rejected_span_count"] == _SHED_LOG_EVERY + 1
+
+
+def test_buffer_overflow_count_is_not_polluted_by_another_component(caplog):
+    # obs is shareable, and BatchProcessor increments dropped_span_count too (egress.py). Deriving
+    # the overflow figure by subtraction reported those foreign drops as this buffer overflowing.
+    from tally.safety import SelfObservability
+
+    obs = SelfObservability()
+    t = _transport(_ScriptedSender([SendResult(400)]), observability=obs, max_buffer=2)
+    t.export({"n": 1})
+    t.export({"n": 2})
+    t.export({"n": 3})  # one real overflow
+    obs.dropped_span_count += 7  # a co-tenant of this obs drops spans of its own
+    t.flush_once()  # refused: 2 spans rejected
+    assert t.shed_counts() == {
+        "undelivered_span_count": 0,
+        "rejected_span_count": 2,
+        "buffer_overflow_span_count": 1,
+    }

@@ -24,6 +24,34 @@ the ingest key as bearer. The design guarantees, all non-negotiable (CLAUDE.md, 
 - **Drains on shutdown.** :meth:`flush` and an ``atexit`` hook drain with a bounded timeout so a
   short-lived script still ships its spans.
 
+Where these clients deliberately differ from the proxy (the authoritative list, kept here rather
+than only in a PR description so it stays true as the code moves, #315 review):
+
+===========================  ==============================  ====================================
+divergence                   edge proxy                      SDK / backfill
+===========================  ==============================  ====================================
+retry budget                 4 attempts                      SDK ``retry_max`` (5); the backfill
+                                                             61, a one-shot corpus load with no
+                                                             hot path behind it
+non-retryable refusal        shed, worker continues          SDK sheds and continues; the backfill
+                                                             aborts, since a CLI has an operator
+                                                             who can fix the credential, and a
+                                                             re-run at the same seed is idempotent
+hint clamp                   ``Max: 2 * time.Second``        SDK clamps to ``BackoffPolicy.max_ms``
+                                                             (30s by default) so one policy object
+                                                             governs every wait; the wait sits on
+                                                             ``_stop.wait``, so stop()/atexit still
+                                                             interrupt it and ``export()`` is never
+                                                             blocked by it
+backoff jitter               none                            SDK jitters +/- 25% via
+                                                             ``BackoffPolicy``; the backfill now
+                                                             jitters to match
+body retry hint              header only                     both clients also read
+                                                             ``server_hints.retry_after_ms``,
+                                                             which is the only place the gateway's
+                                                             503 shed states its wait
+===========================  ==============================  ====================================
+
 The tenant is omitted from the envelope: the bearer key is authoritative and the gateway maps it to
 the tenant (CTO-260 §3.1). The batch carries ``tenant_id=""`` so it claims no tenant.
 
@@ -76,6 +104,13 @@ Sender = Callable[[str, dict[str, str], bytes], "int | SendResult"]
 #: object; the cap only stops a misconfigured endpoint that streams from making us buffer without
 #: limit. Nothing from the body is logged or stored: only the integer hint is used.
 _MAX_ACK_BYTES = 64 * 1024
+
+#: How many further sheds of one cause pass before the log speaks about it again. A standing cause
+#: (a rotated ingest key answering 401) sheds a batch per flush for as long as the app runs, so the
+#: first one warns in full and the rest are rolled into one line per this many. Counted by sheds
+#: rather than by elapsed time so the damping is deterministic and testable, and because a busy app
+#: and an idle one should both get the same number of lines per unit of loss (#315 review).
+_SHED_LOG_EVERY = 100
 
 
 def _retry_hint_ms(headers: object, body: bytes) -> int | None:
@@ -220,8 +255,9 @@ class BatchingTransport:
         # every resend is byte-identical and batch_id is stable. Re-encoding per attempt would be
         # the bug that matters now that a duplicate span permanently pollutes the SummingMergeTree
         # rollups (#311): the gateway's (tenant_id, batch_id) idempotency store only recognizes a
-        # replay if the replay is actually the same batch (#315).
-        self._pending: tuple[BatchRequest, bytes, int] | None = None
+        # replay if the replay is actually the same batch (#315). The bytes are None only in the
+        # window between taking the batch off the buffer and encoding it outside the lock.
+        self._pending: tuple[BatchRequest, bytes | None, int] | None = None
         # The gateway's own requested wait from the last retryable answer, or None for "it named
         # none, use our backoff". 0 is a real value and means "retry, no specific delay".
         self._retry_after_ms: int | None = None
@@ -229,6 +265,12 @@ class BatchingTransport:
         # spent retry budget is an ingest availability problem, a refusal is a client-side one.
         self.undelivered_span_count = 0
         self.rejected_span_count = 0
+        # Counted where it happens, in export(), not derived by subtracting the other two from
+        # obs.dropped_span_count: obs can be shared with a BatchProcessor, which drops spans of its
+        # own, and a subtracted figure would report those as this buffer overflowing (#315 review).
+        self.buffer_overflow_span_count = 0
+        # cause -> [sheds, spans] accumulated since that cause last spoke in the log.
+        self._shed_log_state: dict[str, list[int]] = {}
         self._atexit_registered = False
 
     # --- Exporter protocol (hot path) ---
@@ -239,6 +281,7 @@ class BatchingTransport:
                 if len(self._buf) >= self.max_buffer:
                     self._buf.popleft()
                     self.obs.dropped_span_count += 1
+                    self.buffer_overflow_span_count += 1
                 self._buf.append(attributes)
 
     def pending(self) -> int:
@@ -271,8 +314,7 @@ class BatchingTransport:
         """
         with self._flush_lock:
             # Assemble or reclaim the in-flight batch, then pin it before the send so a mid-send
-            # failure (even a thread death) can never lose the already-dequeued spans. The body is
-            # encoded once, with the batch, and every attempt resends those same bytes.
+            # failure (even a thread death) can never lose the already-dequeued spans.
             with self._lock:
                 if self._pending is not None:
                     batch, body, attempts = self._pending
@@ -282,9 +324,24 @@ class BatchingTransport:
                     n = min(self.max_batch_size, len(self._buf))
                     spans = [self._buf.popleft() for _ in range(n)]
                     batch = self._build_batch(spans)
-                    body = encode_request(batch).encode("utf-8")
-                    attempts = 0
+                    body, attempts = None, 0
+                    # Pinned with body=None, i.e. "taken, not yet encoded": pending() still counts
+                    # these spans and a death before the encode cannot lose them.
                     self._pending = (batch, body, attempts)
+
+            if body is None:
+                # Encoded OUTSIDE _lock, deliberately. Serializing up to max_batch_size (512) spans
+                # is not the "brief state transition" _lock exists for, and doing it under the lock
+                # stalls every export() on the hot path once per flush, which the invariant above
+                # forbids (CTO-260 §5, #315 review). Encoding stays exactly once per batch: the
+                # bytes are pinned here and every attempt resends these same bytes, which is what
+                # makes a resend a replay rather than a rollup-polluting duplicate (#311).
+                body = encode_request(batch).encode("utf-8")
+                with self._lock:
+                    # Only re-pin our own batch. _flush_lock serializes flushes, so nothing can
+                    # have replaced it, but a shed batch must never be resurrected by this write.
+                    if self._pending is not None and self._pending[0] is batch:
+                        self._pending = (batch, body, self._pending[2])
 
             headers = {
                 "Authorization": f"Bearer {self._key}",
@@ -319,19 +376,22 @@ class BatchingTransport:
                     # Terminal on the first answer: shed and count, no resend. Counted apart from a
                     # spent budget because a 401 is fixed by the operator, not by waiting.
                     self.rejected_span_count += len(batch.resource_spans)
-                    self._shed_locked(batch, f"refused with status {status}")
+                    self._shed_locked(batch, f"refused with status {status}", f"status {status}")
                 elif attempts >= self.retry_max:
                     self.undelivered_span_count += len(batch.resource_spans)
-                    self._shed_locked(batch, f"undelivered after {attempts} attempts")
+                    self._shed_locked(
+                        batch, f"undelivered after {attempts} attempts", "spent retry budget"
+                    )
                 else:
                     # Keep the batch, and its bytes, pinned for an identical resend.
                     self._pending = (batch, body, attempts)
             return False
 
-    def _shed_locked(self, batch: BatchRequest, why: str) -> None:
+    def _shed_locked(self, batch: BatchRequest, why: str, cause: str) -> None:
         """Terminal loss of one batch. Counted and logged, never quietly forgotten and never
         reported as a success: an unshipped span is a real, visible number (CLAUDE.md, honest under
-        uncertainty). Caller holds _lock."""
+        uncertainty). ``cause`` is the stable key the log damping groups by, ``why`` the detail.
+        Caller holds _lock."""
         lost = len(batch.resource_spans)
         self.obs.dropped_span_count += lost
         self.obs.record_error(
@@ -339,26 +399,45 @@ class BatchingTransport:
         )
         self._pending = None
         self._retry_after_ms = None
-        # Warn, not debug: dropped spend is the one transport event an operator has to see.
-        _log.warning("tally: shed %d span(s), batch %s", lost, why)
+        # Warn, not debug: dropped spend is the one transport event an operator has to see. But a
+        # standing cause (a rotated key answering 401) sheds one batch per flush indefinitely, so
+        # an undamped warning here floods a busy app's log with the same line. First of each cause
+        # speaks, then one rolled-up line per _SHED_LOG_EVERY further sheds of that cause;
+        # shed_counts() remains the exact record (#315 review).
+        seen = self._shed_log_state.get(cause)
+        if seen is None:
+            self._shed_log_state[cause] = [0, 0]
+            _log.warning(
+                "tally: shed %d span(s), batch %s (further sheds from this cause are summarized "
+                "every %d; see shed_counts())",
+                lost,
+                why,
+                _SHED_LOG_EVERY,
+            )
+            return
+        seen[0] += 1
+        seen[1] += lost
+        if seen[0] >= _SHED_LOG_EVERY:
+            _log.warning(
+                "tally: shed %d more batch(es), %d span(s), still %s", seen[0], seen[1], cause
+            )
+            seen[0] = 0
+            seen[1] = 0
 
     def shed_counts(self) -> dict[str, int]:
         """Spans this transport metered and could not ship, by cause. The honest total the caller
-        needs to know a run lost data (#315)."""
+        needs to know a run lost data (#315).
+
+        Every figure is tracked at its own site rather than derived by subtraction: ``obs`` is
+        shared, and :class:`~tally.egress.BatchProcessor` also writes ``dropped_span_count``, so a
+        subtracted overflow figure would silently absorb another component's drops (#315 review).
+        """
         with self._lock:
             return {
                 "undelivered_span_count": self.undelivered_span_count,
                 "rejected_span_count": self.rejected_span_count,
-                "buffer_overflow_span_count": (
-                    self.obs.dropped_span_count
-                    - self.undelivered_span_count
-                    - self.rejected_span_count
-                ),
+                "buffer_overflow_span_count": self.buffer_overflow_span_count,
             }
-
-    def _has_pending(self) -> bool:
-        with self._lock:
-            return self._pending is not None
 
     def current_backoff_ms(self) -> float:
         """Wait before the next attempt. The gateway's own hint wins when it named one, clamped to
