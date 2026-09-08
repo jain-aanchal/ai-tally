@@ -57,6 +57,20 @@ class Settings(BaseSettings):
     # Idempotency window (seconds) for (tenant_id, batch_id) dedup.
     idempotency_ttl_s: int = 24 * 3600
 
+    # CTO-245: back the idempotency window with Postgres (`ingest_batch_idempotency`, migration
+    # 0032) instead of only an in-process dict. Without it the record dies with the worker, so a
+    # client retrying a batch across a restart is accepted twice and its spend counted twice.
+    # On by default because that is the correct behaviour; set false only to reproduce the old one.
+    idempotency_durable: bool = True
+
+    # Whether an unusable durable store is a startup FAILURE rather than a logged degradation.
+    #
+    # Default false so a checkout with no Postgres, and the test suite, still boot; in that mode the
+    # gateway falls back to the in-process cache and says so at WARNING level. Any deployment that
+    # actually needs the no-double-counting guarantee should set this true, because a gateway that
+    # boots during a Postgres blip would otherwise run without it and nobody would notice.
+    idempotency_durable_required: bool = False
+
     # Edge-key delta feed safe-lag window, in seconds (Initiative 2 §6.2 review). The /v1/edge/keys
     # cursor is a keyset watermark over (GREATEST(created_at, revoked_at), id). created_at/revoked_at
     # are stamped at statement time, not commit time, so a slow transaction can commit a row whose

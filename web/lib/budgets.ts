@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Typed client for the tenant budget control plane (CTO-208, F4).
 //
 // CTO-205 built the storage and the rules (`db/postgres/0026_tenant_budgets.sql`,
@@ -78,7 +78,7 @@ export async function queryBudgets(): Promise<BudgetList> {
   };
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
     });
@@ -116,7 +116,7 @@ export async function saveBudget(input: BudgetInput): Promise<SaveResult> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/budgets`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
       body: JSON.stringify({
         budget_id: input.budgetId,
         period: input.period,
@@ -147,7 +147,7 @@ export async function deleteBudget(budgetId: string): Promise<DeleteResult> {
       `${GATEWAY_URL}/v1/tenant/budgets?budget_id=${encodeURIComponent(budgetId)}`,
       {
         method: "DELETE",
-        headers: { "x-tenant-id": await resolveTenantId() },
+        headers: controlPlaneHeaders(await resolveTenantId()),
         cache: "no-store",
         signal: AbortSignal.timeout(5000),
       },

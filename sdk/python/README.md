@@ -133,3 +133,203 @@ and does not write it to the span row, so no customer name lands in the telemetr
 are optional per account: set none and the dashboard falls back to a shortened hash, which is a
 supported way to run. A label with no account id alongside it is dropped, since there is nothing
 to key it on.
+
+## Onboarding MCP server (CTO-261)
+
+`tally.init()` meters the LLM layer on its own, but the other layers need app code: the
+vector, tool and embedding `record_*` calls, and the per-customer attribution only your app
+can resolve. The onboarding MCP server hands your own coding agent the maintained recipes and
+generated snippets for that wiring. Your source never leaves your machine: the server holds
+only the recipe catalog and the SDK surface, and it returns code, never an applied edit.
+
+Install the extra (it is optional, the SDK runtime itself has no dependencies):
+
+```bash
+pip install 'tally-sdk[mcp]'
+```
+
+That installs the `tally-onboarding-mcp` console script, which speaks MCP over stdio.
+
+### Claude Code
+
+```bash
+claude mcp add ai-tally-onboarding -- tally-onboarding-mcp
+```
+
+Or add it to `.mcp.json` in your project root so your team picks it up too:
+
+```json
+{
+  "mcpServers": {
+    "ai-tally-onboarding": {
+      "command": "tally-onboarding-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+### Cursor
+
+Add the same stanza to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "ai-tally-onboarding": {
+      "command": "tally-onboarding-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+If `tally-onboarding-mcp` is not on your agent's PATH, point `command` at the interpreter that
+has it installed instead: `"command": "/path/to/.venv/bin/tally-onboarding-mcp"`.
+
+### The tools
+
+| Tool | What it returns |
+|---|---|
+| `detect_stack` | providers, agent frameworks, vector DBs and web frameworks found in a manifest, plus the recipe ids that match, the `already_covered` notes for layers you must not meter twice, and the gaps that matched nothing |
+| `get_recipe` | one machine-readable recipe, by id or by a friendly name (`pinecone`, `fastapi`) |
+| `generate_startup` | the `tally.init()` line for application startup |
+| `generate_middleware` | account / feature middleware bound to the resolver you confirm, bundled with the startup line under `startup` (a generated snippet, or a gap with `code: None` if the catalog has no startup recipe, so `startup["code"]` is always safe to read) |
+| `instrument_call_site` | the adapted `record_*` edit for one concrete call site |
+| `explain_layer` | which `record_*` method covers a layer and why, grounded on the live SDK surface |
+| `coverage_report` | per-layer coverage read from the gateway's probe: which layers a real span proves are flowing, and why each dark layer is dark |
+
+#### Configuring `coverage_report`
+
+`coverage_report` is the only tool that talks to anything outside your machine. It calls the
+gateway's coverage probe, which is the side that can read your telemetry, so it needs three
+things from the environment:
+
+| Variable | What it is |
+|---|---|
+| `TALLY_GATEWAY_URL` | base URL of the gateway that holds your telemetry. Must be `https://`, because the request carries the service token; plain `http://` is accepted only for `localhost`, `127.0.0.1` or `::1` so local dev still works |
+| `TALLY_MCP_TENANT_ID` | your tenant UUID, sent as `x-tenant-id`. Must be a canonical UUID, not a tenant name like `local-dev` |
+| `GATEWAY_SERVICE_TOKEN` | the control-plane service token. Set `TALLY_GATEWAY_SERVICE_TOKEN_ENV` to read it from a differently named variable instead |
+
+`TALLY_MCP_TENANT_ID` is deliberately not the retired `TALLY_TENANT_ID`, which used to scope the
+dashboard and which some older deploy manifests still set, inertly, to `local-dev`. The tool never
+reads the retired name, not even as a fallback: a stale value would silently scope your coverage
+report to the wrong tenant. If it finds `TALLY_TENANT_ID` set while `TALLY_MCP_TENANT_ID` is not,
+it answers `probe_available: false` and tells you to rename the variable, rather than guessing with
+it. A value that is not a canonical UUID is refused the same way, because the probe binds it into a
+UUID read filter where a tenant name matches nothing and would look like an honest empty answer.
+
+The token is held by reference: the tool reads the variable at the moment it calls the probe and
+never stores, echoes or logs the value. The `tenant_key` argument is likewise reported only as
+present or absent, never sent onward.
+
+The token is also never carried off the origin you configured: a redirect to a different scheme,
+host or port is refused rather than followed, so a load balancer that 301s elsewhere cannot be
+handed your service token.
+
+Leave these unset and the tool answers `probe_available: false` with every layer `unknown` and
+the reason attached. That is also what you get if `TALLY_GATEWAY_URL` is rejected as unsafe, or
+if the gateway is unreachable, answers an error, times out, redirects off-origin, or returns
+something unreadable or oversized. The result shape is the same on both paths, so `reason` is
+always present (empty when the probe answered). None of those ever turns into "this layer is not
+wired": a layer is reported covered only when the probe returns a span count above zero to prove
+it, re-derived from that count rather than taken on the wire's word, so a payload claiming
+coverage with no evidence is downgraded back to `unknown`.
+
+Pass `wired` (the layers you just instrumented) to separate "wired, awaiting first event" from
+"not wired" on a dark layer. It only softens the wording; it can never produce coverage.
+
+Two things the server will not do. It never guesses which customer a request belongs to: pass
+`generate_middleware` the header or resolver you confirmed, and with no answer it returns a
+reported gap and the account layer stays unattributed. And it never invents an SDK call: a
+stack with no recipe comes back as a gap, and every hole it cannot fill from the call site you
+passed is left as a visible `<FILL:...>` marker for you to complete.
+
+One thing the server will not let you do twice. `tally.init()` already patches the `openai` and
+`anthropic` clients in your process, so those call sites need no edit. `detect_stack` reports
+any such provider under `already_covered`, and the manual `llm.generic.call` recipe deliberately
+does not match a patched call shape: adding `record_llm_call` beside one would meter the same
+call twice and double your reported cost. Use that recipe only where the patch does not reach,
+such as a raw `/v1/chat/completions` POST, `bedrock-runtime`, `ollama`, or a self-hosted or
+gateway-fronted model.
+
+Both mcp 1.x (`FastMCP`, 1.2.0 and up) and mcp 2.x (`MCPServer`) are supported. Without the
+extra installed, launching the server fails with a clear error rather than starting a server
+that does nothing. The extra is also what makes the tools usable at all: `onboarding_mcp` ships
+in the base wheel so the console script resolves, but the recipe catalog is YAML and `pyyaml`
+comes with the extra, since the SDK runtime itself stays dependency-free.
+
+## Hosted repo PR bot (CTO-261)
+
+The MCP server above hands the recipes to your own coding agent. The PR bot is the other end
+of the same catalog: give it scoped access to a repo and it runs the loop server-side and
+opens a reviewed pull request. Same recipes, same refusals, no coding agent needed on your
+side. It is a headless bot rather than a GitHub App, so the access you grant is a token you
+hold and can take back.
+
+```bash
+export TALLY_ONBOARDING_GITHUB_TOKEN=github_pat_...
+tally-onboarding-bot \
+  --repo acme/widgets \
+  --account-source 'request.headers.get("X-Customer-Id")' \
+  --feature-tag support-bot
+```
+
+Omit `--account-source` and the bot does not pick one for you: it opens the PR carrying the
+account question and the candidate resolvers it found, leaves the account layer
+unattributed, and says so in the body. `--dry-run` proposes the diff and stops before
+creating a branch.
+
+### Supplying and revoking the token
+
+1. In GitHub, go to Settings, Developer settings, Personal access tokens, Fine-grained
+   tokens, and generate a token whose repository access is **only** the repo you want the PR
+   in.
+2. Give it exactly two repository permissions: **Contents: read and write** (to push the new
+   branch) and **Pull requests: read and write** (to open the PR). Nothing else is used. Set
+   the shortest expiry you can live with.
+3. Put the value in the environment variable named by `--token-env` (default
+   `TALLY_ONBOARDING_GITHUB_TOKEN`), or in your secret manager and inject it from there. The
+   bot holds the variable NAME, never the value: it reads it at the moment git or the API
+   needs it, hands it to git through `GIT_ASKPASS` so it never lands in `.git/config` or in a
+   process listing, and redacts it from anything it prints.
+4. To revoke, delete the token on that same page, or unset the variable. There is no
+   installation to uninstall and no stored copy to clean up, which is the point of a token
+   you hold rather than an app you grant.
+
+A GitHub App is the harder-edged version of this (short-lived installation tokens, grants
+managed in GitHub) and stays the hardening path. It would change how the credential is
+minted, not what the bot is allowed to do.
+
+### What it refuses to do
+
+Enforced in `onboarding_bot/guards.py` and covered by `tests/test_onboarding_bot_guards.py`,
+not merely promised here:
+
+- **It never pushes to a default branch.** Every push resolves the repo's default branch
+  first and refuses it, along with `main` / `master` / `trunk` / `develop` whatever the
+  remote reports. It pushes the one new branch it created, and force pushes are refused.
+- **It never merges.** Git subcommands and GitHub endpoints are both allowlisted; `merge`
+  (and `rebase`, `cherry-pick`, `reset`) is on neither, so no code path reaches one. The PR
+  waits for a human.
+- **It keeps no source.** The clone is shallow, lives in a temporary directory, and is
+  deleted in a `finally` on every exit path including a refused run, and by a SIGTERM /
+  SIGINT handler so a runner that stops the job does not leave the clone behind either. A
+  `SIGKILL` cannot be caught by anything, so the promise is every exit path the process
+  controls. A cleanup that fails is reported in `cleanup_error`, never swallowed. What the
+  run returns is paths, counts, generated code and gaps, never your source.
+- **It invents nothing.** Every line it writes comes from the recipe catalog. A value it
+  cannot derive from the call site stays a visible `<FILL:...>` hole, and a block with a hole
+  is inserted commented out so nothing runs on a guessed value.
+- **It claims nothing it did not do.** `layers_wired` (in the JSON result, the commit
+  subject and the PR table) lists only blocks that actually meter. A block inserted
+  commented out is reported separately as inactive.
+- **It never commits code that does not compile.** Every block goes in at a statement
+  boundary resolved from the parsed file, and every patched Python file is run through
+  `compile()` before anything is written. A file it cannot patch cleanly is left untouched
+  and reported as a gap.
+
+Each run gets its own branch (`tally/onboarding/<run id>`); pass `--branch-suffix` to name
+it yourself. If the branch is already on the remote the run stops and says so instead of
+failing at push. If the push succeeds but the PR call does not, the exit is non-zero and the
+printed result carries `orphan_branch` so you can find the branch it left.

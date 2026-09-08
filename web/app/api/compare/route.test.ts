@@ -734,7 +734,7 @@ describe("/api/compare", () => {
     expect(body.workload).toBe("all traffic / production / last 7 days");
     // No eval judged (< floor is moot — none ran) → quality unknown → verdict "mixed".
     expect(body.recommendation.verdict).toBe("mixed");
-    expect(body.recommendation.summary).toContain("run an eval pass");
+    expect(body.recommendation.summary).toContain("Run an eval pass");
   });
 
   it("CTO-168: honest 'insufficient data' recommendation when replay samples are thin", async () => {

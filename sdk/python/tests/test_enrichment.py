@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from datetime import date
-from decimal import Decimal
 
 from tally.enrichment import enrich_cost
-from tally.pricing import (
-    PriceCatalog,
-    PriceEntry,
-    PriceType,
-    Unit,
-    compute_call_cost_micro_usd,
-    seed_catalog,
-)
+from tally.pricing import PriceCatalog, seed_catalog
 from tally.schema import GenAI, SpanFields, build_span_attributes
 
 
@@ -183,44 +175,126 @@ def test_client_cost_still_surfaces_when_usage_is_unknown():
     assert res.client_cost_micro_usd == 1234
     assert res.server_cost_micro_usd is None
     assert res.drift is None
-
-
-# CTO-244: the usage check is per operation, because the layers are billed differently. A single
-# both-sides rule silently un-prices every embedding span (no output side by design) and every
-# per-call layer (no token counts at all). These cases pin each branch so nobody "simplifies" the
-# check back to one shape. They mirror db/clickhouse/rollups.sql's UnknownUsageSpanCount predicate.
-
-
-def _embedding_input_rate_catalog() -> PriceCatalog:
-    # An input-token rate for an embedding model. On this branch enrich_cost still resolves cost
-    # through the token pricer, so this is what proves the span reaches the pricer at all instead
-    # of being vetoed as unknown-usage. Once the sibling embedding routing lands, the same span
-    # resolves through the EMBEDDING tier; either way it must PRICE, not land unpriced.
-    cat = PriceCatalog()
-    cat.add(
-        PriceEntry(
-            version="test-embed",
-            valid_from=date(2026, 1, 1),
-            provider="openai",
-            model="text-embedding-3-small",
-            price_type=PriceType.INPUT,
-            unit=Unit.PER_MILLION_TOKENS,
-            price_per_unit=Decimal("0.02"),
-        )
-    )
-    return cat
-
-
-def _embedding_span(inp: int | None = 1_000_000) -> dict[str, object]:
+def _embedding_span(model="text-embedding-3-small", inp=1_000_000, client_cost=None):
     fields = SpanFields(
         system="openai",
-        request_model="text-embedding-3-small",
-        response_model="text-embedding-3-small",
+        request_model=model,
         operation="embeddings",
         input_tokens=inp,
+        cost_estimated_micro_usd=client_cost,
     )
     return build_span_attributes(fields)
 
+
+def test_embeddings_priced_from_the_embedding_tier():
+    # CTO-243: embeddings are catalogued under PriceType.EMBEDDING, not INPUT/OUTPUT. Routing them
+    # through the chat pricer resolved no rate, reported a catalog miss and dropped the cost, so
+    # every embeddings span landed 0.00 in EstimatedCost -- a fabricated zero for a price we hold.
+    res = enrich_cost(_embedding_span(), seed_catalog(), at=AT)
+    assert res.catalog_miss is False
+    assert res.server_cost_micro_usd == 20_000  # 1 Mtok at $0.02 / Mtok
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 20_000
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+
+
+def test_embeddings_client_cost_is_still_only_a_hint():
+    res = enrich_cost(_embedding_span(client_cost=999_999), seed_catalog(), at=AT)
+    assert res.server_cost_micro_usd == 20_000
+    assert res.client_cost_micro_usd == 999_999
+    assert res.drift_exceeded is True
+
+
+def test_unpriced_embedding_model_still_misses_rather_than_reporting_zero():
+    res = enrich_cost(_embedding_span(model="text-embedding-9-imaginary"), seed_catalog(), at=AT)
+    assert res.catalog_miss is True
+    assert res.server_cost_micro_usd is None
+    assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
+
+
+def test_chat_span_is_unaffected_by_the_embedding_path():
+    res = enrich_cost(_span(), seed_catalog(), at=AT)
+    assert res.server_cost_micro_usd == 2_250_000
+# --- per-call layers: tools and vector (CTO-243) ------------------------------------------------
+#
+# The SDK carries these costs on gen_ai.tool.cost_micro_usd. Nothing promoted that into the
+# canonical cost attribute, so the tools and vector layers reported zero spend.
+
+
+def _tool_span(client_cost=10_000, provider="tavily", tool="search"):
+    return build_span_attributes(
+        SpanFields(
+            system=provider,
+            operation="tool",
+            tool_name=tool,
+            tool_call_id="call-1",
+            tool_cost_micro_usd=client_cost,
+        )
+    )
+
+
+def _vector_span(client_cost=400, provider="pinecone", index="docs", operation="query"):
+    return build_span_attributes(
+        SpanFields(
+            system=provider,
+            operation="vector",
+            tool_name=f"{provider}.{index}.{operation}",
+            tool_cost_micro_usd=client_cost,
+        )
+    )
+
+
+def test_tool_cost_is_promoted_to_the_canonical_cost_key():
+    res = enrich_cost(_tool_span(), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 10_000  # tavily search, 0.01 USD
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+    assert res.catalog_miss is False
+
+
+def test_vector_cost_is_priced_off_the_operation_segment():
+    res = enrich_cost(_vector_span(), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 400  # pinecone query, 0.0004 USD
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+
+
+def test_vector_index_name_containing_dots_still_prices():
+    res = enrich_cost(_vector_span(index="docs.v2"), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 400
+
+
+def test_call_cost_server_catalog_wins_and_drift_is_flagged():
+    res = enrich_cost(_tool_span(client_cost=1), seed_catalog(), at=AT)
+    assert res.server_cost_micro_usd == 10_000
+    assert res.client_cost_micro_usd == 1
+    assert res.drift_exceeded is True
+
+
+def test_call_cost_survives_a_catalog_miss():
+    # A negotiated per-call rate the catalog has no entry for is kept, not discarded as zero.
+    res = enrich_cost(_tool_span(provider="acme-internal", tool="lookup"), seed_catalog(), at=AT)
+    assert res.catalog_miss is True
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 10_000
+    assert res.server_cost_micro_usd is None
+    assert GenAI.COST_PRICE_CATALOG_VERSION not in res.attributes
+
+
+def test_unpriced_call_asserts_no_cost():
+    span = _tool_span(client_cost=None, provider="acme-internal", tool="lookup")
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.catalog_miss is True
+    assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
+    assert res.client_cost_micro_usd is None
+
+
+def test_call_cost_original_not_mutated():
+    span = _tool_span()
+    before = dict(span)
+    enrich_cost(span, seed_catalog(), at=AT)
+    assert span == before
+
+
+# CTO-244: the per-operation half of the unknown-usage rule. An embedding call has no output
+# side by design, so the chat rule would mark every correctly instrumented embedding span
+# unknown and stop it pricing. The embedding-tier and per-call paths are covered above.
 
 def test_embeddings_with_input_only_is_not_unknown_usage():
     # The regression this whole change exists to prevent: an embedding span carries no output
@@ -229,79 +303,11 @@ def test_embeddings_with_input_only_is_not_unknown_usage():
     assert res.usage_unknown is False
 
 
-def test_embeddings_with_input_only_prices():
-    res = enrich_cost(_embedding_span(), _embedding_input_rate_catalog(), at=AT)
-    assert res.usage_unknown is False
-    assert res.catalog_miss is False
-    assert res.server_cost_micro_usd == 20_000  # 1M tokens at 0.02 USD/Mtok
-    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 20_000
-    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "test-embed"
-
-
 def test_embeddings_without_input_tokens_is_unknown_usage():
     # Input is the one side an embedding call does have, so an absent one really is unknown.
-    res = enrich_cost(_embedding_span(inp=None), _embedding_input_rate_catalog(), at=AT)
+    res = enrich_cost(_embedding_span(inp=None), seed_catalog(), at=AT)
     assert res.usage_unknown is True
     assert res.catalog_miss is False
     assert res.server_cost_micro_usd is None
     assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
     assert GenAI.COST_PRICE_CATALOG_VERSION not in res.attributes
-
-
-def _per_call_span(operation: str, provider: str, name: str, client_cost=None):
-    fields = SpanFields(
-        system=provider,
-        request_model=name,
-        response_model=name,
-        operation=operation,
-        cost_estimated_micro_usd=client_cost,
-    )
-    return build_span_attributes(fields)
-
-
-def test_tool_span_without_tokens_is_never_unknown_usage():
-    # Priced per call from the catalog, so there is no token usage to be unknown about.
-    res = enrich_cost(_per_call_span("tool", "tavily", "search"), seed_catalog(), at=AT)
-    assert res.usage_unknown is False
-
-
-def test_vector_span_without_tokens_is_never_unknown_usage():
-    res = enrich_cost(_per_call_span("vector", "pinecone", "query"), seed_catalog(), at=AT)
-    assert res.usage_unknown is False
-
-
-def test_per_call_layers_price_per_call_from_the_catalog():
-    # The per-call rates the sibling branch's enrich_cost branch resolves against. Asserted here so
-    # the write-side rule and the catalog cannot drift apart: tavily/search and pinecone/query are
-    # priced per CALL, with no token tiers to fall back on.
-    cat = seed_catalog()
-    tool_cost, tool_version = compute_call_cost_micro_usd(
-        cat, "tavily", "search", PriceType.TOOL_CALL, at=AT
-    )
-    assert (tool_cost, bool(tool_version)) == (10_000, True)
-    vector_cost, vector_version = compute_call_cost_micro_usd(
-        cat, "pinecone", "query", PriceType.VECTOR_CALL, at=AT
-    )
-    assert (vector_cost, bool(vector_version)) == (400, True)
-
-
-def test_client_per_call_cost_survives_a_catalog_miss():
-    # Honest under uncertainty cuts both ways: we assert no server cost we cannot justify, but the
-    # client's figure is still reported rather than thrown away.
-    res = enrich_cost(
-        _per_call_span("tool", "nosuchvendor", "search", client_cost=12_345),
-        seed_catalog(),
-        at=AT,
-    )
-    assert res.usage_unknown is False
-    assert res.catalog_miss is True
-    assert res.client_cost_micro_usd == 12_345
-    assert res.server_cost_micro_usd is None
-
-
-def test_no_catalog_entry_and_no_client_figure_fabricates_nothing():
-    res = enrich_cost(_per_call_span("vector", "nosuchvendor", "query"), seed_catalog(), at=AT)
-    assert res.server_cost_micro_usd is None
-    assert res.client_cost_micro_usd is None
-    assert res.attributes.get(GenAI.COST_ESTIMATED_MICRO_USD) is None
-    assert res.attributes.get(GenAI.COST_PRICE_CATALOG_VERSION) is None

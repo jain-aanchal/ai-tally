@@ -25,7 +25,7 @@ const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] 
   {
     category: "cost",
     title: "Cost sources",
-    blurb: "All-in spend — beyond LLM tokens — attributed to features (CTO-63).",
+    blurb: "All-in spend beyond LLM tokens, attributed to features (CTO-63).",
   },
 ];
 
@@ -53,7 +53,7 @@ export default async function ConnectorsPage() {
         const soon = comingSoonCount(rows);
         const suffix = soon > 0 ? ` · ${soon} coming soon` : "";
         return (
-          <Card key={s.category} title={`${s.title} — ${n}/${live} connected${suffix}`}>
+          <Card key={s.category} title={`${s.title}: ${n}/${live} connected${suffix}`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
             <ConnectorTable rows={rows} enabledLayers={enabledLayers} configs={configs} />
           </Card>
@@ -93,7 +93,7 @@ export default async function ConnectorsPage() {
         write against the real control plane whether or not any telemetry has arrived yet, and
         wrapping it in a "sample data" frame would suggest otherwise.
       */}
-      <Card title="Revenue upload — CSV">
+      <Card title="Revenue upload: CSV">
         <RevenueUpload snapshots={revenueUploads ?? []} unreachable={revenueUploads === null} />
       </Card>
     </div>

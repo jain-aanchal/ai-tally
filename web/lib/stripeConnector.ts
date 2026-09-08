@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "./getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Per-tenant Stripe connector config (CTO-110).
 //
 // Mirrors lib/tenant.ts: the dashboard never talks to Postgres directly — it goes through the
@@ -33,7 +33,7 @@ interface StripeGetResponse {
 export async function queryStripeConfig(): Promise<StripeConfigView | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/stripe`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
@@ -62,10 +62,9 @@ export async function connectStripe(
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/stripe/connect`, {
       method: "POST",
-      headers: {
+      headers: controlPlaneHeaders(await resolveTenantId(), {
         "content-type": "application/json",
-        "x-tenant-id": await resolveTenantId(),
-      },
+      }),
       body: JSON.stringify({
         webhook_secret: webhookSecret,
         stripe_account_id: stripeAccountId || undefined,

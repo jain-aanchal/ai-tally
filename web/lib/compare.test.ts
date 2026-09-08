@@ -114,7 +114,7 @@ describe("deriveRecommendation", () => {
       samplesReplayed: 60,
     });
     expect(r.verdict).toBe("mixed");
-    expect(r.summary).toContain("run an eval pass");
+    expect(r.summary).toContain("Run an eval pass");
   });
 
   it("verdict 'keep' when the cheapest candidate saves less than 5%", () => {

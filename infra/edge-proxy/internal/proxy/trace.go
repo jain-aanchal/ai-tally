@@ -34,18 +34,29 @@ type TraceRecord struct {
 	AccountIdHash string
 	Method        string
 	Path          string
+	// Provider is the route's protocol label (openai / anthropic / gemini), empty in pure
+	// pass-through mode. It ships as gen_ai.system, which is half of the (system, model) pair the
+	// gateway prices against: without it an ingested proxy span can never be costed.
+	Provider string
 	// Model is the model id for the request, extracted from the response (or request path for
 	// Gemini) when a provider protocol is configured (CTO-167). Empty in pure pass-through mode or
 	// when the response carried no recognizable model. It is a short identifier
-	// (e.g. "gemini-2.5-flash"), never request/response content.
+	// (e.g. "gemini-2.5-flash"), never request/response content. An empty Model is omitted from the
+	// wire rather than shipped as "": an unextracted model is unknown, not a model named "".
 	Model string
 	// PromptTokens / CompletionTokens are the input/output token counts reported by the provider in
 	// the response usage block (OpenAI usage.prompt_tokens/completion_tokens, Anthropic
 	// usage.input_tokens/output_tokens, Gemini usageMetadata.promptTokenCount/candidatesTokenCount).
-	// Zero when unknown (pass-through mode, streaming past the scan cap, or an error response). These
-	// are scalar counts only — extracting them never persists or logs the body they came from.
-	PromptTokens     int64
-	CompletionTokens int64
+	// They are pointers so unknown stays unknown on the wire: pass-through mode, a stream past the
+	// scan cap, and an error response all leave them nil, and nil is omitted from the emitted JSON
+	// rather than serialized as 0. A fabricated 0 would read downstream as a real call that cost
+	// nothing, which the honest-under-uncertainty invariant forbids. Storage does not yet preserve
+	// that distinction (the gateway coerces a missing count to 0 into a non-nullable column); the
+	// end-to-end NULL depends on a separately tracked gateway/schema change, and the proxy's job is
+	// to stop being the place the 0 is invented. These are scalar counts only, and extracting them
+	// never persists or logs the body they came from.
+	PromptTokens     *int64
+	CompletionTokens *int64
 	// StatusCode is the upstream response status relayed to the client (0 if the upstream failed
 	// before any status, e.g. connection refused — see Failed).
 	StatusCode int

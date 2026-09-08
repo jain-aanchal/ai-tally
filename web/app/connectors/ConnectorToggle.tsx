@@ -26,7 +26,7 @@ export function ConnectorToggle({ layer, initialEnabled }: Props) {
     startTransition(async () => {
       const res = await toggleConnectorAction(layer, next);
       if (res.ok) {
-        setStatus({ tone: "ok", text: next ? "Enabled — banner will respect this layer." : "Disabled — layer no longer counts." });
+        setStatus({ tone: "ok", text: next ? "Enabled: banner will respect this layer." : "Disabled: layer no longer counts." });
       } else {
         setEnabled(!next); // rollback
         setStatus({ tone: "err", text: res.error ?? "Failed to update connector." });

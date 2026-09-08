@@ -2,6 +2,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,5 +227,65 @@ func TestAccountIdHashHeaderOverride(t *testing.T) {
 	}
 	if cfg.AccountIdHashHeader != "X-Acct" {
 		t.Errorf("AccountIdHashHeader = %q", cfg.AccountIdHashHeader)
+	}
+}
+
+// TestWarningsOnSilentlyUndeliverableTelemetry: the default self-host shape (a telemetry URL, no
+// ingest token, no edge-key feed) can authenticate nothing, so it ships zero telemetry while
+// startup logs a destination. That must be warned about, not discovered from an empty dashboard.
+func TestWarningsOnSilentlyUndeliverableTelemetry(t *testing.T) {
+	cfg, err := FromEnv(envMap(map[string]string{
+		"EDGE_PROXY_TELEMETRY_URL": "https://ingest.example.com/v1/batches",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	warnings := cfg.Warnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "NO telemetry") {
+		t.Fatalf("want a loud no-telemetry warning, got %v", warnings)
+	}
+}
+
+// TestWarningsOnOpenModeWithoutIngestToken: with a key feed configured, only a request carrying a
+// resolvable key can authenticate its own telemetry. In open mode the rest are shed, which is a
+// real (partial) loss the operator should hear about.
+func TestWarningsOnOpenModeWithoutIngestToken(t *testing.T) {
+	cfg, err := FromEnv(envMap(map[string]string{
+		"EDGE_PROXY_TELEMETRY_URL": "https://ingest.example.com/v1/batches",
+		"EDGE_PROXY_KEYS_URL":      "https://gw.example.com/v1/edge/keys",
+		"EDGE_PROXY_SERVICE_TOKEN": "svc",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	warnings := cfg.Warnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "shed unauthenticated") {
+		t.Fatalf("want a partial-loss warning, got %v", warnings)
+	}
+}
+
+// TestNoWarningsOnHealthyConfigs: a proxy with no telemetry at all, and a fully configured one, are
+// both correct. A warning that fires on a healthy config trains operators to ignore warnings.
+func TestNoWarningsOnHealthyConfigs(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"telemetry off": nil,
+		"ingest token set": {
+			"EDGE_PROXY_TELEMETRY_URL": "https://ingest.example.com/v1/batches",
+			"EDGE_PROXY_INGEST_TOKEN":  "svc_token",
+		},
+		"require tenant with key feed": {
+			"EDGE_PROXY_TELEMETRY_URL":  "https://ingest.example.com/v1/batches",
+			"EDGE_PROXY_KEYS_URL":       "https://gw.example.com/v1/edge/keys",
+			"EDGE_PROXY_SERVICE_TOKEN":  "svc",
+			"EDGE_PROXY_REQUIRE_TENANT": "true",
+		},
+	} {
+		cfg, err := FromEnv(envMap(env))
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if got := cfg.Warnings(); len(got) != 0 {
+			t.Errorf("%s: unexpected warnings %v", name, got)
+		}
 	}
 }

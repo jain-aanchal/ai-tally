@@ -69,7 +69,20 @@ fallback — the dashboard boots without any of them (it just renders the mock/`
 | `TALLY_CLICKHOUSE_PASSWORD` | ClickHouse password | `••••••••` | **Encrypted / Sensitive** |
 | `TALLY_CLICKHOUSE_DB` | ClickHouse database | `default` | Plain env |
 | `TALLY_GATEWAY_URL` | Ingest gateway base URL | `https://gateway.example.com` | Plain env |
-| `TALLY_TENANT_ID` | Tenant the dashboard reads | `local-dev` (prod: your tenant) | Plain env |
+| `GATEWAY_SERVICE_TOKEN` | Bearer token on every gateway `/v1/tenant/*` call | `openssl rand -hex 32` output | **Encrypted / Sensitive** |
+| `TALLY_DEV_TENANT` | Dev escape hatch: pin a tenant, skip Clerk | unset in prod (demo: the tenant **UUID**) | Plain env |
+
+`GATEWAY_SERVICE_TOKEN` must be the exact same string the gateway holds as
+`TALLY_GATEWAY_SERVICE_TOKEN`. The gateway rejects every control-plane call without it once
+`TALLY_REQUIRE_API_KEY` is on, so a mismatch shows up as a `401` on key management and connector
+config. Generate a real value (`openssl rand -hex 32`) and store it Sensitive; never commit one.
+
+`TALLY_DEV_TENANT` should be **unset** on a production deployment: the tenant then comes from the
+caller's Clerk organization. Set it only for a single-tenant demo, and set it to the tenant **UUID**
+(`make seed` prints it), never to a name like `local-dev`. The value is bound directly into the
+ClickHouse read filter (`TenantId = ...`) and spans are tagged with the UUID, so a name matches no
+rows and the dashboard renders empty with no error. The older `TALLY_TENANT_ID` variable is gone;
+delete it from any project that still has it.
 
 **Optional UI/build knobs (`NEXT_PUBLIC_*` are inlined at build time — non-secret by definition):**
 

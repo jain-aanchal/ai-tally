@@ -341,7 +341,7 @@ export function deriveRecommendation(input: {
   if (cheapest.qualityScore === null) {
     return {
       verdict: "mixed",
-      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet, so run an eval pass before routing production traffic.${latencyClause}`,
+      summary: `${cheapest.model} projects ${pct}% cheaper (saves ${dollars}/mo vs ${currentModel}), but no eval has judged its quality yet. Run an eval pass before routing production traffic.${latencyClause}`,
       projectedSavingsMicroUsd,
       projectedSavingsPct,
     };
