@@ -54,6 +54,16 @@ spec:
                   name: {{ include "ai-tally.secretName" . }}
                   key: TALLY_CLICKHOUSE_PASSWORD
             {{- end }}
+            # Initiative 1 §6: the web server is the only legitimate caller of the gateway
+            # control plane and authenticates with this shared secret. Same Secret key the
+            # gateway reads as TALLY_GATEWAY_SERVICE_TOKEN; the web code reads it unprefixed.
+            {{- if .Values.secretsManager.secrets.gatewayServiceToken }}
+            - name: GATEWAY_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-tally.secretName" . }}
+                  key: TALLY_GATEWAY_SERVICE_TOKEN
+            {{- end }}
           {{- if eq .Values.secretsManager.mode "csi" }}
           volumeMounts:
             - name: secrets-store

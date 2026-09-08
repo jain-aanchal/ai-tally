@@ -115,9 +115,54 @@ CREATE TABLE IF NOT EXISTS otel_spans
     INDEX idx_agent_run    AgentRunId               TYPE bloom_filter(0.001) GRANULARITY 1,
     INDEX idx_attr_keys    mapKeys(SpanAttributes)  TYPE bloom_filter(0.01)  GRANULARITY 4
 )
-ENGINE = MergeTree
+-- CTO-245: ReplacingMergeTree, and TraceId/SpanId APPENDED to the sorting key. Both halves of that
+-- are load-bearing and neither works without the other.
+--
+-- WHY AT ALL. This was a plain MergeTree, so a span written twice stayed twice, forever. Batch
+-- idempotency was in-process only, so a client retrying a batch across a gateway restart wrote its
+-- spans again and inflated every cost sum by exactly the replayed spend. One local run left 333,689
+-- rows holding 271,571 distinct SpanIds. The primary fix is the durable idempotency store (see
+-- db/postgres/0032_ingest_batch_idempotency.sql); this engine is the BACKSTOP for whatever slips
+-- past it, and it is the same pattern business_events has used since CTO-176.
+--
+-- WHY THE SORTING KEY HAD TO CHANGE. ReplacingMergeTree collapses rows that agree on the SORTING
+-- KEY, not on whatever a reader considers identity. The old key was
+-- (TenantId, FeatureTag, ServiceName, SpanName, Timestamp), which contains no span identity at all:
+-- switching engines without touching it would have deduped on the WRONG THING and silently deleted
+-- genuinely distinct spans that happened to share a feature, service, name and timestamp. That is a
+-- far worse bug than the one being fixed. TraceId and SpanId are therefore appended, making the key
+-- (TenantId, ..., Timestamp, TraceId, SpanId) so that the collapsing identity really is one span.
+-- Appending rather than reordering is deliberate: the old key stays a PREFIX of the new one, so
+-- every existing query keeps exactly the index it had and no read gets slower.
+--
+-- NO VERSION COLUMN, on purpose. ReplacingMergeTree(<version>) exists to pick a winner among rows
+-- that differ. The rows this collapses do not differ: they are the same span re-posted from the same
+-- batch. There is nothing to arbitrate, and inventing a version column would only make it look as
+-- though this table supports updating a span in place. It does not; the gateway only ever inserts
+-- (gateway/store.py has the single insert site and there is no UPDATE path).
+--
+-- WHAT THIS DOES NOT FIX, stated plainly rather than left to be discovered:
+--
+--   1. Collapsing happens AT MERGE TIME and only WITHIN a partition. Partitioning is
+--      toDate(Timestamp) and a duplicate carries the same Timestamp, so the partition condition
+--      holds; the timing one does not. Between the duplicate insert and the background merge, a
+--      plain `SELECT sum(...)` still sees both rows. Reads are never worse than before this change
+--      (previously the duplicate was permanent), but they are not exact until the merge lands. A
+--      read that needs exactness must say FINAL, and no read path was converted in this change.
+--   2. The materialized views. daily_feature_rollup_mv, hourly_feature_rollup_mv (rollups.sql) and
+--      daily_account_rollup_mv (account_rollups.sql) fire on INSERT into this table, so a duplicate
+--      insert is summed into their SummingMergeTree targets before this engine ever sees it, and no
+--      later merge here removes it. A duplicate that reaches ClickHouse is therefore PERMANENT in
+--      the rollups regardless of this change. That is the strongest argument for the durable
+--      idempotency store being the real fix and this being only a backstop.
+--   3. A replay whose row is not byte-identical. Timestamp comes from the client's span timestamp
+--      when present, so an ordinary replay reproduces the same row and collapses. A span with no
+--      client timestamp, or one whose skew assessment clamps against server receive time, can land
+--      on a different Timestamp on the replay and will NOT collapse. Nothing here can repair that;
+--      only preventing the duplicate write can.
+ENGINE = ReplacingMergeTree
 PARTITION BY toDate(Timestamp)
-ORDER BY (TenantId, FeatureTag, ServiceName, SpanName, Timestamp)
+ORDER BY (TenantId, FeatureTag, ServiceName, SpanName, Timestamp, TraceId, SpanId)
 -- Tiering (CTO-29): hot SSD -> warm volume at 7d -> cold volume at 30d -> drop raw at 90d.
 -- This TTL is GENERATED from tally.storage_tiering.DEFAULT_POLICY (render_ttl_clause), the single
 -- source of truth that also classifies a span's tier at query time, so DDL and logic can't drift.
@@ -193,3 +238,24 @@ ALTER TABLE otel_spans
     MODIFY COLUMN CachedInputTokens Nullable(UInt32)       CODEC(T64, ZSTD(1)),
     MODIFY COLUMN EstimatedCost     Nullable(Decimal64(8)) CODEC(ZSTD(1)),
     MODIFY COLUMN CostSource        Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3);
+
+-- CTO-245 ENGINE MIGRATION: WHAT AN EXISTING INSTALL MUST DO. Read this before trusting the
+-- ENGINE line above.
+--
+-- The CREATE above is `IF NOT EXISTS`, so it only ever takes effect on a FRESH database. A
+-- database that already has otel_spans is still on plain MergeTree with the old sorting key, and
+-- `make ch-migrate` will NOT change that: ClickHouse cannot ALTER a table's engine or its ORDER BY,
+-- so there is no idempotent statement that could be added here to do it. That is a real gap and it
+-- is stated rather than papered over. An existing install has NO span deduplication until an
+-- operator runs the one-shot migration:
+--
+--   db/clickhouse/migrations/otel_spans_replacing_engine.sql   (or `make ch-migrate-otel-engine`)
+--
+-- which creates the correctly-shaped table, copies the data, swaps the names atomically, collapses
+-- the historical duplicates and restores the TTL. It is a full copy of the raw span table, so it is
+-- deliberately explicit and is not part of the ch-migrate replay set.
+--
+-- To find out which engine a deployment is ACTUALLY on, ask the database, not this file:
+--
+--   SELECT engine, sorting_key FROM system.tables
+--    WHERE database = currentDatabase() AND name = 'otel_spans';

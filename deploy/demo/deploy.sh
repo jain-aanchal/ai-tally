@@ -41,6 +41,14 @@ set +a
 # Compose reads the same .env for base-stack defaults; pass it explicitly so both files see it.
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
 
+# Tenant-UUID resolution and the service-token preflight, shared with reseed.sh.
+# shellcheck source=deploy/demo/lib-tenant.sh
+source "${SCRIPT_DIR}/lib-tenant.sh"
+
+# Cheap check first: a missing service token with auth on means the gateway never boots.
+require_service_token_if_auth_on
+warn_backfill_unsupported_if_auth_on
+
 echo "==> Building images and starting the stack"
 "${COMPOSE[@]}" up -d --build
 
@@ -66,10 +74,20 @@ echo "==> Applying ClickHouse DDL (make ch-migrate)"
 make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" ch-migrate
 
 # --- Load the SYNTHETIC demo dataset ------------------------------------------------------------
-# seed: creates the local-dev tenant + API key + price catalog.
+# seed: creates the `local-dev` tenant + API key + price catalog, and prints the tenant UUID.
 # chatbot-demo-backfill: POSTs 30 days of backdated synthetic spans ($0, no LLM calls, no API keys).
 echo "==> Seeding the demo tenant (make seed)"
 make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" seed
+
+# --- Point the dashboard at the tenant that was just seeded -------------------------------------
+# The UUID only exists after `make seed`, so the web container above started without it. Resolve it
+# now and recreate just the web service with TALLY_DEV_TENANT set. Exported so Compose interpolation
+# picks it up: a host env var wins over the same key in --env-file.
+echo "==> Resolving the demo tenant UUID"
+TENANT_UUID="$(resolve_tenant_uuid)"
+echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
+export TALLY_DEV_TENANT="${TENANT_UUID}"
+"${COMPOSE[@]}" up -d web
 
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # The `make chatbot-demo-backfill` target runs on the HOST and POSTs to localhost:8080 - neither
@@ -80,16 +98,22 @@ echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # COMPOSE_NETWORK is `<project>_default`; the project name is `ai-tally` (infra/docker-compose.yml
 # `name:`). Override COMPOSE_NETWORK in the environment if you renamed the project.
 #
-# Backfill under the SAME tenant the dashboard renders (TALLY_TENANT_ID). `gateway.seed` creates the
-# demo tenant as `local-dev`, so this is pinned to local-dev in .env.example; passing it here keeps
-# the seeded data and the dashboard's tenant from drifting into an empty dashboard (CTO-243).
+# Backfill under the SAME tenant UUID the dashboard was just pointed at. Both sides come from the
+# one resolve_tenant_uuid call above, so the seeded data and the rendered tenant cannot drift into
+# an empty dashboard (CTO-243).
+#
+# GATEWAY_SERVICE_TOKEN is threaded in because the backfill resolves its synthetic accounts'
+# AccountIdHash through the control plane (POST /v1/tenant/account-lookup), which is service-token
+# authenticated when TALLY_REQUIRE_API_KEY is on (Initiative 1 §6). Without it the backfill stops
+# with a real error instead of shipping a corpus whose account dimension is empty.
 COMPOSE_NETWORK="${COMPOSE_NETWORK:-ai-tally_default}"
 docker run --rm \
   --network "${COMPOSE_NETWORK}" \
   -v "${REPO_ROOT}/examples/vercel-chatbot/scripts:/scripts:ro" \
   -e TALLY_GATEWAY_URL="http://gateway:8080/v1/batches" \
+  -e GATEWAY_SERVICE_TOKEN="${TALLY_GATEWAY_SERVICE_TOKEN:-}" \
   node:22-bookworm-slim \
-  npx --yes tsx /scripts/backfill-spans.ts --tenant "${TALLY_TENANT_ID:-local-dev}"
+  npx --yes tsx /scripts/backfill-spans.ts --tenant "${TENANT_UUID}"
 
 # --- Done ---------------------------------------------------------------------------------------
 cat <<EOF

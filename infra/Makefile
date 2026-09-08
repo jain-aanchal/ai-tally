@@ -2,15 +2,22 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo ch-migrate aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
+
+# Honor the same POSTGRES_USER / POSTGRES_DB that .env.example exposes, so a dev running a
+# non-default user does not get told to `make up && make seed` after both already succeeded.
+PG_USER := $(or $(POSTGRES_USER),tally)
+PG_DB := $(or $(POSTGRES_DB),tally)
 
 # Canonical TenantId is the tenant UUID (Initiative 1, §8). Resolve the seeded local-dev tenant's
 # UUID from Postgres so the demo backfill tags spans with the UUID the dashboard reads, not the
 # name `local-dev`. Lazily expanded (`=`, not `:=`) so it runs when a target uses it, after the
-# stack is up and `make seed` has created the row; empty before then.
-TENANT_UUID = $(shell $(COMPOSE) exec -T postgres psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" 2>/dev/null | tr -d '[:space:]')
+# stack is up and `make seed` has created the row; empty before then. `:=` would shell out on every
+# single make invocation, `make help` included. Recipes that need it more than once capture it into
+# a shell variable so the lookup still runs exactly once per target.
+TENANT_UUID = $(shell $(COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" 2>/dev/null | tr -d '[:space:]')
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -48,6 +55,26 @@ ch-migrate: ## Apply db/clickhouse DDL to a RUNNING stack (initdb only fires on 
 	done
 	@echo "ClickHouse DDL applied."
 
+ch-migrate-otel-engine: ## One-shot: move an EXISTING otel_spans to ReplacingMergeTree (CTO-245)
+	@# Deliberately NOT part of ch-migrate. ClickHouse cannot ALTER a table's engine or ORDER BY,
+	@# so the only migration is create-copy-swap, which is a full copy of the raw span table and
+	@# is neither cheap nor safe to run implicitly on every replay. A fresh database already gets
+	@# the right engine from otel_spans.sql; this target is how an install that predates CTO-245
+	@# catches up. Read the header of the script first: it needs disk for a second full copy and
+	@# ingest should be quiesced while it runs.
+	@echo "Current engine:"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT engine, sorting_key FROM system.tables WHERE database = currentDatabase() AND name = 'otel_spans'"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/migrations/otel_spans_replacing_engine.sql
+	@echo "Engine after migration:"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT engine, sorting_key FROM system.tables WHERE database = currentDatabase() AND name = 'otel_spans'"
+	@echo "Rows vs distinct spans (these should now match):"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT count() AS rows, uniqExact(TenantId, TraceId, SpanId) AS spans FROM otel_spans"
+	@echo "The pre-migration table is kept as otel_spans_cto245. Drop it once you are satisfied."
+
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway
 
@@ -62,7 +89,16 @@ seed: ## Create a local tenant + API key + feature tags in Postgres
 	@echo "  export TALLY_DEV_TENANT=$(TENANT_UUID)"
 
 demo: ## Send a sample batch through the gateway into ClickHouse
-	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py
+	@# send_batch.py defaults to the tenant NAME, but ingest writes TenantId verbatim while the
+	@# dashboard reads by UUID (Initiative 1, §8), so the default would land rows the UI never shows.
+	@# Fail loudly rather than write invisible rows: an empty UUID means the tenant is not seeded.
+	@# One expansion of TENANT_UUID, captured in a shell variable: the guard and the send must agree,
+	@# and a second expansion would be a second round trip into psql.
+	@t="$(strip $(TENANT_UUID))"; \
+	 test -n "$$t" || { \
+	   echo "cannot resolve the local-dev tenant UUID from Postgres; run 'make up && make seed' first"; \
+	   exit 1; }; \
+	 set -x; $(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py --tenant "$$t"
 
 aider-demo: ## Run Aider against a fixture repo through the edge proxy (needs OPENAI_API_KEY)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \
@@ -89,11 +125,27 @@ chatbot-demo-realistic: ## Live realistic-volume run (~5000 sessions/~10min, REA
 chatbot-demo-backfill: ## $0 backfill — POST 30 days of backdated synthetic spans to match the seed story (no LLM calls, no API keys)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \
 	  echo "ai-tally stack not up — run 'make up && make seed' first"; exit 1; }
+	@# Same refusal as `make demo` above, for the same reason (Initiative 1, §8). This target used
+	@# to drop --tenant entirely when the UUID would not resolve, so the backfill fell back to its
+	@# own `local-dev` default: 30 days of spans landed in ClickHouse under the tenant NAME, the
+	@# dashboard read by UUID, matched nothing, and rendered empty with no error anywhere. Never a
+	@# silent fallback; fail with the thing to check.
+	@test -n "$(strip $(TENANT_UUID))" || { \
+	  echo "ERROR: could not resolve the 'local-dev' tenant UUID from Postgres."; \
+	  echo ""; \
+	  echo "       The dashboard reads spans by tenant UUID, so there is no safe fallback here:"; \
+	  echo "       backfilling under the tenant NAME would write 30 days of rows nothing renders."; \
+	  echo ""; \
+	  echo "       Check, in order:"; \
+	  echo "         1. Postgres is up:    make ps"; \
+	  echo "         2. The tenant exists: make psql  ->  SELECT id, name FROM tenants;"; \
+	  echo "         3. If it is missing, seeding never ran or failed: make seed"; \
+	  exit 1; }
 	@cd ../examples/vercel-chatbot/app && \
 	  { [ -d node_modules ] || pnpm install --silent --prefer-offline || \
 	    npm install --silent --no-audit --no-fund; } && \
 	  TALLY_GATEWAY_URL="$${TALLY_GATEWAY_URL:-http://localhost:8080/v1/batches}" \
-	  pnpm --silent exec tsx ../scripts/backfill-spans.ts $(if $(strip $(TENANT_UUID)),--tenant $(TENANT_UUID),) $(BACKFILL_ARGS)
+	  pnpm --silent exec tsx ../scripts/backfill-spans.ts --tenant $(TENANT_UUID) $(BACKFILL_ARGS)
 
 chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-demo
 	@if [ -f $(CHATBOT_PID) ]; then \

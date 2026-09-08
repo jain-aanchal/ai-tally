@@ -11,6 +11,12 @@ Idempotency: a batch carries a client-generated ``batch_id`` (UUIDv7, time-order
 dedupes on ``(tenant_id, batch_id)`` for 24h — a replayed batch returns the original response
 without re-processing. Within a batch, spans dedupe on ``(trace_id, span_id)``, business events on
 ``business_event_id``, identity links on ``(identity_a, identity_b, source)``.
+
+:class:`IdempotencyCache` below is IN-PROCESS and its record dies with the process, so on its own it
+does NOT provide the 24h guarantee above across a gateway restart. It is the fast path in front of
+the gateway's durable Postgres store (``gateway.batch_idempotency``, CTO-245), which is the source
+of truth. Before that store existed, a client retrying a batch across a restart was accepted twice
+and its spans written twice, which in a cost product is spend counted twice.
 """
 
 from __future__ import annotations
@@ -227,6 +233,19 @@ class IdempotencyCache:
         expired = [k for k, (ts, _) in self._store.items() if t - ts > self.ttl]
         for k in expired:
             del self._store[k]
+
+    def peek(self, tenant_id: str, batch_id: str) -> BatchResponse | None:
+        """Non-mutating lookup: the cached response, or ``None`` if this process has not seen it.
+
+        CTO-245. ``check_or_store`` cannot be used as a read, because a miss RESERVES the key, and
+        the gateway's durable layer needs to ask "did I already answer this?" without taking a
+        claim it may not be entitled to. A ``None`` here means only "not in THIS process", which is
+        exactly what a restart looks like, so a caller must never read it as "new batch".
+        """
+        t = self._now()
+        self._purge(t)
+        hit = self._store.get((tenant_id, batch_id))
+        return None if hit is None else hit[1]
 
     def check_or_store(self, req: BatchRequest) -> BatchResponse | None:
         t = self._now()

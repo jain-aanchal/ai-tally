@@ -119,3 +119,26 @@ def test_same_batch_id_different_tenant_isolated():
     cache.record(a, BatchResponse(batch_id=bid, accepted_spans=1))
     # same batch_id but different tenant must NOT collide
     assert cache.check_or_store(b) is None
+
+
+def test_peek_does_not_reserve_the_key() -> None:
+    """CTO-245: the gateway's durable layer needs a READ, not a read-that-claims.
+
+    If peek reserved the slot the way check_or_store does, the durable claim that follows it would
+    be racing a reservation this process had already taken, and a genuinely new batch would look
+    like a replay to itself.
+    """
+    cache = IdempotencyCache()
+    req = BatchRequest(tenant_id="t1", sdk_version="test", batch_id="b1")
+    assert cache.peek("t1", "b1") is None
+    assert cache.peek("t1", "b1") is None  # still unclaimed after a peek
+    assert cache.check_or_store(req) is None  # so the real claim still succeeds
+
+
+def test_peek_returns_the_recorded_response() -> None:
+    cache = IdempotencyCache()
+    req = BatchRequest(tenant_id="t1", sdk_version="test", batch_id="b1")
+    cache.check_or_store(req)
+    cache.record(req, BatchResponse(batch_id="b1", accepted_spans=4))
+    hit = cache.peek("t1", "b1")
+    assert hit is not None and hit.accepted_spans == 4

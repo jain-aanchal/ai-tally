@@ -119,7 +119,7 @@ export default async function ComparePage({
         </div>
       </Card>
 
-      <Card title={`Recommendation — ${recommendation.verdict}`}>
+      <Card title={`Recommendation: ${recommendation.verdict}`}>
         <p className="text-sm text-fg">{recommendation.summary}</p>
         <div className="mt-3 flex items-baseline gap-2 text-sm">
           <span className="text-good text-lg font-semibold">
@@ -257,7 +257,7 @@ function Row({
 function QualityCell({ m, current }: { m: RowMetric; current?: RowMetric }) {
   if (m.qualityScore === null) {
     return (
-      <span className="text-muted" title="needs ≥10 judged samples — run eval pass">
+      <span className="text-muted" title="needs ≥10 judged samples: run eval pass">
         —
       </span>
     );
