@@ -252,6 +252,27 @@ copy of the raw span table: it needs disk for a second copy, it takes as long as
 large, and rows written into the old table while the copy runs are not carried over, so quiesce
 ingest for the duration. It keeps the pre-migration table as `otel_spans_cto245` for rollback.
 
+Exercised against a populated pre-CTO-245 install (1,542,971 spans across three tenants, engine
+`MergeTree`, sorting key without span identity). What was checked afterwards, rather than assumed:
+
+| Check | Result |
+|---|---|
+| Engine and sorting key | `ReplacingMergeTree`, old key intact as a prefix with `TraceId, SpanId` appended |
+| Row counts and cost totals, per tenant | identical before and after |
+| TTL | restored (warm 7d, cold 30d, delete 90d) |
+| Nullable token and cost columns, `unpriced` | intact through the copy and swap |
+| Materialized views | all four still attached, and a test insert reached the daily and hourly rollups |
+| Dedupe | two identical `(TenantId, TraceId, SpanId)` spans collapse to one row at the real cost, not double |
+
+The TTL line is the one worth knowing about: `CREATE TABLE ... AS` copies skipping indexes but not
+TTL, so the script restores it explicitly. Had that been missed the table would have migrated
+cleanly and silently stopped tiering to warm and cold storage.
+
+Two things this run did not prove. The install had no duplicates going in, so the collapse of an
+already-duplicated table is still unexercised. And rollups that already absorbed duplicates are not
+repaired by this: the materialized views sum into `SummingMergeTree` targets at insert time, so a
+duplicate counted there stays counted even after the raw rows collapse.
+
 ## 4. Run the web dashboard
 
 In a separate terminal:
