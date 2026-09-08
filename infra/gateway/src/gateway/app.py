@@ -48,6 +48,7 @@ from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
 from gateway.config import get_settings
 from gateway.cost_connector_job import register_cost_connector_job
+from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_param
 from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
@@ -2401,6 +2402,56 @@ async def stripe_webhook(
             "account_attributed": resolution.is_attributed,
             "account_inferred": resolution.inferred,
         },
+        status_code=200,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Onboarding: per-layer instrumentation coverage (CTO-261, onboarding-agent §7).
+# --------------------------------------------------------------------------------------------
+
+
+@app.get("/v1/tenant/onboarding/coverage")
+def tenant_coverage(
+    wired: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Per-layer coverage for the caller's tenant: which layers a real span proves are flowing.
+
+    Widens Initiative 2 §9's single existence probe across LLM, tools, vector, embeddings and
+    per-customer attribution (§7). ``wired`` is an optional comma-separated list of layers the
+    onboarding agent reports it instrumented; it only distinguishes "wired, awaiting first event"
+    from "not wired" for a dark layer, and can never produce coverage (``coverage_probe``).
+
+    A ClickHouse failure returns 200 with the affected layers ``unknown``, not a 5xx and not a row
+    of zeroes. The caller polls this during onboarding, and a transient outage must read as "we
+    could not tell", never as "your instrumentation is missing" (CLAUDE.md, honest under
+    uncertainty). The two probes are caught separately so an unreadable rollup does not blank out
+    the four layers the span probe answered.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    store: ClickHouseStore = app.state.store
+
+    try:
+        operation_counts: dict[str, int] | None = store.coverage_operation_counts(tenant_id)
+    except Exception:  # noqa: BLE001 — an unreachable store is "unknown", never "not covered"
+        logger.exception("coverage span probe failed for tenant %s", tenant_id)
+        operation_counts = None
+
+    try:
+        total, attributed = store.coverage_account_rows(tenant_id)
+        account: AccountSignal | None = AccountSignal(
+            total_rows=total, attributed_rows=attributed
+        )
+    except Exception:  # noqa: BLE001 — same rule for the rollup read
+        logger.exception("coverage account probe failed for tenant %s", tenant_id)
+        account = None
+
+    layers = build_coverage(operation_counts, account, parse_wired_param(wired))
+    return JSONResponse(
+        {"tenant_id": tenant_id, "layers": [layer.as_dict() for layer in layers]},
         status_code=200,
     )
 
