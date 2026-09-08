@@ -83,6 +83,13 @@ Edit `deploy/demo/.env`:
   the token empty the gateway refuses to boot rather than serve an open control plane, so
   `deploy.sh` and `reseed.sh` stop up front and say so.
 
+  **This kit's seeding path does not support auth on.** The synthetic backfill
+  (`examples/vercel-chatbot/scripts/backfill-spans.ts`) posts to `/v1/batches` with no
+  `Authorization` header and has no api-key option, and with `TALLY_REQUIRE_API_KEY=true` the
+  gateway answers `401`. The stack and dashboard still come up, but the backfill step fails and you
+  get no demo data. Seed with auth off, then turn auth on afterwards if you need it. Both scripts
+  warn about this before they do any work rather than letting you discover it minutes in.
+
 - Do **not** set the tenant by hand. The dashboard reads `TALLY_DEV_TENANT`, and it must hold the
   tenant **UUID**, not the name `local-dev`: the web binds that value straight into the ClickHouse
   read filter (`TenantId = ...`) and the backfill tags spans with the UUID, so a name matches no
@@ -185,6 +192,10 @@ docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.ym
   exec -T clickhouse clickhouse-client -u tally --password tally -d default \
   --query "SELECT TenantId, count() FROM otel_spans GROUP BY TenantId"
 ```
+
+(Those commands assume the `.env.example` defaults `POSTGRES_USER=tally` / `POSTGRES_DB=tally` and
+`CLICKHOUSE_USER=tally`. If you changed them in `deploy/demo/.env`, substitute your own values; the
+scripts themselves read the env vars, only these copy-paste one-liners are literal.)
 
 All three must show the same **UUID**. A `local-dev` (the name) in either of the last two means
 something bypassed `deploy.sh`; re-running `./deploy/demo/reseed.sh` re-resolves and repairs it.

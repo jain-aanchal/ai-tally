@@ -105,6 +105,12 @@ openssl rand -hex 32
 
 Never reuse a value from an example file. Anything checked into this repo is public.
 
+Note that the synthetic demo seeders do **not** support auth on.
+`examples/vercel-chatbot/scripts/backfill-spans.ts` (used by `make chatbot-demo-backfill` and by the
+`deploy/demo` kit) posts to `/v1/batches` with no `Authorization` header and has no api-key option,
+so with `TALLY_REQUIRE_API_KEY=true` every batch takes a `401`. Seed the demo data with auth off,
+then turn auth on.
+
 ## 3. Push telemetry through the gateway
 
 Easiest: the built-in demo batch (resolves the seeded tenant's UUID and writes under it, then
@@ -120,7 +126,9 @@ first (this is the same lookup `make demo` and the demo-deploy kit do):
 ```bash
 TENANT=$(docker compose exec -T postgres \
   psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" | tr -d '[:space:]')
-test -n "$TENANT" || echo "not seeded, run 'make seed' first"
+# Abort rather than fall through: an empty $TENANT would POST 40 batches under tenant_id ""
+# that the dashboard will never render, with no error anywhere.
+test -n "$TENANT" || { echo "not seeded, run 'make seed' first" >&2; exit 1; }
 
 for i in $(seq 1 40); do
   curl -s -X POST localhost:8080/v1/batches \
@@ -498,7 +506,7 @@ Knobs:
 |---|---|
 | `Database tally does not exist` | Gateway pointed at the wrong DB. Use `TALLY_CLICKHOUSE_DB=default` (the compose gateway already does). |
 | Dashboard shows the **"mock data"** badge | A page's ClickHouse query failed and fell back to mock. Check `make logs` and that step 3's count is non-zero. |
-| Dashboard empty despite ingested rows | Tenant mismatch — the UI reads `local-dev`. Post with `tenant_id: local-dev` (or set `TALLY_TENANT_ID` for the web app). |
+| Dashboard empty despite ingested rows | Tenant mismatch. The UI reads the tenant **UUID**, not the name, so spans must be tagged with the UUID: re-send with `tenant_id` set to the UUID from step 3. With no Clerk account, point the web app at that same UUID via `TALLY_DEV_TENANT` (the dev escape hatch); `TALLY_TENANT_ID` is no longer read by anything. |
 
 ## Make targets (run from `infra/`)
 
