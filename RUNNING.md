@@ -324,6 +324,26 @@ the live tables untouched.
 the exchange, so a span ingested mid-run is counted into a table that is about to be discarded and
 is missing from the one that replaces it. Unlike the duplicate being repaired, that loss is silent.
 
+**Each `EXCHANGE` is atomic; the three together are not.** Between the first and the third there is a
+short but real window in which the dashboard reads a rebuilt daily rollup beside a still-inflated
+hourly one, and the two disagree by whatever the drift was. Quiescing ingest stops writes, not reads,
+so it does not close this window. Take the dashboard down for the duration if a reader seeing an
+inconsistent pair matters; otherwise expect it and do not go chasing it.
+
+**Re-running is refused while the rollback copies exist.** After a successful run the `*_cto311`
+tables **are** the pre-rebuild snapshot, and for `not_derivable` grains that snapshot is the only
+surviving record of that money. A second run would drop them as its first act, so it stops instead
+and tells you to verify the dashboard and drop them by hand (or exchange them back to roll the run
+back) first.
+
+**Peak memory is not bounded by the script.** The three derive inserts are whole-table
+`FROM otel_spans FINAL` reads with a `GROUP BY`, with no time window and no chunking, which is the
+opposite of the month-by-month backfill `account_rollups.sql` prescribes for the same shape. On a
+large raw table, raise `max_memory_usage` / `max_bytes_before_external_group_by`, or run the three
+inserts by hand a month at a time. A failure there is safe: it aborts long before the `EXCHANGE` and
+the live tables are untouched. It does leave half-filled shadow tables behind, which the re-run guard
+and the leading `DROP` are there to deal with.
+
 **What it deliberately does not repair, and will not invent.** `otel_spans` drops raw rows at 90
 days (CTO-22/CTO-29, and a per-tenant override in `storage_tiering.sql` can make that shorter). The
 rollups carry no TTL on purpose: for any period older than raw retention they are the only record
@@ -334,10 +354,30 @@ rebuilt table. Scaling them by the duplication ratio of the surviving days, or z
 fabricate a dollar figure, and a plausible number nobody can audit is worse than an inflated one an
 operator has been told about.
 
-Derivability is judged per `(TenantId, Day)`, and that is exact rather than approximate: `otel_spans`
-is `PARTITION BY toDate(Timestamp)` and its TTL `DELETE` is a function of `Timestamp` alone, so a
-day's rows expire together and a day can never be half-present. The hourly rollup is judged on
-`toDate(Hour)` for the same reason.
+Derivability is judged per `(TenantId, Day)`, and it is judged against the **retention floor**
+rather than against "raw still has a row for this day". That distinction is the whole safety
+property, so it is worth stating why. `otel_spans` is `PARTITION BY toDate(Timestamp)`, but its TTL
+`DELETE` is a **per-row** expression, and `storage_tiering.sql`'s per-tenant override compiles to a
+per-row `multiIf` on top of it. ClickHouse only drops whole partitions on expiry when
+`ttl_only_drop_parts = 1`; at the default `0` it expires individual rows during merges. So on the one
+day that straddles the retention boundary the morning can already be gone while the afternoon
+survives, and a day **can** be half-present. Treating such a day as derivable would rebuild all of it
+from the surviving half and delete the rest, which is money the rollup was the only remaining record
+of, and the rebuild's own reconciliation could not catch it because both sides of that comparison are
+computed from the same truncated raw read.
+
+So a day is derivable only if raw still holds rows for it **and** it is not at or within one day of
+the moment its rows become eligible for deletion. That moment is read from
+`system.parts.delete_ttl_info_min`, which is ClickHouse's own evaluation of the `DELETE` TTL over the
+rows of each part, so it is exact for the default policy and for any per-tenant override without the
+scripts parsing or assuming anything about the DDL. Partitions are per-day rather than
+per (tenant, day), so a day at risk for the shortest-retention tenant is treated as at risk for every
+tenant on that day: that over-reports uncertainty, which is the safe direction. The hourly rollup is
+judged on `toDate(Hour)`, so an hour inherits its day's verdict.
+
+Both scripts refuse to run when `otel_spans` has some active parts carrying `DELETE` TTL info and
+others not, because that means a `MODIFY TTL` has not reached every part and the floor they can read
+is not the floor the server will enforce. Run `ALTER TABLE otel_spans MATERIALIZE TTL` and try again.
 
 Two smaller consequences worth knowing before you look at the dashboard afterwards. Rebuilt grains
 get real `UnpricedSpanCount` and `UnknownUsageSpanCount` values; pre-CTO-244 rollup rows held `0`
@@ -365,6 +405,17 @@ The not-derivable figure is the honest residue: 519 of those grains are `local-d
 2025-09-09 to 2026-08-03 whose raw spans aged out, plus three retired test tenants
 (`cto210-shorthistory`, `mv-test`, `cto199-verify`). Whether they contain duplicated money is
 unknowable, and this repair does not pretend otherwise.
+
+The retention-floor rule was exercised separately, because no day on this stack is anywhere near the
+90-day boundary (the oldest raw span is 35 days old). A synthetic tenant was given 110 spans at
+`$1.00` each on `today() - 90`, 100 of them in the morning and 10 late in the evening. ClickHouse
+expired the morning rows on ingest, after the materialized views had already banked them: raw held
+10 spans / `$10.00`, the rollup held 110 / `$110.00`. The old "raw has a row for this day" predicate
+called that day derivable, which would have rebuilt it from the surviving `$10.00` and silently
+destroyed `$100.00` (100,000,000 micro-USD) that existed nowhere else. The retention-floor predicate
+called it not derivable, and a full `make ch-rollup-rebuild` carried all 110 spans and `$110.00`
+across untouched, with `carried_spans` and `carried_cost` matching their pre-rebuild values exactly.
+The test tenant was then removed from raw spans and from all three rollups.
 
 ## 4. Run the web dashboard
 

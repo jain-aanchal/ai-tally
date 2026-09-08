@@ -85,7 +85,9 @@ ch-rollup-check: ## Report rollup spend inflated by duplicated spans, per rollup
 	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
 	@echo ""
 	@echo "derivable    = raw spans still exist for that day; drift_micro_usd is repairable by 'make ch-rollup-rebuild'."
-	@echo "not_derivable = raw spans have aged out; nothing can check or repair those grains and the rebuild leaves them alone."
+	@echo "not_derivable = raw spans have aged out, or that day is at the retention boundary and may be"
+	@echo "                only half-present; nothing can check or repair those grains and the rebuild"
+	@echo "                leaves them alone."
 
 ch-rollup-rebuild: ## One-shot: rebuild the rollup targets from the deduplicated raw spans (CTO-311)
 	@# Deliberately NOT part of ch-migrate, for the same reason as ch-migrate-otel-engine: it
@@ -93,6 +95,10 @@ ch-rollup-rebuild: ## One-shot: rebuild the rollup targets from the deduplicated
 	@# DDL replay. Run ch-rollup-check first and read the header of the script. Quiesce ingest for
 	@# the duration: the materialized views keep writing into the OLD targets until the exchange,
 	@# so spans ingested mid-run land in a table that is about to be discarded.
+	@# NOT re-runnable while the rollback copies exist. After a successful run the <rollup>_cto311
+	@# tables ARE the pre-rebuild snapshot, and for not_derivable grains they are the only record of
+	@# that money, so the script refuses rather than dropping them. Drop them by hand once the
+	@# dashboard has been checked.
 	@echo "Rollup drift BEFORE the rebuild:"
 	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
 	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
@@ -103,7 +109,8 @@ ch-rollup-rebuild: ## One-shot: rebuild the rollup targets from the deduplicated
 	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
 	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
 	@echo ""
-	@echo "The pre-rebuild tables are kept as <rollup>_cto311. Drop them once you are satisfied."
+	@echo "The pre-rebuild tables are kept as <rollup>_cto311. Drop them once you are satisfied;"
+	@echo "until you do, re-running this target is refused so the snapshot cannot be destroyed."
 
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway
