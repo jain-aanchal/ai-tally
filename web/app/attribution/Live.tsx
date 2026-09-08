@@ -25,7 +25,7 @@ import { InteractiveStackedChart, type StackedChartDay } from "@/components/Inte
 import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
-import type { AttributionReport, ProviderAttribution } from "@/lib/attribution";
+import { type AttributionReport, type ProviderAttribution, systemKind } from "@/lib/attribution";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 /**
@@ -41,7 +41,11 @@ const NO_REVENUE_WIRED =
 const NO_REVENUE_FOR_MARGIN =
   "margin needs revenue: no revenue source is wired for this tenant, so only the cost side is known";
 
-/** The providers this workflow knows, for the FilterBar's provider dropdown. */
+/**
+ * The LLM providers the `?provider=` filter accepts (see parseFilters). Narrower than what the table
+ * can show: the breakdown dimension is `gen_ai.system`, so vector vendors appear as rows even though
+ * they are not filter options (#320).
+ */
 const PROVIDER_OPTIONS: FilterOption[] = [
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
@@ -67,9 +71,25 @@ export function AttributionLive({
     () => [
       {
         key: "provider",
-        header: "Provider",
+        header: "System",
         cellClassName: "font-mono",
-        render: (p) => p.provider,
+        // #320: the breakdown key is `gen_ai.system`, which is the LLM provider on an LLM span and
+        // the vector vendor on a vector span, so pinecone/weaviate/qdrant legitimately appear here.
+        // Calling the column "Provider" made those rows read as LLM providers. The column is named
+        // for what it holds, and a vector row is tagged so nobody has to recognise the vendor.
+        render: (p) => (
+          <>
+            {p.provider}
+            {systemKind(p.provider) === "vector" && (
+              <span
+                className="ml-2 rounded border border-edge px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted"
+                title="a vector store, not an LLM provider: gen_ai.system on a vector span names the vector vendor"
+              >
+                vector
+              </span>
+            )}
+          </>
+        ),
       },
       {
         key: "sessions",
@@ -99,7 +119,7 @@ export function AttributionLive({
       },
       {
         key: "cost",
-        header: "LLM cost",
+        header: "Cost",
         align: "right",
         render: (p) => <Money micro={p.costMicroUsd} />,
       },
@@ -112,7 +132,7 @@ export function AttributionLive({
           <>
             <Money
               micro={p.costPerConversionMicroUsd}
-              reason={`no ${outcome} events for this provider in the window, so there is nothing to divide the cost by`}
+              reason={`no ${outcome} events for this system in the window, so there is nothing to divide the cost by`}
             />
             <span className="sr-only"> per {outcome}</span>
           </>
@@ -168,7 +188,7 @@ export function AttributionLive({
       <TileGrid>
         <CountTile label="Sessions" value={report.totals.sessions} />
         <CountTile label={`${outcome} events`} value={report.totals.conversions} />
-        <SummaryTile label="LLM cost" micro={report.totals.costMicroUsd} />
+        <SummaryTile label="Total cost" micro={report.totals.costMicroUsd} />
         <SummaryTile
           label={`$ / ${outcome}`}
           micro={report.totals.costPerConversionMicroUsd}
@@ -177,17 +197,17 @@ export function AttributionLive({
       </TileGrid>
 
       {hasChart ? (
-        <Card title="LLM cost by provider">
+        <Card title="Cost by system">
           <InteractiveStackedChart
             days={chartDays}
             groups={chartGroups}
-            ariaLabel="daily LLM cost stacked by provider"
-            emptyLabel="no LLM spend in this window yet"
+            ariaLabel="daily cost stacked by system"
+            emptyLabel="no spend in this window yet"
           />
         </Card>
       ) : null}
 
-      <Card title={`Per-provider · ${outcome}`}>
+      <Card title={`Per-system · ${outcome}`}>
         {report.perProvider.length === 0 ? (
           // Deliberately not DataTable's `empty` slot. A first-run viewer needs the command that
           // produces data, and a centered line under a header row of empty columns buries it.
@@ -207,9 +227,18 @@ export function AttributionLive({
             pageSize={0}
           />
         )}
+        {/* #320: say out loud what the rows are. A reader who sees pinecone next to anthropic and
+            has not been told the column is `gen_ai.system` will read it as a claim about LLM
+            providers. Naming the dimension is the honest fix; filtering the vector rows out would
+            hide real spend from the very page that exists to account for it. */}
         <p className="mt-3 text-xs text-muted">
+          Rows are <span className="font-mono">gen_ai.system</span>, which is the LLM provider on an
+          LLM span and the vector vendor on a vector span, so a vector store can appear here beside
+          a model provider. Every row is real spend for this window.
+        </p>
+        <p className="mt-2 text-xs text-muted">
           Intervals are Wilson 95% on the conversion rate: small samples produce
-          wide bands, by design. Two providers &ldquo;tie&rdquo; when their bands overlap.
+          wide bands, by design. Two systems &ldquo;tie&rdquo; when their bands overlap.
         </p>
       </Card>
     </div>
@@ -221,8 +250,8 @@ export function AttributionLive({
         title="Conversions"
         subtitle={
           <>
-            $/{outcome} per provider, joined from LLM spans and CDP events on{" "}
-            <span className="font-mono">UserIdHash</span>.
+            $/{outcome} per <span className="font-mono">gen_ai.system</span>, joined from cost spans
+            and CDP events on <span className="font-mono">UserIdHash</span>.
           </>
         }
         actions={<LiveIndicator updatedAt={updatedAt} />}

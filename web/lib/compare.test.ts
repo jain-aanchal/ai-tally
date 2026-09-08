@@ -29,8 +29,15 @@ describe("compare", () => {
     expect(comparison.recommendation.projectedSavingsMicroUsd).toBeGreaterThan(0);
   });
 
-  it("diagnostics excludes throttled samples from headline metrics (modeled)", () => {
-    expect(comparison.diagnostics.excludedRateLimited).toBeGreaterThan(0);
+  // #320: the fixture no longer carries replay counts at all. It used to model 4,200 replayed /
+  // 87,400 available / $42.30, and the route spliced those onto live branches that had never run a
+  // replay, so the page printed them beside real data as though they had been measured.
+  it("fixture carries no fabricated replay counts", () => {
+    expect(comparison.diagnostics.samplesReplayed).toBeNull();
+    expect(comparison.diagnostics.samplesAvailable).toBeNull();
+    expect(comparison.diagnostics.excludedRateLimited).toBeNull();
+    expect(comparison.diagnostics.replayCostMicroUsd).toBeNull();
+    // The methodology label survives: it describes how a replay would be run, not that one was.
     expect(comparison.diagnostics.contextFidelity).toMatch(/resolved-context/);
   });
 });

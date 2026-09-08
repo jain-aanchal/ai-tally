@@ -4,7 +4,10 @@
 // blank cells), the recommendation card and the replay diagnostics are preserved verbatim. Added:
 // the FilterBar (time range + group-by model/provider + model/provider filters), the money
 // headlines as SummaryTiles, and the interactive cost-over-time-by-model chart.
-import { Suspense } from "react";
+//
+// #320: the replay diagnostics are no longer fixture constants. Nothing on this page claims a
+// replayed trace, a replay cost or a corpus size unless the real /v1/replay projection measured it.
+import { Suspense, type ReactNode } from "react";
 
 import { Card } from "@/components/Card";
 import {
@@ -17,12 +20,35 @@ import { ExploreChartCard } from "@/components/ExploreChartCard";
 import { FilterBar } from "@/components/FilterBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
-import { Money, Pct } from "@/components/HonestValue";
+import { Blank, Money, Pct } from "@/components/HonestValue";
 import { apiGet } from "@/lib/api";
 import { type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { isDemoMode } from "@/lib/demoMode";
-import { formatUSD, type MicroUSD } from "@/lib/types";
+import type { MicroUSD } from "@/lib/types";
+
+// #320: why a replay diagnostic is blank. A cross-provider replay is opt-in and per-workload, so on
+// a stack that has never run one there is no corpus, no replayed trace and no replay spend. The old
+// fixture answered all three with plausible numbers, which reads as a measurement rather than as the
+// absence of one.
+const NO_REPLAY_REASON =
+  "no cross-provider replay has run for this workload, so there is nothing replayed to count or cost";
+
+const NO_EXCLUSION_COUNT_REASON =
+  "the replay projection does not report a rate-limit exclusion count, so this is unknown rather than zero";
+
+/**
+ * A diagnostics row whose value may be an honest blank ({@link Diag} takes a plain string, so a
+ * blank rendered through it would lose the reason that has to travel with it).
+ */
+function DiagNode({ k, v }: { k: string; v: ReactNode }) {
+  return (
+    <>
+      <dt className="text-muted">{k}</dt>
+      <dd>{v}</dd>
+    </>
+  );
+}
 
 export default async function ComparePage({
   searchParams,
@@ -46,7 +72,10 @@ export default async function ComparePage({
     current.monthlyCostMicroUsd === null ||
     current.monthlyCostMicroUsd === 0 ||
     candidates.length === 0;
-  const noReplay = diagnostics.samplesReplayed === 0 && diagnostics.samplesAvailable > 0;
+  // #320: a null count is "we did not replay", not "we replayed zero of many", so the partial-data
+  // banner only fires on the real projection reporting an empty replay against available traffic.
+  const noReplay =
+    diagnostics.samplesReplayed === 0 && (diagnostics.samplesAvailable ?? 0) > 0;
   const state = deriveDataState({
     isEmpty: noBaseline,
     isPartial: noReplay,
@@ -108,10 +137,17 @@ export default async function ComparePage({
               : `${Math.round(recommendation.projectedSavingsPct * 100)}% reduction`
           }
         />
+        {/* #320: this tile used to read "$42.30 · 4,200 traces replayed" off the fixture no matter
+            what was actually replayed. Both halves come from the real projection or neither does. */}
         <SummaryTile
           label="Replay cost"
           micro={diagnostics.replayCostMicroUsd}
-          hint={`${diagnostics.samplesReplayed.toLocaleString()} traces replayed`}
+          reason={NO_REPLAY_REASON}
+          hint={
+            diagnostics.samplesReplayed === null
+              ? "no replay has run for this workload"
+              : `${diagnostics.samplesReplayed.toLocaleString()} traces replayed`
+          }
         />
       </TileGrid>
 
@@ -169,9 +205,33 @@ export default async function ComparePage({
 
       <Card title="Replay diagnostics">
         <dl className="grid grid-cols-1 gap-y-1.5 text-sm sm:grid-cols-2">
-          <Diag k="samples replayed" v={`${diagnostics.samplesReplayed.toLocaleString()} of ${diagnostics.samplesAvailable.toLocaleString()} prod traces`} />
-          <Diag k="excluded (rate limits)" v={diagnostics.excludedRateLimited.toLocaleString()} />
-          <Diag k="replay cost" v={formatUSD(diagnostics.replayCostMicroUsd)} />
+          {/* #320: every count here is nullable and renders the explained blank when no replay has
+              run. Previously the fixture's 4,200 / 87,400 / $42.30 printed on a live page with nine
+              spans behind it, which is the fabricated-figure failure CLAUDE.md exists to prevent. */}
+          <DiagNode
+            k="samples replayed"
+            v={
+              diagnostics.samplesReplayed === null || diagnostics.samplesAvailable === null ? (
+                <Blank reason={NO_REPLAY_REASON} />
+              ) : (
+                `${diagnostics.samplesReplayed.toLocaleString()} of ${diagnostics.samplesAvailable.toLocaleString()} prod traces`
+              )
+            }
+          />
+          <DiagNode
+            k="excluded (rate limits)"
+            v={
+              diagnostics.excludedRateLimited === null ? (
+                <Blank reason={NO_EXCLUSION_COUNT_REASON} />
+              ) : (
+                diagnostics.excludedRateLimited.toLocaleString()
+              )
+            }
+          />
+          <DiagNode
+            k="replay cost"
+            v={<Money micro={diagnostics.replayCostMicroUsd} reason={NO_REPLAY_REASON} />}
+          />
           {/* Demo presentation mode hides the "context fidelity" caption: its value is a pure
               methodology hedge ("resolved-context replay (no live retrieval)"), not a number. The
               counted diagnostics above stay. */}

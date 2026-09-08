@@ -2,12 +2,37 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  VECTOR_SYSTEMS,
   buildProviderRow,
   emptyReport,
   mockReport,
   parseFilters,
+  systemKind,
   wilsonInterval,
 } from "./attribution";
+
+// #320 item 3. The breakdown key is `gen_ai.system`, which on a vector span is the vector vendor, so
+// pinecone / weaviate / qdrant appear as rows. The decision was to relabel the dimension rather than
+// filter those rows out: this is a cost view, and dropping rows in the presentation layer would hide
+// real spend and leave the visible rows failing to sum to the total beside them.
+describe("systemKind", () => {
+  it("names the known vector stores as vector, not as LLM providers", () => {
+    for (const s of ["pinecone", "weaviate", "qdrant"]) {
+      expect(systemKind(s)).toBe("vector");
+      expect(VECTOR_SYSTEMS).toContain(s);
+    }
+  });
+
+  it("is case- and whitespace-insensitive, as span attributes are not normalised", () => {
+    expect(systemKind("  Pinecone ")).toBe("vector");
+  });
+
+  it("leaves LLM providers and anything unrecognised as llm rather than guessing", () => {
+    expect(systemKind("openai")).toBe("llm");
+    expect(systemKind("anthropic")).toBe("llm");
+    expect(systemKind("some-future-vendor")).toBe("llm");
+  });
+});
 
 describe("wilsonInterval", () => {
   it("returns zero band when there are no trials", () => {

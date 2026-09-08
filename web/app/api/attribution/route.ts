@@ -1,4 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
+//
+// #320: `perProvider` is keyed on `gen_ai.system`, and on a vector span that attribute names the
+// vector vendor, so pinecone / weaviate / qdrant come back as rows here. That is faithful to what
+// the SDK emits and the payload is unchanged; what changed is that the UI now calls the dimension a
+// system rather than a provider. Filtering the vector rows out in this layer was the alternative
+// and it was rejected: the cost column is real spend and the totals beside it are aggregated over
+// the same span set, so hiding rows here would drop money from a cost-attribution view and leave
+// the visible rows failing to sum to the total. Scoping the QUERY to LLM systems is a separate,
+// deliberate product decision that belongs in lib/clickhouse.ts, not a presentation-layer filter.
 import { NextResponse } from "next/server";
 
 import {

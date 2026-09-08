@@ -28,9 +28,14 @@ function freshState(): StoreState {
       firstDashboardAt: null,
     },
     funnel: [{ stage: "signed_up", at: Date.now() }],
+    // #320: these are placeholders, not a provisioned key and endpoint, and they used to render in
+    // step 1 as though they were the tenant's own. The provisioning path is control-plane work; in
+    // the meantime the values carry `isExample` so every surface that shows them says what they are
+    // rather than presenting an invented key as fact (CLAUDE.md, honest under uncertainty).
     creds: {
-      tenantKey: "tk_demo_3f9c2a7b",
-      proxyBaseUrl: "https://proxy.ai-tally.dev/v1",
+      tenantKey: "tk_example_replace_me",
+      proxyBaseUrl: "https://proxy.example.ai-tally.dev/v1",
+      isExample: true,
     },
   };
 }

@@ -29,6 +29,16 @@ const MIN_REPLAYED_SAMPLES = 50;
 // `workload` label on the live path instead of shipping the fixture string.
 const WORKLOAD_WINDOW_DAYS = 7;
 
+// #320: the replay counts on every branch that has NOT run a replay. Null, not the fixture's
+// 4,200 traces / 87,400 available / $42.30, which the page rendered as though they were measured.
+// A count we did not take is unknown; the page's blank says so with the reason on hover.
+const NO_REPLAY_DIAGNOSTICS = {
+  samplesReplayed: null,
+  samplesAvailable: null,
+  excludedRateLimited: null,
+  replayCostMicroUsd: null,
+} as const;
+
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
   evalRows: EvalCandidateRow[] | undefined,
@@ -83,7 +93,9 @@ export async function GET(req: Request) {
       ...comparison,
       current: { ...comparison.current, qualityScore: null },
       candidates,
-      diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
+      // #320: no replay ran on this path, so every replay count is null. The fixture used to ship
+      // 4,200 / 87,400 / $42.30 here and the page printed them as measurements.
+      diagnostics: { ...comparison.diagnostics, ...NO_REPLAY_DIAGNOSTICS, reconcilerLastRunMinutesAgo },
       replay_source: replay ? "replay" : "mock",
     });
   }
@@ -175,6 +187,9 @@ export async function GET(req: Request) {
         ...comparison.diagnostics,
         samplesReplayed: totalReplayed,
         samplesAvailable: replay.samples_available,
+        // #320: the projection carries a budget-exclusion count per candidate, not a rate-limit
+        // one, so there is no honest number for this row here either. Blank with the reason.
+        excludedRateLimited: null,
         replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
         contextFidelity:
           (replay.diagnostics.context_fidelity as
@@ -266,7 +281,10 @@ export async function GET(req: Request) {
     },
     candidates,
     recommendation,
-    diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
+    // #320: this branch has a live current model and rescaled-mock candidates, and no replay at
+    // all. It is the branch the issue was reported against: nine spans in the stack, "$42.30 /
+    // 4,200 traces replayed / 87,400 prod traces" on screen. All four counts are null now.
+    diagnostics: { ...comparison.diagnostics, ...NO_REPLAY_DIAGNOSTICS, reconcilerLastRunMinutesAgo },
     replay_source: "mock",
   });
 }

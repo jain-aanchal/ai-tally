@@ -88,11 +88,22 @@ export interface Comparison {
     projectedSavingsMicroUsd: MicroUSD | null;
     projectedSavingsPct: number | null; // 0..1, null when there is nothing to divide by
   };
+  /**
+   * Replay diagnostics. Every count is nullable and null is the ONLY honest answer when no
+   * cross-provider replay has run (#320).
+   *
+   * These used to be fixture constants spliced into every branch, so a stack holding nine spans
+   * rendered "REPLAY COST $42.30 · 4,200 traces replayed · 87,400 prod traces" as confidently as a
+   * real projection would. That is precisely the fabricated figure CLAUDE.md forbids, and it was the
+   * more dangerous kind: not a zero a reader might question, but a plausible number they would not.
+   * Only the real /v1/replay projection fills these in now; every other path emits null and the page
+   * renders the blank with the reason.
+   */
   diagnostics: {
-    samplesReplayed: number;
-    samplesAvailable: number;
-    excludedRateLimited: number;
-    replayCostMicroUsd: MicroUSD;
+    samplesReplayed: number | null;
+    samplesAvailable: number | null;
+    excludedRateLimited: number | null;
+    replayCostMicroUsd: MicroUSD | null;
     contextFidelity: "resolved-context replay (no live retrieval)" | "live retrieval";
     /**
      * Minutes since the reconciler last trued-up the baseline traffic this comparison is built
@@ -202,11 +213,15 @@ export const comparison: Comparison = {
     projectedSavingsMicroUsd: 12_200_000_000,
     projectedSavingsPct: 0.64,
   },
+  // #320: the fixture's replay counts are gone, not relabelled. There is no replay behind this
+  // object on any path that ships it, so there is no honest number to put here; the page renders the
+  // explained blank instead. contextFidelity survives because it is a methodology label, not a
+  // measurement, and it describes how a replay WOULD be run rather than claiming one was.
   diagnostics: {
-    samplesReplayed: 4200,
-    samplesAvailable: 87_400,
-    excludedRateLimited: 312,
-    replayCostMicroUsd: 42_300_000, // $42.30 spent replaying = ~0.2% of monthly workload spend
+    samplesReplayed: null,
+    samplesAvailable: null,
+    excludedRateLimited: null,
+    replayCostMicroUsd: null,
     contextFidelity: "resolved-context replay (no live retrieval)",
     reconcilerLastRunMinutesAgo: 18,
   },

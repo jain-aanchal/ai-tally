@@ -876,4 +876,81 @@ describe("/api/compare", () => {
     expect(body.recommendation.summary).toBe(comparison.recommendation.summary);
     expect(body.recommendation.verdict).toBe(comparison.recommendation.verdict);
   });
+
+  // #320 item 2. The bug as reported: a stack holding nine spans rendered "REPLAY COST $42.30 /
+  // 4,200 traces replayed / 87,400 prod traces". Those were fixture constants spliced onto a branch
+  // that had never replayed anything, which is the confident fabricated figure CLAUDE.md forbids.
+  describe("#320: no fabricated replay diagnostics", () => {
+    it("nulls every replay count on the rescaled-mock branch (live current model, no replay)", async () => {
+      queryCurrentModel.mockResolvedValueOnce({
+        model: "claude-sonnet-4-5",
+        provider: "anthropic",
+        monthlyCostMicroUsd: 10_000_000,
+        monthlyCalls: 2000,
+        latencyP95Ms: 2000,
+        errorRate: 0.01,
+      });
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.replay_source).toBe("mock");
+      expect(body.diagnostics.samplesReplayed).toBeNull();
+      expect(body.diagnostics.samplesAvailable).toBeNull();
+      expect(body.diagnostics.excludedRateLimited).toBeNull();
+      expect(body.diagnostics.replayCostMicroUsd).toBeNull();
+      // The specific numbers from the issue must not appear anywhere in the payload.
+      const wire = JSON.stringify(body);
+      expect(wire).not.toContain("4200");
+      expect(wire).not.toContain("87400");
+      expect(wire).not.toContain("42300000");
+    });
+
+    it("nulls every replay count on the unreachable-gateway fallback too", async () => {
+      queryCurrentModel.mockResolvedValueOnce(null);
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.diagnostics.samplesReplayed).toBeNull();
+      expect(body.diagnostics.samplesAvailable).toBeNull();
+      expect(body.diagnostics.replayCostMicroUsd).toBeNull();
+    });
+
+    it("still reports the real counts when a replay projection actually ran", async () => {
+      queryCurrentModel.mockResolvedValueOnce({
+        model: "claude-sonnet-4-5",
+        provider: "anthropic",
+        monthlyCostMicroUsd: 10_000_000,
+        monthlyCalls: 2000,
+        latencyP95Ms: 2000,
+        errorRate: 0.01,
+      });
+      queryReplayCandidates.mockResolvedValueOnce({
+        samples_available: 50,
+        per_candidate: [
+          {
+            provider: "anthropic",
+            model: "claude-haiku-4-5",
+            projected_monthly_cost_micro_usd: 75_000,
+            p50_latency_ms: 800,
+            p95_latency_ms: 1500,
+            error_rate: 0.01,
+            samples_replayed: 50,
+            excluded_budget_count: 0,
+          },
+        ],
+        diagnostics: {
+          context_fidelity: "resolved-context replay (no live retrieval)",
+          replay_cost_micro_usd: 12_500,
+        },
+      });
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.diagnostics.samplesReplayed).toBe(50);
+      expect(body.diagnostics.samplesAvailable).toBe(50);
+      expect(body.diagnostics.replayCostMicroUsd).toBe(12_500);
+    });
+  });
 });
