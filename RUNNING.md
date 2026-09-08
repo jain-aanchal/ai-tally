@@ -82,7 +82,28 @@ when auth is on and no service token is set, rather than coming up with an open 
 `curl … -H 'x-tenant-id: …'` examples below work as written only while auth is off; with auth on, add
 `-H "Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN"`.
 
-Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API key above.
+Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API key above. So is
+`POST /v1/revenue/events` (`docs/revenue-api.md`), which a customer's billing job posts to with an
+ingest key: it takes a write-scoped ingest key **or** the service token, never the service token
+alone.
+
+**The two token settings are a pair.** `infra/.env.example` and `web/.env.example` both leave the
+token commented, because setting only one is worse than setting neither:
+
+| gateway `TALLY_GATEWAY_SERVICE_TOKEN` | web `GATEWAY_SERVICE_TOKEN` | result with auth on |
+| --- | --- | --- |
+| unset | unset | gateway refuses to boot (fail closed, by design) |
+| set | unset | dashboard sends no `Authorization`; every control-plane read 401s and the settings pages go blank |
+| unset | set | gateway refuses to boot |
+| set, same value | set, same value | working |
+
+Generate the value once and paste it into both files:
+
+```bash
+openssl rand -hex 32
+```
+
+Never reuse a value from an example file. Anything checked into this repo is public.
 
 Note that the synthetic demo seeders do **not** support auth on.
 `examples/vercel-chatbot/scripts/backfill-spans.ts` (used by `make chatbot-demo-backfill` and by the

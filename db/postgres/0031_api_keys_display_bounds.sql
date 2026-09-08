@@ -22,11 +22,17 @@
 -- NOT VALID + VALIDATE is deliberately NOT used: these are additive constraints on columns that only
 -- 0029 could have populated, and the table is small. A plain ADD CONSTRAINT takes a brief ACCESS
 -- EXCLUSIVE lock, which is acceptable on api_keys.
+--
+-- The idempotency guards below qualify on conrelid as well as conname. Constraint names are unique
+-- per TABLE, not per database, so matching on conname alone would let a same-named constraint on
+-- some other table make this migration skip a bound and still report success: the column would go
+-- unbounded while the run looked clean.
 
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_name_len'
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'api_keys_name_len' AND conrelid = 'api_keys'::regclass
     ) THEN
         ALTER TABLE api_keys
             ADD CONSTRAINT api_keys_name_len
@@ -34,7 +40,8 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_token_prefix_len'
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'api_keys_token_prefix_len' AND conrelid = 'api_keys'::regclass
     ) THEN
         ALTER TABLE api_keys
             ADD CONSTRAINT api_keys_token_prefix_len
@@ -42,7 +49,8 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_created_by_len'
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'api_keys_created_by_len' AND conrelid = 'api_keys'::regclass
     ) THEN
         ALTER TABLE api_keys
             ADD CONSTRAINT api_keys_created_by_len
