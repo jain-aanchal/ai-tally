@@ -207,7 +207,7 @@ things from the environment:
 
 | Variable | What it is |
 |---|---|
-| `TALLY_GATEWAY_URL` | base URL of the gateway that holds your telemetry |
+| `TALLY_GATEWAY_URL` | base URL of the gateway that holds your telemetry. Must be `https://`, because the request carries the service token; plain `http://` is accepted only for `localhost`, `127.0.0.1` or `::1` so local dev still works |
 | `TALLY_TENANT_ID` | your tenant UUID, sent as `x-tenant-id` |
 | `GATEWAY_SERVICE_TOKEN` | the control-plane service token. Set `TALLY_GATEWAY_SERVICE_TOKEN_ENV` to read it from a differently named variable instead |
 
@@ -215,9 +215,15 @@ The token is held by reference: the tool reads the variable at the moment it cal
 never stores, echoes or logs the value. The `tenant_key` argument is likewise reported only as
 present or absent, never sent onward.
 
+The token is also never carried off the origin you configured: a redirect to a different scheme,
+host or port is refused rather than followed, so a load balancer that 301s elsewhere cannot be
+handed your service token.
+
 Leave these unset and the tool answers `probe_available: false` with every layer `unknown` and
-the reason attached. That is also what you get if the gateway is unreachable, answers an error,
-times out, or returns something unreadable. None of those ever turns into "this layer is not
+the reason attached. That is also what you get if `TALLY_GATEWAY_URL` is rejected as unsafe, or
+if the gateway is unreachable, answers an error, times out, redirects off-origin, or returns
+something unreadable or oversized. The result shape is the same on both paths, so `reason` is
+always present (empty when the probe answered). None of those ever turns into "this layer is not
 wired": a layer is reported covered only when the probe returns a span count above zero to prove
 it, re-derived from that count rather than taken on the wire's word, so a payload claiming
 coverage with no evidence is downgraded back to `unknown`.

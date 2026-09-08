@@ -44,7 +44,20 @@ TENANT_ID_ENV = "TALLY_TENANT_ID"
 DEFAULT_TOKEN_ENV = "GATEWAY_SERVICE_TOKEN"
 TOKEN_ENV_REF = "TALLY_GATEWAY_SERVICE_TOKEN_ENV"
 
-DEFAULT_TIMEOUT_SECONDS = 5.0
+# The probe does two ClickHouse reads, one of them a grouped pass over ``otel_spans`` that gets no
+# key-prefix benefit, so a large or cold tenant can sit well past a few seconds. A short timeout
+# would report every layer unknown for a tenant that is in fact fully instrumented, so this matches
+# the 30s the sibling ``onboarding_bot/github_pr.py`` transport allows (CTO-261).
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
+# A coverage payload is five small rows. Anything past this is not our endpoint answering, and
+# reading it unbounded would let a wrong or hostile host sit on the tool's memory (CTO-261).
+MAX_RESPONSE_BYTES = 1_048_576
+
+# Schemes we will send a bearer token over. Plain http is allowed only to a loopback host, where
+# there is no network to sniff, so local dev against ``http://localhost:8080`` keeps working while
+# a real deployment cannot ship the service token in cleartext (CTO-261).
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 
 # The layer names the gateway speaks, keyed by the names this package has always used. The MCP
 # surface says "tool" (it mirrors ``tally.record_tool_call``); the probe says "tools". Translating
@@ -115,7 +128,49 @@ def config_from_env(env: Mapping[str, str] | None = None) -> tuple[CoverageConfi
             f"${token_env} with the control-plane service token. Nothing is being claimed about "
             f"your instrumentation."
         )
+    scheme_reason = _reject_unsafe_base(gateway_url)
+    if scheme_reason:
+        return None, scheme_reason
+
     return CoverageConfig(gateway_url=gateway_url, tenant_id=tenant_id, token_env=token_env), ""
+
+
+def _reject_unsafe_base(gateway_url: str) -> str:
+    """Say why ``gateway_url`` is not somewhere we will send a service token, or "" if it is.
+
+    A reason rather than an exception: a base URL we refuse is one more thing we do not know the
+    coverage for, and the caller turns it into the honest gap shape (CLAUDE.md, honest under
+    uncertainty). We check the scheme here rather than at call time so the refusal happens before
+    the token is ever read out of the environment (CTO-261).
+    """
+    try:
+        parsed = urllib.parse.urlsplit(gateway_url)
+    except ValueError:
+        return (
+            f"${GATEWAY_URL_ENV} is not a URL we can parse, so the coverage probe was not called. "
+            f"Nothing is being claimed about your instrumentation."
+        )
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return (
+            f"${GATEWAY_URL_ENV} must be an http or https URL (got "
+            f"{scheme or 'no scheme'!r}), so the coverage probe was not called. Nothing is being "
+            f"claimed about your instrumentation."
+        )
+    if not parsed.hostname:
+        return (
+            f"${GATEWAY_URL_ENV} has no host, so the coverage probe was not called. Nothing is "
+            f"being claimed about your instrumentation."
+        )
+    if scheme == "http" and parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+        return (
+            f"${GATEWAY_URL_ENV} uses plain http to a non-loopback host, which would send the "
+            f"control-plane service token in cleartext. Use https (plain http is allowed only for "
+            f"localhost). The coverage probe was not called and nothing is being claimed about "
+            f"your instrumentation."
+        )
+    return ""
 
 
 def resolve_token(config: CoverageConfig, env: Mapping[str, str] | None = None) -> str:
@@ -130,12 +185,71 @@ def resolve_token(config: CoverageConfig, env: Mapping[str, str] | None = None) 
     return token
 
 
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that will not carry the service token to another origin (CTO-261).
+
+    ``HTTPRedirectHandler.redirect_request`` strips only ``content-length`` and ``content-type``
+    and re-sends every other header, ``authorization`` included, at whatever host the 30x names.
+    A gateway behind a load balancer that 301s elsewhere would therefore hand
+    ``$GATEWAY_SERVICE_TOKEN`` to that host. So a redirect that leaves the origin (scheme, host or
+    port) is refused outright rather than silently followed without the header: the tool's answer
+    is then an honest unknown, which is the correct outcome for "we could not safely ask"
+    (CLAUDE.md, credentials by reference).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if _origin(newurl) != _origin(req.full_url):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "cross-origin redirect refused: the control-plane service token is not "
+                "forwarded off the configured gateway origin",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """(scheme, host, port) for same-origin comparison. Unparseable compares equal to nothing."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return ("", "", None)
+    default = {"http": 80, "https": 443}.get(parsed.scheme.lower())
+    return (parsed.scheme.lower(), (parsed.hostname or "").lower(), port or default)
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """An opener whose redirect handling cannot leak the token to another host (CTO-261)."""
+    return urllib.request.build_opener(_SameOriginRedirectHandler())
+
+
 def _urllib_transport(
     url: str, headers: dict[str, str], timeout: float
 ) -> str:  # pragma: no cover - exercised only against a real gateway
     request = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - configured base
-        return response.read().decode("utf-8")
+    # Never the module-level ``urlopen``: its default opener follows cross-host redirects with the
+    # authorization header attached (CTO-261).
+    with _build_opener().open(request, timeout=timeout) as response:  # noqa: S310 - scheme checked in config_from_env
+        return _read_capped(response)
+
+
+def _read_capped(response: Any) -> str:
+    """Read at most :data:`MAX_RESPONSE_BYTES`, refusing anything longer (CTO-261).
+
+    ``errors="replace"`` matches ``onboarding_bot/github_pr.py``: a non-UTF-8 error page from some
+    proxy in the path must not become a ``UnicodeDecodeError`` escaping the failure funnel. The
+    body is decoded only to be JSON-parsed, and never lands in an error message.
+    """
+    raw = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise CoverageUnavailable(
+            f"the coverage probe returned more than {MAX_RESPONSE_BYTES} bytes, which is not a "
+            f"coverage payload, so we could not read your coverage"
+        )
+    return raw.decode("utf-8", errors="replace")
 
 
 def fetch_coverage(
@@ -165,7 +279,18 @@ def fetch_coverage(
         raise CoverageUnavailable(
             f"the coverage probe answered HTTP {exc.code}, so we could not read your coverage"
         ) from None
-    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+    except CoverageUnavailable:
+        # The transport already produced a reason fit to show a developer (an oversized body, for
+        # one). Let it through rather than relabelling it.
+        raise
+    except Exception as exc:
+        # Deliberately everything else (CTO-261). The tool's contract is that no failure escapes as
+        # a crash: a scheme-less base makes ``urlopen`` raise a bare ``ValueError`` ("unknown url
+        # type"), ``http.client`` raises ``IncompleteRead`` / ``BadStatusLine``, and a non-UTF-8
+        # body raises ``UnicodeDecodeError``, none of which is an OSError. Every one of them means
+        # the same thing to a developer: we could not read your coverage. Only the exception CLASS
+        # NAME reaches the message, never ``str(exc)``, so neither the token nor a URL nor a
+        # response body can ride out in the reason (CLAUDE.md, no bodies in telemetry).
         raise CoverageUnavailable(
             f"the coverage probe could not be reached ({type(exc).__name__}), so we could not "
             f"read your coverage"
@@ -241,6 +366,38 @@ def derive_layer(row: Mapping[str, Any] | None, *, wired: bool = False) -> dict[
 
     if claimed == "covered" and derived != "covered":
         return {"status": "unknown", "reason": NO_EVIDENCE, "proving_spans": None}
+    if derived != claimed:
+        # The wire's prose describes the wire's state, so once we have re-derived a different one
+        # the two contradict each other and the prose is the half that is wrong. A row claiming
+        # ``not_wired`` with 5 proving spans would otherwise be reported covered while carrying
+        # "not wired: no span with GenAiOperation = 'tool'", and an unreadable count under
+        # ``not_wired`` would deliver a fabricated negative as text. Neither is honest, so we say
+        # what we derived and why (CTO-261).
+        return {
+            "status": derived,
+            "reason": _derived_reason(derived, spans),
+            "proving_spans": spans,
+        }
     if derived == "unknown":
         return {"status": "unknown", "reason": reason, "proving_spans": None}
     return {"status": derived, "reason": reason, "proving_spans": spans}
+
+
+def _derived_reason(derived: str, spans: int | None) -> str:
+    """The reason for a status we derived ourselves, used when the wire's prose disagrees."""
+    if derived == "covered":
+        return (
+            f"{spans} span(s) prove this layer is flowing, though the probe described it "
+            f"differently; we report what the evidence shows"
+        )
+    if derived == "awaiting_first_event":
+        return (
+            "this layer is wired but no span has arrived yet, though the probe described it "
+            "differently; we report what the evidence shows"
+        )
+    if derived == "not_wired":
+        return (
+            "no span proves this layer is flowing and it was not reported as newly wired, though "
+            "the probe described it differently; we report what the evidence shows"
+        )
+    return UNREADABLE
