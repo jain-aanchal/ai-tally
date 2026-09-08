@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -104,6 +104,33 @@ ch-rollup-rebuild: ## One-shot: rebuild the rollup targets from the deduplicated
 	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
 	@echo ""
 	@echo "The pre-rebuild tables are kept as <rollup>_cto311. Drop them once you are satisfied."
+
+ch-priced-zero-check: ## Report historical spans stored as a priced $$0 that was never measured (CTO-313)
+	@# READ-ONLY. Splits every EstimatedCost = 0 span into: recoverable (the original client-reported
+	@# cost still sits in SpanAttributes and can be promoted), unknown (nothing was ever priced, or
+	@# the price catalog missed) and measured_zero (a real, catalog-priced zero, which stays 0).
+	@# Safe to run any time against a live stack.
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/checks/priced_zero.sql
+	@echo ""
+	@echo "recoverable            = repriceable from the row itself by 'make ch-repair-priced-zero'."
+	@echo "unknown_no_price_input = nothing priceable was ever recorded; that repair marks them NULL / 'unpriced'."
+	@echo "unknown_catalog_miss   = the price catalog never priced them; same marking."
+	@echo "measured_zero          = a real zero from a real catalog version; deliberately left as 0."
+
+ch-repair-priced-zero: ## One-shot: reprice what is derivable, mark the rest unknown, never invent (CTO-313)
+	@# Deliberately NOT part of ch-migrate: it mutates the raw span table. Run ch-priced-zero-check
+	@# first and read the header of the script. Mutations do not fire materialized views, so the
+	@# rollups still hold the pre-repair money afterwards and ch-rollup-rebuild is a required
+	@# follow-up, not a suggestion.
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/migrations/priced_zero_repair.sql
+	@echo ""
+	@echo "RAW SPANS ARE REPAIRED, THE ROLLUPS ARE NOT. Materialized views do not fire on a mutation,"
+	@echo "so daily/hourly/account rollups still hold the pre-repair money and the dashboard reads"
+	@echo "those. Finish the job:"
+	@echo ""
+	@echo "  make ch-rollup-rebuild"
 
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway
