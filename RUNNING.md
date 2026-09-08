@@ -268,10 +268,103 @@ The TTL line is the one worth knowing about: `CREATE TABLE ... AS` copies skippi
 TTL, so the script restores it explicitly. Had that been missed the table would have migrated
 cleanly and silently stopped tiering to warm and cold storage.
 
-Two things this run did not prove. The install had no duplicates going in, so the collapse of an
-already-duplicated table is still unexercised. And rollups that already absorbed duplicates are not
-repaired by this: the materialized views sum into `SummingMergeTree` targets at insert time, so a
-duplicate counted there stays counted even after the raw rows collapse.
+One thing this run did not prove: the install had no duplicates going in, so the collapse of an
+already-duplicated table is still unexercised.
+
+Rollups that already absorbed duplicates are not repaired by the engine migration either, because
+the materialized views sum into `SummingMergeTree` targets at insert time and a duplicate counted
+there stays counted after the raw rows collapse. That is a separate repair, and it has its own
+detection and rebuild path: read on.
+
+### Duplicated spend baked into the rollups (CTO-311)
+
+`daily_feature_rollup`, `hourly_feature_rollup` and `daily_account_rollup` are fed by materialized
+views that fire **on INSERT** into `otel_spans` and add each span into a `SummingMergeTree` target.
+So a duplicate is banked in the rollups before any engine sees it, and nothing removes it
+afterwards: not the `ReplacingMergeTree` collapse on the raw table, not `OPTIMIZE ... FINAL`, not a
+background merge. The dashboard reads rollups and never raw spans, so it shows that money.
+
+The durable idempotency store stops new duplicates and the engine collapses the raw rows. Neither
+repairs a rollup that is already polluted. These two targets do.
+
+**Is this deployment affected, and by how much?**
+
+```bash
+make ch-rollup-check   # from infra/
+```
+
+Read-only, safe against a live stack, run it as often as you like. It re-derives every rollup grain
+from a `FINAL` (deduplicated) read of `otel_spans` and diffs that against what the rollup actually
+holds, per rollup, per tenant. Drift is reported in both directions and they have different causes:
+a rollup **above** raw is duplicated spend, a rollup **below** raw is spans that landed while the MV
+was detached (`make ch-migrate` drops and recreates all three MVs, because a materialized view's
+`SELECT` cannot be `ALTER`ed, and anything ingested inside that window reaches the raw table only).
+Money is `Decimal64(8)` on both sides, so the comparison is exact; `drift_micro_usd` restates it in
+the repo's canonical integer micro-USD.
+
+It refuses to run if `otel_spans` is not a `ReplacingMergeTree` keyed on span identity. On a plain
+`MergeTree` a `FINAL` read is a no-op, "truth" would still contain the duplicates, and the check
+would report a clean bill of health it has no basis for. Run `make ch-migrate-otel-engine` first.
+
+**Repair what can be repaired.**
+
+```bash
+make ch-rollup-rebuild   # from infra/
+```
+
+This is a rebuild, not an adjustment. Rollup rows do not record which spans they came from, so there
+is no duplicate to subtract; what there is is the source. `FROM otel_spans FINAL` is one row per
+span, and re-aggregating it at each rollup's grain reproduces exactly what the MV would have written
+had every span arrived once. Nothing is corrected, scaled or estimated. It follows the same shape as
+the engine migration: build beside, verify, `EXCHANGE TABLES`, keep the pre-rebuild table as
+`<rollup>_cto311` for rollback. The verifications are `throwIf` guards, so a mismatch aborts with
+the live tables untouched.
+
+**Quiesce ingest while it runs.** The materialized views keep writing into the current targets until
+the exchange, so a span ingested mid-run is counted into a table that is about to be discarded and
+is missing from the one that replaces it. Unlike the duplicate being repaired, that loss is silent.
+
+**What it deliberately does not repair, and will not invent.** `otel_spans` drops raw rows at 90
+days (CTO-22/CTO-29, and a per-tenant override in `storage_tiering.sql` can make that shorter). The
+rollups carry no TTL on purpose: for any period older than raw retention they are the only record
+that exists. Those grains cannot be derived, because there is nothing left to derive them from. They
+are carried across **byte for byte**, duplicated money included, and reported separately as
+`not_derivable` so the residual uncertainty stays visible rather than being laundered into a
+rebuilt table. Scaling them by the duplication ratio of the surviving days, or zeroing them, would
+fabricate a dollar figure, and a plausible number nobody can audit is worse than an inflated one an
+operator has been told about.
+
+Derivability is judged per `(TenantId, Day)`, and that is exact rather than approximate: `otel_spans`
+is `PARTITION BY toDate(Timestamp)` and its TTL `DELETE` is a function of `Timestamp` alone, so a
+day's rows expire together and a day can never be half-present. The hourly rollup is judged on
+`toDate(Hour)` for the same reason.
+
+Two smaller consequences worth knowing before you look at the dashboard afterwards. Rebuilt grains
+get real `UnpricedSpanCount` and `UnknownUsageSpanCount` values; pre-CTO-244 rollup rows held `0`
+there, which meant "nobody counted", not "there were no unknowns". And a grain that existed only in
+the rollup for a day raw still covers is **dropped**, because raw is authoritative for a day it
+covers.
+
+Exercised against the populated local stack (1,542,996 spans across three tenants), with 1,000
+synthetic spans at `$0.125` each posted twice to induce a known duplicate population on top of the
+drift the stack already carried:
+
+| Check | Result |
+|---|---|
+| Induced duplicates in raw | 2,000 rows holding 1,000 distinct `(TraceId, SpanId)`; `FINAL` reads 1,000 |
+| Detector on the induced tenant | rollup 2,000 spans / `$250.00`, raw 1,000 / `$125.00`, `drift_micro_usd` 125000000, exactly the amount induced |
+| Detector on the stack overall, before | derivable grains claimed 3,290,614 spans / `$571,229.92` against a raw truth of 1,543,996 / `$139,696.31` |
+| Engine clause inherited by the shadow tables | identical `engine_full` on all three (the guard that would catch a lost TTL) |
+| Pre-swap verification | all three rollups reconciled exactly against `FINAL` raw; carried grain counts identical |
+| Rebuild, daily and hourly | 3,374,936 spans / `$613,269.65` to 1,628,318 / `$181,736.05`; 431,533,604,037 micro-USD of duplicated spend removed |
+| Rebuild, account | 1,546,110 spans / `$164,623.01` to 1,544,149 / `$139,712.81`; 24,910,198,650 micro-USD removed |
+| Induced tenant after | 1,000 spans / `$125.00` in all three rollups, matching `FINAL` raw exactly |
+| Not-derivable grains | 527 daily grains, 84,322 spans, `$42,039.73`, unchanged across the rebuild |
+
+The not-derivable figure is the honest residue: 519 of those grains are `local-dev` days from
+2025-09-09 to 2026-08-03 whose raw spans aged out, plus three retired test tenants
+(`cto210-shorthistory`, `mv-test`, `cto199-verify`). Whether they contain duplicated money is
+unknowable, and this repair does not pretend otherwise.
 
 ## 4. Run the web dashboard
 
@@ -712,6 +805,8 @@ Knobs:
 | `make chatbot-demo-realistic` | Live ~5000-session run over ~10 min, real LLM spend capped ~$10 |
 | `make chatbot-demo-backfill` | `$0` 30-day backfill of synthetic backdated spans (no LLM calls, no API keys) |
 | `make chatbot-demo-stop` | Kill the background chatbot dev server started by `chatbot-demo` |
+| `make ch-rollup-check` | Report rollup spend inflated by duplicated spans, per rollup and tenant (read-only, CTO-311) |
+| `make ch-rollup-rebuild` | Rebuild the rollup targets from the deduplicated raw spans (one-shot, quiesce ingest, CTO-311) |
 | `make ps` / `make logs` | Status / tail gateway logs |
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
 | `make down` | Stop the stack (keep data volumes) |

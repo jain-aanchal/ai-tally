@@ -6,6 +6,12 @@
 -- here (they persist independently of otel_spans' 90d retention, CTO-22/CTO-29).
 --
 -- uniqState/sumState are AggregateFunction states; query with -Merge combinators.
+--
+-- CTO-311: these MVs sum at INSERT time, so a duplicated span is banked here permanently and no
+-- merge on otel_spans removes it. The SELECTs below are duplicated, deliberately and exactly, in
+-- db/clickhouse/migrations/rollup_rebuild_from_spans.sql, which re-derives these targets from a
+-- FINAL (deduplicated) read of the raw table. Change one and you must change the other, or rebuilt
+-- history will disagree with everything ingested after it. `make ch-rollup-check` reports the drift.
 
 CREATE TABLE IF NOT EXISTS daily_feature_rollup
 (

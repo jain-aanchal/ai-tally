@@ -154,7 +154,11 @@ CREATE TABLE IF NOT EXISTS otel_spans
 --      insert is summed into their SummingMergeTree targets before this engine ever sees it, and no
 --      later merge here removes it. A duplicate that reaches ClickHouse is therefore PERMANENT in
 --      the rollups regardless of this change. That is the strongest argument for the durable
---      idempotency store being the real fix and this being only a backstop.
+--      idempotency store being the real fix and this being only a backstop. Repairing rollups that
+--      already absorbed duplicates is CTO-311: db/clickhouse/checks/rollup_drift.sql measures it and
+--      db/clickhouse/migrations/rollup_rebuild_from_spans.sql re-derives the affected grains from
+--      this table. It can only repair grains this table still holds rows for; anything past
+--      retention is unrecoverable and is left alone rather than guessed at.
 --   3. A replay whose row is not byte-identical. Timestamp comes from the client's span timestamp
 --      when present, so an ordinary replay reproduces the same row and collapses. A span with no
 --      client timestamp, or one whose skew assessment clamps against server receive time, can land

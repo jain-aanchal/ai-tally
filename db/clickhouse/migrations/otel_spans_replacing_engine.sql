@@ -38,7 +38,11 @@
 -- ClickHouse were summed into daily_feature_rollup / hourly_feature_rollup / daily_account_rollup at
 -- INSERT time, and collapsing the raw table does not subtract them. Rebuilding those targets from
 -- the deduplicated raw table is a separate operation, only possible while the raw rows are still
--- inside the 90-day retention, and it is deliberately not attempted here.
+-- inside the 90-day retention, and it is deliberately not attempted here. It has its own scripts,
+-- and this one is their prerequisite because their notion of truth is a FINAL read of the table
+-- this script gives you: db/clickhouse/checks/rollup_drift.sql (`make ch-rollup-check`, read-only)
+-- to measure the damage, and db/clickhouse/migrations/rollup_rebuild_from_spans.sql
+-- (`make ch-rollup-rebuild`) to repair the grains raw can still account for. See CTO-311.
 
 -- 1. The new table. Same columns and skipping indexes as the live one, correct engine, and the
 --    sorting key extended with TraceId, SpanId so the collapsing identity is one span.
