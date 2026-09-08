@@ -164,10 +164,13 @@ export async function collectNoMeasuredReturn(
   const live = await tryLive(async (db, tenant) => {
     // Per-feature windowed spend. `w` is a clamped int, so interpolating it is injection-safe (same
     // pattern as the sibling queries in lib/clickhouse.ts). `filters.feature` binds as an array param.
+    // #314: FINAL, like every other otel_spans read (the rationale is in lib/clickhouse.ts). This
+    // detector sums money off the raw span table, so an un-merged duplicate would inflate the
+    // recoverable figure it puts in front of a user until a background merge collapsed it.
     const spendRows = await rowsPCached<FeatureSpendRow>(
       db,
       `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL ${w} DAY
          AND FeatureTag != ''

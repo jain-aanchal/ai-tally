@@ -284,6 +284,9 @@ export async function collectDuplicatedWork(
     // clusters inside ClickHouse (an IN over the cluster tuple) instead of shipping one row per trace
     // to Node and clustering the whole tenant in JS. On the demo corpus that is 740 rows instead of
     // ~420k. This is lossless: a failure-free cluster is dropped precisely because it can never match.
+    // #314: FINAL, like every other otel_spans read (the rationale is in lib/clickhouse.ts). This
+    // detector sums money off the raw span table, so an un-merged duplicate would inflate the
+    // recoverable figure it puts in front of a user until a background merge collapsed it.
     const rows = await rowsPCached<RunRow>(
       db,
       `WITH runs AS (
@@ -295,7 +298,7 @@ export async function collectDuplicatedWork(
                 toString(toUnixTimestamp(max(Timestamp))) AS tsSec,
                 sum(EstimatedCost) AS cost,
                 max(StatusCode) AS maxStatusNum
-         FROM otel_spans
+         FROM otel_spans FINAL
          WHERE TenantId = {tenant:String}
            AND Timestamp >= now() - INTERVAL ${w} DAY
            AND GenAiOperation NOT IN ('compute', 'egress')

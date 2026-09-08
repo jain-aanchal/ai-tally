@@ -1139,3 +1139,61 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
     expect(out.monthlyCostMicroUsd).toBe(Math.round((1_400_000 * 30) / 7));
   });
 });
+
+// #314 (CTO-245): every otel_spans read dedupes.
+//
+// otel_spans is a ReplacingMergeTree, so a duplicate span that got past the durable idempotency
+// store stays readable until a background merge collapses it, and a plain sum() over-counts by the
+// replayed spend in the meantime. FINAL makes the read exact at query time.
+//
+// The value of the fix is that it is applied to ALL of the reads rather than to the ones that
+// looked risky: a surface where some panels dedupe and some do not is worse than one where none do,
+// because two panels then disagree and neither is obviously wrong. That property spans ~40 query
+// sites across five files, which is more than review can hold, so it is asserted against the source
+// text. A query added later that forgets FINAL fails here.
+describe("otel_spans read paths dedupe (#314)", () => {
+  // Files that build SQL against otel_spans. Listed explicitly rather than globbed so that adding a
+  // new reader is a deliberate act which shows up in this list.
+  const SOURCES = [
+    "clickhouse.ts",
+    "waste/duplicated-work.ts",
+    "waste/no-measured-return.ts",
+    "waste/paid-for-nothing.ts",
+    "waste/wrong-sized-model.ts",
+  ];
+
+  // The single deliberate exemption, matched as a whole line so it cannot drift. queryFirstEventSeen
+  // selects the literal 1 and asks only whether a row exists; a duplicate cannot change a boolean,
+  // so FINAL would buy nothing there and it is not free on an endpoint the onboarding panel polls.
+  const EXEMPT = "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1";
+
+  // FROM/JOIN otel_spans, plus an optional alias, plus FINAL if it is there.
+  const READ =
+    /\b(?:FROM|(?:INNER |LEFT |RIGHT |CROSS )?JOIN)\s+otel_spans\b(?:\s+(?!FINAL\b)[A-Za-z_]\w*)?(?:\s+FINAL\b)?/g;
+
+  async function source(rel: string): Promise<string> {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    // Vitest's root is `web/`, so these resolve against the checkout rather than the bundle.
+    return readFile(resolve(process.cwd(), "lib", rel), "utf8");
+  }
+
+  it.each(SOURCES)("%s reads otel_spans only with FINAL", async (rel) => {
+    // Drop the one exempt query before matching, so the exemption is scoped to that exact text and
+    // not to the file it lives in.
+    const src = (await source(rel)).split(EXEMPT).join("");
+    const missing = (src.match(READ) ?? []).filter((m) => !/\bFINAL\b/.test(m));
+    expect(missing, `${rel}: otel_spans read without FINAL`).toEqual([]);
+  });
+
+  it("matches the reads it is meant to be guarding", async () => {
+    // Guards the guard: if the pattern ever stops matching, the assertion above passes vacuously.
+    const src = await source("clickhouse.ts");
+    expect((src.match(READ) ?? []).length).toBeGreaterThan(30);
+  });
+
+  it("keeps the exemption to exactly one query", async () => {
+    const src = await source("clickhouse.ts");
+    expect(src.split(EXEMPT).length - 1).toBe(1);
+  });
+});
