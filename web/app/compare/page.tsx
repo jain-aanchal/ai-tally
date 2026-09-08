@@ -293,7 +293,7 @@ function Row({
 function QualityCell({ m, current }: { m: RowMetric; current?: RowMetric }) {
   if (m.qualityScore === null) {
     return (
-      <span className="text-muted" title="needs ≥10 judged samples — run eval pass">
+      <span className="text-muted" title="needs ≥10 judged samples: run eval pass">
         —
       </span>
     );

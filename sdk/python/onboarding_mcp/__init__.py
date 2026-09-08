@@ -18,6 +18,7 @@ from onboarding_mcp.generate import (
     coverage_report,
     explain_layer,
     generate_middleware,
+    generate_startup,
     get_recipe,
     instrument_call_site,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "detect_stack",
     "get_recipe",
     "generate_middleware",
+    "generate_startup",
     "instrument_call_site",
     "explain_layer",
     "coverage_report",

@@ -103,7 +103,7 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
         <FinishSetupBanner count={unconfigured.length} onStart={openFinishSetup} />
       )}
 
-      <Card title="Unit economics — per feature">
+      <Card title="Unit economics: per feature">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-xs uppercase text-muted">
@@ -186,7 +186,7 @@ function FinishSetupBanner({ count, onStart }: { count: number; onStart: () => v
       <div className="text-warn">
         <span className="font-medium">Partial data. </span>
         <span>
-          {count} {noun} {count === 1 ? "has" : "have"} no value event yet — ROI can’t be attributed
+          {count} {noun} {count === 1 ? "has" : "have"} no value event yet, so ROI can’t be attributed
           until you pick one.
         </span>
       </div>
@@ -284,12 +284,12 @@ function ConfigureModal({
           <div className="space-y-3">
             {!observedAvailable ? (
               <p className="rounded-md border border-edge bg-ink/40 px-3 py-2 text-xs text-muted">
-                Couldn’t reach the event store right now — enter a value event name below and it’ll be
+                Couldn’t reach the event store right now. Enter a value event name below and it’ll be
                 saved once things reconnect.
               </p>
             ) : !hasObserved ? (
               <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-                No business events yet — wire Stripe (RUNNING.md §7) to start capturing value events.
+                No business events yet: wire Stripe (RUNNING.md §7) to start capturing value events.
                 You can still type a value event name below to configure it ahead of time.
               </p>
             ) : (
@@ -342,7 +342,7 @@ function ConfigureModal({
         )}
 
         {save === "error" && (
-          <p className="mt-3 text-xs text-bad">Couldn’t save — try again.</p>
+          <p className="mt-3 text-xs text-bad">Couldn’t save. Try again.</p>
         )}
 
         <div className="mt-5 flex items-center justify-end gap-2">

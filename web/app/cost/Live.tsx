@@ -384,8 +384,8 @@ export function CostLive({
   );
 
   const chartTitle = isDefaultSlice
-    ? "Cost by layer — last 30 days"
-    : `Cost by ${DIMENSION_LABEL[filterState.groupBy].toLowerCase()} — ${sliceLabel(filterState.range.preset)}`;
+    ? "Cost by layer: last 30 days"
+    : `Cost by ${DIMENSION_LABEL[filterState.groupBy].toLowerCase()}: ${sliceLabel(filterState.range.preset)}`;
 
   const body = (
     <div className="space-y-6">

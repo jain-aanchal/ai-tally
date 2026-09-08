@@ -211,6 +211,51 @@ class ClickHouseStore:
             )
         return out
 
+    def coverage_operation_counts(self, tenant_id: str) -> dict[str, int]:
+        """Span count per ``GenAiOperation`` for one tenant, for the per-layer probe (CTO-261).
+
+        ONE grouped pass, not one existence probe per layer. Four separate ``LIMIT 1`` checks would
+        each read the same tenant range, and each would read it in full whenever the answer is no,
+        which is precisely the case onboarding polls. Grouping reads a single LowCardinality column
+        over that range once and answers all four layers, and the counts double as the evidence the
+        report shows for a covered layer.
+
+        Tenant-scoped, so this stays inside the leading key column on a shared cluster (CTO-18).
+        Counts only: no identifier and no body leaves this query.
+        """
+        result = self.client.query(
+            "SELECT GenAiOperation, count() FROM otel_spans WHERE TenantId = %(t)s "
+            "GROUP BY GenAiOperation",
+            parameters={"t": tenant_id},
+        )
+        return {str(r[0]): int(r[1]) for r in result.result_rows}
+
+    def coverage_account_rows(self, tenant_id: str) -> tuple[int, int]:
+        """``(total_rows, attributed_rows)`` from ``daily_account_rollup`` for one tenant (CTO-261).
+
+        Reads the rollup rather than the spans because ``AccountIdHash`` leads that table's key and
+        appears nowhere in the raw table's (see ``coverage_probe.build_coverage``).
+
+        ``notEmpty`` rather than a length test, and this matters. ``AccountIdHash`` is
+        ``FixedString(64) DEFAULT ''``: ClickHouse pads a FixedString to width with NUL bytes, so the
+        unattributed default is 64 NULs and ``length(AccountIdHash) > 0`` is TRUE for every row,
+        including the unattributed ones. Verified against ClickHouse 24.8 on a column declared
+        exactly this way: ``length`` is 64 for both, while ``notEmpty`` (and ``!= ''``, which pads
+        the literal) is 0 for the default and 1 for a real hash. Getting this wrong would report
+        every tenant as attributed, which is the failure mode this whole probe exists to prevent.
+
+        ``total_rows`` comes back with it so the caller can tell an unattributed tenant from a
+        rollup that was never backfilled; conflating the two would blame the developer for our own
+        missing migration step.
+        """
+        result = self.client.query(
+            "SELECT count(), countIf(notEmpty(AccountIdHash)) FROM daily_account_rollup "
+            "WHERE TenantId = %(t)s",
+            parameters={"t": tenant_id},
+        )
+        row = result.result_rows[0]
+        return int(row[0]), int(row[1])
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()

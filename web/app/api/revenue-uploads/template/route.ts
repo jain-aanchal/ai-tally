@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 // Serves the revenue-upload CSV template (CTO-198).
 //
 // A thin proxy rather than a copy of the header string: the gateway owns what the columns are, and
@@ -15,7 +15,7 @@ const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 export async function GET() {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/revenue-uploads/template`, {
-      headers: { "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId()),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
     });
