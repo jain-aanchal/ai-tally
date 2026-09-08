@@ -30,13 +30,16 @@ import {
   filtersToQueryString,
   withGroupBy,
 } from "@/lib/filters";
-import { formatUSD, type MicroUSD } from "@/lib/types";
+import { Money } from "@/components/HonestValue";
+import { type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 
 interface ExploreBreakdownRow {
   group: string;
-  totalMicroUsd: MicroUSD;
+  /** null when every span in the group was unpriced, so the cost is unknown (CTO-244 follow-up). */
+  totalMicroUsd: MicroUSD | null;
   spanCount: number;
+  unpricedSpanCount: number;
 }
 
 interface ExploreSeries {
@@ -47,8 +50,13 @@ interface ExploreSeries {
   groups: string[];
   days: StackedChartDay[];
   breakdown: ExploreBreakdownRow[];
-  totalMicroUsd: MicroUSD;
+  /** null when nothing in the slice could be priced. */
+  totalMicroUsd: MicroUSD | null;
   truncatedGroups: number;
+  /** Groups with no cost figure at all: named under the chart, never drawn as a zero band. */
+  unknownCostGroups: string[];
+  spanCount: number;
+  unpricedSpanCount: number;
 }
 
 interface ExploreResponse {
@@ -128,7 +136,15 @@ export function ExploreChartCard({
         {series && (
           <span className="text-xs text-muted">
             by {DIMENSION_LABEL[series.groupBy].toLowerCase()} ·{" "}
-            <span className="tabular-nums text-fg">{formatUSD(series.totalMicroUsd)}</span> ·{" "}
+            {/* CTO-244 follow-up: a slice we could not price at all has no headline figure. It
+                renders the explained blank rather than a "$0.00" nobody measured. */}
+            <span className="tabular-nums text-fg">
+              <Money
+                micro={series.totalMicroUsd}
+                reason={`all ${series.spanCount.toLocaleString()} spans in this slice could not be priced, so the cost is unknown rather than zero`}
+              />
+            </span>{" "}
+            ·{" "}
             <span className="tabular-nums">
               {series.windowStart} → {series.windowEnd}
             </span>
@@ -157,6 +173,17 @@ export function ExploreChartCard({
             // the chart narrows to that group. Clear the chip (or the search) to widen back out.
             onDrill={(group) => toggleFilter(effectiveGroupBy, group)}
           />
+          {/* The groups the chart cannot draw a bar for, named rather than plotted at zero. */}
+          {series.unknownCostGroups.length > 0 && (
+            <p className="mt-2 text-xs text-muted">
+              {series.unknownCostGroups.length}{" "}
+              {DIMENSION_LABEL[series.groupBy].toLowerCase()}
+              {series.unknownCostGroups.length === 1 ? "" : "s"} ({" "}
+              {series.unknownCostGroups.join(", ")} ) had no priced spans in this window, so{" "}
+              {series.unknownCostGroups.length === 1 ? "it is" : "they are"} left out of the chart
+              rather than drawn as zero.
+            </p>
+          )}
           {series.truncatedGroups > 0 && (
             <p className="mt-2 text-xs text-muted">
               {series.truncatedGroups} smaller{" "}

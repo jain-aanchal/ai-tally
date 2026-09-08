@@ -148,6 +148,64 @@ describe("deriveRecommendation", () => {
       samplesReplayed: 100,
     });
     expect(r.projectedSavingsMicroUsd).toBe(0);
-    expect(r.summary).toContain("No alternative candidate");
+    expect(r.summary).toMatch(/no alternative candidate/i);
+  });
+
+  // CTO-244 follow-up. An unpriced incumbent has an UNKNOWN monthly cost, so the savings are
+  // unknown too. Returning 0/0 made the card say "$0.00, 0% reduction, saves $0.00/mo" directly
+  // beneath its own sentence explaining that the cost is unknown.
+  describe("unpriced incumbent", () => {
+    const unpriced = (over: Partial<Parameters<typeof deriveRecommendation>[0]> = {}) =>
+      deriveRecommendation({
+        currentModel: "claude-sonnet-4-5",
+        currentCostMicroUsd: null,
+        candidates: [cand({ qualityScore: 0.62 })],
+        samplesReplayed: 100,
+        ...over,
+      });
+
+    it("projects null savings, never zero", () => {
+      const r = unpriced();
+      expect(r.projectedSavingsMicroUsd).toBeNull();
+      expect(r.projectedSavingsPct).toBeNull();
+    });
+
+    it("says why, and the verdict is not a recommendation to switch", () => {
+      const r = unpriced();
+      expect(r.verdict).toBe("mixed");
+      expect(r.summary).toMatch(/could not be priced/);
+      expect(r.summary).toMatch(/monthly cost is unknown/);
+    });
+
+    it("refuses to project even with no candidates at all", () => {
+      const r = unpriced({ candidates: [] });
+      expect(r.projectedSavingsMicroUsd).toBeNull();
+      expect(r.projectedSavingsPct).toBeNull();
+    });
+
+    it("uses no em dash in the product copy it emits", () => {
+      expect(unpriced().summary).not.toContain("\u2014");
+    });
+  });
+});
+
+// CTO-244 follow-up: the candidate rows printed a literal "$0.00NaN%" when the incumbent cost was
+// unknown, because the delta divided by it. An unknown side has no delta.
+describe("deltaPct under an unknown side", () => {
+  it("returns null when the current side is unknown", () => {
+    expect(deltaPct(null, 3_000_000)).toBeNull();
+  });
+
+  it("returns null when the candidate side is unknown", () => {
+    expect(deltaPct(10_000_000, null)).toBeNull();
+  });
+
+  it("never returns NaN for any combination of unknown and zero", () => {
+    for (const cur of [null, 0, 10_000_000]) {
+      for (const cnd of [null, 0, 3_000_000]) {
+        const v = deltaPct(cur, cnd);
+        expect(v === null || Number.isFinite(v)).toBe(true);
+      }
+    }
   });
 });

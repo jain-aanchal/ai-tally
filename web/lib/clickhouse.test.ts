@@ -1035,6 +1035,60 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
     expect(out.unpricedSpanCount).toBe(0);
   });
 
+  it("queryCostExplore reports an all-unpriced group as unknown, not $0.00", async () => {
+    const { queryCostExplore } = await freshSut();
+    // Window bounds, then the per-group totals. `google` is the edge-proxy STREAMED case: spans
+    // observed, none of them priceable, so sum() skips every row and returns NULL.
+    respondRows([{ windowStart: "2026-09-01", windowEnd: "2026-09-02", windowDays: 2 }]);
+    respondRows([
+      { grp: "openai", cost: "1.50", spans: "10", unpriced: "0" },
+      { grp: "anthropic", cost: "0", spans: "4", unpriced: "0" },
+      { grp: "google", cost: null, spans: "3", unpriced: "3" },
+    ]);
+    respondRows([{ day: "2026-09-01", grp: "openai", cost: "1.50" }]);
+    const out = (await queryCostExplore({
+      window: { kind: "preset", days: 2 },
+      groupBy: "provider",
+    }))!;
+    const row = (g: string) => out.breakdown.find((r) => r.group === g)!;
+    // The bug: this used to be 0, rendered "$0.00", and read as a free provider.
+    expect(row("google").totalMicroUsd).toBeNull();
+    expect(row("google").unpricedSpanCount).toBe(3);
+    // A measured zero stays a measured zero: spans observed and priced, and they cost nothing.
+    expect(row("anthropic").totalMicroUsd).toBe(0);
+    expect(row("openai").totalMicroUsd).toBe(1_500_000);
+    // The unknown group is named rather than drawn as a zero-height band.
+    expect(out.unknownCostGroups).toEqual(["google"]);
+    expect(out.groups).not.toContain("google");
+    expect(out.totalMicroUsd).toBe(1_500_000);
+    expect(out.unpricedSpanCount).toBe(3);
+  });
+
+  it("queryCostExplore blanks the slice total when nothing could be priced", async () => {
+    const { queryCostExplore } = await freshSut();
+    respondRows([{ windowStart: "2026-09-01", windowEnd: "2026-09-02", windowDays: 2 }]);
+    respondRows([{ grp: "google", cost: null, spans: "3", unpriced: "3" }]);
+    // The kept-group day read still runs; its sum is NULL for the same reason, and a NULL day is
+    // dropped rather than plotted as a zero point.
+    respondRows([{ day: "2026-09-01", grp: "google", cost: null }]);
+    const out = (await queryCostExplore({
+      window: { kind: "preset", days: 2 },
+      groupBy: "provider",
+    }))!;
+    expect(out.totalMicroUsd).toBeNull();
+    expect(out.days.every((d) => Object.keys(d.byGroup).length === 0)).toBe(true);
+  });
+
+  it("queryCostSliceTotals carries the unpriced count so the tile can blank", async () => {
+    const { queryCostSliceTotals } = await freshSut();
+    respondRows([
+      { total: null, estimated: null, reconciled: null, recThrough: null, unpriced: "3", spans: "3" },
+    ]);
+    const out = (await queryCostSliceTotals(30))!;
+    expect(out.spanCount).toBe(3);
+    expect(out.unpricedSpanCount).toBe(3);
+  });
+
   it("queryOutliers blanks the multiple rather than fabricating 1x median", async () => {
     const { queryOutliers } = await freshSut();
     respondRows([

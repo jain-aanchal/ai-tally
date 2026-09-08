@@ -19,7 +19,12 @@ import {
 import { defaultFilterState, toggleDimensionValue, withCustomRange, withGroupBy } from "./filters";
 
 function total(group: string, totalMicroUsd: number, spanCount = 1): ExploreGroupTotal {
-  return { group, totalMicroUsd, spanCount };
+  return { group, totalMicroUsd, spanCount, unpricedSpanCount: 0 };
+}
+
+/** A group ClickHouse summed to 0 only because EVERY span in it was unpriced (CTO-244 follow-up). */
+function allUnpriced(group: string, spanCount = 1): ExploreGroupTotal {
+  return { group, totalMicroUsd: 0, spanCount, unpricedSpanCount: spanCount };
 }
 
 describe("capGroups", () => {
@@ -50,6 +55,62 @@ describe("capGroups", () => {
     expect(c.orderedGroups).toEqual([]);
     expect(c.totalMicroUsd).toBe(0);
     expect(c.truncatedGroups).toBe(0);
+  });
+});
+
+// CTO-244 follow-up. ClickHouse sum() skips NULLs, so a group whose spans were ALL unpriced comes
+// back as 0 and used to render "$0.00" next to a group that genuinely cost nothing. These pin the
+// three states apart: real spend, measured zero, unknown.
+describe("capGroups under unpriced spans", () => {
+  it("reports an all-unpriced group as unknown, never as zero", () => {
+    const c = capGroups([total("a", 30), allUnpriced("b", 4)]);
+    const b = c.breakdown.find((r) => r.group === "b")!;
+    expect(b.totalMicroUsd).toBeNull();
+    expect(b.unpricedSpanCount).toBe(4);
+    expect(c.unknownCostGroups).toEqual(["b"]);
+  });
+
+  it("keeps a genuinely measured zero as a real zero", () => {
+    // Spans observed, all of them priced, and they summed to nothing: that IS zero.
+    const c = capGroups([total("a", 30), total("zero", 0, 6)]);
+    const z = c.breakdown.find((r) => r.group === "zero")!;
+    expect(z.totalMicroUsd).toBe(0);
+    expect(c.unknownCostGroups).toEqual([]);
+  });
+
+  it("keeps the priced figure of a partly unpriced group and carries the count", () => {
+    const c = capGroups([{ group: "a", totalMicroUsd: 30, spanCount: 5, unpricedSpanCount: 2 }]);
+    const a = c.breakdown[0];
+    expect(a.totalMicroUsd).toBe(30);
+    expect(a.unpricedSpanCount).toBe(2);
+    expect(c.unknownCostGroups).toEqual([]);
+  });
+
+  it("leaves an unknown-cost group out of the chart bands but keeps its breakdown row", () => {
+    const c = capGroups([total("a", 30), allUnpriced("b", 2)]);
+    expect(c.orderedGroups).toEqual(["a"]);
+    expect(c.breakdown.map((r) => r.group)).toEqual(["b", "a"]);
+  });
+
+  it("sorts unknown-cost groups first so the cap never folds one into the other bucket", () => {
+    const c = capGroups([total("a", 100), total("b", 50), allUnpriced("gone", 3)], 2);
+    expect(c.breakdown.map((r) => r.group)).toEqual(["gone", "a", OTHER_GROUP]);
+    // "b" is the one that folded, not the group whose cost we cannot see.
+    expect(c.breakdown.find((r) => r.group === OTHER_GROUP)!.totalMicroUsd).toBe(50);
+  });
+
+  it("has no headline total when nothing in the slice could be priced", () => {
+    const c = capGroups([allUnpriced("a", 3), allUnpriced("b", 2)]);
+    expect(c.totalMicroUsd).toBeNull();
+    expect(c.spanCount).toBe(5);
+    expect(c.unpricedSpanCount).toBe(5);
+    expect(c.orderedGroups).toEqual([]);
+  });
+
+  it("still totals the priced part when only some groups are unknown", () => {
+    const c = capGroups([total("a", 30), allUnpriced("b", 2)]);
+    expect(c.totalMicroUsd).toBe(30);
+    expect(c.unpricedSpanCount).toBe(2);
   });
 });
 

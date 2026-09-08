@@ -223,15 +223,40 @@ export function CostLive({
   // /api/cost figures on the default slice (so the byte-for-byte default and the offline view hold),
   // else an honest blank (null) on a non-default slice we could not read — never a zero.
   const slice = explore.totals;
-  const tileTotal = slice ? slice.totalMicroUsd : isDefaultSlice ? total : null;
+  // CTO-244 follow-up: a slice in which NOTHING could be priced has an unknown total, not a zero
+  // one, and the tile must say so or it contradicts the breakdown footer directly beneath it.
+  const sliceAllUnpriced =
+    slice !== null && slice.spanCount > 0 && slice.unpricedSpanCount >= slice.spanCount;
+  const tileTotal = slice
+    ? sliceAllUnpriced
+      ? null
+      : slice.totalMicroUsd
+    : isDefaultSlice
+      ? total
+      : null;
   const tileReconciled = slice ? slice.reconciledMicroUsd : isDefaultSlice ? reconciled : null;
-  const tileEstimated = slice ? slice.estimatedMicroUsd : isDefaultSlice ? estimated : null;
+  const tileEstimated = slice
+    ? sliceAllUnpriced
+      ? null
+      : slice.estimatedMicroUsd
+    : isDefaultSlice
+      ? estimated
+      : null;
   const tileReconciledThrough = slice ? slice.reconciledThrough : costSeries.reconciledThrough;
   const hasReconciledDate = tileReconciledThrough > "1970-01-01";
   const sliceUnavailable = explore.source === "unavailable" && !isDefaultSlice;
   const tileReason = sliceUnavailable
     ? "this slice is served live and the telemetry source could not be reached"
-    : "no cost data for this slice";
+    : sliceAllUnpriced
+      ? `all ${(slice?.spanCount ?? 0).toLocaleString()} spans in this slice could not be priced, so the cost is unknown rather than zero`
+      : "no cost data for this slice";
+  // A partly unpriced slice keeps its figure, marked as the lower bound it is. Same wording as the
+  // Home Spend tile so the two pages disclose the same gap the same way.
+  const sliceUnpriced = slice && !sliceAllUnpriced ? slice.unpricedSpanCount : 0;
+  const totalHint =
+    sliceUnpriced > 0
+      ? `at least: ${sliceUnpriced.toLocaleString()} of ${(slice?.spanCount ?? 0).toLocaleString()} spans could not be priced`
+      : `last ${windowDays} days`;
 
   // Feature options for the FilterBar come from the payload the page already holds; layer options
   // are the fixed cost layers. The other dimensions (model/provider/account) are not enumerated by
@@ -253,20 +278,31 @@ export function CostLive({
   //
   // Span counts only exist on the live path, and they are what separates a genuine measured zero
   // (spans observed, nothing billed) from an absent layer, so they are passed through where present.
+  // The unpriced counts ride along with them (CTO-244 follow-up): spans we saw but could not price
+  // are not a measured zero either, and a layer that is entirely unpriced must blank, not read
+  // "$0.00". A null row total is exactly that case, so it contributes no figure here.
   const layerFigures = useMemo(() => {
     if (breakdownGroupBy !== "layer") return null;
     if (explore.series) {
       const totals = zeroLayerRecord();
       const spans: Partial<Record<Layer, number>> = {};
+      const unpriced: Partial<Record<Layer, number>> = {};
       for (const r of explore.series.breakdown) {
         if (!(LAYERS as readonly string[]).includes(r.group)) continue;
         const l = r.group as Layer;
-        totals[l] = r.totalMicroUsd;
+        totals[l] = r.totalMicroUsd ?? 0;
         spans[l] = r.spanCount;
+        unpriced[l] = r.unpricedSpanCount;
       }
-      return { totals, spans };
+      return { totals, spans, unpriced };
     }
-    if (isDefaultSlice) return { totals: layerTotals, spans: {} as Partial<Record<Layer, number>> };
+    if (isDefaultSlice) {
+      return {
+        totals: layerTotals,
+        spans: {} as Partial<Record<Layer, number>>,
+        unpriced: {} as Partial<Record<Layer, number>>,
+      };
+    }
     return null;
     // layerTotals is rebuilt from featureRows each render; depend on its values, not its identity.
   }, [breakdownGroupBy, explore.series, isDefaultSlice, layerTotals]);
@@ -275,7 +311,14 @@ export function CostLive({
   // would defeat their useMemo.
   const coverage: LayerCoverage[] = useMemo(
     () =>
-      layerFigures ? layerCoverage(layerFigures.totals, enabledLayers, layerFigures.spans) : [],
+      layerFigures
+        ? layerCoverage(
+            layerFigures.totals,
+            enabledLayers,
+            layerFigures.spans,
+            layerFigures.unpriced,
+          )
+        : [],
     [layerFigures, enabledLayers],
   );
   const blankLayers = coverage.filter((c) => c.totalMicroUsd === null);
@@ -317,7 +360,13 @@ export function CostLive({
       // it is named in the notice under the table instead. See layerCoverage.
       return coverage
         .filter((c) => c.totalMicroUsd !== null)
-        .map((c) => ({ group: c.layer, totalMicroUsd: c.totalMicroUsd as number, spanCount: 0 }));
+        .map((c) => ({
+          group: c.layer,
+          totalMicroUsd: c.totalMicroUsd as number,
+          spanCount: 0,
+          // The offline fallback has no span-level coverage data at all, so it claims none.
+          unpricedSpanCount: 0,
+        }));
     }
     return [];
     // coverage, like the layerTotals it derives from, is rebuilt each render from featureRows.
@@ -345,7 +394,7 @@ export function CostLive({
           label="Total"
           micro={tileTotal}
           reason={tileReason}
-          hint={`last ${windowDays} days`}
+          hint={totalHint}
         />
         <SummaryTile
           label="Reconciled"
@@ -394,6 +443,16 @@ export function CostLive({
       {/* CTO-244: the layers the table above could NOT report, named right where a reader would
           otherwise read a "$0.00" row, or see a short list and assume it was the whole bill. */}
       <LayerCoverageNotice blank={blankLayers} />
+
+      {/* The same disclosure for every other axis (CTO-244 follow-up): the groups whose spend is
+          entirely unpriced, named here instead of rendering a fabricated "$0.00". The layer axis
+          has its own notice above, which already names them with the connector-level reason. */}
+      {breakdownGroupBy !== "layer" && (
+        <UnknownCostNotice
+          groupBy={breakdownGroupBy}
+          groups={explore.series?.unknownCostGroups ?? []}
+        />
+      )}
 
 
       {/* Directly under the 30-day headline on purpose (CTO-209): this card's figure is smaller
@@ -633,14 +692,28 @@ function BreakdownTable({
   // applied before the sort so the footer totals what is shown.
   const [sortKey, setSortKey] = useState<"cost" | "share">("cost");
   const [dir, setDir] = useState<"desc" | "asc">("desc");
+  // A row whose cost is unknown (every span in the group unpriced, CTO-244 follow-up) sorts to the
+  // TOP in either direction rather than being ranked as if it were the cheapest. Its cost could be
+  // anything, and a reader scanning the biggest spenders needs to see the gap first, exactly as an
+  // unpriced run sorts to the top of the agent outlier list.
   const visible = rows
     .filter((r) => matchesSearch(r.group))
-    .sort((a, b) =>
-      dir === "desc" ? b.totalMicroUsd - a.totalMicroUsd : a.totalMicroUsd - b.totalMicroUsd,
-    );
+    .sort((a, b) => {
+      if (a.totalMicroUsd === null || b.totalMicroUsd === null) {
+        if (a.totalMicroUsd === b.totalMicroUsd) return 0;
+        return a.totalMicroUsd === null ? -1 : 1;
+      }
+      return dir === "desc" ? b.totalMicroUsd - a.totalMicroUsd : a.totalMicroUsd - b.totalMicroUsd;
+    });
   // The share denominator is the footer total (the rows on screen, CTO-244), so shares always sum to
   // 100% of what the footer shows; guarded so a zero total renders an honest blank, not a divide.
-  const footerTotal = visible.reduce((s, r) => s + r.totalMicroUsd, 0);
+  // Unknown rows add nothing to it, which is why the footer discloses them rather than absorbing
+  // them: the total is over what we could price, not over every row on screen.
+  const footerTotal = visible.reduce((s, r) => s + (r.totalMicroUsd ?? 0), 0);
+  const shownSpans = visible.reduce((s, r) => s + r.spanCount, 0);
+  const shownUnpriced = visible.reduce((s, r) => s + r.unpricedSpanCount, 0);
+  // Nothing on screen could be priced: the footer has no figure at all, not a zero one.
+  const footerKnown = !(shownSpans > 0 && shownUnpriced >= shownSpans);
   const dimLabel = DIMENSION_LABEL[groupBy].toLowerCase();
 
   const toggleSort = (key: "cost" | "share") => {
@@ -723,9 +796,13 @@ function BreakdownTable({
                 {visible.map((r) => (
                   <tr key={r.group} className="border-t border-edge">
                     <td className="py-2 font-medium">{groupLabel(groupBy, r.group)}</td>
-                    <td className="py-2 text-right tabular-nums">{formatUSD(r.totalMicroUsd)}</td>
                     <td className="py-2 text-right tabular-nums">
-                      {footerTotal > 0 ? (
+                      <CostCell row={r} groupBy={groupBy} />
+                    </td>
+                    <td className="py-2 text-right tabular-nums">
+                      {r.totalMicroUsd === null ? (
+                        <Blank reason="this group's cost is unknown, so it has no share of the total" />
+                      ) : footerTotal > 0 ? (
                         <Pct value={r.totalMicroUsd / footerTotal} />
                       ) : (
                         <Blank reason="no spend in this slice, so there is no total to take a share of" />
@@ -746,13 +823,24 @@ function BreakdownTable({
                     {search ? `all shown ${dimLabel}` : `all ${dimLabel}`}
                   </td>
                   <td className="py-2 text-right tabular-nums">
-                    <Money micro={footerTotal} />
+                    <Money
+                      micro={footerKnown ? footerTotal : null}
+                      reason={`all ${shownSpans.toLocaleString()} spans shown could not be priced, so the total is unknown`}
+                    />
+                    {footerKnown && shownUnpriced > 0 && (
+                      <span
+                        className="ml-1 cursor-help text-xs font-normal text-muted underline decoration-dotted decoration-muted/60 underline-offset-4"
+                        title={`At least: ${shownUnpriced.toLocaleString()} of ${shownSpans.toLocaleString()} spans shown could not be priced, so this total is a lower bound.`}
+                      >
+                        at least
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 text-right tabular-nums">
-                    {footerTotal > 0 ? (
+                    {footerKnown && footerTotal > 0 ? (
                       <Pct value={1} />
                     ) : (
-                      <Blank reason="no spend in this slice" />
+                      <Blank reason="no priced spend in this slice" />
                     )}
                   </td>
                   <td className="py-2" />
@@ -764,6 +852,73 @@ function BreakdownTable({
         </table>
       </div>
     </Card>
+  );
+}
+
+/**
+ * The cost cell for one breakdown row (CTO-244 follow-up), on three branches.
+ *
+ * The unknown branch is the whole point: ClickHouse `sum()` skips NULLs, so a group whose spans were
+ * ALL unpriced arrives as 0 and used to render "$0.00" beside a group that genuinely cost nothing.
+ * The provider axis showed the streamed spans that way, as a confident "google $0.00". A null total
+ * is that case and it renders the explained blank instead. A partially unpriced group keeps its
+ * priced figure (that money really was spent) with an "at least" marker, matching how the Home Spend
+ * tile discloses the same gap, so the known subset is never passed off as the whole.
+ */
+function CostCell({ row, groupBy }: { row: ExploreBreakdownRow; groupBy: Dimension }) {
+  const label = groupLabel(groupBy, row.group);
+  if (row.totalMicroUsd === null) {
+    return (
+      <Blank
+        reason={`all ${row.spanCount.toLocaleString()} ${label} span${row.spanCount === 1 ? "" : "s"} in this window could not be priced, so the cost is unknown rather than zero`}
+      />
+    );
+  }
+  return (
+    <>
+      {formatUSD(row.totalMicroUsd)}
+      {row.unpricedSpanCount > 0 && (
+        <span
+          className="ml-1 cursor-help text-xs text-muted underline decoration-dotted decoration-muted/60 underline-offset-4"
+          title={`At least: ${row.unpricedSpanCount.toLocaleString()} of ${row.spanCount.toLocaleString()} ${label} spans could not be priced, so this figure is a lower bound.`}
+        >
+          at least
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * The groups whose cost the table could not report, and why (CTO-244 follow-up).
+ *
+ * The layer axis has had this since CTO-244 (see LayerCoverageNotice): a layer with no figure is
+ * dropped from the chart and named underneath rather than drawn as a zero. Every other axis
+ * (provider, model, feature, account, agent) had no such notice, so an all-unpriced group simply
+ * read "$0.00". This is the same disclosure generalised, and it is what lets the chart honestly draw
+ * no band for a group it has no figure for.
+ */
+function UnknownCostNotice({ groupBy, groups }: { groupBy: Dimension; groups: readonly string[] }) {
+  if (groups.length === 0) return null;
+  const dimLabel = DIMENSION_LABEL[groupBy].toLowerCase();
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4 text-sm text-muted">
+      <p>
+        {groups.length === 1 ? `One ${dimLabel} has` : `${groups.length} ${dimLabel}s have`} no cost
+        figure for this window, because every span we saw for{" "}
+        {groups.length === 1 ? "it" : "them"} was unpriced. {groups.length === 1 ? "It is" : "They are"}{" "}
+        left blank in the table and drawn nowhere in the chart, rather than shown as zero spend:
+      </p>
+      <ul className="mt-2 space-y-1">
+        {groups.map((g) => (
+          <li key={g} className="flex items-baseline gap-2">
+            <span className="font-medium text-fg">{groupLabel(groupBy, g)}</span>
+            <Blank reason={`no cost figure for this ${dimLabel} in this window`} />
+            <span>every span was unpriced (no usage reported, or no matching price-catalog entry).</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -780,9 +935,13 @@ function TrendCell({
   prior,
 }: {
   group: string;
-  current: number;
+  current: number | null;
   prior: ExploreBreakdownPrior | null;
 }) {
+  if (current === null) {
+    // No figure for this window, so there is no ratio to take against the prior one.
+    return <Blank reason="this group's cost is unknown this window, so there is nothing to compare" />;
+  }
   if (group === OTHER_GROUP) {
     return <Blank reason="aggregated tail, no single prior group to compare" />;
   }

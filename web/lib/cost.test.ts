@@ -88,4 +88,23 @@ describe("layerCoverage (CTO-244)", () => {
     expect(compute.totalMicroUsd).toBeNull();
     expect(compute.reason.length).toBeGreaterThan(0);
   });
+
+  // CTO-244 follow-up: spans we could not price are not a measured zero. A span count alone used to
+  // license a confident "$0.00" for a layer whose every span was unpriced.
+  it("blanks a layer whose observed spans were ALL unpriced", () => {
+    const tools = layerCoverage(zeros(), [], { tools: 8 }, { tools: 8 }).find(
+      (c) => c.layer === "tools",
+    )!;
+    expect(tools.totalMicroUsd).toBeNull();
+    expect(tools.reason).toContain("could not be priced");
+  });
+
+  it("keeps the priced figure of a partly unpriced layer", () => {
+    const byLayer = { ...zeros(), llm: 900_000 };
+    const llm = layerCoverage(byLayer, ["llm"], { llm: 10 }, { llm: 3 }).find(
+      (c) => c.layer === "llm",
+    )!;
+    expect(llm.totalMicroUsd).toBe(900_000);
+    expect(llm.reason).toBe("");
+  });
 });

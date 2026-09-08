@@ -57,8 +57,22 @@ export interface ExploreDayPoint {
 
 export interface ExploreBreakdownRow {
   group: string;
-  totalMicroUsd: MicroUSD;
+  /**
+   * Priced spend for the group, or `null` when EVERY span in it was unpriced (CTO-244 follow-up).
+   *
+   * ClickHouse `sum()` skips NULLs, so an all-unpriced group used to arrive as `0` and render
+   * "$0.00", indistinguishable from a group that genuinely cost nothing. Worst case that put a
+   * confident "google $0.00" on screen for the streamed spans whose usage cannot be scanned at all.
+   * A null here is the honest blank; `unpricedSpanCount` says how partial a non-null one is.
+   */
+  totalMicroUsd: MicroUSD | null;
   spanCount: number;
+  /**
+   * How many of `spanCount` carried no cost. Non-zero with a non-null total means the figure is a
+   * LOWER BOUND, and the row must say so rather than present the priced subset as the whole. Same
+   * convention as the Home Spend tile (see querySpendSummary and app/Live.tsx).
+   */
+  unpricedSpanCount: number;
 }
 
 export interface ExploreSeries {
@@ -67,16 +81,26 @@ export interface ExploreSeries {
   windowStart: string;
   windowEnd: string;
   windowDays: number;
-  /** Kept group names, ordered by total spend desc, possibly ending in {@link OTHER_GROUP}. */
+  /**
+   * Chart band names, ordered by total spend desc, possibly ending in {@link OTHER_GROUP}. Groups
+   * whose cost is entirely unknown are NOT here: a band drawn at zero (and a tooltip reading
+   * "$0.00") is the fabricated number this ticket exists to remove. They stay in `breakdown`, as
+   * an explained blank, and are named in `unknownCostGroups`.
+   */
   groups: string[];
   /** One point per calendar day in the window, oldest to newest. */
   days: ExploreDayPoint[];
   /** The breakdown table: one row per kept group (plus "other"), ordered by total desc. */
   breakdown: ExploreBreakdownRow[];
-  /** Sum over every group, so the headline can never disagree with the rows beneath it. */
-  totalMicroUsd: MicroUSD;
+  /** Sum over every group's PRICED spend, or null when nothing in the slice could be priced. */
+  totalMicroUsd: MicroUSD | null;
   /** How many real groups were folded into "other". 0 when the dimension fit under the cap. */
   truncatedGroups: number;
+  /** Groups with no cost figure at all, so the page can name them instead of drawing them. */
+  unknownCostGroups: string[];
+  /** Spans in the slice, and how many of them carried no cost. Drives the partial-coverage hint. */
+  spanCount: number;
+  unpricedSpanCount: number;
 }
 
 /**
@@ -92,6 +116,11 @@ export interface CostSliceTotals {
   estimatedMicroUsd: MicroUSD;
   reconciledMicroUsd: MicroUSD;
   reconciledThrough: string;
+  /** Spans in the slice, and how many of them carried no cost (CTO-244 follow-up). sum() skips
+   *  NULLs, so without these an all-unpriced slice reads "$0.00" on the tile while the breakdown
+   *  beneath it correctly blanks, and the page contradicts itself. */
+  spanCount: number;
+  unpricedSpanCount: number;
 }
 
 /**
@@ -119,8 +148,17 @@ export function costTrend(currentMicro: MicroUSD, priorMicro: MicroUSD | undefin
 /** A raw per-group total row as it comes back from ClickHouse before capping. */
 export interface ExploreGroupTotal {
   group: string;
+  /** `sum(EstimatedCost)`: the PRICED spend only, since ClickHouse's sum() skips NULLs. */
   totalMicroUsd: MicroUSD;
   spanCount: number;
+  /** `countIf(EstimatedCost IS NULL)`. Defaults to 0 so a caller with no coverage data is explicit
+   *  about claiming full coverage rather than getting it by omission. */
+  unpricedSpanCount?: number;
+}
+
+/** Every span in the group was unpriced, so its cost is unknown rather than zero (CTO-244). */
+function costIsUnknown(r: ExploreGroupTotal): boolean {
+  return r.spanCount > 0 && (r.unpricedSpanCount ?? 0) >= r.spanCount;
 }
 
 /** A raw per-day-per-group cost row from ClickHouse. */
@@ -135,47 +173,88 @@ export interface CappedGroups {
   breakdown: ExploreBreakdownRow[];
   /** Just the kept real group names (no "other"), for fast membership tests during the pivot. */
   keptGroups: Set<string>;
-  /** Ordered group names for the chart legend, "other" last when present. */
+  /** Ordered band names for the chart legend, "other" last when present. Excludes the groups whose
+   *  cost is entirely unknown: there is no honest bar to draw for one. */
   orderedGroups: string[];
   truncatedGroups: number;
-  totalMicroUsd: MicroUSD;
+  /** Priced spend across all groups, or null when nothing in the slice could be priced. */
+  totalMicroUsd: MicroUSD | null;
+  /** The groups with no cost figure, so the caller can name them rather than draw them. */
+  unknownCostGroups: string[];
+  spanCount: number;
+  unpricedSpanCount: number;
 }
 
 /**
- * Rank groups by total spend, keep the top {@link MAX_EXPLORE_GROUPS}, and fold the rest into one
- * "other" row whose total is the exact sum of everything dropped. The returned total is over ALL
- * groups, kept and folded alike, so it always equals the tenant's spend for the slice.
+ * Rank groups by spend, keep the top {@link MAX_EXPLORE_GROUPS}, and fold the rest into one "other"
+ * row whose total is the exact sum of everything dropped. The returned total is over ALL groups,
+ * kept and folded alike, so it always equals the tenant's PRICED spend for the slice.
+ *
+ * CTO-244 follow-up. A group whose every span was unpriced has an unknown cost, not a zero one, and
+ * three things follow from that:
+ *   - it sorts FIRST, never into the "other" tail. Its cost could be anything, so silently folding
+ *     it into a bucket labelled with a confident dollar figure would hide the very gap the reader
+ *     needs to see. Same reasoning as the unpriced runs that sort to the top of the agent outliers.
+ *   - its row carries `totalMicroUsd: null`, which the table renders as an explained blank.
+ *   - it is left out of `orderedGroups`, so the chart draws no zero-height band for it.
+ * A PARTIALLY unpriced group keeps its priced figure (real money really was spent) and carries the
+ * unpriced count so the row can say the figure is a lower bound, matching the Home Spend tile.
  */
 export function capGroups(
   totals: readonly ExploreGroupTotal[],
   max: number = MAX_EXPLORE_GROUPS,
 ): CappedGroups {
-  const sorted = [...totals].sort((a, b) => b.totalMicroUsd - a.totalMicroUsd);
-  const grandTotal = sorted.reduce((s, r) => s + r.totalMicroUsd, 0);
+  const sorted = [...totals].sort((a, b) => {
+    const au = costIsUnknown(a);
+    const bu = costIsUnknown(b);
+    if (au !== bu) return au ? -1 : 1;
+    return b.totalMicroUsd - a.totalMicroUsd;
+  });
+  const spanCount = sorted.reduce((s, r) => s + r.spanCount, 0);
+  const unpricedSpanCount = sorted.reduce((s, r) => s + (r.unpricedSpanCount ?? 0), 0);
+  const pricedTotal = sorted.reduce((s, r) => s + r.totalMicroUsd, 0);
+  // Nothing in the slice could be priced, so the headline is unknown rather than zero.
+  const grandTotal =
+    spanCount > 0 && unpricedSpanCount >= spanCount ? null : pricedTotal;
 
   const kept = sorted.slice(0, Math.max(0, max));
   const tail = sorted.slice(Math.max(0, max));
 
-  const breakdown: ExploreBreakdownRow[] = kept.map((r) => ({
+  const row = (r: ExploreGroupTotal): ExploreBreakdownRow => ({
     group: r.group,
-    totalMicroUsd: r.totalMicroUsd,
+    totalMicroUsd: costIsUnknown(r) ? null : r.totalMicroUsd,
     spanCount: r.spanCount,
-  }));
+    unpricedSpanCount: r.unpricedSpanCount ?? 0,
+  });
+  const breakdown: ExploreBreakdownRow[] = kept.map(row);
 
   if (tail.length > 0) {
-    breakdown.push({
-      group: OTHER_GROUP,
-      totalMicroUsd: tail.reduce((s, r) => s + r.totalMicroUsd, 0),
-      spanCount: tail.reduce((s, r) => s + r.spanCount, 0),
-    });
+    // The tail can only reach here once every unknown-cost group has been kept (they sort first),
+    // so an all-unknown "other" is only possible when the tail itself is entirely unpriced.
+    const tailSpans = tail.reduce((s, r) => s + r.spanCount, 0);
+    const tailUnpriced = tail.reduce((s, r) => s + (r.unpricedSpanCount ?? 0), 0);
+    breakdown.push(
+      row({
+        group: OTHER_GROUP,
+        totalMicroUsd: tail.reduce((s, r) => s + r.totalMicroUsd, 0),
+        spanCount: tailSpans,
+        unpricedSpanCount: tailUnpriced,
+      }),
+    );
   }
+
+  const unknownCostGroups = breakdown.filter((r) => r.totalMicroUsd === null).map((r) => r.group);
+  const unknown = new Set(unknownCostGroups);
 
   return {
     breakdown,
     keptGroups: new Set(kept.map((r) => r.group)),
-    orderedGroups: breakdown.map((r) => r.group),
+    orderedGroups: breakdown.filter((r) => !unknown.has(r.group)).map((r) => r.group),
     truncatedGroups: tail.length,
     totalMicroUsd: grandTotal,
+    unknownCostGroups,
+    spanCount,
+    unpricedSpanCount,
   };
 }
 

@@ -800,6 +800,70 @@ describe("/api/compare", () => {
     expect(body.recommendation.summary).not.toContain("$12.2K");
   });
 
+  // CTO-244 follow-up. queryCurrentModel returns a null monthlyCostMicroUsd when the incumbent's
+  // 7-day window could not be fully priced. Everything downstream of that number is unknown, and
+  // the payload has to say so: the page was rendering a blank "current cost" tile beside a
+  // "$0.00" candidate table, a "0% reduction" and a literal "NaN%" per row, all at once.
+  describe("unpriced incumbent (CTO-244)", () => {
+    const liveUnpriced = {
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: null,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    };
+
+    it("emits a null current cost and null candidate costs, never zeros", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveUnpriced);
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.current.monthlyCostMicroUsd).toBeNull();
+      expect(body.candidates.length).toBeGreaterThan(0);
+      for (const c of body.candidates) {
+        // Was Math.round(mockCost * 0) = 0, which rendered "$0.00" and read as a free model.
+        expect(c.monthlyCostMicroUsd).toBeNull();
+      }
+    });
+
+    it("projects no savings and no percentage", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveUnpriced);
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.recommendation.projectedSavingsMicroUsd).toBeNull();
+      expect(body.recommendation.projectedSavingsPct).toBeNull();
+      expect(body.recommendation.summary).toMatch(/could not be priced/);
+    });
+
+    it("does the same on the replay branch, where candidates come from real replay", async () => {
+      queryCurrentModel.mockResolvedValueOnce({ ...liveUnpriced, monthlyCalls: 1000 });
+      queryReplayCandidates.mockResolvedValueOnce({
+        samples_available: 200,
+        per_candidate: [
+          {
+            model: "claude-haiku-4-5",
+            provider: "anthropic",
+            projected_monthly_cost_micro_usd: 500_000,
+            samples_replayed: 100,
+            p95_latency_ms: 900,
+            error_rate: 0.001,
+          },
+        ],
+        diagnostics: { replay_cost_micro_usd: 1_000, context_fidelity: "live retrieval" },
+      });
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+      expect(body.current.monthlyCostMicroUsd).toBeNull();
+      expect(body.recommendation.projectedSavingsMicroUsd).toBeNull();
+      expect(body.recommendation.projectedSavingsPct).toBeNull();
+    });
+  });
+
   it("CTO-168: the unreachable-gateway fallback KEEPS the fixture workload + recommendation", async () => {
     queryCurrentModel.mockResolvedValueOnce(null); // gateway/DB unreachable
     queryReplayCandidates.mockResolvedValueOnce(null);
