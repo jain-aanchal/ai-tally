@@ -80,7 +80,7 @@ class DurableIdempotencyStore(Protocol):
 
 
 class PostgresIdempotencyStore:
-    """Postgres-backed claim/record over ``ingest_batch_idempotency`` (migration 0031).
+    """Postgres-backed claim/record over ``ingest_batch_idempotency`` (migration 0032).
 
     Connection per call and tenant-scoped SQL, matching
     :class:`gateway.ingest_cursors.IngestCursorStore` and every other control-plane store here.
@@ -247,7 +247,7 @@ class BatchIdempotency:
 def build_batch_idempotency(settings: Settings) -> BatchIdempotency:
     """Wire the gate at boot, probing whether the durable layer is actually usable.
 
-    The probe is a single cheap read of the migration-0031 table. It exists so the gateway can state
+    The probe is a single cheap read of the migration-0032 table. It exists so the gateway can state
     which mode it is in rather than discovering it on the first duplicate: a deployment that has not
     applied the migration, or has no Postgres, gets the pre-CTO-245 in-process-only behaviour and a
     WARNING that says so in those words. ``idempotency_durable_required`` turns that into a startup

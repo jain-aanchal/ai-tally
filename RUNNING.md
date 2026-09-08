@@ -141,7 +141,7 @@ This matters when you read the data yourself. `sum()` skips NULLs, so a plain
 SELECT sum(EstimatedCost)                AS known_spend,
        countIf(EstimatedCost IS NULL)    AS unpriced_spans,
        count()                           AS spans
-FROM otel_spans WHERE TenantId = 'local-dev';
+FROM otel_spans WHERE TenantId = '$TENANT';   -- the UUID resolved above, not the name
 ```
 
 The rollups carry the same disclosure as `UnpricedSpanCount` and `UnknownUsageSpanCount` columns.
@@ -209,7 +209,7 @@ Then restart the gateway and confirm the boot line above.
   backstop for anything that gets past the idempotency check. ReplacingMergeTree collapses rows only
   when parts **merge**, so between a duplicate insert and that merge a plain `SELECT sum(...)` still
   sees both rows. Add `FINAL` when you need exactness now:
-  `SELECT sum(EstimatedCost) FROM otel_spans FINAL WHERE TenantId = 'local-dev'`. **No read path in
+  `SELECT sum(EstimatedCost) FROM otel_spans FINAL WHERE TenantId = '$TENANT'`. **No read path in
   the dashboard was converted to `FINAL` in this change**, so dashboard totals converge on the merge
   rather than being exact the instant a duplicate lands. They are never worse than before, where the
   duplicate was permanent.
