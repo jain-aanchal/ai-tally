@@ -140,6 +140,18 @@ type Config struct {
 	// instead and Warnings() says so at startup when it is missing. It is a reference
 	// to a deployment secret (env var rendered from Secret Manager / KMS), never a key we mint.
 	IngestToken string
+	// TenantId is the operator's own tenant UUID, claimed in the batch envelope for every record the
+	// edge-key cache did not resolve (the records IngestToken authenticates). It exists because the
+	// gateway derives the tenant from the bearer key only when it runs with auth ON; with
+	// TALLY_REQUIRE_API_KEY=false (the `make up` default) it has no way to derive one and rejects a
+	// batch carrying an empty tenant_id with 422, so a default self-host meters nothing.
+	//
+	// It is operator-supplied, never inferred or invented: unset stays empty and the envelope claims
+	// no tenant, which is the honest state. It is validated as a UUID at boot because the canonical
+	// TenantId is the tenant UUID, so feeding in a tenant NAME (`local-dev`) would write a value that
+	// joins to nothing. A wrong UUID is not a cross-tenant write either: with auth on the gateway
+	// enforces TENANT_MISMATCH against the authenticating key's tenant and refuses the batch.
+	TenantId string
 
 	// --- Hosted multi-provider routing (Initiative 2 sec 6.1) ---
 
@@ -232,6 +244,18 @@ func FromEnv(lookup Env) (Config, error) {
 	// Forwarding joins onto the upstream path, so a trailing slash would double up ("//v1").
 	u.Path = strings.TrimRight(u.Path, "/")
 	cfg.Upstream = u
+
+	// The envelope tenant claim is refused rather than coerced when it is not a UUID: a name here
+	// would be silently useless downstream, and telemetry that looks configured but joins to nothing
+	// is worse than telemetry that refuses to start.
+	if v := strings.TrimSpace(lookup("EDGE_PROXY_TENANT_ID")); v != "" {
+		if !isUUID(v) {
+			return Config{}, fmt.Errorf(
+				"EDGE_PROXY_TENANT_ID %q is not a tenant UUID (the canonical TenantId is the UUID, "+
+					"not the tenant name)", v)
+		}
+		cfg.TenantId = strings.ToLower(v)
+	}
 
 	if v := lookup("EDGE_PROXY_REQUIRE_TENANT"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -335,21 +359,38 @@ func FromEnv(lookup Env) (Config, error) {
 // EDGE_PROXY_INGEST_TOKEN, RequireTenant off, no edge-key feed) ships exactly zero telemetry, since
 // no record can produce a credential, while startup still logs a cheerful "telemetry -> <url>". A
 // total, permanent failure must not be silent.
+//
+// The sibling hole (an empty envelope tenant_id, which a gateway running with auth disabled refuses
+// with 422) is deliberately NOT warned about from here for the configs where it is ambiguous: an
+// empty claim is correct against a gateway with auth on, so warning about it unconditionally would
+// fire on a healthy hosted deployment and teach operators to ignore these lines. What config CAN
+// say for certain is warned below; the case only the gateway's answer settles is escalated at
+// runtime by the telemetry sink, which sees the actual 422 and names EDGE_PROXY_TENANT_ID.
 func (c Config) Warnings() []string {
 	var out []string
-	if c.TelemetryURL == "" || c.IngestToken != "" {
+	if c.TelemetryURL == "" {
 		return out
 	}
-	// Only a key the edge-key cache resolved is used as a bearer, so with no feed configured no
-	// record can ever authenticate itself and the ingest token is the only possible credential.
-	if c.KeysURL == "" {
-		out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
-			"EDGE_PROXY_KEYS_URL is unset: no record can be authenticated, so every span will be shed "+
-			"and NO telemetry will reach ingest")
-	} else if !c.RequireTenant {
-		out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
-			"EDGE_PROXY_REQUIRE_TENANT is off: telemetry for any request that arrives without a "+
-			"resolvable tenant key will be shed unauthenticated")
+	if c.IngestToken == "" {
+		// Only a key the edge-key cache resolved is used as a bearer, so with no feed configured no
+		// record can ever authenticate itself and the ingest token is the only possible credential.
+		if c.KeysURL == "" {
+			out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
+				"EDGE_PROXY_KEYS_URL is unset: no record can be authenticated, so every span will be shed "+
+				"and NO telemetry will reach ingest")
+		} else if !c.RequireTenant {
+			out = append(out, "EDGE_PROXY_TELEMETRY_URL is set but EDGE_PROXY_INGEST_TOKEN is empty and "+
+				"EDGE_PROXY_REQUIRE_TENANT is off: telemetry for any request that arrives without a "+
+				"resolvable tenant key will be shed unauthenticated")
+		}
+		// The configured tenant is claimed only on batches the ingest token authenticates (an
+		// unresolved record has no other credential), so without that token it is dead configuration
+		// and the operator is not getting the attribution they think they set up.
+		if c.TenantId != "" {
+			out = append(out, "EDGE_PROXY_TENANT_ID is set but EDGE_PROXY_INGEST_TOKEN is empty: the "+
+				"configured tenant is only claimed on batches the ingest token authenticates, so it "+
+				"will never be sent")
+		}
 	}
 	return out
 }
@@ -458,6 +499,29 @@ func buildRoute(match, rawUpstream string, prov Provider, mode RouteMode) (Route
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	return Route{Match: match, Upstream: u, Provider: prov}, nil
+}
+
+// isUUID reports whether s is the canonical 8-4-4-4-12 hex form. Written out rather than pulled in
+// as a dependency: the proxy has no third-party modules and this is the whole of the check we need
+// (we validate the shape so a tenant NAME cannot slip through, not the version or variant bits).
+func isUUID(s string) bool {
+	groups := strings.Split(s, "-")
+	want := []int{8, 4, 4, 4, 12}
+	if len(groups) != len(want) {
+		return false
+	}
+	for i, g := range groups {
+		if len(g) != want[i] {
+			return false
+		}
+		for _, c := range g {
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func firstNonEmpty(vals ...string) string {
