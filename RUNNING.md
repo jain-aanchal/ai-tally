@@ -654,7 +654,7 @@ judge calls run a frontier model and are pricier than candidate replays.
    else parses to an `error` row (the win-rate denominator excludes errors).
 
 3. **Read the result on `/compare`.** The Quality column now shows
-   `47.2%` with `[31-63%]` underneath: the real win-rate and Wilson 95% CI.
+   `47.2%` with `[31–63%]` underneath: the real win-rate and Wilson 95% CI.
    Below the 10-judged-samples floor (small `n` means a CI wider than the
    number is useful), the cell shows `—` with the hint "needs ≥10 judged
    samples: run eval pass". **The page will never fabricate a quality

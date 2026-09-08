@@ -54,16 +54,16 @@ These are enforced by tests, not just documented:
 | `EDGE_PROXY_REQUIRE_TENANT` | `false` | reject requests missing the tenant header with `400` |
 | `EDGE_PROXY_UPSTREAM_TIMEOUT` | `10m` | per-request bound (generous: completions stream for minutes) |
 | `EDGE_PROXY_MODE` | `passthrough` | `passthrough` (app sends the provider key) or `broker` (provider key stays in KMS, see below) |
-| `EDGE_PROXY_BROKER_FILE` | - | path to the KMS-export JSON; **required** when `EDGE_PROXY_MODE=broker` |
+| `EDGE_PROXY_BROKER_FILE` | (none) | path to the KMS-export JSON; **required** when `EDGE_PROXY_MODE=broker` |
 | `EDGE_PROXY_BROKER_TTL` | `5m` | how long a minted credential is reused before re-minting |
 | `EDGE_PROXY_SELF_HOSTED` | `false` | label emitted telemetry as `self-host` vs `cloud` |
-| `EDGE_PROXY_TELEMETRY_URL` | - | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
-| `EDGE_PROXY_INGEST_TOKEN` | - | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
-| `EDGE_PROXY_TENANT_ID` | - | your tenant **UUID**, claimed in the batch envelope for every record the edge-key cache did not resolve. **Required when the gateway runs with auth disabled** (`TALLY_REQUIRE_API_KEY=false`), which cannot derive a tenant from the credential and refuses a batch claiming none with `422`. A tenant name is rejected at startup |
-| `EDGE_PROXY_ROUTES` | - | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
+| `EDGE_PROXY_TELEMETRY_URL` | (none) | gateway ingest endpoint (`https://gateway/v1/batches`) the proxy POSTs metadata-only spans to; empty disables shipping |
+| `EDGE_PROXY_INGEST_TOKEN` | (none) | **fallback** bearer for those POSTs, used for every record whose `X-Tenant-Key` the edge-key cache did not resolve; normally a resolved `X-Tenant-Key` authenticates. Set it on any self-host without `EDGE_PROXY_KEYS_URL`, or telemetry is shed |
+| `EDGE_PROXY_TENANT_ID` | (none) | your tenant **UUID**, claimed in the batch envelope for every record the edge-key cache did not resolve. **Required when the gateway runs with auth disabled** (`TALLY_REQUIRE_API_KEY=false`), which cannot derive a tenant from the credential and refuses a batch claiming none with `422`. A tenant name is rejected at startup |
+| `EDGE_PROXY_ROUTES` | (none) | hosted multi-provider route table (see below); empty keeps single-origin `EDGE_PROXY_UPSTREAM` |
 | `EDGE_PROXY_ROUTE_MODE` | `host` | `host` (match on hostname, hosted default) or `path` (match+strip a leading prefix) |
-| `EDGE_PROXY_KEYS_URL` | - | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
-| `EDGE_PROXY_SERVICE_TOKEN` | - | server-only bearer token the proxy sends to `EDGE_PROXY_KEYS_URL` (required when it is set) |
+| `EDGE_PROXY_KEYS_URL` | (none) | gateway delta feed `GET /v1/edge/keys?since={cursor}` for key-to-tenant resolution; empty disables it |
+| `EDGE_PROXY_SERVICE_TOKEN` | (none) | server-only bearer token the proxy sends to `EDGE_PROXY_KEYS_URL` (required when it is set) |
 | `EDGE_PROXY_KEYS_REFRESH_INTERVAL` | `45s` | how often the key cache polls the feed; also the proxy-path revocation SLA |
 
 `/healthz` is the one path the proxy owns (liveness); everything else is forwarded.
