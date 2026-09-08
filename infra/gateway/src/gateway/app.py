@@ -1045,6 +1045,72 @@ def _service_token_tenant(x_tenant_id: str | None) -> str:
     return x_tenant_id
 
 
+def _service_token_or_ingest_key_tenant(
+    authorization: str | None, x_tenant_id: str | None, *, action: str
+) -> str:
+    """Resolve the tenant for an endpoint a CUSTOMER calls directly, not only the web server.
+
+    The ``/v1/tenant/*`` control plane is service-token only (Initiative 1 §6) because the web
+    server is its only legitimate caller. A tenant-facing INGEST endpoint is different: the caller
+    is the customer's own billing integration, which holds an ingest api key and will never hold
+    the shared service token. Gating such an endpoint on the service token alone turns every
+    automated post into a 401 the moment ``TALLY_REQUIRE_API_KEY`` is flipped on.
+
+    So both doors are open, and both authenticate:
+
+    * the service token plus ``x-tenant-id`` (the dashboard / any first-party server path), and
+    * the tenant's own ingest key, whose ``AuthResult`` carries the tenant, so no header is
+      trusted and one tenant can never post as another.
+
+    A ``write`` or ``admin`` scope is REQUIRED on the ingest-key path: this writes rows. This is
+    the same shape ``GET /v1/tenant/hmac-key`` uses for the same reason (the caller holds no
+    service token). With auth OFF the dev escape hatch (§10) applies exactly as elsewhere: the
+    tenant comes from ``x-tenant-id`` and an absent header is refused rather than guessed.
+    """
+    settings = app.state.settings
+    if not settings.require_api_key:
+        return _service_token_tenant(x_tenant_id)
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise _error(401, ErrorCode.UNAUTHENTICATED, "missing bearer token")
+    presented = authorization.split(" ", 1)[1].strip()
+
+    service_token = settings.gateway_service_token
+    if service_token and secrets.compare_digest(presented, service_token):
+        # Constant-time compare, then the tenant comes from the header: the service token
+        # authenticates the SERVER, never a tenant.
+        return _service_token_tenant(x_tenant_id)
+
+    auth: ApiKeyAuth = app.state.auth
+    result = auth.authenticate(presented)
+    if result is None:
+        raise _error(401, ErrorCode.UNAUTHENTICATED, "invalid or revoked api key")
+    if not result.can_write:
+        raise _error(403, ErrorCode.FORBIDDEN_SCOPE, f"scope '{result.scope}' cannot {action}")
+    return result.tenant_id
+
+
+def _body_tenant(body: dict, x_tenant_id: str | None) -> str:
+    """Tenant for a service-token endpoint that also accepts a body ``tenant_id``.
+
+    Only a service-token holder reaches these handlers and the web server always sends the tenant
+    it resolved server-side, so there is no live IDOR here. Letting the body silently OUTRANK the
+    header is still the wrong default: it means the one field an attacker would control is the one
+    that wins if the gate is ever loosened. A mismatch is refused instead of picking a winner, and
+    the body is accepted only when it agrees with the header or the header is absent.
+    """
+    body_tenant = body.get("tenant_id")
+    if body_tenant is not None and not isinstance(body_tenant, str):
+        raise HTTPException(status_code=422, detail="tenant_id must be a string")
+    body_tenant = (body_tenant or "").strip()
+    header_tenant = (x_tenant_id or "").strip()
+    if body_tenant and header_tenant and body_tenant != header_tenant:
+        raise HTTPException(
+            status_code=403, detail="tenant_id in body does not match the x-tenant-id header"
+        )
+    return body_tenant or _service_token_tenant(x_tenant_id)
+
+
 @app.exception_handler(TenantNotFoundError)
 def _tenant_not_found_handler(_request: Request, exc: TenantNotFoundError) -> JSONResponse:
     """Map an unresolved tenant identifier onto a clean 404 (CTO-201).
@@ -2786,9 +2852,17 @@ async def ingest_revenue_event(
     Nothing here bypasses the revenue policy. The row is an ordinary ``business_events`` row, and
     the response reports whether the tenant's own configured revenue sources (CTO-194) will count
     it, so a narrowed policy shows up on the first request rather than as a blank dashboard later.
+
+    Authenticated by the tenant's own INGEST KEY (write or admin scope) OR by the control-plane
+    service token, not the service token alone: this is a tenant-facing ingest endpoint that a
+    customer's Chargebee / Recurly / Zuora job posts to with an api key, exactly as
+    ``docs/revenue-api.md`` documents. Service-token-only would 401 every one of those jobs the
+    moment auth is switched on and blank the LTV / CAC / margin views. See
+    ``_service_token_or_ingest_key_tenant``.
     """
-    _require_service_token(authorization)
-    tenant_id = _service_token_tenant(x_tenant_id)
+    tenant_id = _service_token_or_ingest_key_tenant(
+        authorization, x_tenant_id, action="post revenue events"
+    )
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3066,7 +3140,7 @@ async def project_replay(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
+    tenant_id = _body_tenant(body, x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidates = body.get("candidate_models") or []
     if not isinstance(candidates, list) or not all(
@@ -3262,7 +3336,7 @@ async def project_replay_estimate(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
+    tenant_id = _body_tenant(body, x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidate = body.get("candidate_model")
     if not isinstance(candidate, dict) or "provider" not in candidate or "model" not in candidate:
@@ -3550,7 +3624,7 @@ async def project_eval(
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="body must be a JSON object")
 
-    tenant_id = body.get("tenant_id") or _service_token_tenant(x_tenant_id)
+    tenant_id = _body_tenant(body, x_tenant_id)
     feature_tag = body.get("feature_tag")
     candidates = body.get("candidate_models") or []
     if not isinstance(candidates, list) or not all(

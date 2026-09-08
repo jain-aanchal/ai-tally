@@ -1,4 +1,11 @@
 {{- if .Values.gateway.enabled }}
+{{- /* Initiative 1 §6: fail at TEMPLATE time, not as a CrashLoop, when the control-plane gate is
+     switched on without a service token. The gateway refuses to boot in that state (fail closed),
+     and this turns a mystery restart loop into an actionable `helm upgrade` error. Sequencing:
+     create the secret FIRST, then set secretManager.secrets.gatewayServiceToken. */ -}}
+{{- if and .Values.gateway.config.requireApiKey (not .Values.secretManager.secrets.gatewayServiceToken) }}
+{{- fail "gateway.config.requireApiKey is true but secretManager.secrets.gatewayServiceToken is empty: create the control-plane service-token secret in your secret manager, then set that value to its name (see the deploy README)." }}
+{{- end }}
 {{- $tier := "gateway" -}}
 apiVersion: apps/v1
 kind: Deployment

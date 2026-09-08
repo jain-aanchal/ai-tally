@@ -68,7 +68,11 @@ secretsManager:
     # on every /v1/tenant/* call and the gateway refuses to boot without it when
     # gateway.config.requireApiKey is true. Consumed as TALLY_GATEWAY_SERVICE_TOKEN (gateway)
     # and GATEWAY_SERVICE_TOKEN (web).
-    gatewayServiceToken: ai-tally-gateway-service-token
+    # DEFAULTED OFF so an existing release can be upgraded before the secret exists: with a value
+    # here the web pods mount a secret that is not there yet and sit in ContainerCreating, and the
+    # web tier does not need the token at all while gateway.config.requireApiKey is false. Create
+    # the Secrets Manager entry FIRST, then set this (see the deploy README).
+    gatewayServiceToken: ""
   # NOTE on Stripe + HMAC: the Stripe webhook *signing secret* is NOT a gateway env var — it is
   # pasted per-tenant in the dashboard and persisted in Postgres (see db/postgres/0003_*.sql), so it
   # is protected by protecting RDS. Per-tenant HMAC user-id keys (CTO-74) live in the gateway's
