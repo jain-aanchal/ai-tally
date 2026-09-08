@@ -82,10 +82,16 @@ services:
       - ../db/postgres/0002_tenant_connectors.sql:/docker-entrypoint-initdb.d/0002_tenant_connectors.sql:ro
       - ../db/postgres/0003_tenant_stripe_config.sql:/docker-entrypoint-initdb.d/0003_tenant_stripe_config.sql:ro
       - ../db/postgres/0004_tenant_replay_config.sql:/docker-entrypoint-initdb.d/0004_tenant_replay_config.sql:ro
-      # Two migrations share the number 0005. Deliberately NOT renumbered: nothing tracks applied
-      # migrations by filename here, so a rename would silently desync every operator's by-hand
-      # record from the repo for no functional gain. The `0005a_` target below is what keeps
-      # initdb's alphabetical order deterministic. See db/postgres/README.md (CTO-317).
+      # Two migrations share the number 0005. Deliberately NOT renumbered: both files have been
+      # applied to real installs under these names, and nothing here tracks applied migrations, so
+      # a rename would leave every operator with a by-hand record that matches no filename in the
+      # repo. Distinct mount targets are what make initdb's order deterministic; the `0005a_`
+      # target does NOT sequence these two the way its name suggests. postgres:16 runs with
+      # LANG=en_US.utf8 and its entrypoint iterates a bash glob, and glibc collation ignores the
+      # underscore, so initdb applies `0005a_tenant_eval_config.sql` BEFORE `0005_cac_periods.sql`
+      # (a LC_ALL=C sort orders them the other way). Harmless here because the two tables are
+      # independent, but do not use an `a` suffix to order a DEPENDENT pair: it would sequence them
+      # backwards on a fresh boot. See db/postgres/README.md (CTO-317).
       - ../db/postgres/0005_cac_periods.sql:/docker-entrypoint-initdb.d/0005_cac_periods.sql:ro
       - ../db/postgres/0005_tenant_eval_config.sql:/docker-entrypoint-initdb.d/0005a_tenant_eval_config.sql:ro
       - ../db/postgres/0006_tenant_guardrails.sql:/docker-entrypoint-initdb.d/0006_tenant_guardrails.sql:ro
