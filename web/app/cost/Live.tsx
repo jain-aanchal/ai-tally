@@ -48,6 +48,8 @@ import {
   type FeatureCostRow,
   type HiddenCostAlert,
   type Layer,
+  type LayerCoverage,
+  layerCoverage,
   reconciledTotal,
   totalRange,
 } from "@/lib/cost";
@@ -86,6 +88,11 @@ export interface CostPayload {
 
 function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
+}
+
+/** Every known layer at zero, the accumulator both layer-total reductions start from. */
+function zeroLayerRecord(): Record<Layer, number> {
+  return { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 };
 }
 
 /** The live slice fetched from /api/explore for the active filter state. */
@@ -200,13 +207,10 @@ export function CostLive({
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
 
-  const layerTotals = LAYERS.reduce<Record<Layer, number>>(
-    (acc, l) => {
-      acc[l] = sumLayer(featureRows, l);
-      return acc;
-    },
-    { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
-  );
+  const layerTotals = LAYERS.reduce<Record<Layer, number>>((acc, l) => {
+    acc[l] = sumLayer(featureRows, l);
+    return acc;
+  }, zeroLayerRecord());
   const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
   const state = deriveDataState({
     isEmpty: total === 0,
@@ -238,6 +242,43 @@ export function CostLive({
 
   // The breakdown group-by: whatever /api/explore grouped by, or the URL's group-by while it loads.
   const breakdownGroupBy: Dimension = explore.series?.groupBy ?? filterState.groupBy;
+
+  // CTO-244. Layer coverage for the breakdown, empty when the table is not a layer view.
+  //
+  // Both layer paths under-report the same way and neither says so. The live breakdown is a GROUP BY
+  // over spans, so a layer with no spans at all silently vanishes from the table. The offline
+  // fallback is the opposite: it maps the FIXED LAYERS list onto the per-layer sums, so that same
+  // layer appears as a confident "Compute $0.00, 0.0%". layerCoverage turns both into the same
+  // honest answer, and the notice under the table names what is missing and why.
+  //
+  // Span counts only exist on the live path, and they are what separates a genuine measured zero
+  // (spans observed, nothing billed) from an absent layer, so they are passed through where present.
+  const layerFigures = useMemo(() => {
+    if (breakdownGroupBy !== "layer") return null;
+    if (explore.series) {
+      const totals = zeroLayerRecord();
+      const spans: Partial<Record<Layer, number>> = {};
+      for (const r of explore.series.breakdown) {
+        if (!(LAYERS as readonly string[]).includes(r.group)) continue;
+        const l = r.group as Layer;
+        totals[l] = r.totalMicroUsd;
+        spans[l] = r.spanCount;
+      }
+      return { totals, spans };
+    }
+    if (isDefaultSlice) return { totals: layerTotals, spans: {} as Partial<Record<Layer, number>> };
+    return null;
+    // layerTotals is rebuilt from featureRows each render; depend on its values, not its identity.
+  }, [breakdownGroupBy, explore.series, isDefaultSlice, layerTotals]);
+
+  // Memoized because the breakdown rows below derive from it: an identity that changed every render
+  // would defeat their useMemo.
+  const coverage: LayerCoverage[] = useMemo(
+    () =>
+      layerFigures ? layerCoverage(layerFigures.totals, enabledLayers, layerFigures.spans) : [],
+    [layerFigures, enabledLayers],
+  );
+  const blankLayers = coverage.filter((c) => c.totalMicroUsd === null);
 
   // Agent filter options (CTO-241): /api/cost doesn't enumerate agents, but the explore breakdown
   // does once grouped by agent, so the FilterBar offers an Agent dropdown listing the agents in the
@@ -271,11 +312,16 @@ export function CostLive({
   const breakdownRows: ExploreBreakdownRow[] = useMemo(() => {
     if (explore.series) return explore.series.breakdown;
     if (isDefaultSlice) {
-      return LAYERS.map((l) => ({ group: l, totalMicroUsd: layerTotals[l], spanCount: 0 }));
+      // CTO-244: only the layers we actually measured become rows. A layer we have nothing for used
+      // to render "$0.00, 0.0%" off the fixed LAYERS list, which asserted a zero nobody measured;
+      // it is named in the notice under the table instead. See layerCoverage.
+      return coverage
+        .filter((c) => c.totalMicroUsd !== null)
+        .map((c) => ({ group: c.layer, totalMicroUsd: c.totalMicroUsd as number, spanCount: 0 }));
     }
     return [];
-    // layerTotals is recomputed each render from featureRows; depend on its values, not identity.
-  }, [explore.series, isDefaultSlice, layerTotals]);
+    // coverage, like the layerTotals it derives from, is rebuilt each render from featureRows.
+  }, [explore.series, isDefaultSlice, coverage]);
 
   // The search predicate matches the raw group value OR its display label, so "tool" finds the
   // `tools` layer / "Tool calls", and it narrows the breakdown rows and the chart bands identically.
@@ -344,6 +390,11 @@ export function CostLive({
         matchesSearch={matchesSearch}
         unavailable={sliceUnavailable}
       />
+
+      {/* CTO-244: the layers the table above could NOT report, named right where a reader would
+          otherwise read a "$0.00" row, or see a short list and assume it was the whole bill. */}
+      <LayerCoverageNotice blank={blankLayers} />
+
 
       {/* Directly under the 30-day headline on purpose (CTO-209): this card's figure is smaller
           than that total, and the two only reconcile once you have read the coverage line saying
@@ -421,6 +472,40 @@ export function CostLive({
       ) : (
         body
       )}
+    </div>
+  );
+}
+
+/**
+ * The layers the breakdown could not report, and why (CTO-244).
+ *
+ * Follows the /cost-per-customer AllocationNotice pattern rather than inventing a new one: when a
+ * figure is missing, state it in prose beside the table and attach the reason to the blank itself,
+ * so the reader learns what is absent instead of reading a fabricated "$0.00, 0.0%" row, or a short
+ * table with no hint that a layer is missing from it. Renders nothing when every layer has a
+ * figure, and nothing when the table is not a layer view, which is the ordinary case either way.
+ */
+function LayerCoverageNotice({ blank }: { blank: readonly LayerCoverage[] }) {
+  if (blank.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4 text-sm text-muted">
+      <p>
+        {blank.length === 1 ? "One layer has" : `${blank.length} layers have`} no figure for this
+        window, so {blank.length === 1 ? "it is" : "they are"} left out of the table above rather
+        than shown as zero:
+      </p>
+      <ul className="mt-2 space-y-1">
+        {blank.map((c) => (
+          <li key={c.layer} className="flex items-baseline gap-2">
+            <span className="font-medium text-fg">{LAYER_LABEL[c.layer]}</span>
+            {/* The blank carries a short reason so the row still explains itself in isolation; the
+                full explanation is the prose beside it, so neither channel merely repeats the other
+                (a screen reader would otherwise hear the same sentence twice). */}
+            <Blank reason={`no ${LAYER_LABEL[c.layer]} figure for this window`} />
+            <span>{c.reason}.</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

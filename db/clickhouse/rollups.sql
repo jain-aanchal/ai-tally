@@ -55,10 +55,6 @@ ALTER TABLE daily_feature_rollup
     ADD COLUMN IF NOT EXISTS UnknownUsageSpanCount UInt64 DEFAULT 0 AFTER SpanCount,
     ADD COLUMN IF NOT EXISTS UnpricedSpanCount     UInt64 DEFAULT 0 AFTER UnknownUsageSpanCount;
 
-ALTER TABLE hourly_feature_rollup
-    ADD COLUMN IF NOT EXISTS UnknownUsageSpanCount UInt64 DEFAULT 0 AFTER SpanCount,
-    ADD COLUMN IF NOT EXISTS UnpricedSpanCount     UInt64 DEFAULT 0 AFTER UnknownUsageSpanCount;
-
 DROP VIEW IF EXISTS daily_feature_rollup_mv;
 CREATE MATERIALIZED VIEW daily_feature_rollup_mv
 TO daily_feature_rollup
@@ -113,6 +109,15 @@ CREATE TABLE IF NOT EXISTS hourly_feature_rollup
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(Hour)
 ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Hour);
+
+-- CTO-244 migration for an EXISTING deployment, the hourly half of the two steps documented above
+-- the daily ALTER. It must sit BELOW the CREATE TABLE it alters: the ClickHouse initdb entrypoint
+-- runs this file top to bottom against an EMPTY database, so an ALTER placed above the CREATE hits
+-- UNKNOWN_TABLE and aborts the whole boot. Below the CREATE it is correct both ways round: a no-op
+-- on a fresh database (the columns are already in the CREATE) and the actual migration on replay.
+ALTER TABLE hourly_feature_rollup
+    ADD COLUMN IF NOT EXISTS UnknownUsageSpanCount UInt64 DEFAULT 0 AFTER SpanCount,
+    ADD COLUMN IF NOT EXISTS UnpricedSpanCount     UInt64 DEFAULT 0 AFTER UnknownUsageSpanCount;
 
 DROP VIEW IF EXISTS hourly_feature_rollup_mv;
 CREATE MATERIALIZED VIEW hourly_feature_rollup_mv

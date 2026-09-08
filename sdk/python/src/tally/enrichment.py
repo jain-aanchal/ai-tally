@@ -52,6 +52,10 @@ class EnrichmentResult:
     drift: float | None
     drift_exceeded: bool
     catalog_miss: bool
+    # CTO-244: distinct from catalog_miss. The catalog COULD price this model; we simply were not
+    # told enough usage to do it. Both land NULL / 'unpriced', but they are different diagnoses and
+    # the rollups count them separately.
+    usage_unknown: bool = False
 
 
 def _int_or_none(v: object) -> int | None:
@@ -71,7 +75,10 @@ def enrich_cost(
     - server value (from the catalog) overwrites ``gen_ai.cost.estimated_micro_usd``;
     - ``gen_ai.cost.price_catalog_version`` is set;
     - the client-emitted value is treated as a hint and compared for drift;
-    - on a catalog miss the cost key is removed and ``catalog_miss`` is True (span still returned).
+    - on a catalog miss the cost key is removed and ``catalog_miss`` is True (span still returned);
+    - CTO-244: when the model is priceable but no usable token counts were reported the cost key
+      is likewise removed and ``usage_unknown`` is True, so the row lands NULL / 'unpriced'
+      rather than claiming a priced 0.
 
     Tool and vector spans (``gen_ai.operation.name`` of ``tool``/``vector``) are priced per call
     and take the branch in :func:`_enrich_call_cost`; everything else is priced from token usage.
@@ -104,6 +111,23 @@ def enrich_cost(
     # still renders blank rather than 0.
     operation = out.get(GenAI.OPERATION_NAME)
     is_embedding = isinstance(operation, str) and operation.lower() in _EMBEDDING_OPERATIONS
+
+    # CTO-244: a priceable model with UNKNOWN usage is unpriced, not free. compute_cost_micro_usd
+    # will happily price zero tokens, so coercing an absent count to 0 asserts a real billed call
+    # cost $0.00 and, worse, asserts it was priced. Drop the keys instead so the row lands NULL /
+    # 'unpriced'. The requirement differs by operation because the evidence does: a chat call has
+    # two token sides, an embedding call has only an input side by design. Applying the chat rule
+    # to embeddings would mark every embeddings span unknown and undo the CTO-243 fix above.
+    _in = _int_or_none(out.get(GenAI.USAGE_INPUT_TOKENS))
+    _out_tok = _int_or_none(out.get(GenAI.USAGE_OUTPUT_TOKENS))
+    usage_unknown = _in is None if is_embedding else (_in is None or _out_tok is None)
+    if usage_unknown:
+        out.pop(GenAI.COST_ESTIMATED_MICRO_USD, None)
+        out.pop(GenAI.COST_PRICE_CATALOG_VERSION, None)
+        return EnrichmentResult(
+            out, None, client_cost, None, False, catalog_miss=False, usage_unknown=True
+        )
+
     if is_embedding:
         server_cost, version = compute_embedding_cost_micro_usd(
             catalog,
