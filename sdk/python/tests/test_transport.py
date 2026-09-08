@@ -6,7 +6,7 @@ from __future__ import annotations
 import threading
 
 from tally.egress import BackoffPolicy
-from tally.transport import BatchingTransport
+from tally.transport import BatchingTransport, SendResult, _retry_hint_ms
 from tally.wire import decode_request
 
 
@@ -200,3 +200,143 @@ def test_sender_error_never_raises():
     # Must not raise; failure recorded to self-observability.
     assert t.flush_once() is False
     assert t.obs.internal_error_count >= 1
+
+
+# --- #315: bounded retry that honors the gateway's own instruction ---
+
+
+class _ScriptedSender:
+    """Replays a scripted list of answers, then 200s. Records every (headers, body) POSTed.
+
+    An entry is a ``SendResult``, a bare status int (the older sender shape), or an exception
+    instance to raise (a transport-level failure).
+    """
+
+    def __init__(self, script: list[object]) -> None:
+        self._script = list(script)
+        self.calls: list[tuple[str, dict, bytes]] = []
+
+    def __call__(self, url: str, headers: dict, body: bytes):
+        self.calls.append((url, headers, body))
+        if not self._script:
+            return SendResult(200)
+        nxt = self._script.pop(0)
+        if isinstance(nxt, BaseException):
+            raise nxt
+        return nxt
+
+
+def test_503_retry_hint_zero_succeeds_on_attempt_two():
+    # The exact shape that killed a backfill at 450k of 512,056 spans: the gateway shed under load
+    # and said "retry", with server_hints.retry_after_ms = 0.
+    sender = _ScriptedSender([SendResult(503, 0)])
+    t = _transport(sender)
+    t.export({"gen_ai.system": "openai"})
+    assert t.flush_once() is False  # shed answer, batch held, not thrown away
+    assert t.pending() == 1
+    assert t.flush_once() is True
+    assert len(sender.calls) == 2
+    assert t.shed_counts() == {
+        "undelivered_span_count": 0,
+        "rejected_span_count": 0,
+        "buffer_overflow_span_count": 0,
+    }
+
+
+def test_resend_is_byte_identical():
+    # The property that keeps a retry a replay rather than a duplicate: identical bytes means a
+    # stable batch_id, which the gateway's (tenant_id, batch_id) idempotency store recognizes.
+    # Duplicate spans permanently pollute the SummingMergeTree rollups (#311).
+    sender = _ScriptedSender([SendResult(503, 0), ConnectionError("blip"), SendResult(500)])
+    t = _transport(sender)
+    t.export({"gen_ai.system": "openai", "n": 1})
+    t.export({"gen_ai.system": "anthropic", "n": 2})
+    for _ in range(4):
+        t.flush_once()
+    assert len(sender.calls) == 4
+    bodies = {body for (_, _, body) in sender.calls}
+    assert len(bodies) == 1  # byte-for-byte identical, not merely the same batch_id
+    assert len({decode_request(b.decode()).batch_id for b in bodies}) == 1
+
+
+def test_retry_after_hint_is_honored_and_clamped():
+    sender = _ScriptedSender([SendResult(429, 3_000)])
+    t = _transport(sender, backoff=BackoffPolicy(base_ms=10, max_ms=30_000))
+    t.export({"n": 1})
+    t.flush_once()
+    # The gateway's wait wins over our own (which would be ~10ms here).
+    assert t.current_backoff_ms() == 3_000
+    # ...but is clamped to the ceiling, so a server asking for a five minute pause cannot stall us.
+    t2 = _transport(
+        _ScriptedSender([SendResult(429, 300_000)]), backoff=BackoffPolicy(max_ms=2_000)
+    )
+    t2.export({"n": 1})
+    t2.flush_once()
+    assert t2.current_backoff_ms() == 2_000
+
+
+def test_retry_after_zero_falls_back_to_our_backoff():
+    # "No specific delay" is not licence to hammer a gateway that is already shedding.
+    sender = _ScriptedSender([SendResult(503, 0)])
+    t = _transport(sender, backoff=BackoffPolicy(base_ms=100, max_ms=1_000, jitter=0.0))
+    t.export({"n": 1})
+    t.flush_once()
+    assert t.current_backoff_ms() == 100
+
+
+def test_retry_bound_exhausted_sheds_and_counts():
+    sender = _ScriptedSender([SendResult(503, 0)] * 10)
+    t = _transport(sender, retry_max=3)
+    for i in range(4):
+        t.export({"n": i})
+    assert t.flush_once() is False
+    assert t.flush_once() is False
+    assert t.flush_once() is False
+    assert len(sender.calls) == 3  # bounded: a down gateway fails fast, it does not hang forever
+    assert t.pending() == 0
+    # Shed, and COUNTED. The count is what makes the loss honest rather than silent.
+    assert t.shed_counts()["undelivered_span_count"] == 4
+    assert t.obs.dropped_span_count == 4
+
+
+def test_non_retryable_status_is_not_retried():
+    sender = _ScriptedSender([SendResult(400)])
+    t = _transport(sender, retry_max=5)
+    t.export({"n": 1})
+    assert t.flush_once() is False
+    assert t.pending() == 0  # terminal on the first answer, no resend
+    assert len(sender.calls) == 1
+    assert t.shed_counts()["rejected_span_count"] == 1
+    assert t.shed_counts()["undelivered_span_count"] == 0
+
+
+def test_unauthorized_is_not_retried():
+    sender = _ScriptedSender([SendResult(401)])
+    t = _transport(sender, retry_max=5)
+    t.export({"n": 1})
+    t.flush_once()
+    t.flush_once()  # buffer empty now; must not have re-sent the refused batch
+    assert len(sender.calls) == 1
+    assert t.shed_counts()["rejected_span_count"] == 1
+
+
+def test_bare_status_sender_still_works():
+    # The older Sender shape (an int) stays supported for callers with their own sender.
+    sender = _ScriptedSender([503, 200])
+    t = _transport(sender)
+    t.export({"n": 1})
+    assert t.flush_once() is False
+    assert t.flush_once() is True
+
+
+def test_retry_hint_parsing():
+    # Header form (delay-seconds) wins over the body.
+    assert _retry_hint_ms({"Retry-After": "2"}, b'{"server_hints":{"retry_after_ms":9000}}') == 2000
+    # The 503 shed body: a real 0, distinct from "no hint at all".
+    assert _retry_hint_ms({}, b'{"status":"retry","server_hints":{"retry_after_ms":0}}') == 0
+    # The 429 body puts it at the top level (gateway/app.py).
+    assert _retry_hint_ms({}, b'{"retry_after_ms":1500}') == 1500
+    # Garbage never stalls the worker: no hint, fall back to our own backoff.
+    assert _retry_hint_ms({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, b"") is None
+    assert _retry_hint_ms({}, b"not json") is None
+    assert _retry_hint_ms({}, b'{"retry_after_ms":"soon"}') is None

@@ -10,9 +10,17 @@ the ingest key as bearer. The design guarantees, all non-negotiable (CLAUDE.md, 
   thread. A full buffer drops the oldest span and counts it (backpressure, drop-oldest).
 - **Never raises.** Every path runs inside the safety boundary; a transport error is recorded to
   self-observability, never propagated.
-- **Buffering + retry.** A failed flush retries the whole batch (idempotent by ``batch_id``) with
-  capped exponential backoff + jitter, bounded by ``retry_max``; an exhausted batch is dropped with
-  a counter, never retried forever.
+- **Buffering + bounded retry, then shed and count.** A *retryable* failure (transport error, 429,
+  any 5xx) resends the exact same bytes, so ``batch_id`` is stable and the gateway's
+  ``(tenant_id, batch_id)`` idempotency key turns the resend into a replay rather than a duplicate.
+  The wait honors the gateway's own hint (``Retry-After``, or ``server_hints.retry_after_ms``, which
+  is what a 503 ``status: retry`` carries) clamped to the backoff ceiling, else capped exponential
+  backoff + jitter. The attempt count is bounded by ``retry_max``; an exhausted batch is shed and
+  COUNTED (``undelivered_span_count``), never retried forever and never silently forgotten. A
+  *non-retryable* refusal (400, 401, 403, 422) is terminal on the first answer: resending identical
+  bytes would only buy a second refusal, so the batch is shed and counted as
+  ``rejected_span_count``. This mirrors ``infra/edge-proxy/internal/telemetry/telemetry.go``, which
+  is the reference implementation of the pattern (CTO-36, #315).
 - **Drains on shutdown.** :meth:`flush` and an ``atexit`` hook drain with a bounded timeout so a
   short-lived script still ships its spans.
 
@@ -33,6 +41,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from tally.egress import BackoffPolicy
 from tally.hmac_keys import HmacKeyBootstrap
@@ -43,15 +52,87 @@ _log = logging.getLogger("tally")
 
 DEFAULT_ENDPOINT = "https://ingest.ai-tally.com"
 
-#: Sends one POST. Returns the HTTP status code; raises on a network-level failure. Injectable.
-Sender = Callable[[str, dict[str, str], bytes], int]
+@dataclass(frozen=True, slots=True)
+class SendResult:
+    """One POST's answer: the status, plus how long the gateway asked us to wait before a resend.
+
+    ``retry_after_ms`` is ``None`` when the gateway named no delay and the client falls back to its
+    own backoff. ``0`` is a real, distinct value: the gateway's overload shed sends
+    ``server_hints.retry_after_ms = 0`` (gateway/backpressure.py) meaning "retry, we have no
+    specific delay for you", not "hammer us". The client answers a 0 with its own bounded backoff,
+    which is the same treatment the edge proxy gives an absent Retry-After.
+    """
+
+    status: int
+    retry_after_ms: int | None = None
 
 
-def _urllib_sender(url: str, headers: dict[str, str], body: bytes, *, timeout: float = 5.0) -> int:
-    """Default POST sender over ``urllib`` (stdlib). Raises ``urllib.error.URLError`` on failure."""
+#: Sends one POST. Returns a :class:`SendResult`, or a bare status code (the older shape, still
+#: accepted so an injected test sender or a caller's own sender keeps working); raises on a
+#: network-level failure. Injectable.
+Sender = Callable[[str, dict[str, str], bytes], "int | SendResult"]
+
+#: Bounds how much of an ingest error body is read to find a retry hint. The ack is a small JSON
+#: object; the cap only stops a misconfigured endpoint that streams from making us buffer without
+#: limit. Nothing from the body is logged or stored: only the integer hint is used.
+_MAX_ACK_BYTES = 64 * 1024
+
+
+def _retry_hint_ms(headers: object, body: bytes) -> int | None:
+    """Extract the gateway's requested wait, preferring the header, then the body hint.
+
+    ``Retry-After`` is read in its delay-seconds form, which is what the gateway's rate limiter and
+    its overload shed both send (gateway/app.py). An HTTP-date form or garbage yields ``None`` and
+    the caller falls back to its own backoff, so a malformed header can never stall the worker.
+    """
+    get = getattr(headers, "get", None)
+    if callable(get):
+        raw = get("Retry-After")
+        if raw:
+            try:
+                secs = int(str(raw).strip())
+            except ValueError:
+                secs = -1
+            if secs >= 0:
+                return secs * 1000
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - a body we cannot parse simply carries no hint
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    hints = parsed.get("server_hints")
+    nested = hints.get("retry_after_ms") if isinstance(hints, dict) else None
+    # A 429 states it at the top level, a 503 shed under server_hints (gateway/app.py).
+    for candidate in (parsed.get("retry_after_ms"), nested):
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            return candidate
+    return None
+
+
+def _urllib_sender(
+    url: str, headers: dict[str, str], body: bytes, *, timeout: float = 5.0
+) -> SendResult:
+    """Default POST sender over ``urllib`` (stdlib). Raises ``urllib.error.URLError`` on failure.
+
+    urllib raises ``HTTPError`` for every non-2xx, but an HTTPError *is* the response, so the 429 /
+    503 answers that carry a retry hint are read here rather than collapsing into a bare exception
+    that loses the gateway's own instruction (#315).
+    """
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https endpoint
-        return int(resp.status)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed endpoint
+            return SendResult(int(resp.status))
+    except urllib.error.HTTPError as err:
+        try:
+            ack = err.read(_MAX_ACK_BYTES)
+        except Exception:  # noqa: BLE001 - a body we cannot read simply carries no hint
+            ack = b""
+        finally:
+            err.close()
+        return SendResult(int(err.code), _retry_hint_ms(err.headers, ack))
 
 
 def fetch_hmac_key(
@@ -135,8 +216,19 @@ class BatchingTransport:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._consecutive_failures = 0
-        # A batch pinned in flight across retries, so its batch_id is stable (idempotent resend).
-        self._pending: tuple[BatchRequest, int] | None = None
+        # A batch pinned in flight across retries together with the EXACT bytes that were sent, so
+        # every resend is byte-identical and batch_id is stable. Re-encoding per attempt would be
+        # the bug that matters now that a duplicate span permanently pollutes the SummingMergeTree
+        # rollups (#311): the gateway's (tenant_id, batch_id) idempotency store only recognizes a
+        # replay if the replay is actually the same batch (#315).
+        self._pending: tuple[BatchRequest, bytes, int] | None = None
+        # The gateway's own requested wait from the last retryable answer, or None for "it named
+        # none, use our backoff". 0 is a real value and means "retry, no specific delay".
+        self._retry_after_ms: int | None = None
+        # Spans metered and then lost, kept apart because the two losses have different fixes: a
+        # spent retry budget is an ingest availability problem, a refusal is a client-side one.
+        self.undelivered_span_count = 0
+        self.rejected_span_count = 0
         self._atexit_registered = False
 
     # --- Exporter protocol (hot path) ---
@@ -162,6 +254,14 @@ class BatchingTransport:
         # tenant_id="" - the bearer key decides the tenant at the gateway (CTO-260 §3.1).
         return BatchRequest(tenant_id="", sdk_version=self._sdk_version, resource_spans=spans)
 
+    @staticmethod
+    def _is_retryable(status: int) -> bool:
+        """Backpressure and server faults are transient by definition; the same bytes are accepted
+        once ingest recovers. Every other non-2xx is the gateway saying this batch is wrong (bad
+        credential, wrong tenant, failed validation), and a resend only buys a second refusal. This
+        is exactly the edge proxy's split (telemetry.go ``attempt``)."""
+        return status == 429 or status >= 500
+
     def flush_once(self) -> bool:
         """Flush a single batch. Returns True on delivery, False on empty/failure. Never raises.
 
@@ -171,55 +271,105 @@ class BatchingTransport:
         """
         with self._flush_lock:
             # Assemble or reclaim the in-flight batch, then pin it before the send so a mid-send
-            # failure (even a thread death) can never lose the already-dequeued spans.
+            # failure (even a thread death) can never lose the already-dequeued spans. The body is
+            # encoded once, with the batch, and every attempt resends those same bytes.
             with self._lock:
                 if self._pending is not None:
-                    batch, attempts = self._pending
+                    batch, body, attempts = self._pending
                 else:
                     if not self._buf:
                         return False
                     n = min(self.max_batch_size, len(self._buf))
                     spans = [self._buf.popleft() for _ in range(n)]
                     batch = self._build_batch(spans)
+                    body = encode_request(batch).encode("utf-8")
                     attempts = 0
-                    self._pending = (batch, attempts)
+                    self._pending = (batch, body, attempts)
 
             headers = {
                 "Authorization": f"Bearer {self._key}",
                 "Content-Type": "application/json",
             }
-            body = encode_request(batch).encode("utf-8")
+            ok = False
+            retryable = True  # a transport error is the most retryable failure there is
+            status: int | None = None
+            hint: int | None = None
             try:
-                status = self._sender(self._url, headers, body)
+                result = self._sender(self._url, headers, body)
+                if isinstance(result, SendResult):
+                    status, hint = result.status, result.retry_after_ms
+                else:
+                    status = int(result)
                 ok = 200 <= status < 300
+                retryable = ok or self._is_retryable(status)
             except Exception as exc:  # noqa: BLE001 - transport errors must never escape
                 self.obs.record_error(exc, "BatchingTransport.flush")
-                ok = False
 
             with self._lock:
                 if ok:
                     self._pending = None
                     self._consecutive_failures = 0
+                    self._retry_after_ms = None
                     return True
 
-                # Failure: keep the batch pinned for retry, bounded by retry_max (idempotent resend
-                # by batch_id).
                 attempts += 1
                 self._consecutive_failures += 1
-                if attempts >= self.retry_max:
-                    self.obs.dropped_span_count += len(batch.resource_spans)
-                    self.obs.record_error(
-                        RuntimeError(f"batch dropped after {attempts} attempts"),
-                        "BatchingTransport.flush",
-                    )
-                    self._pending = None
+                self._retry_after_ms = hint
+                if not retryable:
+                    # Terminal on the first answer: shed and count, no resend. Counted apart from a
+                    # spent budget because a 401 is fixed by the operator, not by waiting.
+                    self.rejected_span_count += len(batch.resource_spans)
+                    self._shed_locked(batch, f"refused with status {status}")
+                elif attempts >= self.retry_max:
+                    self.undelivered_span_count += len(batch.resource_spans)
+                    self._shed_locked(batch, f"undelivered after {attempts} attempts")
                 else:
-                    self._pending = (batch, attempts)
+                    # Keep the batch, and its bytes, pinned for an identical resend.
+                    self._pending = (batch, body, attempts)
             return False
 
+    def _shed_locked(self, batch: BatchRequest, why: str) -> None:
+        """Terminal loss of one batch. Counted and logged, never quietly forgotten and never
+        reported as a success: an unshipped span is a real, visible number (CLAUDE.md, honest under
+        uncertainty). Caller holds _lock."""
+        lost = len(batch.resource_spans)
+        self.obs.dropped_span_count += lost
+        self.obs.record_error(
+            RuntimeError(f"batch dropped: {why}"), "BatchingTransport.flush"
+        )
+        self._pending = None
+        self._retry_after_ms = None
+        # Warn, not debug: dropped spend is the one transport event an operator has to see.
+        _log.warning("tally: shed %d span(s), batch %s", lost, why)
+
+    def shed_counts(self) -> dict[str, int]:
+        """Spans this transport metered and could not ship, by cause. The honest total the caller
+        needs to know a run lost data (#315)."""
+        with self._lock:
+            return {
+                "undelivered_span_count": self.undelivered_span_count,
+                "rejected_span_count": self.rejected_span_count,
+                "buffer_overflow_span_count": (
+                    self.obs.dropped_span_count
+                    - self.undelivered_span_count
+                    - self.rejected_span_count
+                ),
+            }
+
+    def _has_pending(self) -> bool:
+        with self._lock:
+            return self._pending is not None
+
     def current_backoff_ms(self) -> float:
+        """Wait before the next attempt. The gateway's own hint wins when it named one, clamped to
+        the backoff ceiling so a server asking for a five minute pause cannot stall the worker; a
+        hinted 0 falls back to our jittered backoff, because "no specific delay" is not licence to
+        hammer a gateway that is already shedding."""
         with self._lock:
             failures = self._consecutive_failures
+            hint = self._retry_after_ms
+        if hint is not None and hint > 0:
+            return float(min(hint, self.backoff.max_ms))
         return self.backoff.delay_ms(failures)
 
     # --- background loop ---
