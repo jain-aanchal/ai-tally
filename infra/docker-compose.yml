@@ -106,7 +106,7 @@ services:
       # in-process cache that dies with the worker, so a batch retried across a restart is accepted
       # twice and its spend counted twice. initdb only fires on a first boot against an empty
       # volume, so an already-running stack must apply this migration by hand (`make psql`).
-      - ../db/postgres/0031_ingest_batch_idempotency.sql:/docker-entrypoint-initdb.d/0031_ingest_batch_idempotency.sql:ro
+      - ../db/postgres/0032_ingest_batch_idempotency.sql:/docker-entrypoint-initdb.d/0032_ingest_batch_idempotency.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s

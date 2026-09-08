@@ -5,7 +5,7 @@ WHY. :class:`tally.wire.IdempotencyCache` is a dict inside one process. The reco
 with the worker, so a client retrying across a gateway restart, deploy, crash or scale-out was
 accepted twice and its spans written twice. ``otel_spans`` had no dedup either, so the second copy
 stayed forever and inflated every cost sum by exactly the replayed spend. See
-``db/postgres/0031_ingest_batch_idempotency.sql`` for the full rationale and the state machine.
+``db/postgres/0032_ingest_batch_idempotency.sql`` for the full rationale and the state machine.
 
 THE SHAPE. :class:`BatchIdempotency` is what the ingest path talks to. It keeps the in-process cache
 as a fast path in front of a durable Postgres store, but the DURABLE LAYER IS THE SOURCE OF TRUTH:
@@ -270,12 +270,12 @@ def build_batch_idempotency(settings: Settings) -> BatchIdempotency:
         if settings.idempotency_durable_required:
             raise RuntimeError(
                 "durable batch idempotency is required but ingest_batch_idempotency is "
-                f"unreachable ({exc}); apply db/postgres/0031_ingest_batch_idempotency.sql"
+                f"unreachable ({exc}); apply db/postgres/0032_ingest_batch_idempotency.sql"
             ) from exc
         logger.warning(
             "durable batch idempotency UNAVAILABLE (%s); falling back to the in-process cache "
             "alone, which does not survive a restart, so a batch replayed across one will be "
-            "accepted twice. Apply db/postgres/0031_ingest_batch_idempotency.sql, and set "
+            "accepted twice. Apply db/postgres/0032_ingest_batch_idempotency.sql, and set "
             "TALLY_IDEMPOTENCY_DURABLE_REQUIRED=true to make this a startup failure instead",
             exc,
         )

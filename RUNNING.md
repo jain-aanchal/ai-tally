@@ -198,7 +198,7 @@ which dollars were counted twice; refusing is visible and costs only a delay.
 boot against an empty volume, so an existing stack needs the migration by hand:
 
 ```bash
-make psql < ../db/postgres/0031_ingest_batch_idempotency.sql   # from infra/
+make psql < ../db/postgres/0032_ingest_batch_idempotency.sql   # from infra/
 ```
 
 Then restart the gateway and confirm the boot line above.

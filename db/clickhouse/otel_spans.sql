@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS otel_spans
 -- idempotency was in-process only, so a client retrying a batch across a gateway restart wrote its
 -- spans again and inflated every cost sum by exactly the replayed spend. One local run left 333,689
 -- rows holding 271,571 distinct SpanIds. The primary fix is the durable idempotency store (see
--- db/postgres/0031_ingest_batch_idempotency.sql); this engine is the BACKSTOP for whatever slips
+-- db/postgres/0032_ingest_batch_idempotency.sql); this engine is the BACKSTOP for whatever slips
 -- past it, and it is the same pattern business_events has used since CTO-176.
 --
 -- WHY THE SORTING KEY HAD TO CHANGE. ReplacingMergeTree collapses rows that agree on the SORTING
