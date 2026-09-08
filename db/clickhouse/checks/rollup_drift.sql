@@ -33,10 +33,28 @@
 -- is normal on any install older than its retention window; it means "the rollups are the only
 -- record of this period", which is what they are for.
 --
--- Derivability is judged per (TenantId, Day) rather than per rollup grain, and that is exact rather
--- than approximate: otel_spans is PARTITION BY toDate(Timestamp) and the TTL DELETE is a function of
--- Timestamp alone, so a day's rows expire together. A day cannot be half-present. The hourly rollup
--- is judged on toDate(Hour) for the same reason.
+-- Derivability is judged per (TenantId, Day) rather than per rollup grain, and it is judged against
+-- the RETENTION FLOOR, not merely against "raw still has a row for this day". The difference matters
+-- and an earlier revision of this file got it wrong in prose that reviewers then trusted, so it is
+-- spelled out. otel_spans is PARTITION BY toDate(Timestamp), but its TTL DELETE is a PER-ROW
+-- expression (and storage_tiering.sql's per-tenant override compiles to a per-row multiIf on top of
+-- it). ClickHouse only drops whole partitions on expiry when ttl_only_drop_parts = 1; at the default
+-- 0 it expires INDIVIDUAL ROWS during merges. So on the one day that straddles the retention
+-- boundary, the morning can already be gone while the afternoon survives, and a day CAN be
+-- half-present. Judging on "raw has a row here" would call such a day derivable, compare a rollup
+-- against a truncated truth, report the missing morning as drift, and invite the rebuild to delete
+-- money that exists nowhere else.
+--
+-- So a day counts as derivable only if raw still holds rows for it AND it is not at or within one
+-- day of the moment its rows become eligible for deletion. That moment is read from
+-- system.parts.delete_ttl_info_min, which is ClickHouse's own evaluation of the DELETE TTL over the
+-- rows of each part, so it is exact for the default policy and for any per-tenant override without
+-- this file parsing or assuming anything about the DDL. Since one partition is one day, a day whose
+-- earliest expiry moment has arrived is treated as possibly truncated and is reported as
+-- not_derivable. Partitions are per-day rather than per (tenant, day), so a day at risk for the
+-- shortest-retention tenant is treated as at risk for every tenant on that day: that over-reports
+-- uncertainty, which is the safe direction. The hourly rollup is judged on toDate(Hour) so an hour
+-- inherits its day's verdict.
 --
 -- Money is Decimal64(8) USD on both sides of every comparison, so the equality is exact and a
 -- mismatch is real, never a rounding artifact. Each drift is also shown as integer micro-USD, which
@@ -49,17 +67,23 @@
 --    would cheerfully report that badly inflated rollups agree with badly inflated raw spans. Fail
 --    loudly instead of reporting a false clean bill of health. If this throws, run
 --    `make ch-migrate-otel-engine` first (CTO-245).
+--
+--    Read through scalar subqueries and with no FROM clause of its own, deliberately. A throwIf in
+--    the select list of a query filtered to one table name is not evaluated at all when that name is
+--    absent: zero matching rows means zero evaluations and the query SUCCEEDS. A guard that passes
+--    precisely when the table it guards is missing is not a guard. A missing row yields the String
+--    default '' here, which fails the condition and throws, which is the right answer.
 SELECT
-    engine,
-    sorting_key,
+    (SELECT engine      FROM system.tables
+      WHERE database = currentDatabase() AND name = 'otel_spans') AS engine,
+    (SELECT sorting_key FROM system.tables
+      WHERE database = currentDatabase() AND name = 'otel_spans') AS sorting_key,
     -- throwIf aborts the whole script when the condition holds; it returns 0 when it does not, so a
     -- printed 0 here is the check PASSING. There is no truthier return value to give it.
     throwIf(
         engine != 'ReplacingMergeTree' OR NOT endsWith(sorting_key, 'TraceId, SpanId'),
-        'otel_spans is not a ReplacingMergeTree keyed on span identity, so FINAL does not dedupe and this check cannot establish truth. Run make ch-migrate-otel-engine first (CTO-245).'
+        'otel_spans is missing, or is not a ReplacingMergeTree keyed on span identity, so FINAL does not dedupe and this check cannot establish truth. Run make ch-migrate-otel-engine first (CTO-245).'
     ) AS preflight_throws_if_broken
-FROM system.tables
-WHERE database = currentDatabase() AND name = 'otel_spans'
 FORMAT Vertical;
 
 -- 1. SUMMARY: one row per rollup per class. This is the answer to "is this deployment affected, and
@@ -93,7 +117,11 @@ FROM
         sum(t_sc) AS raw_spans,
         sum(r_ec) AS rollup_cost,
         sum(t_ec) AS raw_cost,
-        (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) FROM otel_spans GROUP BY 1, 2) AS derivable
+        (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) AS Day FROM otel_spans
+             WHERE toDate(Timestamp) NOT IN (SELECT toDate(partition) FROM system.parts
+                    WHERE database = currentDatabase() AND table = 'otel_spans' AND active
+                      AND delete_ttl_info_min != toDateTime(0)
+                      AND delete_ttl_info_min <= now() + INTERVAL 1 DAY) GROUP BY 1, 2) AS derivable
     FROM
     (
         SELECT TenantId, Day, FeatureTag, GenAiResponseModel,
@@ -133,8 +161,13 @@ FROM
         sum(t_sc) AS raw_spans,
         sum(r_ec) AS rollup_cost,
         sum(t_ec) AS raw_cost,
-        -- Judged on the DAY the hour falls in: raw retention expires whole days, never single hours.
-        (TenantId, toDate(Hour)) IN (SELECT TenantId, toDate(Timestamp) FROM otel_spans GROUP BY 1, 2) AS derivable
+        -- Judged on the DAY the hour falls in, against the same retention floor the daily rollups
+        -- use: an hour is derivable exactly when its day is.
+        (TenantId, toDate(Hour)) IN (SELECT TenantId, toDate(Timestamp) AS Day FROM otel_spans
+             WHERE toDate(Timestamp) NOT IN (SELECT toDate(partition) FROM system.parts
+                    WHERE database = currentDatabase() AND table = 'otel_spans' AND active
+                      AND delete_ttl_info_min != toDateTime(0)
+                      AND delete_ttl_info_min <= now() + INTERVAL 1 DAY) GROUP BY 1, 2) AS derivable
     FROM
     (
         SELECT TenantId, Hour, FeatureTag, GenAiResponseModel,
@@ -174,7 +207,11 @@ FROM
         sum(t_sc) AS raw_spans,
         sum(r_ec) AS rollup_cost,
         sum(t_ec) AS raw_cost,
-        (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) FROM otel_spans GROUP BY 1, 2) AS derivable
+        (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) AS Day FROM otel_spans
+             WHERE toDate(Timestamp) NOT IN (SELECT toDate(partition) FROM system.parts
+                    WHERE database = currentDatabase() AND table = 'otel_spans' AND active
+                      AND delete_ttl_info_min != toDateTime(0)
+                      AND delete_ttl_info_min <= now() + INTERVAL 1 DAY) GROUP BY 1, 2) AS derivable
     FROM
     (
         SELECT TenantId, Day, AccountIdHash, FeatureTag, GenAiOperation,
@@ -232,7 +269,11 @@ FROM
         FROM otel_spans FINAL
         GROUP BY 1, 2, 3, 4
     )
-    WHERE (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) FROM otel_spans GROUP BY 1, 2)
+    WHERE (TenantId, Day) IN (SELECT TenantId, toDate(Timestamp) AS Day FROM otel_spans
+             WHERE toDate(Timestamp) NOT IN (SELECT toDate(partition) FROM system.parts
+                    WHERE database = currentDatabase() AND table = 'otel_spans' AND active
+                      AND delete_ttl_info_min != toDateTime(0)
+                      AND delete_ttl_info_min <= now() + INTERVAL 1 DAY) GROUP BY 1, 2)
     GROUP BY TenantId, Day, FeatureTag, GenAiResponseModel
     HAVING rollup_spans != raw_spans OR rollup_cost != raw_cost
 )
@@ -246,6 +287,14 @@ FORMAT PrettyCompact;
 --    from before the fix, and this check cannot tell, because the only thing that could have told is
 --    gone. That is stated rather than guessed at: a wrong number written here would be worse than
 --    the acknowledged uncertainty. Treat any figure covering these days as approximate.
+--
+--    The inner GROUP BY is not cosmetic. daily_feature_rollup is a SummingMergeTree, so one grain
+--    can sit in several un-merged parts at once and a bare count() over the table counts PARTS, not
+--    grains. Section 1 collapses to the sorting key before counting; without the same collapse here
+--    the two sections of one report would disagree, and step 7 of the rebuild mandates comparing
+--    this number before and after a run that necessarily changes the part layout. sum(SpanCount)
+--    and sum(EstimatedCost) are unaffected, since summing the duplicate parts is the whole point of
+--    the engine; only count() had to be fixed.
 SELECT
     TenantId,
     count() AS not_derivable_grains,
@@ -254,8 +303,18 @@ SELECT
     sum(SpanCount) AS span_total,
     sum(EstimatedCost) AS cost_usd,
     toInt64(round(sum(EstimatedCost) * 1000000)) AS cost_micro_usd
-FROM daily_feature_rollup
-WHERE (TenantId, Day) NOT IN (SELECT TenantId, toDate(Timestamp) FROM otel_spans GROUP BY 1, 2)
+FROM
+(
+    SELECT TenantId, Day, FeatureTag, GenAiResponseModel,
+           sum(SpanCount) AS SpanCount, sum(EstimatedCost) AS EstimatedCost
+    FROM daily_feature_rollup
+    GROUP BY TenantId, Day, FeatureTag, GenAiResponseModel
+)
+WHERE (TenantId, Day) NOT IN (SELECT TenantId, toDate(Timestamp) AS Day FROM otel_spans
+             WHERE toDate(Timestamp) NOT IN (SELECT toDate(partition) FROM system.parts
+                    WHERE database = currentDatabase() AND table = 'otel_spans' AND active
+                      AND delete_ttl_info_min != toDateTime(0)
+                      AND delete_ttl_info_min <= now() + INTERVAL 1 DAY) GROUP BY 1, 2)
 GROUP BY TenantId
 ORDER BY span_total DESC
 FORMAT PrettyCompact;
