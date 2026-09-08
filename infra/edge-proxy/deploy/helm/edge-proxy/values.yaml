@@ -41,8 +41,14 @@ proxy:
   # collector can distinguish self-hosted ingest from cloud. Leave true for self-hosted installs.
   selfHosted: true
 
-  # Collector endpoint the proxy POSTs metadata-only TraceRecords to. Empty disables telemetry
+  # Gateway ingest endpoint the proxy POSTs metadata-only spans to, as single-span
+  # /v1/batches requests (e.g. https://ingest.ai-tally.com/v1/batches). Empty disables telemetry
   # shipping entirely (the proxy still works; it just emits nothing).
+  #
+  # Each batch is authenticated by the tenant key the caller presented, so no credential is
+  # configured here. A single-tenant install whose callers send no tenant key needs the
+  # EDGE_PROXY_INGEST_TOKEN fallback instead; that is a secret, so set it on the Deployment from
+  # your own Secret rather than through this chart's ConfigMap.
   telemetryURL: ""
 
 # --- key broker (broker mode only) -------------------------------------------------------------

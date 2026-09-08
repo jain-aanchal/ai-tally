@@ -19,10 +19,15 @@ import (
 // (empty Provider) none of this runs and the hot path is byte-identical to CTO-39.
 
 // responseMeta holds the scalar metadata pulled from one response. It never carries content.
+//
+// The token counts are pointers, not plain int64s, because "the provider did not report usage"
+// (streaming, an error response, a body past the scan cap) and "the provider reported zero" are
+// different facts and telemetry must not conflate them. A nil count stays NULL all the way to
+// storage; a fabricated 0 would read downstream as a real, free call.
 type responseMeta struct {
 	Model            string
-	PromptTokens     int64
-	CompletionTokens int64
+	PromptTokens     *int64
+	CompletionTokens *int64
 }
 
 // metaCaptureCap bounds how many response bytes we tee aside for parsing. A generateContent /
@@ -49,47 +54,51 @@ func extractMeta(p config.Provider, path string, body []byte) responseMeta {
 }
 
 func openAIMeta(body []byte) responseMeta {
+	// Pointer fields throughout: an absent "usage" object, or an absent count inside it, must stay
+	// absent rather than decode to 0 (see responseMeta).
 	var r struct {
 		Model string `json:"model"`
-		Usage struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
+		Usage *struct {
+			PromptTokens     *int64 `json:"prompt_tokens"`
+			CompletionTokens *int64 `json:"completion_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return responseMeta{}
 	}
-	return responseMeta{
-		Model:            r.Model,
-		PromptTokens:     r.Usage.PromptTokens,
-		CompletionTokens: r.Usage.CompletionTokens,
+	m := responseMeta{Model: r.Model}
+	if r.Usage != nil {
+		m.PromptTokens = r.Usage.PromptTokens
+		m.CompletionTokens = r.Usage.CompletionTokens
 	}
+	return m
 }
 
 func anthropicMeta(body []byte) responseMeta {
 	var r struct {
 		Model string `json:"model"`
-		Usage struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
+		Usage *struct {
+			InputTokens  *int64 `json:"input_tokens"`
+			OutputTokens *int64 `json:"output_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return responseMeta{}
 	}
-	return responseMeta{
-		Model:            r.Model,
-		PromptTokens:     r.Usage.InputTokens,
-		CompletionTokens: r.Usage.OutputTokens,
+	m := responseMeta{Model: r.Model}
+	if r.Usage != nil {
+		m.PromptTokens = r.Usage.InputTokens
+		m.CompletionTokens = r.Usage.OutputTokens
 	}
+	return m
 }
 
 func geminiMeta(path string, body []byte) responseMeta {
 	var r struct {
 		ModelVersion  string `json:"modelVersion"`
-		UsageMetadata struct {
-			PromptTokenCount     int64 `json:"promptTokenCount"`
-			CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+		UsageMetadata *struct {
+			PromptTokenCount     *int64 `json:"promptTokenCount"`
+			CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
 		} `json:"usageMetadata"`
 	}
 	// The body may be missing/unparseable (e.g. an error response); still return the path-derived
@@ -100,11 +109,12 @@ func geminiMeta(path string, body []byte) responseMeta {
 	if model == "" {
 		model = r.ModelVersion
 	}
-	return responseMeta{
-		Model:            model,
-		PromptTokens:     r.UsageMetadata.PromptTokenCount,
-		CompletionTokens: r.UsageMetadata.CandidatesTokenCount,
+	m := responseMeta{Model: model}
+	if r.UsageMetadata != nil {
+		m.PromptTokens = r.UsageMetadata.PromptTokenCount
+		m.CompletionTokens = r.UsageMetadata.CandidatesTokenCount
 	}
+	return m
 }
 
 // geminiModelFromPath pulls the model id out of a Generative Language request path of the form

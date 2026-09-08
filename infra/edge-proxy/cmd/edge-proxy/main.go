@@ -42,14 +42,20 @@ func main() {
 	}
 
 	// Telemetry shipping: a self-hosted proxy emits the same metadata-only records as the cloud
-	// proxy, labeled by deployment. Empty URL keeps the CTO-39 NopSink (no telemetry).
+	// proxy, labeled by deployment. Records go to the gateway's POST /v1/batches as single-span
+	// batches, authenticated per record by the presented tenant key (Initiative 2 sec 6.3 / sec 8).
+	// Empty URL keeps the CTO-39 NopSink (no telemetry).
 	var sink *telemetry.HTTPSink
 	if cfg.TelemetryURL != "" {
 		dep := telemetry.DeploymentCloud
 		if cfg.SelfHosted {
 			dep = telemetry.DeploymentSelfHost
 		}
-		sink = telemetry.NewHTTPSink(telemetry.Options{URL: cfg.TelemetryURL, Deployment: dep})
+		sink = telemetry.NewHTTPSink(telemetry.Options{
+			URL:         cfg.TelemetryURL,
+			Deployment:  dep,
+			IngestToken: cfg.IngestToken,
+		})
 		opts = append(opts, proxy.WithSink(sink))
 		log.Printf("edge-proxy: telemetry -> %s (deployment=%s)", cfg.TelemetryURL, dep)
 	}

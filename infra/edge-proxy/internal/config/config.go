@@ -129,9 +129,16 @@ type Config struct {
 	// SelfHosted marks this as a customer-VPC deployment; it labels emitted telemetry so the cloud
 	// can distinguish self-hosted ingest. Defaults to false (cloud).
 	SelfHosted bool
-	// TelemetryURL, if set, is the collector endpoint the proxy POSTs metadata-only TraceRecords
-	// to. Empty disables telemetry shipping (NopSink), as in the CTO-39 core.
+	// TelemetryURL, if set, is the ingest endpoint the proxy POSTs metadata-only TraceRecords to as
+	// single-span batches (the gateway's POST /v1/batches). Empty disables telemetry shipping
+	// (NopSink), as in the CTO-39 core.
 	TelemetryURL string
+	// IngestToken is the fallback bearer for those POSTs, used only when a record carries no tenant
+	// key of its own. Normally the presented X-Tenant-Key authenticates the batch, which is what
+	// keeps the hosted multi-tenant deployment attributing each batch to its own tenant; a
+	// single-tenant self-host that runs without RequireTenant sets this instead. It is a reference
+	// to a deployment secret (env var rendered from Secret Manager / KMS), never a key we mint.
+	IngestToken string
 
 	// --- Hosted multi-provider routing (Initiative 2 sec 6.1) ---
 
@@ -192,6 +199,7 @@ func FromEnv(lookup Env) (Config, error) {
 		Mode:            ModePassthrough,
 		BrokerTTL:       DefaultBrokerTTL,
 		TelemetryURL:    lookup("EDGE_PROXY_TELEMETRY_URL"),
+		IngestToken:     lookup("EDGE_PROXY_INGEST_TOKEN"),
 	}
 
 	// Provider is orthogonal to upstream selection but changes the default upstream: a gemini proxy
