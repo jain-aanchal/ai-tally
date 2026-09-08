@@ -124,3 +124,79 @@ def test_unpriced_embedding_model_still_misses_rather_than_reporting_zero():
 def test_chat_span_is_unaffected_by_the_embedding_path():
     res = enrich_cost(_span(), seed_catalog(), at=AT)
     assert res.server_cost_micro_usd == 2_250_000
+# --- per-call layers: tools and vector (CTO-243) ------------------------------------------------
+#
+# The SDK carries these costs on gen_ai.tool.cost_micro_usd. Nothing promoted that into the
+# canonical cost attribute, so the tools and vector layers reported zero spend.
+
+
+def _tool_span(client_cost=10_000, provider="tavily", tool="search"):
+    return build_span_attributes(
+        SpanFields(
+            system=provider,
+            operation="tool",
+            tool_name=tool,
+            tool_call_id="call-1",
+            tool_cost_micro_usd=client_cost,
+        )
+    )
+
+
+def _vector_span(client_cost=400, provider="pinecone", index="docs", operation="query"):
+    return build_span_attributes(
+        SpanFields(
+            system=provider,
+            operation="vector",
+            tool_name=f"{provider}.{index}.{operation}",
+            tool_cost_micro_usd=client_cost,
+        )
+    )
+
+
+def test_tool_cost_is_promoted_to_the_canonical_cost_key():
+    res = enrich_cost(_tool_span(), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 10_000  # tavily search, 0.01 USD
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+    assert res.catalog_miss is False
+
+
+def test_vector_cost_is_priced_off_the_operation_segment():
+    res = enrich_cost(_vector_span(), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 400  # pinecone query, 0.0004 USD
+    assert res.attributes[GenAI.COST_PRICE_CATALOG_VERSION] == "seed-2026-06-15"
+
+
+def test_vector_index_name_containing_dots_still_prices():
+    res = enrich_cost(_vector_span(index="docs.v2"), seed_catalog(), at=AT)
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 400
+
+
+def test_call_cost_server_catalog_wins_and_drift_is_flagged():
+    res = enrich_cost(_tool_span(client_cost=1), seed_catalog(), at=AT)
+    assert res.server_cost_micro_usd == 10_000
+    assert res.client_cost_micro_usd == 1
+    assert res.drift_exceeded is True
+
+
+def test_call_cost_survives_a_catalog_miss():
+    # A negotiated per-call rate the catalog has no entry for is kept, not discarded as zero.
+    res = enrich_cost(_tool_span(provider="acme-internal", tool="lookup"), seed_catalog(), at=AT)
+    assert res.catalog_miss is True
+    assert res.attributes[GenAI.COST_ESTIMATED_MICRO_USD] == 10_000
+    assert res.server_cost_micro_usd is None
+    assert GenAI.COST_PRICE_CATALOG_VERSION not in res.attributes
+
+
+def test_unpriced_call_asserts_no_cost():
+    span = _tool_span(client_cost=None, provider="acme-internal", tool="lookup")
+    res = enrich_cost(span, seed_catalog(), at=AT)
+    assert res.catalog_miss is True
+    assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
+    assert res.client_cost_micro_usd is None
+
+
+def test_call_cost_original_not_mutated():
+    span = _tool_span()
+    before = dict(span)
+    enrich_cost(span, seed_catalog(), at=AT)
+    assert span == before

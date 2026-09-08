@@ -47,6 +47,7 @@ source "${SCRIPT_DIR}/lib-tenant.sh"
 
 # Cheap check first: a missing service token with auth on means the gateway never boots.
 require_service_token_if_auth_on
+warn_backfill_unsupported_if_auth_on
 
 echo "==> Building images and starting the stack"
 "${COMPOSE[@]}" up -d --build

@@ -6,11 +6,18 @@ GATEWAY := ai-tally-gateway
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
+# Honor the same POSTGRES_USER / POSTGRES_DB that .env.example exposes, so a dev running a
+# non-default user does not get told to `make up && make seed` after both already succeeded.
+PG_USER := $(or $(POSTGRES_USER),tally)
+PG_DB := $(or $(POSTGRES_DB),tally)
+
 # Canonical TenantId is the tenant UUID (Initiative 1, §8). Resolve the seeded local-dev tenant's
 # UUID from Postgres so the demo backfill tags spans with the UUID the dashboard reads, not the
 # name `local-dev`. Lazily expanded (`=`, not `:=`) so it runs when a target uses it, after the
-# stack is up and `make seed` has created the row; empty before then.
-TENANT_UUID = $(shell $(COMPOSE) exec -T postgres psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" 2>/dev/null | tr -d '[:space:]')
+# stack is up and `make seed` has created the row; empty before then. `:=` would shell out on every
+# single make invocation, `make help` included. Recipes that need it more than once capture it into
+# a shell variable so the lookup still runs exactly once per target.
+TENANT_UUID = $(shell $(COMPOSE) exec -T postgres psql -U $(PG_USER) -d $(PG_DB) -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" 2>/dev/null | tr -d '[:space:]')
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -65,10 +72,13 @@ demo: ## Send a sample batch through the gateway into ClickHouse
 	@# send_batch.py defaults to the tenant NAME, but ingest writes TenantId verbatim while the
 	@# dashboard reads by UUID (Initiative 1, §8), so the default would land rows the UI never shows.
 	@# Fail loudly rather than write invisible rows: an empty UUID means the tenant is not seeded.
-	@test -n "$(strip $(TENANT_UUID))" || { \
-	  echo "cannot resolve the local-dev tenant UUID from Postgres; run 'make up && make seed' first"; \
-	  exit 1; }
-	$(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py --tenant $(TENANT_UUID)
+	@# One expansion of TENANT_UUID, captured in a shell variable: the guard and the send must agree,
+	@# and a second expansion would be a second round trip into psql.
+	@t="$(strip $(TENANT_UUID))"; \
+	 test -n "$$t" || { \
+	   echo "cannot resolve the local-dev tenant UUID from Postgres; run 'make up && make seed' first"; \
+	   exit 1; }; \
+	 set -x; $(COMPOSE) exec gateway python /app/infra/gateway/examples/send_batch.py --tenant "$$t"
 
 aider-demo: ## Run Aider against a fixture repo through the edge proxy (needs OPENAI_API_KEY)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \

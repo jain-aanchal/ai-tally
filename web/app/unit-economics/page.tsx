@@ -188,7 +188,7 @@ export default async function UnitEconomicsPage() {
                       {p.locked && (
                         <span
                           className="ml-2 rounded bg-edge px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted"
-                          title={`Closed${p.closedAt ? ` ${p.closedAt.slice(0, 10)}` : ""} — locked, not editable`}
+                          title={`Closed${p.closedAt ? ` ${p.closedAt.slice(0, 10)}` : ""}, locked, not editable`}
                         >
                           Locked
                         </span>

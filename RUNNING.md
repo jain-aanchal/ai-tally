@@ -27,7 +27,7 @@ name onto the UUID. Reads do not.)
 
 ## Prerequisites
 
-- Docker (Compose v2) — `docker version` should print a server version.
+- Docker (Compose v2): `docker version` should print a server version.
 - Node.js + npm (for the web app).
 - [uv](https://docs.astral.sh/uv/) (only if you want to run the gateway or its tests outside Docker).
 
@@ -53,13 +53,13 @@ curl -s localhost:8080/healthz     # {"status":"ok"}
 > "starting" is normal.
 
 > On first boot the gateway also hits `GET /v1/models` on every provider whose API key it has and
-> writes the result to `.tally/models.json` (CTO-109). Subsequent boots reuse that file for 24 h —
+> writes the result to `.tally/models.json` (CTO-109). Subsequent boots reuse that file for 24 h;
 > set `TALLY_MODELS_REFRESH=1` to force a refetch, or `TALLY_PINNED_MODELS=<path>` to skip discovery
-> entirely. If both providers are unreachable, boot still succeeds — you'll just see a warning in
+> entirely. If both providers are unreachable, boot still succeeds; you'll just see a warning in
 > the gateway log and the demos fall back to their hardcoded model defaults.
 
 The composed gateway already sets `TALLY_CLICKHOUSE_DB=default` (the official ClickHouse image loads
-unqualified DDL into the `default` database — see the note in `infra/docker-compose.yml`). Running
+unqualified DDL into the `default` database; see the note in `infra/docker-compose.yml`). Running
 the gateway *by hand* with the library default `TALLY_CLICKHOUSE_DB=tally` will fail with
 `Database tally does not exist`; pass `TALLY_CLICKHOUSE_DB=default` if you do.
 
@@ -69,7 +69,7 @@ the gateway *by hand* with the library default `TALLY_CLICKHOUSE_DB=tally` will 
 make seed     # creates the `local-dev` tenant + API key + feature tags in Postgres
 ```
 
-This prints a one-time API key (`tally_sk_…`). Only its SHA-256 is stored — copy it if you plan to
+This prints a one-time API key (`tally_sk_…`). Only its SHA-256 is stored, so copy it if you plan to
 enable auth. For local testing auth is **off** by default (`TALLY_REQUIRE_API_KEY=false`).
 
 ### Control-plane auth when you flip `TALLY_REQUIRE_API_KEY=true`
@@ -167,7 +167,7 @@ decouples the request edge from ClickHouse (accept + ack immediately, drain in t
       TALLY_INGEST_BUFFERED: "true"
 ```
 
-then `make up` again. You can watch the guarantee directly: stop ClickHouse, fire a burst — POSTs
+then `make up` again. You can watch the guarantee directly: stop ClickHouse, fire a burst, and POSTs
 still return `200 accepted` while the drain loop logs `drain failed; retrying` and holds the rows
 until ClickHouse returns. Knobs (all `TALLY_`-prefixed): `INGEST_BUFFER_CAPACITY` (default `200000`;
 rows past this are shed as *retryable*, never 5xx), `INGEST_BUFFER_DRAIN_BATCH` (`2000`),
@@ -176,7 +176,7 @@ rows past this are shed as *retryable*, never 5xx), `INGEST_BUFFER_DRAIN_BATCH` 
 ## Step 5: real traffic via Aider
 
 `make demo` posts a hand-crafted batch. To see ai-tally with **real agent
-traffic** — same path a customer's app would take — run the Aider fixture
+traffic** (same path a customer's app would take), run the Aider fixture
 demo:
 
 ```bash
@@ -189,8 +189,8 @@ requests transit the ai-tally edge proxy with `X-Tally-Feature-Tag:
 aider-demo`, and the dashboard auto-opens to `/agents?tag=aider-demo` showing
 the just-recorded runs.
 
-Full walkthrough — including the cross-provider variant, what each task does,
-and the architecture diagram — is in
+Full walkthrough (including the cross-provider variant, what each task does,
+and the architecture diagram) is in
 [examples/aider-demo/README.md](examples/aider-demo/README.md).
 
 When you're done: `make aider-demo-stop` kills the background proxy.
@@ -198,8 +198,8 @@ When you're done: `make aider-demo-stop` kills the background proxy.
 ## Step 6: chatbot + conversion attribution
 
 Aider is the right shape for agent-loop and cross-provider visibility (steps
-1–3 of the five workflows). For **workflow 4 — business-outcome
-attribution** — run the chatbot demo. It vendors the Vercel AI SDK chatbot
+1–3 of the five workflows). For **workflow 4: business-outcome
+attribution**, run the chatbot demo. It vendors the Vercel AI SDK chatbot
 template, drives 50 synthetic sessions split across OpenAI and Anthropic,
 and emits conversion events (thumbs-up + session-engaged) so the
 `/attribution` view can show $/conversion per provider.
@@ -211,8 +211,8 @@ cd infra && make chatbot-demo
 ```
 
 `run.sh` (re)installs the chatbot's deps whenever `node_modules` is missing **or
-stale** — i.e. `pnpm-lock.yaml` / `package.json` is newer than `node_modules`
-(CTO-174) — so a dependency bump is picked up automatically instead of failing
+stale**, i.e. `pnpm-lock.yaml` / `package.json` is newer than `node_modules`
+(CTO-174), so a dependency bump is picked up automatically instead of failing
 the build with `Module not found`. If a run ever trips over a stale install,
 recover manually with `cd examples/vercel-chatbot/app && pnpm install`.
 
@@ -220,7 +220,7 @@ On launch the demo **refreshes the model lineup** (CTO-147): before booting the
 chatbot, `run.sh` force-refreshes the gateway's discovery cache
 (`.tally/models.json`, CTO-109) with `TALLY_MODELS_REFRESH=1` and logs the live
 OpenAI/Anthropic lineup. This keeps the picker's IDs (`app/lib/ai/models.ts`,
-which now pin `gpt-5` / `gpt-5-mini` — the retired `gpt-4o` / `gpt-4o-mini` SKUs
+which now pin `gpt-5` / `gpt-5-mini`; the retired `gpt-4o` / `gpt-4o-mini` SKUs
 are gone) and `providers.ts`'s `resolveLatest()` fallbacks from rotting. The
 refresh is **fail-soft**: offline / no API key just warns and proceeds on the
 pinned IDs. For an offline or hermetic run, either set `TALLY_SKIP_MODEL_REFRESH=1`
@@ -230,7 +230,7 @@ hardcoded; reading the cache dynamically in the model picker is a CTO-147 follow
 
 The chatbot boots on `:3001` (avoiding the dashboard on `:3000`). The driver
 posts spans straight to the gateway from the chatbot's `/api/chat` route, so
-this exercises the **gateway-POST ingestion path** — distinct from Aider's
+this exercises the **gateway-POST ingestion path**, distinct from Aider's
 edge-proxy path. After ~2 minutes, the dashboard auto-opens to
 `/attribution?tag=chatbot-demo&outcome=positive_feedback`.
 
@@ -240,8 +240,8 @@ span. So on the **Cost** tab you'll now see LLM dominant with the **Tools** and
 **Embeddings** bars non-zero (instead of $0), matching the seed mock. The tool
 prices are a small fixed table (`getWeather`=$0.001, document tools=$0.005,
 `requestSuggestions`=$0.002) and the embedding cost is computed at
-text-embedding-3-small's $0.02/Mtok — both are demo-seed values, not real
-billing. (Vector/Compute/Egress layers stay $0 — out of scope here.)
+text-embedding-3-small's $0.02/Mtok. Both are demo-seed values, not real
+billing. (Vector/Compute/Egress layers stay $0: out of scope here.)
 
 Walkthrough, configuration knobs, and the upstream patch list are in
 [examples/vercel-chatbot/README.md](examples/vercel-chatbot/README.md) and
@@ -250,7 +250,7 @@ Walkthrough, configuration knobs, and the upstream patch list are in
 ### Realistic-volume demo
 
 The default `make chatbot-demo` drives **50** sessions (~$0.40), so a freshly
-seeded stack shows a fraction-of-a-cent dashboard — not the **~$52,400/mo**
+seeded stack shows a fraction-of-a-cent dashboard, not the **~$52,400/mo**
 story the seed fixtures and the LinkedIn screenshots advertise. To reproduce
 that startup-scale picture you have two paths:
 
@@ -313,7 +313,7 @@ Honesty notes, so you know what the numbers are and are not:
 - Everything else is synthetic-seed: backdated timestamps, RNG-drawn token
   counts, fabricated conversion revenue, fictional company names.
 
-The backfill is **idempotent** — batch ids are derived from `--seed`, so the
+The backfill is **idempotent**: batch ids are derived from `--seed`, so the
 gateway's `(tenant_id, batch_id)` dedup makes a re-run a no-op. Use a fresh
 `--seed` to layer in another independent month; the daily compute/egress span
 ids are keyed on the seed too, so a layered month adds rows instead of colliding
@@ -368,8 +368,8 @@ When you're done: `make chatbot-demo-stop` kills the chatbot dev server.
 ## Step 7: real revenue via Stripe
 
 The chatbot demo emits synthetic conversion events so `/attribution` has
-something to show. For **real** revenue numbers — Value/user, Margin/user, and
-margin % per provider — connect Stripe (CTO-110). The gateway exposes a
+something to show. For **real** revenue numbers (Value/user, Margin/user, and
+margin % per provider), connect Stripe (CTO-110). The gateway exposes a
 verified webhook ingest at:
 
 ```
@@ -396,11 +396,11 @@ To wire it up:
        --stripe-key sk_live_xxx        # or sk_test_xxx
    ```
 
-   The script is safe to re-run — idempotency is keyed on Stripe's event id.
+   The script is safe to re-run: idempotency is keyed on Stripe's event id.
 
 Once events start landing, `/attribution` lights up two new columns:
 **Value/user** and **Margin/user** (with margin % below). Cells stay `—`
-until enough events arrive — we never fabricate numbers from absent data.
+until enough events arrive: we never fabricate numbers from absent data.
 
 As a side-effect, the **Stripe card** in the third-party integrations section of
 `/connectors` flips from "Not connected" to a green "Connected" card showing
@@ -423,10 +423,10 @@ projections with real cross-provider calls instead (CTO-113).
      -d '{"enabled": true, "sample_rate": 0.05, "daily_budget_usd": 5.0}'
    ```
 
-   - `enabled` defaults to `false` for every tenant — no surprises.
+   - `enabled` defaults to `false` for every tenant: no surprises.
    - `sample_rate` is the fraction of ingested spans we capture (default 5%).
    - `daily_budget_usd` is a **hard cap** on the replay executor's spend per
-     tenant per day. A bug in replay must never burn $10k overnight — the
+     tenant per day. A bug in replay must never burn $10k overnight; the
      executor checks today's spend before every candidate call and skips
      with `excluded_budget=True` when projected next-call cost would push the
      day over.
@@ -436,7 +436,7 @@ projections with real cross-provider calls instead (CTO-113).
    expensive runs aren't drowned out, scrubs PII (emails, API keys, postal
    addresses), and writes the resolved request envelope to object storage.
 
-3. **Request a projection** — the dashboard does this automatically from
+3. **Request a projection**: the dashboard does this automatically from
    `/compare` and `/estimate`, but you can hit the gateway directly to see
    the raw output:
 
@@ -465,11 +465,11 @@ mock (tenant hasn't opted in yet, or the gateway is unreachable).
 ## Step 9: cross-provider eval (real quality scores)
 
 Replay gives you per-candidate cost / latency / error from real calls, but
-`/compare`'s **Quality** column still needs a judgment — "is the haiku-4.5
+`/compare`'s **Quality** column still needs a judgment: "is the haiku-4.5
 response actually as good as sonnet-4.5's was?". CTO-114 adds a pairwise
 LLM-judge eval pass that replaces the previously fabricated `qualityScore`
 with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
-— judge calls run a frontier model and are pricier than candidate replays.
+judge calls run a frontier model and are pricier than candidate replays.
 
 1. **Enable eval** for the local tenant:
 
@@ -481,7 +481,7 @@ with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
 
    - Default off, default budget `$10/day`, default judge `claude-opus-4-8`.
    - The judge is overridable per tenant (e.g. to mitigate judge-self-bias if
-     all candidates are claude-family — v2 will rotate judges automatically).
+     all candidates are claude-family; v2 will rotate judges automatically).
    - The daily budget is a hard ceiling enforced before every judge call.
 
 2. **Run the eval pass** (or let the dashboard call it automatically):
@@ -504,11 +504,11 @@ with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
    else parses to an `error` row (the win-rate denominator excludes errors).
 
 3. **Read the result on `/compare`.** The Quality column now shows
-   `47.2%` with `[31–63%]` underneath — the real win-rate and Wilson 95% CI.
+   `47.2%` with `[31–63%]` underneath: the real win-rate and Wilson 95% CI.
    Below the 10-judged-samples floor (small `n` means a CI wider than the
    number is useful), the cell shows `—` with the hint "needs ≥10 judged
-   samples — run eval pass". **The page will never fabricate a quality
-   number** — there is no fallback to mock here, by design.
+   samples: run eval pass". **The page will never fabricate a quality
+   number**: there is no fallback to mock here, by design.
 
    The `current` row's Quality is always `—`: a model is never paired against
    itself, so there's no judge verdict to surface.
@@ -527,17 +527,17 @@ with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
 ## Live updates
 
 Every dashboard page (Home, Agents, Cost, Attribution) auto-refreshes in the
-browser on a short interval — leave the tab open while you run demos and new
+browser on a short interval; leave the tab open while you run demos and new
 spans appear without a manual reload (CTO-108). Pages still server-render the
 first paint; a small client wrapper polls the same `/api/...` endpoint and
 re-renders the body on each tick.
 
 Knobs:
 
-- `NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS` — poll interval, default `5000`.
+- `NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS`: poll interval, default `5000`.
   Set to `0` to disable polling entirely (the page becomes static again).
 - Polling pauses automatically when the tab is hidden, and fetches once
-  immediately on focus — no wasted requests sitting in a background tab.
+  immediately on focus: no wasted requests sitting in a background tab.
 - On transient API errors the page keeps the last good data and logs the
   error to `console.warn`; the badge stays green so a 5xx never blanks the UI.
 
@@ -547,7 +547,7 @@ Knobs:
 |---|---|
 | `Database tally does not exist` | Gateway pointed at the wrong DB. Use `TALLY_CLICKHOUSE_DB=default` (the compose gateway already does). |
 | Dashboard shows the **"mock data"** badge | A page's ClickHouse query failed and fell back to mock. Check `make logs` and that step 3's count is non-zero. |
-| Dashboard empty despite ingested rows | Tenant mismatch — the UI reads `local-dev`. Post with `tenant_id: local-dev` (or set `TALLY_TENANT_ID` for the web app). |
+| Dashboard empty despite ingested rows | Tenant mismatch. The UI reads the tenant **UUID**, not the name, so spans must be tagged with the UUID: re-send with `tenant_id` set to the UUID from step 3. With no Clerk account, point the web app at that same UUID via `TALLY_DEV_TENANT` (the dev escape hatch); `TALLY_TENANT_ID` is no longer read by anything. |
 
 ## Make targets (run from `infra/`)
 
@@ -574,4 +574,4 @@ cd infra && make down     # keep data
 cd infra && make nuke     # wipe volumes
 ```
 
-The web dev server is a foreground process — stop it with Ctrl-C in its terminal.
+The web dev server is a foreground process; stop it with Ctrl-C in its terminal.

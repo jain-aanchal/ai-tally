@@ -115,7 +115,7 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
             {grounded !== null && !error && (
               <span className="text-muted">
                 grounded on {grounded} replayed sample{grounded === 1 ? "" : "s"}
-                {proposed.monthlyCostMicroUsd === null && " (too few — showing —)"}
+                {proposed.monthlyCostMicroUsd === null && " (too few, showing —)"}
               </span>
             )}
           </div>

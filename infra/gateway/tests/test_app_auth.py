@@ -77,13 +77,28 @@ def _client(
     # `with TestClient(app)` runs the lifespan exactly once; we then override the infra-touching
     # bits (auth → in-memory, optionally the limiter or the store) before yielding.
     with TestClient(app) as client:
-        app.state.settings.require_api_key = True
-        app.state.auth = FakeAuth(keys or {})
-        if limiter is not None:
-            app.state.limiter = limiter
-        if store is not None:
-            app.state.store = store
-        yield client
+        # `app` is module-level and shared by every test in the run, so each override is put back on
+        # the way out. Leaving a RecordingStore (or a FakeAuth) parked on app.state leaks into
+        # whatever runs next and makes failures depend on test order.
+        previous = {
+            "require_api_key": app.state.settings.require_api_key,
+            "auth": app.state.auth,
+            "limiter": app.state.limiter,
+            "store": app.state.store,
+        }
+        try:
+            app.state.settings.require_api_key = True
+            app.state.auth = FakeAuth(keys or {})
+            if limiter is not None:
+                app.state.limiter = limiter
+            if store is not None:
+                app.state.store = store
+            yield client
+        finally:
+            app.state.settings.require_api_key = previous["require_api_key"]
+            app.state.auth = previous["auth"]
+            app.state.limiter = previous["limiter"]
+            app.state.store = previous["store"]
 
 
 def test_missing_bearer_is_unauthenticated() -> None:

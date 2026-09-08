@@ -4,9 +4,14 @@
 # ai-tally demo-deploy-kit - reset + re-seed the SYNTHETIC demo data (CTO-243).
 #
 # Run nightly so the demo always shows a fresh, backdated "last 30 days". It:
-#   1. TRUNCATEs the ClickHouse telemetry tables (spans, events, rollups, replay corpus).
-#   2. Re-runs `make seed` (idempotent: tenant + API key + price catalog).
-#   3. Re-POSTs 30 days of backdated synthetic spans via the backfill script.
+#   1. Re-runs `make seed` (idempotent: tenant + API key + price catalog), so a stack whose control
+#      plane was wiped bootstraps itself instead of failing every night at the resolve below.
+#   2. Resolves the demo tenant's UUID, aborting if it cannot.
+#   3. TRUNCATEs the ClickHouse telemetry tables (spans, events, rollups, replay corpus).
+#   4. Re-POSTs 30 days of backdated synthetic spans via the backfill script.
+#
+# Steps 2 and 3 are in that order on purpose: never truncate without a resolved tenant to repost
+# under (a failed resolve then leaves the previous night's data on screen).
 #
 # The stack keeps running throughout (no container restart); only the data is reset. The Postgres
 # control plane (tenant row, API key, connector config) is left intact.
@@ -53,6 +58,7 @@ COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD
 source "${SCRIPT_DIR}/lib-tenant.sh"
 
 require_service_token_if_auth_on
+warn_backfill_unsupported_if_auth_on
 
 CH_USER="${CLICKHOUSE_USER:-tally}"
 CH_PASSWORD="${CLICKHOUSE_PASSWORD:-tally}"
@@ -74,9 +80,19 @@ TABLES=(
   replay_samples
 )
 
-# Resolve the tenant BEFORE truncating. If the control plane cannot answer, a nightly run must abort
-# with the old data still on screen rather than empty the tables and then discover it has no tenant
-# to repost under (CTO-243).
+# Seed FIRST so a wiped control plane can bootstrap itself. `make seed` is idempotent, so on a
+# normal nightly run this is a no-op, but on a stack whose Postgres volume was recreated (fresh VM,
+# `make nuke`, a restore from an empty volume) it is the only thing that recreates the tenant row.
+# Resolving before this point meant every cron run on such a host aborted at "could not resolve the
+# tenant UUID" and could never reach the step that would have fixed it (CTO-243).
+echo "==> Re-seeding the demo tenant (make seed)"
+make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" seed
+
+# Then resolve, still BEFORE the TRUNCATE. That ordering is the safety property: if the control
+# plane cannot answer even after seeding, a nightly run aborts with the old data still on screen
+# rather than emptying the tables and only then discovering it has no tenant to repost under. Under
+# `set -euo pipefail` a failed resolve_tenant_uuid aborts the script here, so no path reaches the
+# TRUNCATE loop without a validated UUID (CTO-243).
 echo "==> Resolving the demo tenant UUID"
 TENANT_UUID="$(resolve_tenant_uuid)"
 echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
@@ -88,9 +104,6 @@ for t in "${TABLES[@]}"; do
     clickhouse-client -u "${CH_USER}" --password "${CH_PASSWORD}" -d default \
     --query "TRUNCATE TABLE IF EXISTS ${t}"
 done
-
-echo "==> Re-seeding the demo tenant (make seed)"
-make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" seed
 
 echo "==> Re-backfilling 30 days of SYNTHETIC demo spans"
 # Same throwaway-container approach as deploy.sh: no host Node, reaches the gateway internally.

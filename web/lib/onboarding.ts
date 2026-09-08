@@ -39,7 +39,7 @@ export function proxyEnvSnippet(creds: TenantProxyCredentials): string {
   return [
     `export OPENAI_BASE_URL="${creds.proxyBaseUrl}"`,
     `export TALLY_TENANT_KEY="${creds.tenantKey}"`,
-    `# Your OPENAI_API_KEY is unchanged — it stays in your environment and is never sent to us.`,
+    `# Your OPENAI_API_KEY is unchanged. It stays in your environment and is never sent to us.`,
   ].join("\n");
 }
 
@@ -83,7 +83,7 @@ export function deriveChecklist(p: OnboardingProgress): ChecklistStep[] {
     {
       id: "signed_up",
       title: "Create your account",
-      hint: "Done — welcome.",
+      hint: "Done. Welcome.",
       done: true,
     },
     {
@@ -95,14 +95,14 @@ export function deriveChecklist(p: OnboardingProgress): ChecklistStep[] {
     {
       id: "first_trace",
       title: "Send your first request",
-      hint: "We'll detect the first trace automatically — target under 5 minutes.",
+      hint: "We'll detect the first trace automatically. Target: under 5 minutes.",
       done: p.firstTraceAt !== null,
       targetMs: TIME_TO_FIRST_TRACE_TARGET_MS,
     },
     {
       id: "first_dashboard",
       title: "See your first dashboard",
-      hint: "Cost and agent views populate as traces flow in — target within 24 hours.",
+      hint: "Cost and agent views populate as traces flow in. Target: within 24 hours.",
       done: p.firstDashboardAt !== null,
       targetMs: TIME_TO_FIRST_DASHBOARD_TARGET_MS,
     },
