@@ -16,14 +16,24 @@
 -- backdated ones. So this classifies on what the row itself carries, which is exact and needs no
 -- date at all:
 --
---   recoverable        cost is 0 but the span still carries the ORIGINAL client-reported cost in
---                      SpanAttributes['gen_ai.tool.cost_micro_usd']. The gateway now promotes that
---                      attribute into EstimatedCost; these rows predate the promotion. The money is
---                      right there, so this is a repricing, not a guess. The test is
---                      toInt64OrNull(...) IS NOT NULL rather than "the key is present", on purpose:
---                      toInt64OrZero on a malformed value would manufacture the very zero this is
---                      trying to remove, so an unparseable attribute falls through to a class below
---                      and is treated as unknown.
+--   recoverable        cost is 0, PriceCatalogVersion is '', and the span still carries the ORIGINAL
+--                      client-reported cost in SpanAttributes['gen_ai.tool.cost_micro_usd']. The
+--                      gateway now promotes that attribute into EstimatedCost; these rows predate
+--                      the promotion. The money is right there, so this is a repricing, not a guess.
+--                      The test is toInt64OrNull(...) IS NOT NULL rather than "the key is present",
+--                      on purpose: toInt64OrZero on a malformed value would manufacture the very
+--                      zero this is trying to remove, so an unparseable attribute falls through to a
+--                      class below and is treated as unknown.
+--                      THE EMPTY-VERSION REQUIREMENT IS LOAD-BEARING, and it used to be missing.
+--                      gen_ai.tool.cost_micro_usd is not promoted out of SpanAttributes (it is
+--                      absent from mapping.py's _PROMOTED_GENAI), so it survives on the row next to
+--                      a cost the price catalog computed. A tool or vector span the catalog
+--                      legitimately prices at zero therefore carries a REAL version and the client
+--                      hint at once. Because this branch is evaluated first, such a row was never
+--                      even reported as measured_zero, and the repair would have overwritten a
+--                      catalog-authoritative zero with a client hint. An empty version is the only
+--                      state in which no catalog ever spoke and the hint is the best evidence there
+--                      is.
 --
 --   unknown_no_price_input
 --                      cost is 0 and the span records NOTHING that could ever have been priced: no
@@ -39,12 +49,27 @@
 --                      Rows here usually DO carry a model and real token counts, so the money is
 --                      real and unknown, which is the worst of the three to report as $0.00.
 --
---   measured_zero      cost is 0, a real price catalog version is stamped, and there is a model to
---                      have priced. This is a provider-reported or catalog-computed zero and it is
---                      a fact. It is listed so it is visibly EXCLUDED from any repair. CTO-244 was
---                      explicit that a real 0 stays 0 and stays distinguishable from NULL; turning
---                      these into unknowns would destroy information, which is the same sin in the
---                      opposite direction.
+--   measured_zero      cost is 0, a real price catalog version is stamped, there is a model to have
+--                      priced AND there are tokens to have priced it on. This is a provider-reported
+--                      or catalog-computed zero and it is a fact. It is listed so it is visibly
+--                      EXCLUDED from any repair. CTO-244 was explicit that a real 0 stays 0 and
+--                      stays distinguishable from NULL; turning these into unknowns would destroy
+--                      information, which is the same sin in the opposite direction.
+--
+--   measured_zero_no_model
+--   measured_zero_flat_usage
+--                      the residue, split out rather than folded into measured_zero, because the
+--                      class doc used to promise "a real model, real tokens and a real catalog
+--                      version" while the SQL asked only for a version plus (a model OR non-zero
+--                      tokens). Two populations slipped through that gap and sat inside a class name
+--                      claiming more certainty than it had: rows with tokens but no model on either
+--                      side, which enrich_cost can never price, and pre-CTO-244 flattened-usage rows
+--                      with a model, a real version and tokens coerced to 0, which is CTO-244's own
+--                      motivating case. Both keep a real PriceCatalogVersion, so a catalog did
+--                      produce that number and the repair leaves them alone exactly as it leaves
+--                      measured_zero alone. Naming them is the point: this is the residue that
+--                      neither the repair nor this check can decide, and it should be visible rather
+--                      than laundered into a confident label.
 --
 -- The classes are evaluated in that order and are mutually exclusive, so the counts partition the
 -- priced-zero population exactly.
@@ -56,10 +81,13 @@ SELECT
     TenantId,
     GenAiOperation,
     multiIf(
-        toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL, 'recoverable',
+        PriceCatalogVersion = ''
+            AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL, 'recoverable',
         GenAiRequestModel = '' AND GenAiResponseModel = ''
             AND ifNull(InputTokens, 0) = 0 AND ifNull(OutputTokens, 0) = 0, 'unknown_no_price_input',
         PriceCatalogVersion = '', 'unknown_catalog_miss',
+        GenAiRequestModel = '' AND GenAiResponseModel = '', 'measured_zero_no_model',
+        ifNull(InputTokens, 0) = 0 AND ifNull(OutputTokens, 0) = 0, 'measured_zero_flat_usage',
         'measured_zero'
     ) AS class,
     count() AS spans,
@@ -71,8 +99,13 @@ SELECT
     if(class = 'recoverable',
        toString(sum(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']))),
        '') AS recoverable_micro_usd,
+    -- Divided BEFORE widening. `toDecimal64(micro, 8)` widens the micro-USD integer to a scale-8
+    -- Decimal64, which leaves ten integer digits and throws above about 92,233,720,368 micro-USD,
+    -- roughly $92,233 on one span. One client sending nanos would hard-fail a READ-ONLY check,
+    -- which is the last thing a check should do. divideDecimal converts at scale 0 instead.
     if(class = 'recoverable',
-       toString(sum(toDecimal64(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']), 8)) / 1000000),
+       toString(divideDecimal(sum(toDecimal64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd'], 0)),
+                              toDecimal64(1000000, 0), 8)),
        '') AS recoverable_usd
 FROM otel_spans FINAL
 WHERE EstimatedCost = 0
@@ -85,17 +118,29 @@ FORMAT PrettyCompact;
 -- conversion can be replayed against them and checked. `conversion_mismatches` must be 0; if it is
 -- not, the attribute and the column disagree about what the gateway does and the reprice in
 -- db/clickhouse/migrations/priced_zero_repair.sql must not be run until that is understood.
+--
+-- SCOPED TO PriceCatalogVersion = '', which is what "the gateway promoted this" actually means. The
+-- attribute is not promoted out of SpanAttributes, so it also survives on tool and vector spans the
+-- price CATALOG costed, where EstimatedCost is the server's price and the attribute is only a client
+-- hint that may legitimately differ. Without this scope every such row with any drift at all counts
+-- as a mismatch, and the lines above then tell an operator the repair must not be run, on a
+-- deployment where nothing is wrong. That is a false block on the only remedy, so it is fixed rather
+-- than explained.
 SELECT
     count() AS gateway_promoted_spans,
-    countIf(EstimatedCost != toDecimal64(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']), 8) / 1000000)
+    countIf(EstimatedCost != divideDecimal(toDecimal64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd'], 0),
+                                           toDecimal64(1000000, 0), 8))
         AS conversion_mismatches,
     -- Reported separately because a NULL comparison is neither true nor false, so an unparseable
     -- attribute would sit silently outside conversion_mismatches rather than being flagged by it.
     countIf(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NULL) AS unparseable_attrs,
     sum(EstimatedCost) AS stored_usd,
-    sum(toDecimal64(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']), 8)) / 1000000 AS replayed_usd
+    divideDecimal(sum(toDecimal64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd'], 0)),
+                  toDecimal64(1000000, 0), 8) AS replayed_usd
 FROM otel_spans FINAL
-WHERE SpanAttributes['gen_ai.tool.cost_micro_usd'] != '' AND EstimatedCost != 0
+WHERE SpanAttributes['gen_ai.tool.cost_micro_usd'] != ''
+  AND EstimatedCost != 0
+  AND PriceCatalogVersion = ''
 FORMAT Vertical;
 
 -- Already-honest rows, for contrast: spans that correctly say "unknown" rather than "$0.00". A

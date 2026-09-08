@@ -37,6 +37,18 @@
 --      0 and stays distinguishable from NULL. Turning those into unknowns would destroy information,
 --      which is the same sin in the other direction, so this script does not touch them.
 --
+-- WHAT THIS COSTS, STATED RATHER THAN GLOSSED. Limb (a) of step 2 can turn a genuine client-reported
+-- zero into an unknown, and there is no predicate that can stop it. tally.enrichment.enrich_cost
+-- returns early WITHOUT popping gen_ai.cost.estimated_micro_usd when provider or model are not
+-- strings, so a non-tool span carrying that key with a value of 0, no model and no tokens is stored
+-- as a REAL priced zero with CostSource = 'estimated' (mapping.py is explicit that this is a real
+-- priced zero). That key IS promoted, so nothing survives in SpanAttributes to tell such a row apart
+-- from the column default limb (a) is aimed at, and it is marked NULL. That is information loss in
+-- the opposite direction from the bug being repaired. It is accepted rather than hidden: the shape
+-- requires a client to report a cost of exactly zero on a span with no model and no usage at all,
+-- which is rare, and the alternative is to leave every column-default zero asserting a measurement
+-- that was never taken. If a deployment has such spans, exclude them by hand before running step 2.
+--
 -- WHY NOT A CUTOVER DATE, which the issue offered as an option. Nothing in otel_spans records when a
 -- row was WRITTEN. Timestamp is the span's own time and the demo backfill posts spans backdated 30
 -- days, so a date comparison would mark freshly-written rows as historical and miss backdated ones.
@@ -72,10 +84,12 @@ SELECT
     'before' AS phase,
     countIf(EstimatedCost = 0) AS priced_zero_spans,
     countIf(EstimatedCost IS NULL) AS unknown_spans,
-    countIf(EstimatedCost = 0 AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
+    countIf(EstimatedCost = 0 AND PriceCatalogVersion = '' AND CostSource != 'reconciled'
+            AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
         AS repriceable_spans,
     sumIf(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']),
-          EstimatedCost = 0 AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
+          EstimatedCost = 0 AND PriceCatalogVersion = '' AND CostSource != 'reconciled'
+          AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
         AS recoverable_micro_usd,
     sum(EstimatedCost) AS known_spend_usd
 FROM otel_spans FINAL
@@ -88,15 +102,41 @@ FORMAT Vertical;
 --    toInt64OrNull(...) IS NOT NULL so a malformed attribute is left for step 2 rather than being
 --    coerced to a zero by toInt64OrZero, which would manufacture the exact defect being repaired.
 --
+--    ALSO SCOPED TO PriceCatalogVersion = '', and that is the one guard the header's prose used to
+--    claim without the SQL containing it. gen_ai.tool.cost_micro_usd is NOT promoted out of
+--    SpanAttributes (it is absent from mapping.py's _PROMOTED_GENAI), so it SURVIVES on the row
+--    alongside a cost the price catalog computed. A tool or vector span whose catalog entry
+--    legitimately prices it at zero therefore lands as EstimatedCost = 0 with a REAL version and the
+--    client's hint still attached. Without this predicate step 1 would overwrite a catalog-
+--    authoritative zero with a client hint while deliberately leaving PriceCatalogVersion alone,
+--    so the substituted number would inherit provenance it did not earn. An empty version is the
+--    signal that no catalog ever priced the row, which is the only case where the hint is the best
+--    evidence available.
+--
+--    And scoped away from CostSource = 'reconciled'. That is a live enum value (otel_spans.sql) and
+--    the web read path splits spend on it, so a reconciled row that happens to hold 0 must not be
+--    silently downgraded to an estimate. No such row exists today; the guard costs nothing.
+--
 --    PriceCatalogVersion is deliberately NOT set. This cost came from the client, not from a price
 --    catalog, and the empty version is the honest record of that. It is the same version the
 --    gateway leaves on the spans it promotes today, so repaired rows and new rows agree.
 -- ============================================================================================
 ALTER TABLE otel_spans
 UPDATE
-    EstimatedCost = toDecimal64(toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']), 8) / 1000000,
+    -- Divided BEFORE widening. `toDecimal64(micro, 8)` widens the micro-USD INTEGER to a scale-8
+    -- Decimal64 first, which leaves ten integer digits and therefore overflows above about
+    -- 92,233,720,368 micro-USD, roughly $92,233 on a single span. One client sending nanos instead
+    -- of micros would abort the whole mutation. divideDecimal converts at scale 0 and produces the
+    -- scale-8 result directly, so the only ceiling left is what the Decimal64(8) column can actually
+    -- store, a million times higher. The OrNull keeps an unparseable attribute out of the arithmetic
+    -- entirely; the WHERE below has already excluded those rows.
+    EstimatedCost = divideDecimal(
+        toDecimal64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd'], 0),
+        toDecimal64(1000000, 0), 8),
     CostSource = 'estimated'
 WHERE EstimatedCost = 0
+  AND PriceCatalogVersion = ''
+  AND CostSource != 'reconciled'
   AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL
 SETTINGS mutations_sync = 2;
 
@@ -105,9 +145,20 @@ SETTINGS mutations_sync = 2;
 --    repriceable span is no longer 0 by the time this predicate is evaluated, so it cannot be
 --    caught here and have its recovered money thrown away again.
 --
---    The two limbs are the (a) and (b) shapes described at the top. The attribute exclusion is a
---    belt-and-braces guard for a client that genuinely reported a cost of zero: that is a
---    measurement and it stays 0, even though limb (b) would otherwise match it.
+--    The two limbs are the (a) and (b) shapes described at the top.
+--
+--    The attribute exclusion is `toInt64OrNull(...) IS NULL`, not `... = ''`. The equality was
+--    described as protecting a client-reported cost of zero, but it cannot have been doing that:
+--    '0' parses, so step 1 has already claimed such a row and it is no longer 0 here. What the
+--    equality actually excluded was rows whose attribute is UNPARSEABLE, which is the opposite of
+--    what checks/priced_zero.sql promises ("an unparseable attribute falls through to a class below
+--    and is treated as unknown"). A span with attr = 'n/a', a real model, real tokens and an empty
+--    catalog version was therefore classed unknown_catalog_miss, skipped here, and left as a
+--    fabricated $0, so a post-repair re-run still reported unknown_* rows. `IS NULL` keeps the row
+--    that carries a usable number out of this step, which is the only thing that needs keeping out,
+--    and lets the unparseable ones through to be marked unknown, which is what they are.
+--
+--    Reconciled rows are excluded here too, for the same reason as in step 1.
 -- ============================================================================================
 ALTER TABLE otel_spans
 UPDATE
@@ -115,7 +166,8 @@ UPDATE
     CostSource = 'unpriced',
     PriceCatalogVersion = ''
 WHERE EstimatedCost = 0
-  AND SpanAttributes['gen_ai.tool.cost_micro_usd'] = ''
+  AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NULL
+  AND CostSource != 'reconciled'
   AND (
         (GenAiRequestModel = '' AND GenAiResponseModel = ''
          AND ifNull(InputTokens, 0) = 0 AND ifNull(OutputTokens, 0) = 0)
@@ -129,14 +181,16 @@ SETTINGS mutations_sync = 2;
 --    from the sum and a zero changes no total. That is the arithmetic proof that the mark step
 --    subtracted no money: it only stopped claiming that money was known.
 --
---    priced_zero_spans should now be only the genuine measured zeros (usually none), and
---    unknown_spans should have grown by exactly the number of rows step 2 marked.
+--    priced_zero_spans should now be only the zeros a real price catalog produced, which
+--    checks/priced_zero.sql splits into measured_zero and the two ambiguous residue classes beside
+--    it, and unknown_spans should have grown by exactly the number of rows step 2 marked.
 -- ============================================================================================
 SELECT
     'after' AS phase,
     countIf(EstimatedCost = 0) AS priced_zero_spans,
     countIf(EstimatedCost IS NULL) AS unknown_spans,
-    countIf(EstimatedCost = 0 AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
+    countIf(EstimatedCost = 0 AND PriceCatalogVersion = '' AND CostSource != 'reconciled'
+            AND toInt64OrNull(SpanAttributes['gen_ai.tool.cost_micro_usd']) IS NOT NULL)
         AS repriceable_spans,
     sum(EstimatedCost) AS known_spend_usd
 FROM otel_spans FINAL
@@ -163,6 +217,10 @@ FORMAT PrettyCompact;
 --
 --   make ch-rollup-rebuild   # from infra/, CTO-311, quiesce ingest for the duration
 --
---    Then `make ch-priced-zero-check` again. The unknown_* classes should be gone, and whatever
---    remains under `measured_zero` is a real zero that was correctly left alone.
+--    Then `make ch-priced-zero-check` again. The unknown_* classes should be gone. What remains is
+--    the catalog-priced residue: `measured_zero` proper, plus `measured_zero_no_model` and
+--    `measured_zero_flat_usage`, which this repair deliberately does not touch because a real
+--    PriceCatalogVersion says a catalog produced that number and turning it into NULL would destroy
+--    information. Those two are reported separately so the residue stays auditable rather than
+--    disappearing into a class whose name claims more certainty than it has.
 -- ============================================================================================

@@ -123,7 +123,9 @@ ch-priced-zero-check: ## Report historical spans stored as a priced $$0 that was
 	@echo "recoverable            = repriceable from the row itself by 'make ch-repair-priced-zero'."
 	@echo "unknown_no_price_input = nothing priceable was ever recorded; that repair marks them NULL / 'unpriced'."
 	@echo "unknown_catalog_miss   = the price catalog never priced them; same marking."
-	@echo "measured_zero          = a real zero from a real catalog version; deliberately left as 0."
+	@echo "measured_zero*         = a real catalog version produced that zero; deliberately left as 0."
+	@echo "                         measured_zero_no_model and measured_zero_flat_usage are the"
+	@echo "                         ambiguous residue, named rather than folded into measured_zero."
 
 ch-repair-priced-zero: ## One-shot: reprice what is derivable, mark the rest unknown, never invent (CTO-313)
 	@# Deliberately NOT part of ch-migrate: it mutates the raw span table. Run ch-priced-zero-check
