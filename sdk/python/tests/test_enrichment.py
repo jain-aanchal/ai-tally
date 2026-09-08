@@ -290,3 +290,24 @@ def test_call_cost_original_not_mutated():
     before = dict(span)
     enrich_cost(span, seed_catalog(), at=AT)
     assert span == before
+
+
+# CTO-244: the per-operation half of the unknown-usage rule. An embedding call has no output
+# side by design, so the chat rule would mark every correctly instrumented embedding span
+# unknown and stop it pricing. The embedding-tier and per-call paths are covered above.
+
+def test_embeddings_with_input_only_is_not_unknown_usage():
+    # The regression this whole change exists to prevent: an embedding span carries no output
+    # count by design, so a both-sides rule marked every one of them unknown-usage.
+    res = enrich_cost(_embedding_span(), seed_catalog(), at=AT)
+    assert res.usage_unknown is False
+
+
+def test_embeddings_without_input_tokens_is_unknown_usage():
+    # Input is the one side an embedding call does have, so an absent one really is unknown.
+    res = enrich_cost(_embedding_span(inp=None), seed_catalog(), at=AT)
+    assert res.usage_unknown is True
+    assert res.catalog_miss is False
+    assert res.server_cost_micro_usd is None
+    assert GenAI.COST_ESTIMATED_MICRO_USD not in res.attributes
+    assert GenAI.COST_PRICE_CATALOG_VERSION not in res.attributes
