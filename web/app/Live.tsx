@@ -201,7 +201,7 @@ export function HomeLive({
       <Card title="Per-provider · conversion">
         {perProviderConversion.length === 0 ? (
           <p className="text-sm text-muted">
-            No sessions yet — drive traffic to populate (link out from{" "}
+            No sessions yet: drive traffic to populate (link out from{" "}
             <a className="text-good underline" href="/attribution">
               Attribution
             </a>

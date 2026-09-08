@@ -2,18 +2,31 @@
 """The code-returning MCP tools (CTO-261 section 4.2).
 
 ``get_recipe``, ``generate_middleware``, ``instrument_call_site``, ``explain_layer``,
-and a ``coverage_report`` stub. Each returns recipes or generated code, never an edit
-applied to a repo (section 4.2). Every path is honest under uncertainty: a stack with
-no recipe returns a reported gap, never a fabricated ``record_*`` call (section 2
-decision 2, section 9).
+and ``coverage_report``. Each returns recipes, generated code or a read of the coverage
+probe, never an edit applied to a repo (section 4.2). Every path is honest under
+uncertainty: a stack with no recipe returns a reported gap, never a fabricated
+``record_*`` call (section 2 decision 2, section 9), and an unanswerable coverage probe
+returns unknown with a reason, never a verdict (section 7).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+from onboarding_mcp.coverage_client import (
+    DEFAULT_LAYERS,
+    CoverageConfig,
+    CoverageUnavailable,
+    Transport,
+    config_from_env,
+    derive_layer,
+    fetch_coverage,
+    index_layers,
+)
+from onboarding_mcp.detect import import_token_matches_prose, tokenize
 from onboarding_mcp.sdk_surface import emitted_tally_calls, layer_grounding
 
 _HOLE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -70,6 +83,11 @@ def generate_middleware(
     ``account_source`` is the confirmed resolver expression (an ``X-Customer-Id`` header, an
     auth dependency); it is injected verbatim, never inferred. Without an answer the account
     layer stays unattributed, so an empty ``account_source`` is a reported gap, not a guess.
+
+    The ``startup`` value is a union: normally the ``generate_startup`` result, but a gap
+    dict (``gap``, ``reason``) when the catalog has no startup recipe. Both shapes carry
+    ``code`` / ``placement`` / ``imports_to_add``, with ``code`` set to None in the gap case,
+    so ``result["startup"]["code"]`` is always safe to read.
     """
     cat = catalog or get_catalog()
     if not account_source.strip():
@@ -97,6 +115,19 @@ def generate_middleware(
         recipe.edit["template"],
         {"account_source": account_source, "feature_tag": feature_expr},
     )
+    # Section 3 step 4 describes the proposed diff as "tally.init() at startup +
+    # middleware + record_*". Returning the startup snippet alongside the middleware is
+    # what makes the bundle complete: the developer's agent would otherwise wire
+    # with_account into a process that never called init.
+    startup = generate_startup(feature_tag, catalog=cat)
+    if startup.get("gap"):
+        # generate_startup returns a union: a generated snippet, or a _gap dict that
+        # carries none of the code / placement / imports_to_add keys. A caller reading
+        # result["startup"]["code"] would then raise KeyError instead of seeing the gap
+        # it was told about (CTO-261 review finding 6). Normalize to one shape: the
+        # gap and its reason survive, and code is None, which reads as "nothing to
+        # apply" rather than blowing up.
+        startup = {"code": None, "placement": None, "imports_to_add": [], **startup}
     return {
         "recipe_id": recipe.id,
         "web_framework": web_framework,
@@ -104,6 +135,41 @@ def generate_middleware(
         "code": code,
         "placement": recipe.edit["placement"],
         "bound_account_source": account_source,
+        "feature_tag": feature_tag,
+        "startup": startup,
+    }
+
+
+STARTUP_RECIPE_ID = "startup.tally.init"
+
+
+def generate_startup(
+    feature_tag: str | None = None,
+    *,
+    catalog: RecipeCatalog | None = None,
+) -> dict[str, Any]:
+    """Generate the ``tally.init()`` startup snippet (section 3 step 4).
+
+    The proposed diff is "init at startup + middleware + record_*"; without the init line
+    the other two edits run in a process that was never connected. A catalog with no
+    startup recipe is a reported gap, not an invented init line.
+    """
+    cat = catalog or get_catalog()
+    recipe = cat.get(STARTUP_RECIPE_ID)
+    if recipe is None:
+        return _gap(
+            f"no startup recipe {STARTUP_RECIPE_ID!r} in the catalog",
+            known_recipes=[r.id for r in cat.recipes],
+        )
+    code = _fill(
+        recipe.edit["template"],
+        {"feature_tag": repr(feature_tag) if feature_tag else "None"},
+    )
+    return {
+        "recipe_id": recipe.id,
+        "imports_to_add": recipe.edit["imports_to_add"],
+        "code": code,
+        "placement": recipe.edit["placement"],
         "feature_tag": feature_tag,
     }
 
@@ -180,13 +246,40 @@ def explain_layer(query: str, *, catalog: RecipeCatalog | None = None) -> dict[s
     matched_recipe = None
     if facts is None:
         # Not a bare layer name: try to match the excerpt to a recipe by its detect block.
+        # Imports match on identifier-token boundaries, not bare substrings: a plain
+        # substring test lets an unrelated dependency name pass as a confident LLM answer,
+        # and a confidently wrong grounded answer is worse than a gap (CTO-261 review
+        # finding 2, CLAUDE.md "honest under uncertainty").
+        #
+        # A token boundary is not enough for a package whose name is also an ordinary
+        # English word, because the token genuinely IS a word: "let us work through this
+        # together" would otherwise ground on the together.ai import and answer with the
+        # LLM layer. Those names need an import-shaped or package-shaped context here.
+        # This is explain_layer only: detect_stack reads manifests and import excerpts,
+        # where the same token really does mean the dependency is installed, so together.ai
+        # detection keeps working there (CTO-261 review finding 2).
+        query_tokens = tokenize(query)
+
+        def _import_hit(imp: str) -> bool:
+            return any(
+                import_token_matches_prose(tok, query, query_tokens) for tok in tokenize(imp)
+            )
+
         for recipe in cat.recipes:
-            if any(pat in query for pat in recipe.call_patterns) or any(
-                imp in query for imp in recipe.imports
+            if not (
+                any(pat in query for pat in recipe.call_patterns)
+                or any(_import_hit(imp) for imp in recipe.imports)
             ):
-                facts = layer_grounding(recipe.verify.get("layer", ""))
-                matched_recipe = recipe.id
-                break
+                continue
+            grounding = layer_grounding(recipe.verify.get("layer", ""))
+            if grounding is None:
+                # A recipe whose layer carries no record_* grounding (the startup line
+                # is the one such recipe) answers nothing here. Keep looking rather than
+                # reporting a gap a later recipe could have answered honestly.
+                continue
+            facts = grounding
+            matched_recipe = recipe.id
+            break
     if facts is None:
         return _gap(
             f"no known layer or recipe matches {query!r}",
@@ -199,29 +292,90 @@ def explain_layer(query: str, *, catalog: RecipeCatalog | None = None) -> dict[s
     return result
 
 
-def coverage_report(tenant_key: str, *, layers: list[str] | None = None) -> dict[str, Any]:
-    """Per-layer coverage (section 7). Stubbed against the spec contract for P1.
+def coverage_report(
+    tenant_key: str,
+    *,
+    layers: list[str] | None = None,
+    wired: list[str] | None = None,
+    config: CoverageConfig | None = None,
+    transport: Transport | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Per-layer coverage (section 7), read from the gateway's real probe (section 12 P3).
 
-    The real ClickHouse per-layer existence probe is the gateway's work in a later PR
-    (section 12 P3). Until then this reports each layer as not-yet-probed rather than
-    fabricating a covered / dark verdict, honoring "honest under uncertainty": a layer
-    is never marked covered without a span to prove it (section 7, CLAUDE.md).
+    Calls ``GET /v1/tenant/onboarding/coverage`` and re-derives every verdict from the proving
+    span counts it returns, so a layer reaches ``covered`` only behind evidence and a payload
+    that claims coverage with nothing to show for it is downgraded to ``unknown``
+    (:mod:`onboarding_mcp.coverage_client`).
+
+    Every way this can fail (unconfigured, unreachable, non-2xx, timeout, unreadable body) leaves
+    ``probe_available`` False and every layer ``unknown`` WITH the reason attached. None of them
+    ever becomes "not covered": saying a developer's tools layer is unwired because our gateway
+    blipped would be fabricating a negative out of an absence of knowledge (CLAUDE.md, honest
+    under uncertainty).
+
+    ``wired`` passes the agent's claim about what it just instrumented straight through. It only
+    separates "wired, awaiting first event" from "not wired" for a dark layer and can never
+    manufacture coverage. ``tenant_key`` is reported as present or absent and never echoed back;
+    the tenant the probe reads and the service token it authenticates with both come from
+    configuration, by reference.
     """
-    layer_names = layers or ["llm", "tool", "vector", "embeddings", "account"]
+    layer_names = layers or list(DEFAULT_LAYERS)
+    claimed_wired = {name for name in (wired or []) if name in DEFAULT_LAYERS}
+
+    if config is None:
+        config, config_reason = config_from_env(env)
+    else:
+        config_reason = ""
+
+    if config is None:
+        return _unavailable_coverage(tenant_key, layer_names, config_reason)
+
+    try:
+        payload = fetch_coverage(config, wired=claimed_wired, transport=transport, env=env)
+    except CoverageUnavailable as exc:
+        return _unavailable_coverage(tenant_key, layer_names, str(exc))
+
+    rows = index_layers(payload)
     return {
         "tenant_key_present": bool(tenant_key),
-        "probe_available": False,
-        "note": (
-            "Per-layer coverage probe ships in a later PR (CTO-261 section 7 / P3). "
-            "No layer is reported as covered without a proving span."
-        ),
+        "probe_available": True,
+        # Present on both branches so the shape is stable: a caller reading ``result["reason"]``
+        # unconditionally used to get a KeyError exactly when the probe succeeded (CTO-261). The
+        # top-level reason explains why the probe as a whole did not answer, so on success it is
+        # empty; the per-layer reasons carry the detail.
+        "reason": "",
         "layers": [
             {
                 "layer": name,
-                "signal": (grounding or {}).get("signal", ""),
-                "status": "not_probed",
+                "signal": (layer_grounding(name) or {}).get("signal", ""),
+                **derive_layer(rows.get(name), wired=name in claimed_wired),
             }
             for name in layer_names
-            for grounding in [layer_grounding(name)]
+        ],
+    }
+
+
+def _unavailable_coverage(
+    tenant_key: str, layer_names: list[str], reason: str
+) -> dict[str, Any]:
+    """The honest answer when the probe did not run: unknown everywhere, with the reason.
+
+    ``probe_available: False`` is kept from the P1 stub because it is still the correct answer
+    here, and ``proving_spans`` stays null rather than 0: an unknown count is not a zero count.
+    """
+    return {
+        "tenant_key_present": bool(tenant_key),
+        "probe_available": False,
+        "reason": reason,
+        "layers": [
+            {
+                "layer": name,
+                "signal": (layer_grounding(name) or {}).get("signal", ""),
+                "status": "unknown",
+                "reason": reason,
+                "proving_spans": None,
+            }
+            for name in layer_names
         ],
     }

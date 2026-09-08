@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -42,7 +42,7 @@ export async function GET(req: Request) {
     try {
       const qs = ruleId ? `?rule_id=${encodeURIComponent(ruleId)}` : "";
       const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails/audit${qs}`, {
-        headers: { "x-tenant-id": await resolveTenantId() },
+        headers: controlPlaneHeaders(await resolveTenantId()),
         cache: "no-store",
         signal: AbortSignal.timeout(2000),
       });
@@ -102,7 +102,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-tenant-id": await resolveTenantId() },
+      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

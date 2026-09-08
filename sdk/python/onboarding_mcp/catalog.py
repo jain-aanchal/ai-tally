@@ -15,10 +15,29 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on which extras are installed
+    # onboarding_mcp ships in the base wheel (the console entrypoint has to resolve for an
+    # installed SDK, and a wheel cannot vary its contents by extra), but the recipe catalog
+    # is YAML and pyyaml lives in the mcp extra. Without it the honest answer is which
+    # install is missing, not a bare "No module named 'yaml'" (CTO-261 review finding 4).
+    raise ModuleNotFoundError(
+        "the onboarding recipe catalog is YAML and needs pyyaml, which ships with the "
+        "'mcp' extra: pip install 'tally-sdk[mcp]'. onboarding_mcp is present in the base "
+        "tally-sdk wheel so the tally-onboarding-mcp entrypoint resolves, but it is not "
+        "usable without that extra; the SDK runtime itself stays dependency-free."
+    ) from exc
 
-# recipes/ sits next to onboarding_mcp/ under sdk/python/.
-RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
+# In-tree, recipes/ sits next to onboarding_mcp/ under sdk/python/. In an installed
+# wheel the catalog is force-included at onboarding_mcp/recipes/ so the console
+# entrypoint finds it without a source checkout (CTO-261 section 4.2).
+_INSTALLED_RECIPES = Path(__file__).resolve().parent / "recipes"
+RECIPES_DIR = (
+    _INSTALLED_RECIPES
+    if _INSTALLED_RECIPES.is_dir()
+    else Path(__file__).resolve().parent.parent / "recipes"
+)
 
 
 @dataclass(frozen=True)

@@ -6,11 +6,25 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
 )
+
+// tokensEq reports whether a nullable token count is present and equal to want. A nil count means
+// the provider never reported usage, which is never equal to a number.
+func tokensEq(got *int64, want int64) bool { return got != nil && *got == want }
+
+// tokensStr renders a nullable count for test failure messages, so an unknown reads as "unknown"
+// rather than as a misleading 0.
+func tokensStr(got *int64) string {
+	if got == nil {
+		return "unknown"
+	}
+	return strconv.FormatInt(*got, 10)
+}
 
 // recordedGeminiResponse is a real-shape generateContent response body (content elided): the parts
 // text is irrelevant to metadata — only usageMetadata and, via the path, the model matter.
@@ -36,11 +50,11 @@ func TestGeminiMetaFromRecordedResponse(t *testing.T) {
 	if meta.Model != "gemini-2.5-flash" {
 		t.Errorf("Model = %q, want gemini-2.5-flash", meta.Model)
 	}
-	if meta.PromptTokens != 259 {
-		t.Errorf("PromptTokens = %d, want 259", meta.PromptTokens)
+	if !tokensEq(meta.PromptTokens, 259) {
+		t.Errorf("PromptTokens = %s, want 259", tokensStr(meta.PromptTokens))
 	}
-	if meta.CompletionTokens != 73 {
-		t.Errorf("CompletionTokens = %d, want 73", meta.CompletionTokens)
+	if !tokensEq(meta.CompletionTokens, 73) {
+		t.Errorf("CompletionTokens = %s, want 73", tokensStr(meta.CompletionTokens))
 	}
 }
 
@@ -71,13 +85,15 @@ func TestGeminiMetaFallsBackToModelVersion(t *testing.T) {
 func TestOpenAIAndAnthropicMeta(t *testing.T) {
 	openai := extractMeta(config.ProviderOpenAI, "/v1/chat/completions",
 		[]byte(`{"model":"gpt-4o-2024-08-06","usage":{"prompt_tokens":12,"completion_tokens":34}}`))
-	if openai.Model != "gpt-4o-2024-08-06" || openai.PromptTokens != 12 || openai.CompletionTokens != 34 {
+	if openai.Model != "gpt-4o-2024-08-06" || !tokensEq(openai.PromptTokens, 12) ||
+		!tokensEq(openai.CompletionTokens, 34) {
 		t.Errorf("openai meta = %+v", openai)
 	}
 
 	anthropic := extractMeta(config.ProviderAnthropic, "/v1/messages",
 		[]byte(`{"model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":200}}`))
-	if anthropic.Model != "claude-sonnet-4-5" || anthropic.PromptTokens != 100 || anthropic.CompletionTokens != 200 {
+	if anthropic.Model != "claude-sonnet-4-5" || !tokensEq(anthropic.PromptTokens, 100) ||
+		!tokensEq(anthropic.CompletionTokens, 200) {
 		t.Errorf("anthropic meta = %+v", anthropic)
 	}
 }
@@ -152,8 +168,8 @@ func TestGeminiProxyRecordsMetadataAndHidesKey(t *testing.T) {
 	if rec.Model != "gemini-2.5-flash" {
 		t.Errorf("trace Model = %q", rec.Model)
 	}
-	if rec.PromptTokens != 259 || rec.CompletionTokens != 73 {
-		t.Errorf("trace tokens = %d/%d, want 259/73", rec.PromptTokens, rec.CompletionTokens)
+	if !tokensEq(rec.PromptTokens, 259) || !tokensEq(rec.CompletionTokens, 73) {
+		t.Errorf("trace tokens = %s/%s, want 259/73", tokensStr(rec.PromptTokens), tokensStr(rec.CompletionTokens))
 	}
 	if rec.StatusCode != http.StatusOK {
 		t.Errorf("trace status = %d", rec.StatusCode)
@@ -191,7 +207,10 @@ func TestGeminiProxyStreamingModelFromPath(t *testing.T) {
 	if rec.Model != "gemini-1.5-pro" {
 		t.Errorf("trace Model = %q, want gemini-1.5-pro", rec.Model)
 	}
-	if rec.PromptTokens != 0 || rec.CompletionTokens != 0 {
-		t.Errorf("expected zero tokens when usage absent, got %d/%d", rec.PromptTokens, rec.CompletionTokens)
+	// Honest under uncertainty: usage the provider never reported stays nil (NULL downstream). A 0
+	// here would claim the call really used no tokens, which is a fabricated fact.
+	if rec.PromptTokens != nil || rec.CompletionTokens != nil {
+		t.Errorf("expected unknown tokens when usage absent, got %s/%s",
+			tokensStr(rec.PromptTokens), tokensStr(rec.CompletionTokens))
 	}
 }

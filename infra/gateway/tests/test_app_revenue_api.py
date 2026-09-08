@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
 from gateway.app import app
+from gateway.auth import AuthResult
+from gateway.config import get_settings
 from gateway.revenue_api import counts_as_revenue
 from gateway.tenant_revenue_sources import RevenueSourceConfig
 from tally.cdp_connectors import WebhookIngestor
@@ -313,3 +315,110 @@ def test_counts_as_revenue_mirrors_the_reader_defaults():
     assert counts_as_revenue(_config(None, include_mrr=False), "revenue-api", "monetary") is True
     # Source comparison is case-insensitive, matching lower(Source) in the reader.
     assert counts_as_revenue(_config(("Revenue-API",)), "revenue-api", "monetary") is True
+
+
+# ----------------------------------------------------------------------------------------------
+# Auth with TALLY_REQUIRE_API_KEY on: this is tenant-facing INGEST, not the control plane.
+#
+# Two doors, both authenticated: the customer's own ingest key (all a Chargebee / Recurly / Zuora
+# job ever holds, and what docs/revenue-api.md documents) and the control-plane service token.
+# Service-token-only would 401 every automated revenue post the moment auth is switched on, and
+# silently blank the LTV / CAC / margin views.
+# ----------------------------------------------------------------------------------------------
+
+SERVICE_TOKEN = "svc-token-for-tests"
+
+
+class FakeAuth:
+    """Token -> AuthResult, standing in for the Postgres api-key lookup."""
+
+    def __init__(self, mapping: dict[str, AuthResult]) -> None:
+        self._mapping = mapping
+
+    def authenticate(self, token: str) -> AuthResult | None:
+        return self._mapping.get(token)
+
+    def ping(self) -> bool:
+        return True
+
+
+@contextmanager
+def _authed_client(keys: dict[str, AuthResult]) -> Iterator[tuple[TestClient, FakeCHStore]]:
+    # Boot with auth OFF so the fail-closed boot guard cannot trip on leftover singleton state, then
+    # apply the per-test auth config, which is what the request-time path actually reads. Restored
+    # on the way out: app is module-level and shared with every other test in the run.
+    boot = get_settings()
+    boot.require_api_key = False
+    boot.gateway_service_token = ""
+    with TestClient(app) as client:
+        previous_auth = app.state.auth
+        try:
+            app.state.settings.require_api_key = True
+            app.state.settings.gateway_service_token = SERVICE_TOKEN
+            app.state.auth = FakeAuth(keys)
+            ch = FakeCHStore()
+            app.state.store = ch
+            app.state.tenant_revenue_sources = FakeRevenueSourceStore()
+            app.state.revenue_ingestor = WebhookIngestor()
+            yield client, ch
+        finally:
+            app.state.settings.require_api_key = False
+            app.state.settings.gateway_service_token = ""
+            app.state.auth = previous_auth
+
+
+def _written_tenants(ch: FakeCHStore) -> set[str]:
+    return {tenant for tenant, _ in ch.existing}
+
+
+def test_ingest_key_still_works_when_auth_is_on():
+    """The regression this guards: a billing integration holds an ingest key, never the service
+    token. The tenant comes from the KEY, so no header is trusted and no cross-tenant post is
+    possible."""
+    keys = {"wk": AuthResult(tenant_id=TENANT, scope="write")}
+    with _authed_client(keys) as (client, ch):
+        res = client.post(
+            "/v1/revenue/events", json=_payload(), headers={"Authorization": "Bearer wk"}
+        )
+        assert res.status_code == 201
+        assert len(ch.events) == 1
+        assert _written_tenants(ch) == {TENANT}
+
+
+def test_service_token_plus_tenant_header_also_works_when_auth_is_on():
+    with _authed_client({}) as (client, ch):
+        res = client.post(
+            "/v1/revenue/events",
+            json=_payload(),
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}", "X-Tenant-Id": TENANT},
+        )
+        assert res.status_code == 201
+        assert len(ch.events) == 1
+        assert _written_tenants(ch) == {TENANT}
+
+
+def test_neither_credential_is_rejected_when_auth_is_on():
+    with _authed_client({}) as (client, ch):
+        # No Authorization at all: a bare x-tenant-id must not be enough once auth is on.
+        res = client.post("/v1/revenue/events", json=_payload(), headers={"X-Tenant-Id": TENANT})
+        assert res.status_code == 401
+        # A token that is neither the service token nor a live api key.
+        res = client.post(
+            "/v1/revenue/events",
+            json=_payload(),
+            headers={"Authorization": "Bearer nope", "X-Tenant-Id": TENANT},
+        )
+        assert res.status_code == 401
+        assert ch.events == []
+
+
+def test_read_scoped_ingest_key_cannot_post_revenue():
+    """A read-only key authenticates but must not write rows, matching /v1/tenant/hmac-key."""
+    keys = {"rk": AuthResult(tenant_id=TENANT, scope="read")}
+    with _authed_client(keys) as (client, ch):
+        res = client.post(
+            "/v1/revenue/events", json=_payload(), headers={"Authorization": "Bearer rk"}
+        )
+        assert res.status_code == 403
+        assert res.json()["detail"]["code"] == "FORBIDDEN_SCOPE"
+        assert ch.events == []

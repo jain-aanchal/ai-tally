@@ -27,7 +27,7 @@ export default async function BudgetSettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold">Settings — Budgets</h1>
+        <h1 className="text-xl font-semibold">Settings: Budgets</h1>
         <p className="mt-1 max-w-prose text-sm text-muted">
           What you intend to spend on AI, per period and per scope. This is the reference every
           &ldquo;versus budget&rdquo; figure is measured against. Until a budget exists here, spend
@@ -51,9 +51,9 @@ export default async function BudgetSettingsPage() {
         title={
           reachable
             ? configured
-              ? `Budgets — ${budgets.length} set`
-              : "Budgets — none set"
-            : "Budgets — unknown"
+              ? `Budgets: ${budgets.length} set`
+              : "Budgets: none set"
+            : "Budgets: unknown"
         }
       >
         <p className="mb-3 max-w-prose text-xs text-muted">

@@ -15,6 +15,7 @@ from onboarding_mcp import (
     detect_stack,
     explain_layer,
     generate_middleware,
+    generate_startup,
     get_recipe,
     instrument_call_site,
 )
@@ -88,6 +89,116 @@ def test_detect_stack_gap_names_the_unhandled_web_framework():
     assert "fastapi" not in account_gaps[0]
 
 
+# --------------------------------------------------------------------------- #
+# The manual LLM recipe must not fire on an already-patched call, and must not fire
+# on an app with no LLM at all (CTO-261 review findings 1 and 2).
+# --------------------------------------------------------------------------- #
+def test_patched_openai_call_does_not_match_the_manual_llm_recipe():
+    # tally.init monkeypatches client.chat.completions.create (CTO-260). Matching the
+    # manual recipe here made an agent add a second record_llm_call beside a metered
+    # call, doubling reported cost: the product's core number.
+    result = detect_stack(
+        "openai==1.0\nfastapi==0.115",
+        "r = client.chat.completions.create(model=m, messages=msgs)",
+    )
+    assert "llm.generic.call" not in result["matched_recipes"]
+
+
+def test_detected_auto_instrumented_provider_is_flagged_as_already_covered():
+    # A marker in the tool OUTPUT is not optional: the recipe template's comment never
+    # reaches the agent reading detect_stack's result.
+    result = detect_stack("openai==1.0\nanthropic==0.34\n")
+    assert result["already_covered"], "an auto-instrumented provider must be flagged"
+    marker = result["already_covered"][0]
+    assert "openai" in marker
+    assert "twice" in marker
+    assert "tally.init()" in marker
+
+
+def test_no_llm_provider_means_no_already_covered_marker():
+    result = detect_stack("requests==2.32.0\nflask==3.0\n")
+    assert result["already_covered"] == []
+
+
+def test_plain_requests_and_flask_app_does_not_match_the_llm_recipe():
+    # httpx / requests / boto3 are in nearly every Python app. Matching on them told an
+    # app with no LLM to add record_llm_call while llm_providers was empty.
+    result = detect_stack("requests==2.32.0\nflask==3.0\n")
+    assert result["llm_providers"] == []
+    assert "llm.generic.call" not in result["matched_recipes"]
+
+
+def test_boto3_alone_does_not_match_but_bedrock_runtime_does():
+    # boto3 is overwhelmingly S3 / DynamoDB, so it only signals an LLM call site with a
+    # bedrock-runtime call pattern alongside it.
+    plain = detect_stack("boto3==1.34.0\n", "s3 = boto3.client('s3')")
+    assert "llm.generic.call" not in plain["matched_recipes"]
+    bedrock = detect_stack("boto3==1.34.0\n", "brt = boto3.client('bedrock-runtime')")
+    assert "llm.generic.call" in bedrock["matched_recipes"]
+
+
+def test_genuinely_unpatched_providers_still_match():
+    # Narrowing must not blind the recipe to the call sites it exists for.
+    assert "llm.generic.call" in detect_stack("ollama==0.3.0\n")["matched_recipes"]
+    assert (
+        "llm.generic.call"
+        in detect_stack("", 'httpx.post("https://x/v1/chat/completions")')["matched_recipes"]
+    )
+
+
+def test_explain_layer_on_boto3_is_a_gap_not_a_confident_llm_answer():
+    # A confidently wrong grounded answer is worse than a gap (CLAUDE.md). boto3 must not
+    # resolve to record_llm_call / GenAiOperation='chat'.
+    result = explain_layer("what records this boto3 call?")
+    assert result["gap"] is True
+    result = explain_layer("boto3")
+    assert result["gap"] is True
+
+
+def test_explain_layer_on_ambiguous_common_word_prose_is_a_gap():
+    # "together" is a real package (together.ai) AND an everyday adverb, so free-text prose
+    # containing it must not ground on the LLM layer. A gap beats a confident wrong answer
+    # (CTO-261 review finding 2, CLAUDE.md "honest under uncertainty").
+    for prose in (
+        "let us work through this together",
+        "do these two calls get metered together?",
+        "how are my agents metered?",
+        "do the numbers cohere across layers?",
+    ):
+        result = explain_layer(prose)
+        assert result["gap"] is True, prose
+
+
+def test_explain_layer_still_answers_an_ambiguous_token_in_package_shaped_context():
+    # The stronger signal is import-shaped or package-shaped context, so a genuine
+    # together.ai question still gets the grounded LLM answer.
+    for excerpt in (
+        "import together",
+        "what records this together.ai call?",
+        "from together import Together",
+    ):
+        result = explain_layer(excerpt)
+        assert result.get("gap") is not True, excerpt
+        assert result["call"] == "tally.record_llm_call", excerpt
+
+
+def test_detect_stack_still_detects_together_from_a_manifest_and_from_imports():
+    # The explain_layer guard must not cost together.ai manifest / import detection: in
+    # detect_stack the token appearing really does mean the dependency is present.
+    manifest = detect_stack("together==1.2.3\n")
+    assert "llm.generic.call" in manifest["matched_recipes"]
+    excerpt = detect_stack("", "import together\nclient = together.Together()")
+    assert "llm.generic.call" in excerpt["matched_recipes"]
+
+
+def test_explain_layer_does_not_match_an_import_name_buried_in_a_longer_identifier():
+    # Imports match on identifier-token boundaries rather than bare substrings, so an
+    # unrelated name that merely contains a provider name is a gap, not a confident
+    # LLM answer. (Guards the same class of bug as the boto3 case above.)
+    result = explain_layer("what records this vllmlike_helper call?")
+    assert result["gap"] is True
+
+
 def test_get_recipe_by_id_and_by_alias():
     by_id = get_recipe("vector.pinecone.query")
     assert by_id["id"] == "vector.pinecone.query"
@@ -119,6 +230,93 @@ def test_generate_middleware_is_bound_to_the_given_header():
     assert "with_account" in emitted
     assert "start_trace" in emitted
     assert "<FILL:" not in result["code"]  # both holes were bound
+
+
+def test_generate_middleware_bundles_the_startup_snippet():
+    # Section 3 step 4: the proposed diff is init + middleware + record_*. Middleware
+    # without the init line wires a process that was never connected.
+    result = generate_middleware("fastapi", 'request.headers["X-Customer-Id"]', "chatbot")
+    startup = result["startup"]
+    assert startup["recipe_id"] == "startup.tally.init"
+    assert startup["placement"] == "startup"
+    assert "tally.init(" in startup["code"]
+    ast.parse(startup["code"])
+    assert {c.name for c in emitted_tally_calls(startup["code"])} == {"init"}
+
+
+def test_generate_startup_binds_the_feature_tag_and_never_inlines_a_key():
+    result = generate_startup("chatbot")
+    assert "feature_tag='chatbot'" in result["code"]
+    assert "<FILL:" not in result["code"]
+    # Credentials by reference (CLAUDE.md): the key comes from the environment, so no
+    # snippet ever puts a tally_sk_live_ secret into the developer's diff.
+    assert "tally_sk_live_" not in result["code"]
+    assert "TALLY_KEY" in result["code"]
+
+
+def test_generate_startup_without_a_feature_tag_is_none_not_invented():
+    result = generate_startup()
+    assert "feature_tag=None" in result["code"]
+
+
+def test_generate_startup_without_the_recipe_is_a_gap():
+    # A catalog missing the startup recipe reports a gap rather than hand-writing init.
+    from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+
+    full = get_catalog()
+    without = RecipeCatalog(
+        [r for r in full.recipes if r.id != "startup.tally.init"], full.schema
+    )
+    result = generate_startup("chatbot", catalog=without)
+    assert result["gap"] is True
+    assert "code" not in result
+
+
+def test_middleware_startup_gap_is_readable_without_a_key_error():
+    # Finding 6: generate_startup returns a union, and the gap arm carries no code /
+    # placement / imports_to_add. A caller reading result["startup"]["code"] must see the
+    # gap, not a KeyError.
+    from onboarding_mcp.catalog import RecipeCatalog, get_catalog
+
+    full = get_catalog()
+    without = RecipeCatalog(
+        [r for r in full.recipes if r.id != "startup.tally.init"], full.schema
+    )
+    result = generate_middleware(
+        "fastapi", 'request.headers["X-Customer-Id"]', "chatbot", catalog=without
+    )
+    startup = result["startup"]
+    assert startup["gap"] is True
+    assert startup["code"] is None
+    assert startup["placement"] is None
+    assert startup["imports_to_add"] == []
+    assert startup["reason"]
+
+
+def test_startup_recipe_is_not_counted_as_llm_layer_coverage():
+    # Finding 7: the init line is a startup recipe, not an LLM-call recipe. Counting it
+    # under llm would mislead the first consumer that branches on the kind (the P3
+    # coverage probe).
+    from onboarding_mcp.catalog import get_catalog
+
+    cat = get_catalog()
+    startup = cat.get("startup.tally.init")
+    assert startup.kind == "startup"
+    assert startup.sdk_surface["layer"] == "startup"
+    assert startup.verify["layer"] == "startup"
+    assert startup.id not in {r.id for r in cat.by_kind("llm")}
+
+
+def test_instrument_call_site_adapts_the_llm_recipe():
+    # Section 5.3: LLM call sites CTO-260 auto-instrumentation does not cover.
+    result = instrument_call_site(
+        'r = httpx.post("/v1/chat/completions", json=payload)', "llm.generic.call"
+    )
+    assert result["sdk_call"] == "tally.record_llm_call"
+    assert "record_llm_call" in result["emitted_calls"]
+    # Token counts are left to fill from the provider's usage block, never guessed.
+    assert "input_tokens" in result["holes_to_fill"]
+    assert "<FILL:input_tokens>" in result["code"]
 
 
 def test_generate_middleware_without_an_answer_is_a_gap_not_a_guess():
@@ -180,9 +378,13 @@ def test_explain_layer_unknown_is_a_gap():
 
 
 def test_coverage_report_is_honest_and_not_fabricated():
-    result = coverage_report("tally_sk_live_deadbeef")
+    # Unconfigured: the probe cannot run, so every layer is unknown WITH a reason. Never
+    # "not covered", never a fabricated verdict (section 7, CLAUDE.md). The wired probe path
+    # is covered in tests/test_onboarding_mcp_coverage.py.
+    result = coverage_report("tally_sk_live_deadbeef", env={})
     assert result["probe_available"] is False
     statuses = {layer["status"] for layer in result["layers"]}
-    assert statuses == {"not_probed"}
+    assert statuses == {"unknown"}
+    assert all(layer["reason"] for layer in result["layers"])
     # No layer is claimed covered without a proving span (section 7, CLAUDE.md).
     assert all(layer["status"] != "covered" for layer in result["layers"])

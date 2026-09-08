@@ -15,10 +15,13 @@ import {
 
 describe("getTenant dev escape hatch", () => {
   it("short-circuits to the pinned dev tenant without consulting Clerk", async () => {
-    expect(devTenant()).toBe("00000000-0000-0000-0000-000000000000");
+    // Pinned in vitest.config.ts. A UUID, not the name `local-dev`: the canonical TenantId is the
+    // tenant UUID (Initiative 1, §8) and this value is bound into the ClickHouse read filter.
+    const DEV_TENANT = "00000000-0000-0000-0000-000000000000";
+    expect(devTenant()).toBe(DEV_TENANT);
     const t = await getTenant();
-    expect(t).toEqual({ tenantId: "00000000-0000-0000-0000-000000000000", orgId: null, orgRole: null });
-    expect(await resolveTenantId()).toBe("00000000-0000-0000-0000-000000000000");
+    expect(t).toEqual({ tenantId: DEV_TENANT, orgId: null, orgRole: null });
+    expect(await resolveTenantId()).toBe(DEV_TENANT);
   });
 
   it("treats dev as admin so local key management works", async () => {

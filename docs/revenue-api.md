@@ -22,6 +22,17 @@ Authorization: Bearer <tenant api key>     # or X-Tenant-Id when auth is disable
 Content-Type: application/json
 ```
 
+This is an **ingest** endpoint, not part of the `/v1/tenant/*` control plane, so with
+`TALLY_REQUIRE_API_KEY=true` it accepts either credential:
+
+- a **tenant api key** with `write` or `admin` scope. This is the normal path: your billing job
+  holds an api key. The tenant comes from the key itself, so `X-Tenant-Id` is neither needed nor
+  trusted, and one tenant can never post as another. A `read`-scoped key gets a 403.
+- the **control-plane service token** plus `X-Tenant-Id`, for a first-party server calling on a
+  tenant's behalf.
+
+With auth off (local dev), `X-Tenant-Id` alone is enough, as everywhere else.
+
 | Field         | Required | Type   | Notes                                                                           |
 | ------------- | -------- | ------ | ------------------------------------------------------------------------------- |
 | `event_id`    | yes      | string | Your stable id for this event. The idempotency key. Max 200 chars.              |

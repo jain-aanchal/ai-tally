@@ -180,7 +180,7 @@ export function AgentsLive({
         defaultGroupBy="feature"
       />
 
-      <Card title="Agent cost — distribution is the story">
+      <Card title="Agent cost: distribution is the story">
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-muted">
             <tr>

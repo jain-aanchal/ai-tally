@@ -14,7 +14,8 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["vector", "tool", "embedding", "llm", "middleware", "otel"]
+      "description": "Component this recipe instruments. 'startup' is the tally.init() line, which is not an LLM-call recipe: keeping it under 'llm' made by_kind('llm') and detect_stack's matched_kinds count the init line as LLM-layer coverage (CTO-261 review finding 7).",
+      "enum": ["vector", "tool", "embedding", "llm", "middleware", "otel", "startup"]
     },
     "title": {
       "type": "string",
@@ -62,8 +63,8 @@
         },
         "layer": {
           "type": "string",
-          "enum": ["vector", "tool", "embedding", "llm", "account", "otel"],
-          "description": "Gateway cost-layer / coverage bucket this recipe lands in."
+          "enum": ["vector", "tool", "embedding", "llm", "account", "otel", "startup"],
+          "description": "Gateway cost-layer / coverage bucket this recipe lands in. 'startup' is not a cost layer: it marks a recipe that connects the process rather than metering one call, so no coverage bucket may count it (CTO-261 review finding 7)."
         }
       }
     },
@@ -95,7 +96,7 @@
       "properties": {
         "layer": {
           "type": "string",
-          "enum": ["vector", "tool", "embeddings", "llm", "account", "otel"]
+          "enum": ["vector", "tool", "embeddings", "llm", "account", "otel", "startup"]
         },
         "operation_name": {
           "type": "string",
