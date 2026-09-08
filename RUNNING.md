@@ -82,34 +82,7 @@ when auth is on and no service token is set, rather than coming up with an open 
 `curl … -H 'x-tenant-id: …'` examples below work as written only while auth is off; with auth on, add
 `-H "Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN"`.
 
-Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API key above. So is
-`POST /v1/revenue/events` (`docs/revenue-api.md`), which a customer's billing job posts to with an
-ingest key: it takes a write-scoped ingest key **or** the service token, never the service token
-alone.
-
-**The two token settings are a pair.** `infra/.env.example` and `web/.env.example` both leave the
-token commented, because setting only one is worse than setting neither:
-
-| gateway `TALLY_GATEWAY_SERVICE_TOKEN` | web `GATEWAY_SERVICE_TOKEN` | result with auth on |
-| --- | --- | --- |
-| unset | unset | gateway refuses to boot (fail closed, by design) |
-| set | unset | dashboard sends no `Authorization`; every control-plane read 401s and the settings pages go blank |
-| unset | set | gateway refuses to boot |
-| set, same value | set, same value | working |
-
-Generate the value once and paste it into both files:
-
-```bash
-openssl rand -hex 32
-```
-
-Never reuse a value from an example file. Anything checked into this repo is public.
-
-Note that the synthetic demo seeders do **not** support auth on.
-`examples/vercel-chatbot/scripts/backfill-spans.ts` (used by `make chatbot-demo-backfill` and by the
-`deploy/demo` kit) posts to `/v1/batches` with no `Authorization` header and has no api-key option,
-so with `TALLY_REQUIRE_API_KEY=true` every batch takes a `401`. Seed the demo data with auth off,
-then turn auth on.
+Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API key above.
 
 ## 3. Push telemetry through the gateway
 
@@ -126,9 +99,7 @@ first (this is the same lookup `make demo` and the demo-deploy kit do):
 ```bash
 TENANT=$(docker compose exec -T postgres \
   psql -U tally -d tally -tAc "SELECT id FROM tenants WHERE name='local-dev' LIMIT 1" | tr -d '[:space:]')
-# Abort rather than fall through: an empty $TENANT would POST 40 batches under tenant_id ""
-# that the dashboard will never render, with no error anywhere.
-test -n "$TENANT" || { echo "not seeded, run 'make seed' first" >&2; exit 1; }
+test -n "$TENANT" || echo "not seeded, run 'make seed' first"
 
 for i in $(seq 1 40); do
   curl -s -X POST localhost:8080/v1/batches \
@@ -283,29 +254,99 @@ seeded stack shows a fraction-of-a-cent dashboard, not the **~$52,400/mo**
 story the seed fixtures and the LinkedIn screenshots advertise. To reproduce
 that startup-scale picture you have two paths:
 
-**A. `$0` backfill (recommended for screenshots).** Posts **30 days** of
-backdated synthetic spans + conversion events straight to the gateway's
-`/v1/batches` endpoint. It makes **no LLM calls and needs no API keys**, so a
-screenshot run costs **$0**. The spans sum to ~$52,400 with the seed feature mix
-(research_agent 54% · support_triage 17% · inline_writer 12% · smart_search 10%
-· chatbot 7%), a 60/40 OpenAI/Anthropic provider split, and a small layer of
-tool (~8%) and embedding (~1.5%) spans so the **Cost** tab's Tools/Embeddings
-bars are non-zero too. Conversions fire at **13% (OpenAI) / 15% (Anthropic)**
-and `positive_feedback` on ~75% of sessions, matching the attribution
-screenshot.
+**A. `$0` backfill (recommended for screenshots, and the repo's test corpus).**
+Posts **30 days** of backdated synthetic spans + business events straight to the
+gateway's `/v1/batches` endpoint. It makes **no LLM calls and needs no API
+keys**, so a screenshot run costs **$0**. The LLM layer sums to ~$52,400 with the
+seed feature mix (research_agent 54% · support_triage 17% · inline_writer 12% ·
+smart_search 10% · chatbot 7%).
 
 ```bash
 cd infra && make chatbot-demo-backfill
-# tune it: make chatbot-demo-backfill BACKFILL_ARGS="--days 30 --target-usd 52400 --seed 138"
+# tune it: make chatbot-demo-backfill BACKFILL_ARGS="--days 30 --target-usd 52400 --seed 138 --accounts 12"
 ```
+
+The target refuses to run when the `local-dev` tenant UUID does not resolve, and
+prints what to check. It used to drop `--tenant` in that case, which quietly
+wrote 30 days of rows under the tenant NAME that the dashboard (which reads by
+UUID) never rendered. There is no fallback to the name, by design.
+
+What the corpus contains, and what each part is there to exercise:
+
+| Part | Exercises |
+|---|---|
+| `llm` chat spans across 3 providers / 6 models (openai `gpt-5` + `gpt-4o-mini`, anthropic `claude-sonnet-4-5` + `claude-haiku-4-5`, google `gemini-2.5-pro` + `gemini-2.5-flash`) | Cost Explorer breakdowns by provider/model, Model Comparison, `/compare` |
+| `tools` spans (tavily, serpapi, brave, firecrawl, exa, openai code_interpreter) at the catalog's per-call rates | The Tools layer bar, tool-cost drilldowns |
+| `embeddings` spans (`text-embedding-3-small` / `-large`) | The Embeddings layer bar |
+| `vector` spans (pinecone / weaviate / qdrant queries and upserts) | The Vector layer bar |
+| daily `compute` and `egress` rows in the cloud-billing connector shape | The Compute/Egress layers and the accounts tab's *excluded infrastructure* pot |
+| `AccountIdHash` on spans and on revenue events, ~12 accounts, top-heavy; ~8% of runs deliberately unattributed | Cost per Account, account margin, the unattributed bucket |
+| 5 feature tags on 5 distinct agents (`ServiceName`) | `/features`, `/agents`, per-agent waste scoping |
+| ~3.5% of runs failed with billed input tokens and no output | Recoverable Cost → **Failed but billed** |
+| ~2.5% of runs failed and then retried successfully within 15-120s by a same-shape run | Recoverable Cost → **Duplicated work** |
+| `conversion` (monetary) + `positive_feedback` (count, `value_amount_micro` NULL) events, carrying the account hash | `/attribution`, ROI, Value/user and Margin/user |
+
+Honesty notes, so you know what the numbers are and are not:
+
+- **All money is derived, never invented.** Rates mirror
+  `sdk/python/src/tally/pricing.py:seed_catalog`, the script computes in integer
+  micro-USD (BigInt, no float dollars), and the **gateway still recomputes the
+  authoritative cost** from (provider, model, tokens) against that same catalog.
+  The line the script prints is an expectation to check ClickHouse against, not
+  the source of truth.
+- **Account hashes come from the gateway**, via `POST /v1/tenant/account-lookup`,
+  so they are the digests the tenant's own HMAC key produces and the
+  cost-per-customer search box can resolve them. No raw customer id is ever put
+  in a span. Labels are upserted through `POST /v1/tenant/account-labels` and
+  live in Postgres, never in ClickHouse.
+- **Layer sizes are honest, not flattering.** Only the LLM layer is sized to a
+  dollar target. The per-call layers (tools, vector, embeddings) are sized by
+  *span count* and then cost exactly what the catalog says, so the Vector bar is
+  genuinely small: `$0.0004`/query is the serving portion only, and the deployed-
+  index node-hours that dominate a real vector bill are a **compute** cost by
+  design (see the cost-split note on `_VECTOR_SEEDS` in `pricing.py`).
+  Compute/egress are daily aggregate bill rows, sized at 4.5% / 0.4% of the LLM
+  layer.
+- **Unknown stays unknown.** A failed call records 0 output tokens because that
+  is what it produced, and a `count`-typed engagement event carries a NULL
+  amount, not 0.
+- Everything else is synthetic-seed: backdated timestamps, RNG-drawn token
+  counts, fabricated conversion revenue, fictional company names.
 
 The backfill is **idempotent**: batch ids are derived from `--seed`, so the
 gateway's `(tenant_id, batch_id)` dedup makes a re-run a no-op. Use a fresh
-`--seed` to layer in another independent month. All of it is synthetic-seed
-data: backdated timestamps, RNG-drawn token counts, fabricated conversion
-revenue. The gateway still computes **authoritative** cost from
-(provider, model, tokens) against the seed catalog; the script only sizes token
-volumes to land on the dollar story.
+`--seed` to layer in another independent month; the daily compute/egress span
+ids are keyed on the seed too, so a layered month adds rows instead of colliding
+with the previous one.
+
+#### Checking the corpus actually landed
+
+The one failure mode worth checking for is a tenant mismatch, so every query
+below is scoped to the UUID. `make ch` opens the shell; `$TENANT` is the UUID
+`make seed` printed.
+
+```sql
+-- Every layer present, under the UUID and not the name.
+SELECT GenAiOperation, count() AS spans, round(sum(EstimatedCost), 2) AS usd,
+       countIf(AccountIdHash != '') AS with_account
+FROM otel_spans WHERE TenantId = '<uuid>' GROUP BY GenAiOperation ORDER BY usd DESC;
+
+-- Accounts, biggest first. '' is the honest unattributed bucket, not a customer.
+SELECT AccountIdHash, count(), round(sum(EstimatedCost), 2) AS usd
+FROM otel_spans WHERE TenantId = '<uuid>' GROUP BY AccountIdHash ORDER BY usd DESC LIMIT 15;
+
+-- Failed-but-billed runs (what the Recoverable Cost detector reads).
+WITH runs AS (
+  SELECT TraceId, sum(EstimatedCost) AS cost, max(StatusCode) AS st
+  FROM otel_spans
+  WHERE TenantId = '<uuid>' AND GenAiOperation NOT IN ('compute', 'egress')
+  GROUP BY TraceId)
+SELECT countIf(st = 2 AND cost > 0) AS failed_but_billed,
+       round(sumIf(cost, st = 2), 2) AS recoverable_usd FROM runs;
+```
+
+If `TenantId` reads `local-dev` rather than a UUID anywhere in those results,
+those rows predate the UUID switch and the dashboard will not render them.
 
 **B. Live realistic mode (higher fidelity, real spend).** Drives ~**5,000**
 sessions across the seed feature tags over a bounded window (~10 min), making
@@ -427,7 +468,7 @@ Replay gives you per-candidate cost / latency / error from real calls, but
 `/compare`'s **Quality** column still needs a judgment: "is the haiku-4.5
 response actually as good as sonnet-4.5's was?". CTO-114 adds a pairwise
 LLM-judge eval pass that replaces the previously fabricated `qualityScore`
-with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay;
+with a real win-rate (and Wilson 95% CI). Opt in **separately** from replay
 judge calls run a frontier model and are pricier than candidate replays.
 
 1. **Enable eval** for the local tenant:

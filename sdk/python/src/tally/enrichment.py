@@ -27,8 +27,12 @@ from tally.pricing import (
     Usage,
     compute_call_cost_micro_usd,
     compute_cost_micro_usd,
+    compute_embedding_cost_micro_usd,
 )
 from tally.schema import GenAI
+
+# ``gen_ai.operation.name`` values priced under ``PriceType.EMBEDDING`` rather than INPUT/OUTPUT.
+_EMBEDDING_OPERATIONS = frozenset({"embeddings", "embedding"})
 
 DEFAULT_DRIFT_THRESHOLD = 0.05  # 5%
 
@@ -89,14 +93,35 @@ def enrich_cost(
         # nothing to price against
         return EnrichmentResult(out, None, client_cost, None, False, catalog_miss=True)
 
-    usage = Usage(
-        input_tokens=_int_or_none(out.get(GenAI.USAGE_INPUT_TOKENS)) or 0,
-        output_tokens=_int_or_none(out.get(GenAI.USAGE_OUTPUT_TOKENS)) or 0,
-        cached_input_tokens=_int_or_none(out.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0,
-    )
-    server_cost, version = compute_cost_micro_usd(
-        catalog, provider, model, usage, at=at, tenant_id=tenant_id
-    )
+    # CTO-243: an embeddings span is priced under PriceType.EMBEDDING, not INPUT/OUTPUT. Routing it
+    # through compute_cost_micro_usd (which only reads the INPUT/OUTPUT tiers) resolved no rate at
+    # all, so every embeddings span reported a catalog miss and had its cost dropped, landing 0.00
+    # in EstimatedCost. That is the fabricated-zero the honesty invariant forbids: the seed catalog
+    # DOES price text-embedding-3-*, and the SDK's own record_embedding_call already computes the
+    # right number client-side (tally.client, "use the embedding-specific resolver") only for the
+    # gateway to overwrite it with nothing. Use the same resolver here so the authoritative
+    # server-side value is the catalog value. A genuinely unpriced embedding model still misses and
+    # still renders blank rather than 0.
+    operation = out.get(GenAI.OPERATION_NAME)
+    is_embedding = isinstance(operation, str) and operation.lower() in _EMBEDDING_OPERATIONS
+    if is_embedding:
+        server_cost, version = compute_embedding_cost_micro_usd(
+            catalog,
+            provider,
+            model,
+            _int_or_none(out.get(GenAI.USAGE_INPUT_TOKENS)) or 0,
+            at=at,
+            tenant_id=tenant_id,
+        )
+    else:
+        usage = Usage(
+            input_tokens=_int_or_none(out.get(GenAI.USAGE_INPUT_TOKENS)) or 0,
+            output_tokens=_int_or_none(out.get(GenAI.USAGE_OUTPUT_TOKENS)) or 0,
+            cached_input_tokens=_int_or_none(out.get(GenAI.USAGE_CACHED_INPUT_TOKENS)) or 0,
+        )
+        server_cost, version = compute_cost_micro_usd(
+            catalog, provider, model, usage, at=at, tenant_id=tenant_id
+        )
 
     catalog_miss = not version
     if catalog_miss:
