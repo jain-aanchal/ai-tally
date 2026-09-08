@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo ch-migrate aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -54,6 +54,26 @@ ch-migrate: ## Apply db/clickhouse DDL to a RUNNING stack (initdb only fires on 
 	    --multiquery < $$f || exit 1; \
 	done
 	@echo "ClickHouse DDL applied."
+
+ch-migrate-otel-engine: ## One-shot: move an EXISTING otel_spans to ReplacingMergeTree (CTO-245)
+	@# Deliberately NOT part of ch-migrate. ClickHouse cannot ALTER a table's engine or ORDER BY,
+	@# so the only migration is create-copy-swap, which is a full copy of the raw span table and
+	@# is neither cheap nor safe to run implicitly on every replay. A fresh database already gets
+	@# the right engine from otel_spans.sql; this target is how an install that predates CTO-245
+	@# catches up. Read the header of the script first: it needs disk for a second full copy and
+	@# ingest should be quiesced while it runs.
+	@echo "Current engine:"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT engine, sorting_key FROM system.tables WHERE database = currentDatabase() AND name = 'otel_spans'"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/migrations/otel_spans_replacing_engine.sql
+	@echo "Engine after migration:"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT engine, sorting_key FROM system.tables WHERE database = currentDatabase() AND name = 'otel_spans'"
+	@echo "Rows vs distinct spans (these should now match):"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  -q "SELECT count() AS rows, uniqExact(TenantId, TraceId, SpanId) AS spans FROM otel_spans"
+	@echo "The pre-migration table is kept as otel_spans_cto245. Drop it once you are satisfied."
 
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway

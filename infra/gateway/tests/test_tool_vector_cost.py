@@ -152,9 +152,11 @@ def test_unpriced_tool_span_is_not_given_a_fabricated_cost() -> None:
 
     row = _row(store)
     assert row["PriceCatalogVersion"] == ""
-    # The base branch's row mapper still coerces an absent cost to Decimal(0); the point here is
-    # that enrichment asserts nothing of its own. Nullable cost lands separately (CTO-243 note).
-    assert row["EstimatedCost"] == Decimal(0)
+    # Nullable cost (CTO-244) has landed, so the absent cost is no longer coerced to Decimal(0):
+    # it reaches storage as NULL, tagged unpriced, which is the outcome this test always wanted.
+    # The earlier Decimal(0) expectation recorded the mapper's coercion, not the intended contract.
+    assert row["EstimatedCost"] is None
+    assert row["CostSource"] == "unpriced"
 
 
 def test_llm_span_cost_is_unchanged() -> None:

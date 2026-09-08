@@ -30,7 +30,6 @@ from tally.wire import (
     BatchRequest,
     BatchResponse,
     BusinessEvent,
-    IdempotencyCache,
     IdentityLink,
     PartialError,
     Sampling,
@@ -46,6 +45,11 @@ from gateway.account_lookup import (
 )
 from gateway.auth import ApiKeyAuth
 from gateway.backpressure import Backpressure
+from gateway.batch_idempotency import (
+    BatchIdempotency,
+    IdempotencyStoreUnavailable,
+    build_batch_idempotency,
+)
 from gateway.config import get_settings
 from gateway.cost_connector_job import register_cost_connector_job
 from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_param
@@ -402,7 +406,9 @@ async def lifespan(app: FastAPI):
     # is: losing it on restart costs an honest blank, never a wrong account.
     app.state.account_linker = AccountLinker()
     app.state.catalog = seed_catalog()
-    app.state.idempotency = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_s)
+    # CTO-245: durable (tenant_id, batch_id) idempotency. The in-process cache alone died with the
+    # worker, so a batch retried across a restart was accepted twice and its spend counted twice.
+    app.state.idempotency = build_batch_idempotency(settings)
     app.state.limiter = RateLimiter(
         rps=settings.rate_limit_rps,
         burst=settings.rate_limit_burst,
@@ -750,7 +756,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     store: ClickHouseStore = app.state.store
     auth: ApiKeyAuth = app.state.auth
     catalog = app.state.catalog
-    idempotency: IdempotencyCache = app.state.idempotency
+    idempotency: BatchIdempotency = app.state.idempotency
     limiter: RateLimiter = app.state.limiter
 
     claimed_tenant = batch.tenant_id
@@ -791,8 +797,32 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         )
 
     # --- idempotency: replayed batch returns the original response ---
-    cached = idempotency.check_or_store(batch)
+    # CTO-245: this consults a DURABLE store, so a replay across a gateway restart is recognised
+    # rather than written a second time. A store that cannot answer is refused (503 RETRY), never
+    # waved through: accepting on a failed check re-admits the exact duplicate this guards against,
+    # and a duplicate is wrong money that nothing downstream can identify or undo afterwards.
+    try:
+        cached = idempotency.check_or_store(batch)
+    except IdempotencyStoreUnavailable:
+        logger.exception("idempotency store unavailable; refusing batch %s", batch.batch_id)
+        return JSONResponse(
+            {
+                "batch_id": batch.batch_id,
+                "status": Status.RETRY.value,
+                "error": {
+                    "code": ErrorCode.IDEMPOTENCY_UNAVAILABLE.value,
+                    "message": "idempotency store unavailable; retry",
+                },
+                "retry_after_ms": 2000,
+            },
+            status_code=503,
+            headers={"Retry-After": "2"},
+        )
     if cached is not None:
+        # A recorded outcome is a true replay and returns 200. A batch another worker is still
+        # holding has no known outcome yet, so it is answered retryable and NOT re-processed.
+        if cached.status is Status.RETRY:
+            return JSONResponse(_response_dict(cached), status_code=503, headers={"Retry-After": "1"})
         return JSONResponse(_response_dict(cached, replayed=True), status_code=200)
 
     batch = batch.deduplicated()

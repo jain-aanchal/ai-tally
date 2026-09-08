@@ -87,7 +87,8 @@ Ingest (`/v1/batches`) is unchanged: it still authenticates with the ingest API 
 ## 3. Push telemetry through the gateway
 
 Easiest: the built-in demo batch (resolves the seeded tenant's UUID and writes under it, then
-re-sends once to demonstrate idempotent replay):
+re-sends once to demonstrate idempotent replay; see [Batch idempotency](#batch-idempotency-cto-245) for exactly
+what that guarantee covers and what it does not):
 
 ```bash
 make demo            # run it a few times for more rows
@@ -162,6 +163,88 @@ change removes. So pre-cutover totals may be lower than the real spend, by an am
 measure, and the pre-cutover `UnpricedSpanCount` of `0` means "nobody counted", not "there were no
 unknowns". Post-cutover data is honest. If a clean baseline matters more than history on a local
 stack, `make nuke && make up && make seed` and re-backfill.
+
+### Batch idempotency (CTO-245)
+
+Re-posting a batch with a `batch_id` the gateway has already accepted returns the original response
+(`"replayed": true`) and writes nothing. That guarantee is now **durable**: the record lives in
+Postgres (`ingest_batch_idempotency`, migration 0031), so it survives a gateway restart, a deploy,
+a crash and a scale-out onto a second worker.
+
+It did not before, and the consequence was real. The record used to live only in a dict inside one
+gateway process, so a client that retried a batch across a restart was accepted a second time and
+its spans were written again. `otel_spans` was a plain `MergeTree` with no deduplication, so the
+second copy stayed forever and inflated every cost total by exactly the replayed spend. One local
+end-to-end run that re-posted across two restarts left 333,689 rows holding 271,571 distinct
+`SpanId`s: about 62,000 spans of permanently double-counted money.
+
+**Check which mode your gateway is in.** It says so at boot:
+
+```bash
+make logs | grep -i "batch idempotency"
+```
+
+`durable batch idempotency enabled` is the fixed state. A `WARNING` about it being unavailable means
+migration 0031 has not been applied (see below) and the gateway is running with the old, restart-
+unsafe in-process cache. Set `TALLY_IDEMPOTENCY_DURABLE_REQUIRED=true` to make that a startup
+failure instead of a warning; any deployment that depends on the guarantee should.
+
+**If the store cannot be reached mid-flight, the gateway refuses the batch** with HTTP 503 and
+`error.code = IDEMPOTENCY_UNAVAILABLE`, and the client retries. It does not accept on a failed
+check. Accepting would re-admit the duplicate silently, and nothing in the data afterwards says
+which dollars were counted twice; refusing is visible and costs only a delay.
+
+**Applying it to a stack that is already up.** `docker-entrypoint-initdb.d` only fires on a first
+boot against an empty volume, so an existing stack needs the migration by hand:
+
+```bash
+make psql < ../db/postgres/0031_ingest_batch_idempotency.sql   # from infra/
+```
+
+Then restart the gateway and confirm the boot line above.
+
+**What is still exposed, stated plainly.**
+
+* `otel_spans` is now `ReplacingMergeTree` with `TraceId, SpanId` appended to its sorting key, as a
+  backstop for anything that gets past the idempotency check. ReplacingMergeTree collapses rows only
+  when parts **merge**, so between a duplicate insert and that merge a plain `SELECT sum(...)` still
+  sees both rows. Add `FINAL` when you need exactness now:
+  `SELECT sum(EstimatedCost) FROM otel_spans FINAL WHERE TenantId = 'local-dev'`. **No read path in
+  the dashboard was converted to `FINAL` in this change**, so dashboard totals converge on the merge
+  rather than being exact the instant a duplicate lands. They are never worse than before, where the
+  duplicate was permanent.
+* **The rollups are not covered at all.** `daily_feature_rollup`, `hourly_feature_rollup` and
+  `daily_account_rollup` are fed by materialized views that fire on INSERT into `otel_spans`, so a
+  duplicate is summed into them before the engine ever sees it and no later merge removes it. A
+  duplicate that reaches ClickHouse is permanent in the rollups. This is why the durable idempotency
+  store is the real fix and the engine is only a backstop.
+* A replay only collapses if the row is identical. An ordinary replay reproduces the same
+  `Timestamp` (it comes from the client's span timestamp), but a span with no client timestamp, or
+  one whose clock-skew assessment clamps against server receive time, can land on a different
+  `Timestamp` on the replay and will not collapse.
+
+**Existing ClickHouse installs are still on the old engine.** ClickHouse cannot `ALTER` a table's
+engine or its `ORDER BY`, so `db/clickhouse/otel_spans.sql` gives a **fresh** database the right
+engine and leaves an existing one exactly as it was; `make ch-migrate` cannot change it either.
+Check what you actually have:
+
+```sql
+SELECT engine, sorting_key FROM system.tables
+ WHERE database = currentDatabase() AND name = 'otel_spans';
+```
+
+If that is not `ReplacingMergeTree` with a sorting key ending in `TraceId, SpanId`, run the one-shot
+migration, which creates the correctly-shaped table, copies the data, swaps the names atomically,
+collapses the historical duplicates and restores the TTL:
+
+```bash
+make ch-migrate-otel-engine   # from infra/
+```
+
+Read the header of `db/clickhouse/migrations/otel_spans_replacing_engine.sql` first. It is a full
+copy of the raw span table: it needs disk for a second copy, it takes as long as your table is
+large, and rows written into the old table while the copy runs are not carried over, so quiesce
+ingest for the duration. It keeps the pre-migration table as `otel_spans_cto245` for rollback.
 
 ## 4. Run the web dashboard
 
