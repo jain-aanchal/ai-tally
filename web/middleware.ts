@@ -6,6 +6,14 @@
 // Dev escape hatch (§10): when TALLY_DEV_TENANT is set, this is a NO-OP so `make up` and CI reach
 // every route with no Clerk session and no Clerk keys. The product path (flag unset) requires a
 // session, exactly as intended.
+//
+// That hatch is guarded in a production build (CTO-268): TALLY_DEV_TENANT alone refuses to boot,
+// and turning auth off for real takes the explicit TALLY_ALLOW_INSECURE_NO_AUTH opt-in as well. The
+// assertion lives in instrumentation.ts, which runs once before the first request in every runtime,
+// so a bad configuration never reaches this file: the process is already gone. It is deliberately
+// NOT repeated here, because this module is compiled into the Edge bundle where `process.env` reads
+// can be inlined at BUILD time; a copy of the check here would be reasoning about the build's
+// environment rather than the container's, which is worse than no check at all.
 
 import {
   clerkMiddleware,

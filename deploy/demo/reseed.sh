@@ -125,9 +125,9 @@ docker run --rm \
   npx --yes tsx /scripts/backfill-spans.ts --seed "${BACKFILL_SEED}" --tenant "${TENANT_UUID}"
 
 # Repair the web tier if it is running without TALLY_DEV_TENANT (for example after a bare
-# `docker compose up` that bypassed deploy.sh). Compose recreates only when the value actually
-# changes, so on a normal nightly run this is a no-op.
-export TALLY_DEV_TENANT="${TENANT_UUID}"
-"${COMPOSE[@]}" up -d web
+# `docker compose up` that bypassed deploy.sh, which now leaves the web container refusing to boot
+# rather than serving an unknown tenant). Compose recreates only when a value actually changes, so
+# on a normal nightly run this is a no-op.
+pin_dashboard_tenant "${TENANT_UUID}"
 
 echo "==> Demo data reset. The dashboard now shows a fresh synthetic 30-day window."

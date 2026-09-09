@@ -22,6 +22,7 @@
         { "name": "PORT", "value": "3000" },
         { "name": "TALLY_GATEWAY_URL", "value": "REPLACE_GATEWAY_URL" },
         { "name": "TALLY_DEV_TENANT", "value": "" },
+        { "name": "TALLY_ALLOW_INSECURE_NO_AUTH", "value": "" },
         { "name": "TALLY_CLICKHOUSE_URL", "value": "REPLACE_CLICKHOUSE_URL" },
         { "name": "TALLY_CLICKHOUSE_DB", "value": "default" },
         { "name": "TALLY_CLICKHOUSE_USER", "value": "tally" },

@@ -15,6 +15,11 @@ data:
   # caller's Clerk org). When pinned it must be the tenant UUID, not a name: the value is
   # bound into the ClickHouse read filter (TenantId = ...), so a name matches no rows.
   TALLY_DEV_TENANT: {{ .Values.web.config.devTenant | quote }}
+  # CTO-268: devTenant does not only pin a tenant, it disables the dashboard's authentication
+  # entirely. The web image therefore REFUSES TO BOOT when devTenant is set in a production build
+  # unless this second value explicitly says so. Leave it empty. Set it to "1" only for a public
+  # demo serving synthetic data behind your own access control.
+  TALLY_ALLOW_INSECURE_NO_AUTH: {{ .Values.web.config.allowInsecureNoAuth | default "" | quote }}
   TALLY_CLICKHOUSE_URL: {{ printf "%s://%s:%d" .Values.clickhouse.scheme (include "ai-tally.clickhouseHost" .) (int .Values.clickhouse.httpPort) | quote }}
   TALLY_CLICKHOUSE_DB: {{ .Values.web.config.clickhouseDb | quote }}
   TALLY_CLICKHOUSE_USER: {{ .Values.web.config.clickhouseUser | quote }}

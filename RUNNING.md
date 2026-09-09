@@ -584,6 +584,16 @@ npm run dev
 Use the UUID, not `local-dev`: the value is bound into the ClickHouse read filter and a name matches
 no rows. Leave it unset and the dashboard errors rather than guessing a tenant.
 
+`TALLY_DEV_TENANT` is a **development** escape hatch in the literal sense: setting it turns the
+dashboard's authentication off completely (no Clerk middleware, no `ClerkProvider`, every visitor an
+org admin). `npm run dev` is unaffected, and so is the vitest suite, which pins the same variable.
+But a **production** build (`npm run build && npm start`, or either Dockerfile's standalone server)
+refuses to boot with it set: it prints what is wrong and exits non-zero before serving a request,
+rather than publish every number in the system to anyone with the URL. Serving with no
+authentication deliberately (the public demo kit does, behind Caddy basic auth, with synthetic data)
+takes a second variable as well, `TALLY_ALLOW_INSECURE_NO_AUTH=1`, and then every boot logs a
+standing warning. The guard is `web/lib/authGuard.ts`, run from `web/instrumentation.ts` (CTO-268).
+
 Each Route Handler queries ClickHouse live and falls back to mock data **only** if ClickHouse is
 unreachable. With the stack up and a batch sent, the **Cost**, **Features**, **Agents**, and **Data
 Quality** pages render your ingested spans.
