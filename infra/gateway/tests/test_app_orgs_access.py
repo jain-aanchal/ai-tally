@@ -9,6 +9,7 @@ the resolver-backed by-clerk-org lookup, and the ``GATEWAY_SERVICE_TOKEN`` gate.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -188,6 +189,46 @@ def test_provision_reports_503_when_the_key_provider_is_unavailable() -> None:
     body = r.json()
     assert "tenant_id" not in body
     assert "key provider unavailable" in body["detail"]
+
+
+def test_provision_runs_off_the_event_loop() -> None:
+    """CTO-359. ``provision`` is fully blocking and must not be awaited inline.
+
+    It does psycopg round trips and a key-provider mint that, under
+    ``TALLY_HMAC_KEY_PROVIDER=kms``, is two Secrets Manager calls at botocore's tens-of-seconds
+    default timeouts. Run on the event loop it stalls every other request on that worker: measured
+    against the local stack, an unrelated ``/healthz`` went from 0.04s to 2.71s while one provision
+    with a 3s mint was in flight. Clerk retries webhooks, so a Secrets Manager slowdown arrives as a
+    burst of these, and the worker that stops answering is the one taking the tenant's ingest.
+
+    Asserted by identity rather than by timing, so it cannot flake: ``asyncio.get_running_loop()``
+    succeeds on the loop thread and raises ``RuntimeError`` on a worker thread. A regression that
+    reinstates the inline await turns this green assertion red.
+    """
+
+    class _ThreadRecordingProvisioner(FakeProvisioner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_event_loop: bool | None = None
+
+        def provision(self, *, clerk_org_id, name, region="auto"):
+            try:
+                asyncio.get_running_loop()
+                self.on_event_loop = True
+            except RuntimeError:
+                self.on_event_loop = False
+            return super().provision(clerk_org_id=clerk_org_id, name=name, region=region)
+
+    provisioner = _ThreadRecordingProvisioner()
+    with _client(auth_on=True) as c:
+        app.state.tenant_provisioner = provisioner
+        r = c.post(
+            "/v1/tenant/provision",
+            json={"data": {"id": "org_thread", "name": "Thread Co"}},
+            headers=_svc_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert provisioner.on_event_loop is False
 
 
 def test_provision_rejects_without_service_token() -> None:
