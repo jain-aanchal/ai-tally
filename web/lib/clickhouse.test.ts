@@ -1327,3 +1327,142 @@ describe("otel_spans read paths dedupe (#314)", () => {
     }
   });
 });
+
+// #340: the attribution revenue query must not fan revenue out across the span join, and must not
+// convert micro-USD to dollars inside SQL.
+//
+// The fan-out property (a user with N spans contributes their revenue ONCE, not N times) is a
+// property of how the SQL joins, so it is asserted against the SQL the builder emits rather than
+// against mocked rows: a mock can only hand back whatever numbers the test author invented, and
+// would have passed just as happily on the broken query. The check below is run against the
+// PRE-FIX query text too, so a change that reintroduces the old shape fails here.
+describe("attributionRevenueSql: no fan-out, no float dollars (#340)", () => {
+  const OPTS = {
+    policy: { sources: null, includeMrr: true },
+    windowSql: "now() - INTERVAL 30 DAY",
+    providerExpr: "coalesce(nullIf(s.GenAiSystem, ''), 'unknown')",
+    spanFilterSql: "",
+  };
+
+  // The query as it stood before this fix, kept verbatim as the negative fixture. It sums
+  // ValueAmountMicro straight across the one-to-many join and divides by 1e6 in SQL.
+  const PRE_FIX_SQL = `SELECT
+     coalesce(nullIf(s.GenAiSystem, ''), 'unknown') AS provider,
+     (sumIf(ifNull(b.ValueAmountMicro, 0), b.ValueType IN {positiveTypes:Array(String)})
+        - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String}))
+       / 1000000 AS revenue,
+     uniqExactIf(b.UserIdHash, b.ValueType IN {positiveTypes:Array(String)}) AS users
+   FROM business_events b
+   INNER JOIN otel_spans s FINAL ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+   WHERE b.TenantId = {tenant:String}
+   GROUP BY provider`;
+
+  /** The subquery text that reads business_events, or null when it is read at the top level. */
+  function businessEventsScope(sql: string): string | null {
+    const at = sql.indexOf("business_events");
+    if (at < 0) return null;
+    // Walk back to the innermost unclosed "(" before the read, then forward to its match.
+    let depth = 0;
+    let open = -1;
+    for (let i = at; i >= 0; i--) {
+      if (sql[i] === ")") depth++;
+      else if (sql[i] === "(") {
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+        depth--;
+      }
+    }
+    if (open < 0) return null;
+    let close = -1;
+    depth = 0;
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++;
+      else if (sql[i] === ")" && --depth === 0) {
+        close = i;
+        break;
+      }
+    }
+    return close < 0 ? null : sql.slice(open, close + 1);
+  }
+
+  /**
+   * Revenue is summed over a per-user pre-aggregate, so it cannot be multiplied by a span count.
+   * Two things make that true: business_events is read inside its own subquery that never mentions
+   * otel_spans, and that subquery collapses to one row per user with GROUP BY.
+   */
+  function fanoutSafe(sql: string): boolean {
+    const scope = businessEventsScope(sql);
+    if (scope === null) return false;
+    if (/otel_spans/i.test(scope)) return false;
+    return /GROUP\s+BY\s+user_hash\b/i.test(scope);
+  }
+
+  it("flags the pre-fix query, which summed revenue across the span join", () => {
+    expect(fanoutSafe(PRE_FIX_SQL)).toBe(false);
+  });
+
+  it("aggregates business_events per user before joining spans", async () => {
+    const { attributionRevenueSql } = await freshSut();
+    expect(fanoutSafe(attributionRevenueSql(OPTS).sql)).toBe(true);
+  });
+
+  it("joins the DISTINCT (user, provider) pairs, so the provider dimension survives", async () => {
+    const { attributionRevenueSql } = await freshSut();
+    const { sql } = attributionRevenueSql(OPTS);
+    // The span side is still there (it is what attributes revenue to a provider) but reduced to
+    // one row per user per provider, and still deduped with FINAL.
+    expect(sql).toMatch(/SELECT\s+DISTINCT\s+s\.UserIdHash\s+AS\s+user_hash/);
+    expect(sql).toMatch(/FROM\s+otel_spans\s+s\s+FINAL/);
+    expect(sql).toMatch(/GROUP\s+BY\s+provider/);
+  });
+
+  it("returns integer micro-USD, never dollars", async () => {
+    const { attributionRevenueSql } = await freshSut();
+    const { sql } = attributionRevenueSql(OPTS);
+    expect(sql).not.toMatch(/\/\s*1000000/);
+    expect(sql).not.toMatch(/\/\s*1e6/i);
+    expect(PRE_FIX_SQL).toMatch(/\/\s*1000000/); // the fixture really does carry the defect
+  });
+
+  it("keeps the refund subtraction and the money-typed user count", async () => {
+    const { attributionRevenueSql } = await freshSut();
+    const { sql, params } = attributionRevenueSql(OPTS);
+    expect(sql).toContain("{refundType:String}");
+    expect(sql).toMatch(/uniqExactIf\(r\.user_hash, r\.revenue_events > 0\)/);
+    expect(params.positiveTypes).toEqual(["monetary", "mrr"]);
+    expect(params.refundType).toBe("refund");
+  });
+
+  it("drops mrr from the positive types when the tenant excludes it", async () => {
+    const { attributionRevenueSql } = await freshSut();
+    const { params } = attributionRevenueSql({
+      ...OPTS,
+      policy: { sources: null, includeMrr: false },
+    });
+    expect(params.positiveTypes).toEqual(["monetary"]);
+  });
+});
+
+// #340: the caller must read that column as micro-USD. Feeding an already-micro value to micro()
+// would multiply it by 1e6 a second time, the mirror image of the SQL-side divide.
+describe("queryAttribution reads revenue as micro-USD (#340)", () => {
+  it("passes ClickHouse's integer micro-USD through unscaled", async () => {
+    const { queryAttribution } = await freshSut();
+    // sessions, conversions, revenue, daily, bounds: the five reads queryAttribution issues.
+    respondRows([{ provider: "openai", sessions: "10", cost: "1.5", unpriced: "0" }]);
+    respondRows([{ provider: "openai", conversions: "4" }]);
+    respondRows([{ provider: "openai", revenue: "3596171155434", users: "10053" }]);
+    respondRows([]);
+    respondRows([{ start: "2026-08-10" }]);
+
+    const out = await queryAttribution({ tag: null, provider: null, outcome: null });
+    expect(out).not.toBeNull();
+    const openai = out!.perProvider.find((p) => p.provider === "openai");
+    // Value/user is revenue/users straight out of micro-USD. Had the row been fed through micro(),
+    // this would read 1e6 times larger: $357.72 per user, not $357,721,193.
+    expect(openai?.valuePerUserMicroUsd).toBe(Math.round(3_596_171_155_434 / 10053));
+    expect(openai?.valuePerUserMicroUsd).toBeLessThan(1_000_000_000);
+  });
+});

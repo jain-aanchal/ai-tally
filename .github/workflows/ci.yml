@@ -76,6 +76,11 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      # #341: examples/ is outside web/tsconfig.json's include, so nothing compiled the example
+      # scripts. They run under `tsx`, not a bundler, and examples/tsconfig.json is written to match
+      # that; it borrows this job's TypeScript rather than adding a second lockfile for two files.
+      - name: Typecheck examples
+        run: npx tsc -p ../examples/tsconfig.json
       - name: Lint
         run: npm run lint
       - name: Test
