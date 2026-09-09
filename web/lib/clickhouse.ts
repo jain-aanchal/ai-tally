@@ -105,6 +105,7 @@ import {
 import type { GuardrailMode, GuardrailRule, GuardrailScopeKind } from "./guardrails";
 import {
   REFUND_VALUE_TYPE,
+  type RevenuePolicy,
   positiveValueTypes,
   queryRevenuePolicy,
   revenueSourceFilter,
@@ -201,6 +202,20 @@ export function microOrNull(decimalUsd: string | number | null | undefined): num
   if (decimalUsd === null || decimalUsd === undefined || decimalUsd === "\\N") return null;
   const n = typeof decimalUsd === "number" ? decimalUsd : parseFloat(decimalUsd);
   return Number.isFinite(n) ? Math.round(n * 1_000_000) : null;
+}
+
+/**
+ * A ClickHouse integer column -> JS number, with no unit conversion.
+ *
+ * #340. The counterpart to `micro()` for columns that are ALREADY integer micro-USD: the money
+ * invariant is integer micro-USD end to end, converted at the boundary only, so a query that sums
+ * `ValueAmountMicro` must not divide by 1e6 in SQL and must not be re-multiplied here. ClickHouse
+ * serialises Int64 as a JSON string (output_format_json_quote_64bit_integers), so the string form
+ * is the normal one, not an edge case.
+ */
+function int(v: string | number | null | undefined): number {
+  const n = typeof v === "number" ? v : parseInt(v ?? "0", 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 function zeroLayers(): SpendByLayer {
@@ -2895,6 +2910,90 @@ export async function querySpanFeatureTags(days?: number): Promise<string[] | nu
   });
 }
 
+/**
+ * Per-provider revenue for the attribution report: SQL plus the parameters it binds (#340).
+ *
+ * Extracted from queryAttribution so the shape can be asserted in a unit test. It fixes two defects
+ * that shipped together and had to be fixed together, because the first one is what made the second
+ * one look harmless.
+ *
+ * 1. JOIN FAN-OUT. The previous query summed `b.ValueAmountMicro` straight across
+ *    `business_events b INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash`. The join is
+ *    one-to-many by construction (a user has many spans), so every business event was summed once
+ *    per matching span: a user with 30 spans contributed their revenue 30 times. FINAL removed the
+ *    DUPLICATE-span multiplier only, and the real span count stayed. The sibling conversions query
+ *    survives the identical join because `uniqExact(b.BusinessEventId)` collapses the fan-out; a
+ *    `sum` cannot. On the local demo corpus this inflated per-provider revenue by up to 2.5x.
+ *
+ *    The fix keeps BOTH sides of the join, because the join is what does the attribution: it is the
+ *    only thing that says which provider served the user who paid. Instead of de-duplicating the
+ *    result it de-duplicates the INPUTS. Revenue is aggregated per user before anything is joined,
+ *    and the span side is reduced to the DISTINCT (user, provider) pairs it was really contributing.
+ *    Each (user, provider) pair therefore contributes that user's revenue exactly once, whether the
+ *    user has one span or thirty thousand. The per-provider dimension is untouched, and a user
+ *    served by two providers still counts under both, which is the same attribution rule the
+ *    conversions query has always applied (the panel compares providers, it does not sum them).
+ *
+ * 2. FLOAT DOLLARS IN SQL. The old expression ended `/ 1000000 AS revenue`, doing the micro-USD
+ *    conversion inside ClickHouse and handing JS a float. Money is integer micro-USD end to end and
+ *    is converted at the boundary only, so this returns micro-USD and the caller parses it as an
+ *    integer. There is deliberately no micro() on the result.
+ *
+ * `users` still counts only users carrying a revenue-typed event, so a user whose only event is a
+ * 'count' engagement signal cannot dilute value/user into a fabricated number. `ValueAmountMicro`
+ * is Nullable(Int64), so each sumIf zero-fills with `ifNull(..., 0)`: without it a tenant with no
+ * refunds gets NULL from the refund term and the NULL swallows the whole subtraction.
+ */
+export function attributionRevenueSql(opts: {
+  policy: RevenuePolicy;
+  /** SQL expression for the window start, e.g. `now() - INTERVAL 30 DAY`. */
+  windowSql: string;
+  /** Provider expression over the `s` alias, shared with the sessions/conversions queries. */
+  providerExpr: string;
+  /** Tag / feature / provider narrowing fragments, all written against the `s` alias. */
+  spanFilterSql: string;
+}): { sql: string; params: Record<string, unknown> } {
+  const { policy, windowSql, providerExpr, spanFilterSql } = opts;
+  const positiveTypes = positiveValueTypes(policy);
+  const sourceFilter = revenueSourceFilter(policy, "b");
+  const moneyTyped =
+    "(b.ValueType IN {positiveTypes:Array(String)} OR b.ValueType = {refundType:String})";
+
+  return {
+    sql: `SELECT
+         u.provider                                      AS provider,
+         sum(r.revenue_micro)                            AS revenue,
+         uniqExactIf(r.user_hash, r.revenue_events > 0)  AS users
+       FROM (
+         SELECT
+           b.UserIdHash AS user_hash,
+           sumIf(ifNull(b.ValueAmountMicro, 0), b.ValueType IN {positiveTypes:Array(String)})
+             - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String})
+             AS revenue_micro,
+           countIf(${moneyTyped}) AS revenue_events
+         FROM business_events b
+         WHERE b.TenantId = {tenant:String}
+           AND b.OccurredAt >= ${windowSql}
+           AND b.UserIdHash != ''
+           ${sourceFilter.sql}
+         GROUP BY user_hash
+       ) AS r
+       INNER JOIN (
+         SELECT DISTINCT s.UserIdHash AS user_hash, ${providerExpr} AS provider
+         FROM otel_spans s FINAL
+         WHERE s.TenantId = {tenant:String}
+           AND s.UserIdHash != ''
+           ${spanFilterSql}
+       ) AS u ON u.user_hash = r.user_hash
+       GROUP BY provider`,
+    params: {
+      positiveTypes,
+      refundType: REFUND_VALUE_TYPE,
+      ...sourceFilter.params,
+    },
+  };
+}
+
 export async function queryAttribution(
   filters: AttributionFilters,
   query?: AttributionQuery,
@@ -2987,70 +3086,37 @@ export async function queryAttribution(
     // refunds, which net off rather than being ignored. Source is now only ever a per-tenant
     // NARROWING, and absent config means every source counts (see lib/revenueSources.ts).
     //
-    // `users` counts only users who actually carry a revenue-typed event; a user whose only event
-    // is a 'count' engagement signal must not dilute value/user into a fabricated number.
-    //
-    // ValueAmountMicro is Nullable(Int64), so `sumIf` over a group with no matching row yields NULL
-    // rather than 0 and the NULL then swallows the whole subtraction. The `ifNull(..., 0)` inside
-    // each sumIf is what keeps a tenant with zero refunds from reporting NULL revenue.
-    //
-    // KNOWN WRONG, SEPARATELY (both predate #314 / CTO-245, do not read the FINAL below as a fix):
-    //
-    // 1. Join fan-out. This sums b.ValueAmountMicro across an INNER JOIN on otel_spans, so a
-    //    business event is counted once per matching span for that user: a user with 30 spans
-    //    contributes their revenue 30 times. FINAL removes the DUPLICATE-SPAN multiplier and nothing
-    //    else, so the figure stays inflated by the real span count. The sibling conversions query
-    //    above survives the same join only because uniqExact collapses the fan-out; a sum cannot.
-    //    The fix is to aggregate business_events before joining (or drop the join and filter users
-    //    by a subquery), which changes the number this panel shows and needs its own change.
-    // 2. Float dollars in SQL. The `/ 1000000` divides integer micro-USD inside ClickHouse, so the
-    //    value arrives already converted and already floating, against the money invariant (integer
-    //    micro-USD end to end, converted at the boundary only). It should return micro-USD and let
-    //    micro() do the conversion.
-    const positiveTypes = positiveValueTypes(policy);
-    const sourceFilter = revenueSourceFilter(policy, "b");
+    // #340 fixed two defects that predate #314 / CTO-245 (the FINAL there was never a fix for
+    // either): the join fanned revenue out by span count, and the query divided micro-USD by 1e6
+    // inside SQL. Both live in attributionRevenueSql() now; see the note there.
+    const revenue = attributionRevenueSql({
+      policy,
+      windowSql,
+      providerExpr,
+      spanFilterSql: `${tagSql}
+           ${featureSql}
+           ${providerSql}`,
+    });
     const revenueRows = await rowsP<{
       provider: string;
-      revenue: string;
-      users: string;
-    }>(
-      db,
-      `SELECT
-         ${providerExpr} AS provider,
-         (sumIf(ifNull(b.ValueAmountMicro, 0), b.ValueType IN {positiveTypes:Array(String)})
-            - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String}))
-           / 1000000 AS revenue,
-         uniqExactIf(
-           b.UserIdHash,
-           b.ValueType IN {positiveTypes:Array(String)} OR b.ValueType = {refundType:String}
-         ) AS users
-       FROM business_events b
-       INNER JOIN otel_spans s FINAL ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
-       WHERE b.TenantId = {tenant:String}
-         AND b.OccurredAt >= ${windowSql}
-         AND b.UserIdHash != ''
-         ${sourceFilter.sql}
-         ${tagSql}
-         ${featureSql}
-         ${providerSql}
-       GROUP BY provider`,
-      {
-        tenant,
-        tag: filters.tag ?? "",
-        provider: filters.provider ?? "",
-        features: featureValues,
-        positiveTypes,
-        refundType: REFUND_VALUE_TYPE,
-        ...sourceFilter.params,
-      },
-    );
+      revenue: string | number | null;
+      users: string | number | null;
+    }>(db, revenue.sql, {
+      tenant,
+      tag: filters.tag ?? "",
+      provider: filters.provider ?? "",
+      features: featureValues,
+      ...revenue.params,
+    });
     const revenueByProvider = new Map<
       string,
       { revenueMicroUsd: number; distinctUsers: number }
     >();
     for (const r of revenueRows) {
-      const users = parseInt(r.users, 10) || 0;
-      const revenueMicroUsd = micro(r.revenue);
+      const users = int(r.users);
+      // #340: `revenue` is integer micro-USD off the wire. No micro() here: converting a value that
+      // is already in micro-USD would multiply it by 1e6 a second time.
+      const revenueMicroUsd = int(r.revenue);
       if (users > 0) {
         revenueByProvider.set(r.provider, { revenueMicroUsd, distinctUsers: users });
       }
