@@ -236,6 +236,16 @@ ALTER TABLE otel_spans
 -- exists to remove. Consequence, stated plainly: token and cost figures covering any period before
 -- the cutover may UNDERSTATE real spend, and no query can quantify by how much. Post-cutover rows
 -- are honest. See RUNNING.md ("Nullable usage and cost").
+--
+-- CTO-313 narrows that, without weakening the rule above. It repairs only the pre-cutover zeros
+-- that can be decided on STRUCTURAL evidence carried by the row itself, never on a guess or a
+-- cutover date: it reprices spans whose original client-reported cost still sits in SpanAttributes,
+-- and marks spans that nothing could ever have priced (no model, no tokens, no cost attribute, or a
+-- catalog that missed) as NULL / 'unpriced'. A zero on a row with a real model, real tokens and a
+-- real PriceCatalogVersion is a genuine priced zero and is deliberately left alone. See
+-- db/clickhouse/checks/priced_zero.sql and db/clickhouse/migrations/priced_zero_repair.sql. That
+-- repair mutates rows, and mutations do not fire materialized views, so it must be followed by the
+-- CTO-311 rollup rebuild or the rollups keep the pre-repair money.
 ALTER TABLE otel_spans
     MODIFY COLUMN InputTokens       Nullable(UInt32)       CODEC(T64, ZSTD(1)),
     MODIFY COLUMN OutputTokens      Nullable(UInt32)       CODEC(T64, ZSTD(1)),

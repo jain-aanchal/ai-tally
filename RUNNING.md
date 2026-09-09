@@ -170,6 +170,14 @@ measure, and the pre-cutover `UnpricedSpanCount` of `0` means "nobody counted", 
 unknowns". Post-cutover data is honest. If a clean baseline matters more than history on a local
 stack, `make nuke && make up && make seed` and re-backfill.
 
+That limitation is narrower than it was. CTO-313 repairs the pre-cutover zeros that can be decided
+on structural evidence: it reprices the ones whose true cost still sits on the row, and marks the
+ones that were never priced at all as unknown rather than as `$0.00`. What it still cannot separate
+is a genuine provider-reported `0` from an unknown that ingest flattened **on any row that carries a
+real catalog version**. Those stay `0`, and the check names the ambiguous ones among them
+(`measured_zero_no_model`, `measured_zero_flat_usage`) rather than implying they are all decided. See "Historical rows stored as
+a priced $0" below.
+
 ### Batch idempotency (CTO-245)
 
 Re-posting a batch with a `batch_id` the gateway has already accepted returns the original response
@@ -416,6 +424,139 @@ destroyed `$100.00` (100,000,000 micro-USD) that existed nowhere else. The reten
 called it not derivable, and a full `make ch-rollup-rebuild` carried all 110 spans and `$110.00`
 across untouched, with `carried_spans` and `carried_cost` matching their pre-rebuild values exactly.
 The test tenant was then removed from raw spans and from all three rollups.
+
+### Historical rows stored as a priced $0 (CTO-313)
+
+CTO-244 made `EstimatedCost` nullable so a span we cannot price stores `NULL` with
+`CostSource = 'unpriced'` and renders as a blank with a reason. That stopped **new** spans asserting
+a fabricated `$0`. It did not rewrite the rows already written that way, and those rows are what a
+dashboard over historical data reads: a confident, measured-looking `$0.00` on calls that either
+cost real money or cost an amount nobody ever established.
+
+**See what you have.**
+
+```bash
+make ch-priced-zero-check   # from infra/, read-only
+```
+
+It splits every `EstimatedCost = 0` span into four mutually exclusive classes, and the split is
+structural: it reads what each row carries rather than comparing against a cutover date. A cutover
+date does not work here, and the reason is worth knowing. Nothing in `otel_spans` records when a row
+was **written**; `Timestamp` is the span's own time and the demo backfill posts spans backdated 30
+days, so a date comparison would mark freshly-written rows as historical and miss backdated ones.
+
+| Class | What it means | What the repair does |
+|---|---|---|
+| `recoverable` | cost is 0, `PriceCatalogVersion` is `''`, and the original client-reported cost still sits in `SpanAttributes['gen_ai.tool.cost_micro_usd']`, from before the gateway promoted that attribute into the column | reprices from the attribute |
+| `unknown_no_price_input` | cost is 0 and nothing priceable was ever recorded: no model either side, no tokens, no usable client cost. The stored 0 is a column default, not a result, even where a `PriceCatalogVersion` is stamped | marks `NULL` / `unpriced` |
+| `unknown_catalog_miss` | cost is 0 and `PriceCatalogVersion` is `''`, the empty-version signal `tally.pricing` returns on a catalog miss. These usually carry a real model and real tokens, so the money is real and unknown | marks `NULL` / `unpriced` |
+| `measured_zero` | cost is 0 with a real catalog version, a model to have priced and tokens to have priced it on. This was priced and the answer was zero | left as `0`, deliberately |
+| `measured_zero_no_model` | cost is 0 with a real catalog version and tokens, but no model on either side, which `enrich_cost` can never price | left as `0`, deliberately |
+| `measured_zero_flat_usage` | cost is 0 with a real catalog version and a model, but tokens coerced to `0`, which is CTO-244's own motivating case | left as `0`, deliberately |
+
+The last three rows are not an oversight. CTO-244 was explicit that a real `0` stays `0` and stays
+distinguishable from `NULL`; turning genuine zeros into unknowns destroys information, which is the
+same sin in the other direction. A real `PriceCatalogVersion` means a catalog did produce that
+number, so all three are left alone. The last two are named rather than folded into `measured_zero`
+because that name claims more certainty than they have: they are the residue neither the check nor
+the repair can decide, and they should be visible.
+
+The `recoverable` requirement that `PriceCatalogVersion` be `''` is load-bearing.
+`gen_ai.tool.cost_micro_usd` is not promoted out of `SpanAttributes`, so it survives on a row next to
+a cost the catalog computed. Without that requirement a tool span the catalog legitimately priced at
+zero would be classed `recoverable` and the repair would overwrite a catalog-authoritative zero with
+a client hint, while leaving the catalog version in place so the substituted number inherited
+provenance it never earned.
+
+**One thing the repair can get wrong, stated rather than glossed.** A non-tool span that carried
+`gen_ai.cost.estimated_micro_usd = 0` with no model and no tokens is stored as a genuine priced zero,
+because `enrich_cost` returns early without popping that key when provider or model are not strings.
+That key **is** promoted, so nothing survives in `SpanAttributes` to tell such a row apart from the
+column default the repair is aimed at, and it is marked unknown. That is information loss in the
+opposite direction. The shape is rare, and the alternative is leaving every column-default zero
+asserting a measurement nobody took, so it is accepted. Exclude such spans by hand if you have them.
+
+The check also replays the repricing arithmetic against every span the gateway itself already
+promoted, where the source attribute and the promoted column both survive and must agree exactly.
+`conversion_mismatches` must be `0`. That is what makes the reprice a repricing rather than an
+estimate: it is provably the same operation the gateway performs. The replay is scoped to
+`PriceCatalogVersion = ''`, which is what "the gateway promoted this" means; a catalog-priced tool
+span keeps the attribute too, as a client hint that may legitimately differ, and sweeping those in
+would report a mismatch and block the repair on a deployment where nothing is wrong.
+
+**Repair it.**
+
+```bash
+make ch-repair-priced-zero   # from infra/
+make ch-rollup-rebuild       # REQUIRED follow-up, see below
+```
+
+Nothing is invented. Where the true cost survives on the row it is promoted; where it does not, the
+row is marked `EstimatedCost = NULL`, `CostSource = 'unpriced'`, which is exactly what a
+post-CTO-244 gateway writes in the same situation, so the dashboard blanks it with a reason instead
+of showing a confident zero. What those calls really cost is not recorded anywhere and is not
+recoverable, so no number is put there.
+
+The script prints a before-and-after ledger, and the ledger carries its own proof. Known spend must
+move **up** by exactly the recoverable micro-USD and by nothing else, because marking a row unknown
+removes a zero from a sum and a zero changes no total. If known spend moves by any other amount, the
+mark step touched money it should not have.
+
+#### Order of operations
+
+`ALTER ... UPDATE` is a ClickHouse mutation, and **materialized views fire on INSERT, never on a
+mutation**. So every dollar the repair changes leaves `daily_feature_rollup`,
+`hourly_feature_rollup` and `daily_account_rollup` holding the old money, and the dashboard reads
+rollups. Run the two repairs in this order:
+
+1. `make ch-migrate-otel-engine`, if `otel_spans` is not yet a `ReplacingMergeTree` (CTO-245). Both
+   checks below define truth as a `FINAL` read, which is a no-op on a plain `MergeTree`.
+2. `make ch-priced-zero-check`, then `make ch-repair-priced-zero`. Ingest does not need quiescing:
+   every predicate is structural, and a span written while it runs is already honest.
+3. `make ch-rollup-rebuild` (CTO-311), with ingest quiesced. This is where the repriced money
+   reaches the dashboard.
+4. `make ch-rollup-check` and `make ch-priced-zero-check` again to confirm.
+
+Doing 3 before 2 leaves the rollups derived from the pre-repair costs, which looks like a successful
+rebuild and is wrong by exactly the recovered spend.
+
+#### Verified on the live local stack
+
+1,542,996 spans across three tenants. Every priced-`$0` population on the stack, before and after:
+
+| Population | Spans | Before | After |
+|---|---|---|---|
+| `local-dev` tool spans carrying `gen_ai.tool.cost_micro_usd` | 28,586 | `$0.00`, `CostSource = 'estimated'` | **`$93.106`** (93,106,000 micro-USD), still `estimated` |
+| `live-cto219` load-test spans, no model, no tokens, no cost attribute | 600,000 | `$0.00`, `CostSource = 'estimated'`, `PriceCatalogVersion = 'v1'` | `NULL`, `CostSource = 'unpriced'` |
+| `local-dev` embedding spans, real model and real tokens, empty catalog version | 3,989 | `$0.00`, `CostSource = 'estimated'` | `NULL`, `CostSource = 'unpriced'` |
+
+Stack-wide: priced-`$0` spans 632,575 to **0**; spans honestly marked unknown 0 to **603,989**; known
+spend `$139,571.3122253` to `$139,664.4182253`, a move of exactly `$93.106`, which is the recovered
+tool spend and nothing else. The repricing arithmetic replayed against the 183,169 spans the gateway
+had already promoted with **0** mismatches, and after the repair that replay covers all 211,755
+spans carrying the attribute, still with 0 mismatches (`$535.96335` = `$442.85735` + `$93.106`).
+
+After `make ch-rollup-rebuild`, all three rollups reconciled exactly against a `FINAL` sum over raw
+spans at `$139,664.4182253` with `drift_micro_usd = 0`, and `live-cto219`'s rollup rows went from
+claiming `$0.00` spend over 600,000 calls with `UnpricedSpanCount = 0` to `UnpricedSpanCount =
+600,000`, which is the signal the dashboard needs to blank the figure rather than render a zero.
+
+The guards added in review were exercised on the same stack with two synthetic spans, removed
+afterwards from raw spans and from all three rollups. A tool span at `$0.00` with a real
+`PriceCatalogVersion` and a `gen_ai.tool.cost_micro_usd` hint of `5000` was claimed by the old step 1
+(which would have overwritten a catalog-authoritative zero) and classed `recoverable`; under the
+empty-version guard it is claimed by neither step and classes as `measured_zero`. A span with
+`gen_ai.tool.cost_micro_usd = 'n/a'`, a real model, real tokens and an empty catalog version was
+skipped by the old step 2 and would have stayed a fabricated `$0` through any number of re-runs;
+under `toInt64OrNull(...) IS NULL` it is marked `NULL` / `unpriced`, which is what makes the claim
+above that the `unknown_*` classes are gone after a repair actually true.
+
+Two notes on what this changed that were not bugs being fixed. The issue quoted the affected
+population as "28,586 tool/vector spans holding $93.11". On this stack it is exactly 28,586 spans
+holding `$93.106`, and every one of them is a `tool` span: `local-dev`'s 40,000 `vector` spans were
+already correctly priced at `$8,262.74` and were not touched. And `live-cto219`'s reported spend does
+not fall to a smaller number, it stops being a number at all: 600,000 synthetic load-test calls that
+were reading as `$0.00` of confirmed spend now read as unknown, because that is what they are.
 
 ## 4. Run the web dashboard
 
@@ -860,6 +1001,8 @@ Knobs:
 | `make chatbot-demo-stop` | Kill the background chatbot dev server started by `chatbot-demo` |
 | `make ch-rollup-check` | Report rollup spend inflated by duplicated spans, per rollup and tenant (read-only, CTO-311) |
 | `make ch-rollup-rebuild` | Rebuild the rollup targets from the deduplicated raw spans (one-shot, quiesce ingest, CTO-311) |
+| `make ch-priced-zero-check` | Report historical spans stored as a priced `$0` that was never measured (read-only, CTO-313) |
+| `make ch-repair-priced-zero` | Reprice what is derivable, mark the rest unknown; follow with `ch-rollup-rebuild` (CTO-313) |
 | `make ps` / `make logs` | Status / tail gateway logs |
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
 | `make down` | Stop the stack (keep data volumes) |
