@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-B9MBsTruncatedExampleIdent",
+  "object": "chat.completion",
+  "created": 1741569988,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The three main causes are, first,",
+        "refusal": null,
+        "annotations": []
+      },
+      "logprobs": null,
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1204,
+    "completion_tokens": 8,
+    "total_tokens": 1212
+  },
+  "service_tier": "default"
+}

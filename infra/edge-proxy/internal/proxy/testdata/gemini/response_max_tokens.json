@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "content": { "parts": [{ "text": "The three main causes are, first," }], "role": "model" },
+      "finishReason": "MAX_TOKENS",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 1204,
+    "candidatesTokenCount": 8,
+    "thoughtsTokenCount": 96,
+    "cachedContentTokenCount": 0,
+    "totalTokenCount": 1308
+  },
+  "modelVersion": "gemini-2.5-flash-002",
+  "responseId": "0bYFaJ2cKcOTz7IPvbHFqAo"
+}
