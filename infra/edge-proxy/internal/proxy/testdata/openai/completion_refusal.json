@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-B9MBsRefusalExampleIdenti",
+  "object": "chat.completion",
+  "created": 1741570021,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": "final refusal text",
+        "annotations": []
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 331,
+    "completion_tokens": 12,
+    "total_tokens": 343
+  },
+  "service_tier": "default"
+}

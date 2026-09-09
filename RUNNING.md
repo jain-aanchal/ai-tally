@@ -711,6 +711,30 @@ cd infra && make chatbot-demo-backfill
 # tune it: make chatbot-demo-backfill BACKFILL_ARGS="--days 30 --target-usd 52400 --seed 138 --accounts 12"
 ```
 
+Those numbers were inherited and unverified until issue #318; they have now been
+measured. A default run at `--seed 138` against a local stack posted 512,056
+spans and 101,799 events in 1,229 batches with nothing shed, and ClickHouse then
+reported, from the cost the **gateway** recomputed rather than the figure the
+script printed:
+
+| Layer (`GenAiOperation`) | Spans | 30-day cost |
+| --- | ---: | ---: |
+| `chat` (LLM) | 293,352 | **$52,401.67** |
+| `compute` | 150 | $2,351.71 |
+| `tool` | 26,678 | $397.86 |
+| `egress` | 150 | $209.04 |
+| `embeddings` | 35,235 | $88.12 |
+| `vector` | 156,491 | $45.00 |
+| all-in | 512,056 | **$55,493.40** |
+
+So the `~$52,400/mo` claim holds, and the feature mix lands on the documented
+split exactly (54 / 17 / 12 / 10 / 7 percent of LLM spend). The script's own
+printed expectation was `$52,401.56`, 11 cents under what the gateway stored,
+which is per-span rounding rather than catalog drift: the script's rates and
+`seed_catalog` still agree. The run shapes in the table below check out too:
+of 121,660 runs, 4,162 failed without a retry (3.4%), 2,953 failed and were
+retried (2.4%), and 9,914 were deliberately unattributed (8.2%).
+
 The target refuses to run when the `local-dev` tenant UUID does not resolve, and
 prints what to check. It used to drop `--tenant` in that case, which quietly
 wrote 30 days of rows under the tenant NAME that the dashboard (which reads by

@@ -1,0 +1,28 @@
+{
+  "id": "chatcmpl-B9MBsToolCallExampleIden",
+  "object": "chat.completion",
+  "created": 1741570090,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_62136354",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"San Francisco, CA\"}"
+            }
+          }
+        ],
+        "refusal": null
+      },
+      "logprobs": null,
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
