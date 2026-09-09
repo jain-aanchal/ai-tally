@@ -29,8 +29,27 @@ variable "vpc_cidr" {
 }
 
 variable "availability_zones" {
-  description = "Two AZs in aws_region. Named explicitly rather than read from a data source so that a plan is stable across account-specific AZ shuffling."
+  description = <<-EOT
+    Two AZs in aws_region. Named explicitly rather than read from a data source so that a plan is
+    stable across account-specific AZ shuffling. AZ names are account-scoped, and not every AZ in a
+    region offers every service, so list the ones your account actually has:
+
+      aws ec2 describe-availability-zones --region "$REGION" \
+        --query 'AvailabilityZones[?State==`available`].ZoneName' --output text
+  EOT
   type        = list(string)
+
+  validation {
+    # An AZ from another region is a mistake nobody catches by reading: the subnet create fails
+    # partway through the network module, leaving a VPC and a half-built subnet set behind.
+    condition     = alltrue([for az in var.availability_zones : startswith(az, var.aws_region)])
+    error_message = "Every availability_zones entry must be in aws_region, e.g. [\"us-east-1a\", \"us-east-1b\"] for aws_region = \"us-east-1\"."
+  }
+
+  validation {
+    condition     = length(var.availability_zones) >= 2 && length(distinct(var.availability_zones)) == length(var.availability_zones)
+    error_message = "availability_zones needs at least two distinct AZs: the RDS subnet group and the ALB both require two."
+  }
 }
 
 variable "enable_nat_gateway" {
@@ -90,15 +109,58 @@ variable "create_provider_key_secrets" {
   default = true
 }
 
+# REQUIRED, AND DELIBERATELY WITHOUT A DEFAULT (CTO-360).
+#
+# Both of these are facts about your region and your account, not preferences, and neither can be
+# known from this repository. This module had `db_engine_version = "16.4"` and
+# `db_instance_class = "db.t4g.medium"` as defaults; nobody had ever run a plan against a real
+# account, so both were guesses. A Postgres minor version that RDS has deprecated, or an instance
+# class that region does not offer for that engine version, fails at APPLY time, after the VPC, the
+# NAT gateway and the KMS key already exist. That is the worst moment to find out, and the recovery
+# is a half-built stack and a `terraform destroy`.
+#
+# Requiring them moves the failure to the front: Terraform refuses to plan at all until you have
+# looked the values up, and the lookup is one command each. The validation blocks catch a
+# malformed value in the same breath. Neither can prove the value exists in your region, and this
+# comment does not pretend otherwise.
+
 variable "db_engine_version" {
-  type    = string
-  default = "16.4"
+  description = <<-EOT
+    RDS for PostgreSQL engine version, e.g. "16.8". No default: a version that does not exist in
+    aws_region fails at apply, after the VPC exists. Discover the valid values for your region:
+
+      aws rds describe-db-engine-versions --engine postgres --region "$REGION" \
+        --query 'DBEngineVersions[].EngineVersion' --output text | tr '\t' '\n' | sort -V
+
+    Add --default-only for the one AWS would pick, or filter with
+    --engine-version 16 to list only the 16.x line.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+(\\.[0-9]+)?$", var.db_engine_version))
+    error_message = "db_engine_version must be a Postgres version like \"16\" or \"16.8\". Run: aws rds describe-db-engine-versions --engine postgres --region <region> --query 'DBEngineVersions[].EngineVersion' --output text"
+  }
 }
 
 variable "db_instance_class" {
-  description = "db.t4g.* is the Graviton family, which matches the ARM64 posture of the task definitions. The runbook suggests db.t3.medium; t4g.medium is the same size on cheaper hardware."
+  description = <<-EOT
+    RDS instance class, e.g. "db.t4g.medium". No default: an instance class this region does not
+    offer for this engine version fails at apply, in the same place db_engine_version does. The
+    db.t4g.* Graviton family matches the ARM64 posture of the task definitions and is the same size
+    as the runbook's db.t3.medium on cheaper hardware, so it is the one to try first. Confirm the
+    combination is orderable before you apply:
+
+      aws rds describe-orderable-db-instance-options --engine postgres \
+        --engine-version "$DB_ENGINE_VERSION" --region "$REGION" \
+        --query 'OrderableDBInstanceOptions[].DBInstanceClass' --output text | tr '\t' '\n' | sort -u
+  EOT
   type        = string
-  default     = "db.t4g.medium"
+
+  validation {
+    condition     = can(regex("^db\\.[a-z0-9]+\\.[a-z0-9]+$", var.db_instance_class))
+    error_message = "db_instance_class must look like db.t4g.medium. Run: aws rds describe-orderable-db-instance-options --engine postgres --engine-version <version> --region <region> --query 'OrderableDBInstanceOptions[].DBInstanceClass' --output text"
+  }
 }
 
 variable "db_allocated_storage" {

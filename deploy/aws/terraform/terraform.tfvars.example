@@ -4,8 +4,25 @@
 # name, an id or a hostname. Secret VALUES are written to Secrets Manager out of band, never here,
 # because a .tfvars file becomes state and state is readable by anyone who can read the bucket.
 
-aws_region         = "us-east-1"
+aws_region = "us-east-1"
+
+# AZ names are account-scoped. List yours:
+#   aws ec2 describe-availability-zones --region "$REGION" \
+#     --query 'AvailabilityZones[?State==`available`].ZoneName' --output text
 availability_zones = ["us-east-1a", "us-east-1b"]
+
+# REQUIRED AND UNGUESSABLE (CTO-360). These two are facts about your region, they have no defaults
+# on purpose, and a wrong value fails at APPLY, after the VPC and the NAT gateway already exist.
+# The values below are placeholders, not knowns. Look yours up first:
+#
+#   aws rds describe-db-engine-versions --engine postgres --region "$REGION" \
+#     --query 'DBEngineVersions[].EngineVersion' --output text | tr '\t' '\n' | sort -V
+#
+#   aws rds describe-orderable-db-instance-options --engine postgres \
+#     --engine-version "$DB_ENGINE_VERSION" --region "$REGION" \
+#     --query 'OrderableDBInstanceOptions[].DBInstanceClass' --output text | tr '\t' '\n' | sort -u
+db_engine_version = "16.8"
+db_instance_class = "db.t4g.medium"
 
 # Globally unique. Convention: <account-id>-ai-tally-replay.
 replay_bucket_name = "123456789012-ai-tally-replay"
