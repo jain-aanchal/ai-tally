@@ -14,7 +14,7 @@ variable "ecs_dir" {
 }
 
 variable "replay_bucket_name" {
-  description = "Substituted for REPLACE_REPLAY_BUCKET in task-role-policy.json, which is the placeholder PR #352 left in place of the old hard-coded my-org-ai-tally-replay."
+  description = "Substituted for __REPLAY_BUCKET__ in task-role-policy.json, which is the placeholder PR #352 left in place of the old hard-coded my-org-ai-tally-replay."
   type        = string
 }
 

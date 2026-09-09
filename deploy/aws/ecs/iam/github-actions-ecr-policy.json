@@ -21,9 +21,9 @@
         "ecr:UploadLayerPart"
       ],
       "Resource": [
-        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/gateway",
-        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/edge-proxy",
-        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/web"
+        "arn:aws:ecr:__REGION__:__ACCOUNT__:repository/ai-tally/gateway",
+        "arn:aws:ecr:__REGION__:__ACCOUNT__:repository/ai-tally/edge-proxy",
+        "arn:aws:ecr:__REGION__:__ACCOUNT__:repository/ai-tally/web"
       ]
     }
   ]

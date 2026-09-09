@@ -31,7 +31,7 @@ variable "create_kms_key" {
 }
 
 variable "replay_bucket_name" {
-  description = "Globally unique bucket for replay bodies. Substituted for REPLACE_REPLAY_BUCKET in task-role-policy.json and in gateway.taskdef.json."
+  description = "Globally unique bucket for replay bodies. Substituted for __REPLAY_BUCKET__ in task-role-policy.json and in gateway.taskdef.json."
   type        = string
 }
 

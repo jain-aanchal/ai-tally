@@ -18,7 +18,7 @@
   },
   "loadBalancers": [
     {
-      "targetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT:targetgroup/ai-tally-gateway/REPLACE",
+      "targetGroupArn": "arn:aws:elasticloadbalancing:__REGION__:__ACCOUNT__:targetgroup/ai-tally-gateway/REPLACE",
       "containerName": "gateway",
       "containerPort": 8080
     }

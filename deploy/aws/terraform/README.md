@@ -360,11 +360,12 @@ NAT is in an AZ that is having a bad day and `single_nat_gateway = true`. Interf
 help here; see the section above.
 
 **The gateway logs region errors, or the replay store writes nowhere.** Check that `AWS_REGION` and
-`TALLY_REPLAY_S3_REGION` are still spelled that way in the registered task definition. The runbook's
-`sed -e "s/REGION/$REGION/g"` recipe rewrites those variable NAMES as well as their values, giving
-you `AWS_us-east-1`. The task registers and starts, and both settings are simply absent. This module
-substitutes by shape rather than as a bare word specifically to avoid that, so seeing it means
-something registered a task definition by hand.
+`TALLY_REPLAY_S3_REGION` are still spelled that way in the registered task definition. Before
+CTO-360 the placeholder was the bare word `REGION`, and the runbook's `sed -e "s/REGION/$REGION/g"`
+rewrote those variable NAMES as well as their values, giving you `AWS_us-east-1`; the task
+registered and started, and both settings were simply absent. The placeholders are `__REGION__` and
+`__ACCOUNT__` now, which cannot occur inside an identifier, so seeing this means an older recipe or
+an older copy of the files is still in use somewhere.
 
 **The edge proxy service cycles forever with nothing useful in the logs.** Somebody added a
 container `healthCheck` to `edge-proxy.taskdef.json`. The image is `FROM scratch`: no shell, no

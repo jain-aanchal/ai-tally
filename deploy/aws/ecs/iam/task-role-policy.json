@@ -11,8 +11,8 @@
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::REPLACE_REPLAY_BUCKET",
-        "arn:aws:s3:::REPLACE_REPLAY_BUCKET/*"
+        "arn:aws:s3:::__REPLAY_BUCKET__",
+        "arn:aws:s3:::__REPLAY_BUCKET__/*"
       ]
     },
     {
@@ -35,10 +35,10 @@
         "kms:Decrypt",
         "kms:GenerateDataKey"
       ],
-      "Resource": "arn:aws:kms:REGION:ACCOUNT:key/REPLACE_KMS_KEY_ID",
+      "Resource": "arn:aws:kms:__REGION__:__ACCOUNT__:key/__KMS_KEY_ID__",
       "Condition": {
         "StringEquals": {
-          "kms:ViaService": "secretsmanager.REGION.amazonaws.com"
+          "kms:ViaService": "secretsmanager.__REGION__.amazonaws.com"
         }
       }
     },
