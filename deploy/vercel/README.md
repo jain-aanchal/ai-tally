@@ -110,6 +110,22 @@ encrypted env store and mark it **Sensitive** — Vercel encrypts it at rest and
 after save. **Never commit a secret**; `web/vercel.json` contains config only, no values. A changed
 `NEXT_PUBLIC_*` value requires a **redeploy** to take effect (it is baked into the client bundle).
 
+## 2b. Run the preflight before you deploy
+
+```bash
+cd infra && make prod-preflight ENV=../prod.env      # or: scripts/prod-preflight.sh --env prod.env
+```
+
+Put BOTH sides in the file: the Vercel settings from §2 and the gateway's own settings. They use
+different variable names (`GATEWAY_SERVICE_TOKEN` on the web tier, `TALLY_GATEWAY_SERVICE_TOKEN` on
+the gateway), and one merged environment is what lets the check compare them, which is the point:
+a token that differs between the two 401s every control-plane call and reaches a signed-in user as
+a broken dashboard with nothing naming the cause.
+
+It needs no AWS credentials and never prints a secret value; secrets are compared and reported by
+SHA-256 prefix and length. It exits non-zero and says what to fix. Read §4 below before dismissing
+the ClickHouse URL check: an unreachable ClickHouse does not error, it paints mock data.
+
 ## 3. Deploy
 
 - **Production:** push to `main` (or click **Deploy**). Vercel runs `npm ci` → `next build` in `web/`
@@ -159,6 +175,7 @@ leave them unset to preview against mock data). Never point Preview at productio
 
 ## Quick checklist
 
+- [ ] `make prod-preflight` is green (§2b).
 - [ ] Project imported, **Root Directory = `web/`**.
 - [ ] Node.js Version = **22.x** (Project Settings).
 - [ ] Env vars set for Production + Preview; ClickHouse password marked **Sensitive**.

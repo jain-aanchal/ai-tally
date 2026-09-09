@@ -455,6 +455,26 @@ The IRSA role also needs the Secrets Store CSI driver's AWS provider installed (
 
 ## 7. Deploy
 
+### First, the preflight (CTO-360)
+
+```bash
+cd infra && make prod-preflight ENV=../prod.env      # or: scripts/prod-preflight.sh --env prod.env
+```
+
+Put both sides in the file: the gateway's settings and the Vercel project's. It checks the handful
+of settings whose failures are confusing and unrelated-looking, and each finding names the symptom
+it prevents: `TALLY_REQUIRE_API_KEY` false leaves the control plane ungated so an unauthenticated
+`POST /v1/tenant/provision` creates a real tenant; the web tier's `GATEWAY_SERVICE_TOKEN` and the
+gateway's `TALLY_GATEWAY_SERVICE_TOKEN` differing 401s every control-plane call; a leftover
+`TALLY_DEV_TENANT` pins one tenant for whoever loads the dashboard; `TALLY_HMAC_KEY_PROVIDER` unset
+falls back to the local provider, which holds per-tenant key material in configuration rather than
+by reference; a missing Clerk svix signing secret rejects `organization.created` so no tenant is
+ever provisioned; and an unreachable ClickHouse does not error but paints mock data.
+
+It uses no AWS credentials, makes no AWS API call, and never prints a secret value: secrets are
+compared and reported by SHA-256 prefix and length. It exits non-zero and says exactly what to fix.
+`ARGS=--no-probe` skips the outbound reachability check.
+
 ### Option A — ECS-Fargate (primary)
 
 Create the cluster and the CloudWatch log groups, then register the task defs and create the
