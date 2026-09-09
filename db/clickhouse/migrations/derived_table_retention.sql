@@ -79,6 +79,10 @@
 -- 0. LOOK BEFORE YOU LEAP. Read-only. How many rows are already past each proposed horizon?
 --    Run this first, on its own. It deletes nothing.
 -- ============================================================================================
+-- NOTE: the UNION must be wrapped before ORDER BY. In ClickHouse an ORDER BY written after a
+-- UNION ALL binds to the LAST SELECT only, not to the union result, and the alias from the
+-- first SELECT is not in scope there, so the bare form fails with UNKNOWN_IDENTIFIER (47).
+SELECT * FROM (
 SELECT 'daily_feature_rollup'  AS table, count() AS rows_past_horizon FROM daily_feature_rollup  WHERE toDateTime(Day)               < now() - INTERVAL 2555 DAY
 UNION ALL SELECT 'daily_account_rollup',  count() FROM daily_account_rollup  WHERE toDateTime(Day)               < now() - INTERVAL 2555 DAY
 UNION ALL SELECT 'business_events',       count() FROM business_events       WHERE toDateTime(OccurredAt)        < now() - INTERVAL 2555 DAY
@@ -91,7 +95,7 @@ UNION ALL SELECT 'business_events.RawPayload (column blanked, row kept)',
                                           count() FROM business_events       WHERE toDateTime(OccurredAt)        < now() - INTERVAL 90 DAY
 UNION ALL SELECT 'replay_samples',        count() FROM replay_samples        WHERE toDateTime(CapturedAt)        < now() - INTERVAL 30 DAY
 UNION ALL SELECT 'replay_runs',           count() FROM replay_runs           WHERE toDateTime(RanAt)             < now() - INTERVAL 30 DAY
-ORDER BY rows_past_horizon DESC
+) ORDER BY rows_past_horizon DESC
 FORMAT PrettyCompactMonoBlock;
 
 -- ============================================================================================
