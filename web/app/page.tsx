@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import { apiGet } from "@/lib/api";
 import type { ForecastPayload } from "@/lib/burndown";
-import { queryPriorMonthSpend } from "@/lib/clickhouse";
+import { queryFirstEventSeen, queryPriorMonthSpend } from "@/lib/clickhouse";
 import { filtersToQueryString, parseFilters } from "@/lib/filters";
+import { resolveTenantId } from "@/lib/getTenant";
+import { hasFunnelStage, recordFunnel } from "@/lib/onboardingStore";
 import { searchParamsFromRecord } from "@/lib/searchParams";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import type { MicroUSD } from "@/lib/types";
 import type { CostBudgetPayload } from "./cost/BurndownCard";
 import { HomeLive, type HomePayload } from "./Live";
+import { SetupCallout } from "./SetupCallout";
 
 export default async function HomePage({
   searchParams,
@@ -23,22 +26,41 @@ export default async function HomePage({
   // rather than joined to the 5-second poll: it moves on a daily cadence, and a forecast that
   // flickered every few seconds would read as far less trustworthy than it is. Tenant scope only on
   // Home (no ?scope=); the full scoped burn-down stays on /cost.
-  const [initialData, enabledLayers, budget, priorMonthMicroUsd] = await Promise.all([
+  const [initialData, enabledLayers, budget, priorMonthMicroUsd, firstEvent] = await Promise.all([
     apiGet<HomePayload>(endpoint),
     queryEnabledConnectors(),
     apiGet<CostBudgetPayload>("/api/cost/budget"),
     // Last full month's actual, for the forecast card's "vs last month" delta (CTO-227). Read once
     // here, not polled: it only changes at a month boundary.
     queryPriorMonthSpend(),
+    // Has anything ever landed for this tenant (#358)? The existing existence probe, reused rather
+    // than a second read of the same fact: it drives the setup callout below and the first_dashboard
+    // funnel stage. Its `unknown` state is carried through, not folded into "nothing yet".
+    queryFirstEventSeen(),
   ]);
+  // #358: the one place `first_dashboard` can honestly be recorded. Nothing anywhere posted it, so
+  // the onboarding checklist maxed out at 3 of 4 forever. The stage is "see your first dashboard",
+  // and this IS the dashboard being served with the tenant's own data behind it, so the moment is
+  // measured rather than noticed and the timestamp means what it says. The `connected` guard is
+  // load-bearing: rendering Home while the probe says `waiting` or `unknown` proves nothing about
+  // whether they ever saw data, and the store keeps only the first occurrence.
+  if (firstEvent === "connected") {
+    const tenantId = await resolveTenantId();
+    if (!hasFunnelStage(tenantId, "first_dashboard")) {
+      recordFunnel(tenantId, "first_dashboard");
+    }
+  }
   const forecast: ForecastPayload = budget.forecast;
   const priorMonth: MicroUSD | null = priorMonthMicroUsd;
   return (
-    <HomeLive
-      initialData={initialData}
-      enabledLayers={enabledLayers}
-      forecast={forecast}
-      priorMonthMicroUsd={priorMonth}
-    />
+    <div className="space-y-6">
+      <SetupCallout status={firstEvent} />
+      <HomeLive
+        initialData={initialData}
+        enabledLayers={enabledLayers}
+        forecast={forecast}
+        priorMonthMicroUsd={priorMonth}
+      />
+    </div>
   );
 }

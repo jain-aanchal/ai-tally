@@ -106,9 +106,13 @@ export interface ChecklistStep {
  * A timestamp with no source is not an unknown value we render as a blank, it is a measurement we
  * do not take, so the model does not carry a slot for it. Restoring it means restoring a real
  * arrival signal from ingest at the same time.
+ *
+ * There is deliberately no `signedUpAt` either (#358), for the same reason. It used to be stamped
+ * when the in-process store first built its record, which on a process-global store was server boot
+ * time and on a per-tenant store would be the first page view. Neither is a signup. Clerk holds the
+ * real one and nothing here reads it, so the slot is gone rather than filled with a stand-in.
  */
 export interface OnboardingProgress {
-  signedUpAt: number;
   copiedConfigAt: number | null;
   firstDashboardAt: number | null;
 }

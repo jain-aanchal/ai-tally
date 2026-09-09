@@ -19,10 +19,14 @@ export default function SelectOrgPage() {
           Create one to get started, or pick an organization you already belong to.
         </p>
       </div>
+      {/* #358: creating an org used to land on Home, which for a tenant that has existed for four
+          seconds is a dashboard of blanks with no next step on it. It lands on /onboarding instead,
+          where the connect snippets and the coverage probe are. Selecting an existing org still
+          goes to Home: that org may already be flowing. */}
       <OrganizationList
         hidePersonal
         afterSelectOrganizationUrl="/"
-        afterCreateOrganizationUrl="/"
+        afterCreateOrganizationUrl="/onboarding"
       />
     </div>
   );

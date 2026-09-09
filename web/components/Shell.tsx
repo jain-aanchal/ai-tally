@@ -53,6 +53,11 @@ const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
   {
     caption: "Configure",
     items: [
+      // The permanent way back into the two-step setup page (#358). It shipped unreachable: no
+      // href anywhere in the app, no nav entry, no mention in the docs. Home carries the prominent
+      // callout while a tenant has no data; this entry is the one that stays, because a team that
+      // adds a second service still needs the connect snippets and the coverage readout.
+      { label: "Setup", href: "/onboarding" },
       { label: "Connectors", href: "/connectors" },
       { label: "Guardrails", href: "/guardrails" },
       { label: "Budgets", href: "/settings/budgets" },
@@ -194,10 +199,13 @@ export function Shell({
 
         {showOrgControls && (
           <div className="flex items-center justify-between gap-2 border-t border-edge px-4 py-3">
+            {/* A brand-new org has no data by definition, so creating one lands on setup rather
+                than on an empty dashboard (#358). Selecting an EXISTING org still lands on Home:
+                that org may well be flowing, and forcing setup on a switch would be noise. */}
             <OrganizationSwitcher
               hidePersonal
               afterSelectOrganizationUrl="/"
-              afterCreateOrganizationUrl="/"
+              afterCreateOrganizationUrl="/onboarding"
             />
             <UserButton />
           </div>
