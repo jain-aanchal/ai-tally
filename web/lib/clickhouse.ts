@@ -10,6 +10,31 @@
 // layers; vector/compute/egress are zero until those sources are instrumented. That's honest: the
 // dashboard shows exactly the telemetry that exists.
 //
+// EVERY otel_spans READ SAYS `FINAL` (CTO-245 / #314). otel_spans is a ReplacingMergeTree keyed on
+// (TenantId, FeatureTag, ServiceName, SpanName, Timestamp, TraceId, SpanId), so a duplicate span
+// that got past the durable idempotency store collapses only when a background merge runs. Between
+// the duplicate insert and that merge a plain `sum(EstimatedCost)` reads both rows and over-states
+// spend by exactly the replayed amount. FINAL makes the read exact at query time instead of
+// eventually.
+//
+// It is applied to ALL of them in one pass, not to the ones that looked risky. A read surface where
+// some panels dedupe and some do not is worse than one where none do: two panels disagree and
+// neither is obviously wrong. The single documented exception is queryFirstEventSeen, which selects
+// a literal rather than a value (see the comment there); `clickhouse.test.ts` fails the build if any
+// other otel_spans read drops FINAL.
+//
+// The cost is real. FINAL merges the scanned rows across the parts that hold them, so it scales
+// with BOTH how much data the query reads and how un-merged the table is; only the RATIO between a
+// merged and an un-merged table is bounded by un-mergedness. Measured on the local corpus (1.54M
+// spans, three tenants): with the table fully merged (one part per partition) FINAL is inside the
+// noise; forced to 372 parts over 31 partitions, roughly twelve times un-merged, the heaviest
+// dashboard query goes from 148ms to 200ms of ClickHouse time and the rest move by 25-50ms each.
+// End to end /waste measured 644ms before and 617ms after against a production build, which is a
+// speedup after adding work and therefore noise: the page-level delta is UNMEASURED, not shown to
+// be small, because the run-to-run spread (617-728ms) is wider than any effect this could have. All
+// that is established at page level is that both pages stay inside the one-second bar CTO-227
+// bought back. Numbers and method are in the PR for #314.
+//
 // Server-only: imported solely by Route Handlers pinned to the nodejs runtime (never a client
 // component), so it never reaches the browser bundle.
 
@@ -141,6 +166,12 @@ export async function queryFirstEventSeen(): Promise<FirstEventStatus> {
   const seen = await tryLive(async (db, tenant) => {
     const r = await rows<{ one: number }>(
       db,
+      // CTO-245 / #314: the ONE otel_spans read that deliberately omits FINAL. Every other read in
+      // this module takes a value off the table and so can be inflated by an un-merged duplicate.
+      // This one takes no value: it selects the literal 1 and asks only "does a row exist". A
+      // duplicate cannot change a boolean, so FINAL would buy nothing here and it is not free on a
+      // polled endpoint (measured on 372 un-merged parts: 7ms -> 43ms of ClickHouse time). The
+      // guard in clickhouse.test.ts allowlists this line by name so the exemption stays this one.
       "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1",
       tenant,
     );
@@ -289,14 +320,14 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
          sumIf(EstimatedCost, CostSource = 'estimated') AS estimated,
          sumIf(EstimatedCost, CostSource = 'reconciled') AS reconciled,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY`,
       tenant,
     );
     const byLayerRows = await rows<{ layer: Layer; cost: string }>(
       db,
       `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
        GROUP BY layer`,
       tenant,
@@ -333,7 +364,7 @@ export async function queryPriorMonthSpend(): Promise<MicroUSD | null> {
     const r = await rows<{ total: string }>(
       db,
       `SELECT sum(EstimatedCost) AS total
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= toStartOfMonth(now()) - INTERVAL 1 MONTH
          AND Timestamp < toStartOfMonth(now())`,
@@ -362,7 +393,7 @@ export async function queryOutliers(windowDays = 30): Promise<CostOutlier[] | nu
       `WITH runs AS (
          SELECT TraceId AS runId, any(ServiceName) AS agent,
                 if(countIf(EstimatedCost IS NULL) > 0, NULL, sum(EstimatedCost)) AS cost
-         FROM otel_spans
+         FROM otel_spans FINAL
          WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY
            AND ServiceName != '' AND ServiceName != 'unknown'
            AND GenAiOperation NOT IN ('compute', 'egress')
@@ -445,7 +476,7 @@ export async function queryCostSeries(
     const out = await rowsP<{ day: string; layer: Layer; cost: string }>(
       db,
       `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${tagClause}
        GROUP BY day, layer
        ORDER BY day`,
@@ -498,7 +529,7 @@ export async function queryFeatureCostRows(
     const out = await rowsP<{ feature: string; layer: Layer; cost: string }>(
       db,
       `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY AND FeatureTag != '' ${tagClause}
        GROUP BY feature, layer`,
       { tenant, tag },
@@ -656,7 +687,7 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
               sum(EstimatedCost) AS cost,
               count() AS spans,
               countIf(EstimatedCost IS NULL) AS unpriced
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE ${scope} ${filterClause}
        GROUP BY grp
        ORDER BY cost DESC`,
@@ -680,7 +711,7 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
         ? await rowsP<{ day: string; grp: string; cost: string }>(
             db,
             `SELECT toString(toDate(Timestamp)) AS day, ${groupExpr} AS grp, sum(EstimatedCost) AS cost
-             FROM otel_spans
+             FROM otel_spans FINAL
              WHERE ${scope} ${filterClause} AND ${groupExpr} IN {kept:Array(String)}
              GROUP BY day, grp`,
             { ...common, kept },
@@ -690,7 +721,7 @@ export async function queryCostExplore(params: ExploreParams): Promise<ExploreSe
       ? await rowsP<{ day: string; cost: string }>(
           db,
           `SELECT toString(toDate(Timestamp)) AS day, sum(EstimatedCost) AS cost
-           FROM otel_spans
+           FROM otel_spans FINAL
            WHERE ${scope} ${filterClause} AND ${groupExpr} NOT IN {kept:Array(String)}
            GROUP BY day`,
           { ...common, kept },
@@ -795,7 +826,7 @@ export async function queryCostBreakdownPrior(
     const rows = await rowsP<{ grp: string; cost: string }>(
       db,
       `SELECT ${groupExpr} AS grp, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE ${scope} ${filterClause}
        GROUP BY grp`,
       { tenant, windowStart: b.windowStart, windowDays, ...filterParams },
@@ -847,7 +878,7 @@ export async function queryCostSliceTotals(
          countIf(EstimatedCost IS NULL) AS unpriced,
          count() AS spans,
          toString(maxOrNull(if(CostSource = 'reconciled', toDate(Timestamp), NULL))) AS recThrough
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${clause}`,
       { tenant, ...params },
     );
@@ -1079,7 +1110,7 @@ export async function querySettledCostSeries(
     const costRows = await rowsP<{ day: string; layer: Layer; cost: string }>(
       db,
       `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE ${inWindow} ${clause}
        GROUP BY day, layer`,
       params,
@@ -1099,7 +1130,7 @@ export async function querySettledCostSeries(
               countIf(${LAYER_CASE} = 'compute') AS compute,
               countIf(${LAYER_CASE} = 'egress') AS egress,
               countIf(CostSource = 'reconciled') AS reconciled
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE ${inWindow}
        GROUP BY day`,
       params,
@@ -1582,7 +1613,7 @@ async function accountDetail(
               countIf(EstimatedCost IS NULL) AS unpriced,
               count() AS steps,
               max(StatusCode) AS maxStatus
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND AccountIdHash = {account:String}
          AND ${ACCOUNT_SPAN_WINDOW} AND ${DIRECT_ONLY}
        GROUP BY TraceId
@@ -1664,7 +1695,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
     const totalRows = await rowsP<{ total: string }>(
       db,
       `SELECT sum(EstimatedCost) AS total
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY ${tagClause}`,
       { tenant, tag },
     );
@@ -1684,7 +1715,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
          if(FeatureTag != '', FeatureTag, ServiceName) AS feature,
          countIf(GenAiOperation = 'tool' AND (EstimatedCost IS NULL OR EstimatedCost = 0)) AS uncosted,
          sum(EstimatedCost) AS featureCost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY ${tagClause}
        GROUP BY feature
        HAVING uncosted > {threshold:UInt32}
@@ -1699,7 +1730,7 @@ export async function queryHiddenCostAlerts(filter?: { tag?: string }): Promise<
          if(FeatureTag != '', FeatureTag, ServiceName) AS feature,
          countIf(${LAYER_CASE} = 'llm') / nullIf(uniqExact(SessionId), 0) AS callsPerSession,
          sum(EstimatedCost) AS featureCost
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
          AND SessionId != '' ${tagClause}
        GROUP BY feature
@@ -1784,7 +1815,7 @@ export async function queryFeatureEconomics(windowDays = 30): Promise<FeatureEco
       // CTO-244: `unpriced` gates the cost-per-user ratio below. See FeatureEconomics.
       `SELECT FeatureTag AS feature, sum(EstimatedCost) AS cost, uniqExact(UserIdHash) AS users,
               countIf(EstimatedCost IS NULL) AS unpriced
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${w} DAY AND FeatureTag != ''
        GROUP BY FeatureTag
        ORDER BY cost DESC`,
@@ -2067,7 +2098,7 @@ export async function queryAccountStitching(): Promise<AccountStitching | null> 
     const direct = await rows<{ direct_accounts: string }>(
       db,
       `SELECT uniqExact(AccountIdHash) AS direct_accounts
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 30 DAY
          AND AccountIdHash != ''`,
@@ -2093,7 +2124,7 @@ export async function queryAccountStitching(): Promise<AccountStitching | null> 
       const costs = await rowsP<{ user_hash: string; cost: string; spans: string }>(
         db,
         `SELECT UserIdHash AS user_hash, sum(EstimatedCost) AS cost, count() AS spans
-         FROM otel_spans
+         FROM otel_spans FINAL
          WHERE TenantId = {tenant:String}
            AND Timestamp >= now() - INTERVAL 30 DAY
            AND AccountIdHash = ''
@@ -2142,7 +2173,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
 
     const sample = await rows<{ rate: string }>(
       db,
-      `SELECT avg(SampleRate) AS rate FROM otel_spans
+      `SELECT avg(SampleRate) AS rate FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY`,
       tenant,
     );
@@ -2150,7 +2181,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
 
     const perFeature = await rows<{ feature: string; events: string }>(
       db,
-      `SELECT FeatureTag AS feature, count() AS events FROM otel_spans
+      `SELECT FeatureTag AS feature, count() AS events FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 7 DAY AND FeatureTag != ''
        GROUP BY feature ORDER BY events DESC`,
       tenant,
@@ -2171,7 +2202,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
               any(SpanAttributes['telemetry.sdk.version']) AS sdk,
               countIf(ContextDroppedMessages > 0) AS drops,
               count() AS spans
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 24 HOUR
        GROUP BY service`,
       tenant,
@@ -2189,7 +2220,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
       `SELECT toString(toDate(Timestamp)) AS date,
               sum(EstimatedCost) AS est,
               sumIf(EstimatedCost, CostSource = 'reconciled') AS recon
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 14 DAY
        GROUP BY date ORDER BY date`,
       tenant,
@@ -2219,7 +2250,7 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
               count() AS spans,
               avg(EstimatedCost) AS mean,
               stddevPop(EstimatedCost) AS std
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 30 DAY
          AND SamplingStratum IN ('body', 'mid', 'tail')
@@ -2340,7 +2371,7 @@ async function fetchSpansFor(
   const inList = safeIds.map((id) => `'${id}'`).join(",");
   const sql = `SELECT TraceId AS runId, SpanId AS spanId, ParentSpanId AS parentSpanId,
             SpanName AS name, EstimatedCost AS cost, DurationNs AS durNs, StatusCode AS status
-     FROM otel_spans
+     FROM otel_spans FINAL
      WHERE TenantId = {tenant:String} AND TraceId IN (${inList})
      ORDER BY AgentStepIndex, Timestamp`;
   const spanRows = await rows<SpanRowRaw>(db, sql, tenant);
@@ -2415,7 +2446,7 @@ export async function queryAgents(
               count() AS steps,
               max(StatusCode) AS maxStatus,
               toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL ${w} DAY
          AND ServiceName != ''
@@ -2496,7 +2527,7 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
       `SELECT TraceId AS runId, any(FeatureTag) AS agent, sum(EstimatedCost) AS cost,
               countIf(EstimatedCost IS NULL) AS unpriced,
               count() AS steps, max(StatusCode) AS maxStatus, toString(toUnixTimestamp(max(Timestamp))) AS tsEpoch
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND TraceId = {runId:String}
        GROUP BY TraceId`,
       { tenant, runId },
@@ -2509,7 +2540,7 @@ export async function queryAgentRun(runId: string): Promise<AgentRun | null> {
     const peers = await rowsP<{ cost: string; unpriced: string }>(
       db,
       `SELECT sum(EstimatedCost) AS cost, countIf(EstimatedCost IS NULL) AS unpriced
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND FeatureTag = {agent:String}
          AND Timestamp >= now() - INTERVAL 30 DAY
        GROUP BY TraceId`,
@@ -2646,7 +2677,7 @@ export async function queryGuardrailActivity(): Promise<Map<string, GuardrailAct
          extract(key, '^gen_ai\\\\.guardrail\\\\.(.+)\\\\.verdict$') AS ruleId,
          count() AS runs,
          countIf(val IN ('enforced', 'shadow_observed')) AS wouldFire
-       FROM otel_spans
+       FROM otel_spans FINAL
        ARRAY JOIN mapKeys(SpanAttributes) AS key, mapValues(SpanAttributes) AS val
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 7 DAY
@@ -2774,7 +2805,7 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
       db,
       `SELECT ${LAYER_CASE} AS layer, GenAiSystem AS system, count() AS n,
               toString(max(Timestamp)) AS last
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL 30 DAY
        GROUP BY layer, system`,
       tenant,
@@ -2854,7 +2885,7 @@ export async function querySpanFeatureTags(days?: number): Promise<string[] | nu
     const out = await rows<{ feature: string }>(
       db,
       `SELECT DISTINCT FeatureTag AS feature
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= now() - INTERVAL ${windowDays} DAY
          AND FeatureTag != ''
        ORDER BY feature`,
@@ -2904,7 +2935,7 @@ export async function queryAttribution(
          uniqExact(s.SessionId) AS sessions,
          sum(s.EstimatedCost) AS cost,
          countIf(s.EstimatedCost IS NULL) AS unpriced
-       FROM otel_spans s
+       FROM otel_spans s FINAL
        WHERE s.TenantId = {tenant:String}
          AND s.Timestamp >= ${windowSql}
          AND s.GenAiOperation NOT IN ('compute', 'egress')
@@ -2923,7 +2954,7 @@ export async function queryAttribution(
          ${providerExpr} AS provider,
          uniqExact(b.BusinessEventId) AS conversions
        FROM business_events b
-       INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+       INNER JOIN otel_spans s FINAL ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
          AND b.EventName = {outcome:String}
          AND b.OccurredAt >= ${windowSql}
@@ -2962,6 +2993,20 @@ export async function queryAttribution(
     // ValueAmountMicro is Nullable(Int64), so `sumIf` over a group with no matching row yields NULL
     // rather than 0 and the NULL then swallows the whole subtraction. The `ifNull(..., 0)` inside
     // each sumIf is what keeps a tenant with zero refunds from reporting NULL revenue.
+    //
+    // KNOWN WRONG, SEPARATELY (both predate #314 / CTO-245, do not read the FINAL below as a fix):
+    //
+    // 1. Join fan-out. This sums b.ValueAmountMicro across an INNER JOIN on otel_spans, so a
+    //    business event is counted once per matching span for that user: a user with 30 spans
+    //    contributes their revenue 30 times. FINAL removes the DUPLICATE-SPAN multiplier and nothing
+    //    else, so the figure stays inflated by the real span count. The sibling conversions query
+    //    above survives the same join only because uniqExact collapses the fan-out; a sum cannot.
+    //    The fix is to aggregate business_events before joining (or drop the join and filter users
+    //    by a subquery), which changes the number this panel shows and needs its own change.
+    // 2. Float dollars in SQL. The `/ 1000000` divides integer micro-USD inside ClickHouse, so the
+    //    value arrives already converted and already floating, against the money invariant (integer
+    //    micro-USD end to end, converted at the boundary only). It should return micro-USD and let
+    //    micro() do the conversion.
     const positiveTypes = positiveValueTypes(policy);
     const sourceFilter = revenueSourceFilter(policy, "b");
     const revenueRows = await rowsP<{
@@ -2980,7 +3025,7 @@ export async function queryAttribution(
            b.ValueType IN {positiveTypes:Array(String)} OR b.ValueType = {refundType:String}
          ) AS users
        FROM business_events b
-       INNER JOIN otel_spans s ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
+       INNER JOIN otel_spans s FINAL ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
          AND b.OccurredAt >= ${windowSql}
          AND b.UserIdHash != ''
@@ -3031,7 +3076,7 @@ export async function queryAttribution(
     const dailyRows = await rowsP<{ day: string; provider: string; cost: string }>(
       db,
       `SELECT toString(toDate(s.Timestamp)) AS day, ${providerExpr} AS provider, sum(s.EstimatedCost) AS cost
-       FROM otel_spans s
+       FROM otel_spans s FINAL
        WHERE s.TenantId = {tenant:String}
          AND s.Timestamp >= ${windowSql}
          AND s.GenAiOperation NOT IN ('compute', 'egress')
@@ -3177,7 +3222,7 @@ export async function queryCurrentModel(): Promise<{
          quantileExact(0.95)(if(DurationNs > 0, DurationNs, NULL)) / 1e6 AS p95Ms,
          countIf(StatusCode = 2) / count() AS errRate,
          count() AS sampleCount
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= now() - INTERVAL 7 DAY
          AND (GenAiResponseModel != '' OR GenAiRequestModel != '')

@@ -170,6 +170,9 @@ export async function collectPaidForNothing(
     // Stage 1 (runs subquery): one row per TraceId with its cost, terminal-error flag, feature and
     // agent. `isFailed` reuses queryAgents' derivation: max(StatusCode)=2 (OTel Error) => failed.
     // `GenAiOperation NOT IN ('compute','egress')` keeps this to run-shaped, billable spend.
+    // #314: FINAL, like every other otel_spans read (the rationale is in lib/clickhouse.ts). This
+    // detector sums money off the raw span table, so an un-merged duplicate would inflate the
+    // recoverable figure it puts in front of a user until a background merge collapsed it.
     const runsCte = `
       SELECT
         TraceId AS runId,
@@ -177,7 +180,7 @@ export async function collectPaidForNothing(
         any(ServiceName) AS agent,
         sum(EstimatedCost) AS runCost,
         max(StatusCode) = 2 AS isFailed
-      FROM otel_spans
+      FROM otel_spans FINAL
       WHERE TenantId = {tenant:String}
         AND Timestamp >= now() - INTERVAL ${w} DAY
         AND GenAiOperation NOT IN ('compute', 'egress')

@@ -301,6 +301,9 @@ interface FeatureIncumbent {
 async function queryFeatureIncumbents(windowDays: number): Promise<FeatureIncumbent[] | null> {
   const w = clampWindowDays(windowDays);
   return tryLive(async (db, tenant) => {
+    // #314: FINAL, like every other otel_spans read (the rationale is in lib/clickhouse.ts). This
+    // detector sums money off the raw span table, so an un-merged duplicate would inflate the
+    // recoverable figure it puts in front of a user until a background merge collapsed it.
     const out = await rowsPCached<{ feature: string; model: string; spend: string; calls: string | number }>(
       db,
       `SELECT FeatureTag AS feature,
@@ -308,7 +311,7 @@ async function queryFeatureIncumbents(windowDays: number): Promise<FeatureIncumb
                  if(GenAiRequestModel != '', GenAiRequestModel, 'unknown')) AS model,
               sum(EstimatedCost) AS spend,
               count() AS calls
-       FROM otel_spans
+       FROM otel_spans FINAL
        WHERE TenantId = {tenant:String}
          AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
          AND GenAiOperation NOT IN ('compute', 'egress')
