@@ -322,30 +322,96 @@ same value as `TALLY_GATEWAY_SERVICE_TOKEN`; the two must match exactly, or the 
 ## 6. Identity — task role (ECS) / IRSA (EKS)
 
 Create **one workload IAM role** and grant it exactly what the app needs. No static access key is
-ever created. The permissions policy is `ecs/iam/task-role-policy.json` (S3 replay + Cost Explorer +
-Bedrock + Secrets Manager read); reuse it verbatim for both paths — only the **trust** differs.
+ever created. The permissions policy is `ecs/iam/task-role-policy.json` (S3 replay + per-tenant HMAC
+secrets + KMS + connector role assumption + Cost Explorer + Bedrock + Secrets Manager read); reuse it
+verbatim for both paths, only the **trust** differs.
+
+**Every IAM document here carries placeholders and none of them is usable unedited.** They are the
+same tokens the task definitions use, so one `sed` line covers a file: `ACCOUNT`, `REGION`,
+`REPLACE_REPLAY_BUCKET` (the same bucket `gateway.taskdef.json` names) and `REPLACE_KMS_KEY_ID`. The
+bucket used to be spelled `my-org-ai-tally-replay`, which reads like a real name and is not one; it
+is a placeholder now so nobody grants their role access to somebody else's bucket.
 
 ```bash
+export KMS_KEY_ID=YOUR_CMK_KEY_ID            # see "Which KMS key" below
+export REPLAY_BUCKET=$ACCOUNT-ai-tally-replay
+
 # The permissions policy (shared by both paths):
+sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
+    -e "s/REPLACE_REPLAY_BUCKET/$REPLAY_BUCKET/g" \
+    -e "s/REPLACE_KMS_KEY_ID/$KMS_KEY_ID/g" \
+    deploy/aws/ecs/iam/task-role-policy.json > /tmp/ai-tally-workload.json
 aws iam create-policy --policy-name ai-tally-workload \
-  --policy-document file://deploy/aws/ecs/iam/task-role-policy.json
+  --policy-document file:///tmp/ai-tally-workload.json
 export WORKLOAD_POLICY_ARN=arn:aws:iam::$ACCOUNT:policy/ai-tally-workload
 ```
 
-**ECS** — create the task role (trusted by `ecs-tasks.amazonaws.com`) and the execution role:
+**ECS** — create the task role (trusted by `ecs-tasks.amazonaws.com`) and the execution role. The
+trust policy pins `aws:SourceAccount` so no other account's ECS can assume these roles, which is
+why it needs substituting too:
 
 ```bash
-# Task role = the app's own identity (S3 / Cost Explorer / Bedrock).
+sed "s/ACCOUNT/$ACCOUNT/g" deploy/aws/ecs/iam/ecs-tasks-trust-policy.json > /tmp/ecs-trust.json
+
+# Task role = the app's own identity (S3 / tenant HMAC secrets / Cost Explorer / Bedrock).
 aws iam create-role --role-name ai-tally-workload \
-  --assume-role-policy-document file://deploy/aws/ecs/iam/ecs-tasks-trust-policy.json
+  --assume-role-policy-document file:///tmp/ecs-trust.json
 aws iam attach-role-policy --role-name ai-tally-workload --policy-arn "$WORKLOAD_POLICY_ARN"
 
 # Execution role = what Fargate needs to START a task (ECR pull, logs, secret injection).
+sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
+    -e "s/REPLACE_KMS_KEY_ID/$KMS_KEY_ID/g" \
+    deploy/aws/ecs/iam/execution-role-policy.json > /tmp/ai-tally-execution.json
 aws iam create-role --role-name ai-tally-ecs-execution \
-  --assume-role-policy-document file://deploy/aws/ecs/iam/ecs-tasks-trust-policy.json
+  --assume-role-policy-document file:///tmp/ecs-trust.json
 aws iam put-role-policy --role-name ai-tally-ecs-execution --policy-name ai-tally-ecs-execution \
-  --policy-document file://deploy/aws/ecs/iam/execution-role-policy.json
+  --policy-document file:///tmp/ai-tally-execution.json
 ```
+
+### What each grant is for, and what to delete
+
+| Statement | Who uses it | Drop it when |
+|---|---|---|
+| `ReplayBucketS3` | `S3ReplayBlobStore` (`TALLY_REPLAY_BLOB_BACKEND=s3`) | you run the `memory` backend |
+| `TenantHmacSecrets` | `SecretManagerKeyProvider` (`TALLY_HMAC_KEY_PROVIDER=kms`) | never, on a multi-tenant instance: this is what holds the identifiers-by-hash invariant up |
+| `SecretsManagerKmsUse` | the same provider, and any CMK-encrypted secret | your secrets use the AWS-managed `aws/secretsmanager` key (then delete the statement rather than leaving a dangling key id) |
+| `AssumeTenantConnectorRoles` | a per-tenant `credentials_ref` holding a role ARN (`docs/connector-aws-cost-explorer.md`) | every tenant uses `aws-default-chain` |
+| `CostExplorerRead` | the AWS Cost Explorer compute connector | no tenant enables it |
+| `BedrockInvoke` | nothing in the codebase today | now, unless you are staging for Bedrock: it is an unearned privilege |
+
+The execution role's ECR grants are now scoped to the three `ai-tally/*` repositories rather than
+`*`; `ecr:GetAuthorizationToken` stays on `*` because it does not support resource-level permissions.
+
+### Which KMS key
+
+`REPLACE_KMS_KEY_ID` is the customer-managed key your Secrets Manager secrets are encrypted with. If
+you left them on the AWS-managed `aws/secretsmanager` key, delete the `SecretsManagerKmsUse` and
+`SecretsInjectionKmsDecrypt` statements instead of substituting: the AWS-managed key is usable by
+principals in the account that hold the Secrets Manager permission, so a grant would be redundant,
+and a policy naming a key that does not exist is a policy nobody can read. If you DO use a CMK, both
+statements are required, they carry a `kms:ViaService` condition so the roles cannot use the key for
+anything but Secrets Manager, and the key policy must also allow the account root or these roles.
+
+### Per-tenant HMAC keys (CTO-336)
+
+With `TALLY_HMAC_KEY_PROVIDER=kms`, provisioning a tenant creates one Secrets Manager secret named
+`ai-tally/tenant-hmac/<uuid>` holding 32 random bytes, and stores **only** its ARN plus a version
+selector (`.../v1`) in `tenants.hash_salt_kek_ref`, whose `no_raw_secret` CHECK bounds it to under
+512 characters. That is the credentials-by-reference invariant in `CLAUDE.md`, made real: the
+control-plane database holds a pointer that is useless without IAM permission on the ARN.
+
+Two operational notes:
+
+- **Do not enable AWS managed rotation on these secrets.** Rotating a tenant's HMAC key changes every
+  hash computed after it, so it is a product decision about historical joins, not a key-store
+  operation, and ai-tally does not ship rotation yet. The reference deliberately pins the `v1`
+  staging label rather than `AWSCURRENT`, so a rotation that moved `AWSCURRENT` would not silently
+  break existing hashes, but it would also not do anything useful.
+- **Failure is honest.** If the gateway cannot reach Secrets Manager, or the role lacks
+  `TenantHmacSecrets`, `POST /v1/tenant/provision` returns **503** and writes no tenant row, and
+  `GET /v1/tenant/hmac-key` returns 503 rather than 404. There is deliberately no fallback to a
+  locally generated key: it would produce hashes that look valid and are not the tenant's own.
+  Clerk retries the webhook and provisioning is idempotent, so fix the IAM gap and the retry lands.
 
 **EKS** — bind the same permissions to the KSA the chart creates (`ai-tally` in namespace
 `ai-tally`) via IRSA. Easiest with `eksctl`, which writes the OIDC trust policy for you:
@@ -415,6 +481,21 @@ sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
 aws ecs register-task-definition --cli-input-json file:///tmp/edge-proxy.taskdef.json
 aws ecs create-service --cli-input-json file://deploy/aws/ecs/edge-proxy.service.json
 ```
+
+### Gateway settings this bundle expects (CTO-336 / CTO-337 / CTO-268)
+
+Three gateway environment variables belong on the ECS gateway task and are not in
+`gateway.taskdef.json` yet (that file is owned by the image-publishing PR; add them there, or set
+them in your IaC, before you rely on any of the three):
+
+| Variable | Set it to | Why |
+|---|---|---|
+| `TALLY_ENV` | `production` | The gateway had no notion of a deployment environment, so nothing stopped `TALLY_REQUIRE_API_KEY=false` from shipping. With this set, a gateway with authentication off refuses to boot unless you also set `TALLY_ALLOW_INSECURE_NO_AUTH=1`. It is the gateway half of the web tier's guard, and it reuses the same opt-in variable. `gateway.taskdef.json` already sets `TALLY_REQUIRE_API_KEY=true`, so this is a backstop against a later edit rather than today's exposure. |
+| `TALLY_HMAC_KEY_PROVIDER` | `kms` | Selects the AWS Secrets Manager provider above. Left unset, the gateway uses the LOCAL provider, whose per-tenant material is derived from a root secret in configuration, which is exactly what credentials-by-reference forbids on a multi-tenant instance. |
+| `TALLY_CORS_ALLOWED_ORIGINS` | your dashboard's origin, e.g. `https://app.YOUR_DOMAIN` | The dashboard runs on Vercel and the gateway behind this ALB, so they are different origins. No browser code calls the gateway directly today (the dashboard's gateway calls all run server-side), so this is preparation rather than a fix for a live break. Unset means the local dev origins only, which admits nobody in a deployment: fail closed, not open. A wildcard is refused at boot. |
+
+`TALLY_HMAC_SECRETS_KMS_KEY_ID` is optional and only needed if you want tenant HMAC secrets encrypted
+with your CMK rather than the AWS-managed key.
 
 Notes on the task defs:
 - **Secrets** are injected from Secrets Manager by Fargate at task start via `secrets[].valueFrom`

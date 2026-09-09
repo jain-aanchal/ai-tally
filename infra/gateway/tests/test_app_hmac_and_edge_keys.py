@@ -23,6 +23,7 @@ from gateway.app import app
 from gateway.auth import AuthResult
 from gateway.edge_keys import KeyChange
 from gateway.tenant_hmac_key import HmacKeyMaterial, HmacKeyUnavailableError
+from gateway.tenant_provisioning import KeyProviderUnavailableError
 
 SERVICE_TOKEN = "svc-secret-token"
 TENANT_A = "8f14e45f-ceea-467a-9a3c-2f0e4d1b7c60"
@@ -195,6 +196,21 @@ def test_hmac_key_404_when_material_unavailable() -> None:
     ):
         r = c.get("/v1/tenant/hmac-key", headers={"Authorization": "Bearer wk"})
         assert r.status_code == 404
+
+
+def test_hmac_key_503_when_the_key_provider_cannot_be_reached() -> None:
+    # CTO-336. "We could not ask the key store" is a different answer from "this tenant has no
+    # key". A 404 tells the SDK to stop asking, which would be a permanent-looking reply to a
+    # transient outage or a fixable IAM gap, so the unavailable case is a retryable 503. Either
+    # way no bytes are returned and none are invented.
+    with _client(auth_on=True, tokens={"wk": _write(TENANT_A)}) as (c, hmac_store, _e):
+        def _boom(tenant_id: str):
+            raise KeyProviderUnavailableError("Secrets Manager get_secret_value failed")
+
+        hmac_store.active_key = _boom
+        r = c.get("/v1/tenant/hmac-key", headers={"Authorization": "Bearer wk"})
+        assert r.status_code == 503
+        assert "key_material_b64" not in r.text
 
 
 # --- /v1/edge/keys ------------------------------------------------------------------------------

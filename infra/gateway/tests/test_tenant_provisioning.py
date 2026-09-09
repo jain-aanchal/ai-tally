@@ -16,6 +16,7 @@ carry the acceptance criteria:
 
 from __future__ import annotations
 
+import sys
 import uuid
 
 import pytest
@@ -170,6 +171,42 @@ def test_provision_lost_race_cleans_up_orphaned_key(monkeypatch) -> None:
     assert spy.minted == spy.deleted
 
 
+def test_provision_writes_no_tenant_when_the_key_provider_is_unavailable(monkeypatch) -> None:
+    # CTO-336, honest under uncertainty: a mint that cannot reach Secrets Manager fails the whole
+    # provision. A tenant that cannot hash its identifiers must not exist, and there is deliberately
+    # no fallback to a locally generated key, which would look valid and would not be the tenant's.
+    tenants: dict = {}
+    _patch_connect(monkeypatch, tenants)
+
+    class _DeadProvider(SpyKeyProvider):
+        def mint(self) -> str:
+            raise tenant_provisioning.KeyProviderUnavailableError("endpoint unreachable")
+
+    prov = TenantProvisioner(_Settings(), key_provider=_DeadProvider())
+    with pytest.raises(tenant_provisioning.KeyProviderUnavailableError):
+        prov.provision(clerk_org_id="org_dead", name="Dead Co")
+    assert tenants == {}
+
+
+def test_a_failed_cleanup_delete_is_logged_not_raised(monkeypatch, caplog) -> None:
+    # CTO-336: cleanup runs on paths whose outcome is already decided (the race is lost). A cloud
+    # delete that fails must not turn a correct answer into a 500; it must name the orphan instead.
+    winner = str(uuid.uuid4())
+    tenants = {"org_race": (winner, "free")}
+    _patch_connect(monkeypatch, tenants, race=True)
+
+    class _UndeletableProvider(SpyKeyProvider):
+        def delete(self, ref: str) -> None:
+            raise tenant_provisioning.KeyProviderUnavailableError("throttled")
+
+    prov = TenantProvisioner(_Settings(), key_provider=_UndeletableProvider())
+    with caplog.at_level("ERROR"):
+        result = prov.provision(clerk_org_id="org_race", name="Racer")
+
+    assert result.tenant_id == winner
+    assert "orphaned HMAC key reference" in caplog.text
+
+
 def test_provision_rejects_blank_fields(monkeypatch) -> None:
     _patch_connect(monkeypatch, {})
     prov = TenantProvisioner(_Settings(), key_provider=SpyKeyProvider())
@@ -233,21 +270,51 @@ def test_build_key_provider_selects_by_setting() -> None:
     ref = local.mint()
     assert local.material(ref) == other.material(ref)
 
-    # The prod seam is selectable but fails fast without a wired client, never silently local.
-    with pytest.raises(ProvisionError):
-        build_key_provider(
-            SimpleNamespace(hmac_key_provider="kms", hmac_local_root_secret="rs")
-        )
+    # An unknown value fails fast rather than guessing a provider.
     with pytest.raises(ProvisionError):
         build_key_provider(
             SimpleNamespace(hmac_key_provider="bogus", hmac_local_root_secret="rs")
         )
 
 
-def test_secret_manager_provider_requires_a_client() -> None:
-    with pytest.raises(ProvisionError):
+def test_build_key_provider_selects_secrets_manager_for_kms(monkeypatch) -> None:
+    # CTO-336: 'kms' now builds a working AWS Secrets Manager provider (it used to raise). The AWS
+    # client itself is stubbed here, so this asserts the wiring and the settings pass-through
+    # without boto3, credentials or an account.
+    built: dict[str, object] = {}
+
+    def _fake_build_client(region: str) -> object:
+        built["region"] = region
+        return object()
+
+    monkeypatch.setattr(
+        tenant_provisioning.SecretManagerKeyProvider, "_build_client", staticmethod(_fake_build_client)
+    )
+    provider = build_key_provider(
+        SimpleNamespace(
+            hmac_key_provider="kms",
+            hmac_local_root_secret="rs",
+            hmac_secrets_name_prefix="acme/hmac/",
+            hmac_secrets_kms_key_id="alias/ai-tally",
+            hmac_secrets_region="eu-west-1",
+        )
+    )
+    assert isinstance(provider, SecretManagerKeyProvider)
+    assert built["region"] == "eu-west-1"
+
+
+def test_secret_manager_provider_without_boto3_says_so_and_does_not_fall_back(monkeypatch) -> None:
+    # The one thing that must never happen on a misconfigured prod install is a silent drop to
+    # LocalDevKeyProvider, whose material comes from a config root secret rather than the tenant's
+    # own key. A missing dependency is a loud, named failure instead.
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    with pytest.raises(ProvisionError) as excinfo:
         SecretManagerKeyProvider()
-    # With a client wired it constructs; the concrete cloud calls are a deployment concern.
+    assert "boto3" in str(excinfo.value)
+
+
+def test_secret_manager_provider_accepts_an_injected_client() -> None:
+    # The seam the tests (and any deployment wanting its own client) use. Mirrors S3ReplayBlobStore.
     assert SecretManagerKeyProvider(client=object()) is not None
 
 
