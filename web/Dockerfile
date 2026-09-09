@@ -18,7 +18,13 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 # Only the manifests, so this layer is reused whenever source (but not deps) changes.
-COPY package.json package-lock.json ./
+#
+# .npmrc belongs here too (CTO-334). It carries legacy-peer-deps=true, which the repo needs because
+# @clerk/nextjs pins its React peer above the exact react 19.0.0 the app is built against. Without it
+# `npm ci` dies with ERESOLVE and the image cannot be built at all. That went unnoticed until CI
+# started building this image, because the `web` CI job runs npm ci in the checkout, where .npmrc is
+# simply present.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 # ---- builder ------------------------------------------------------------------------------------

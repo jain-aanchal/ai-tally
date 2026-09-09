@@ -118,7 +118,9 @@ jobs:
   # slow. The edge proxy is additionally published for amd64, because its Helm chart targets customer
   # clusters that are mostly x86 and a stdlib-only Go binary cross-compiles for free.
   images:
-    name: images
+    # Named off the matrix entry, or GitHub builds the check name out of every matrix value and the
+    # required-check list becomes unreadable.
+    name: image (${{ matrix.name }})
     needs: [python-sdk, gateway, edge-proxy, web]
     # Free for public repositories, and native for the arm64 images we ship (see above).
     runs-on: ubuntu-24.04-arm
