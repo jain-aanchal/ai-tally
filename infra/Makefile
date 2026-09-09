@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -104,6 +104,43 @@ ch-migrate-otel-engine: ## One-shot: move an EXISTING otel_spans to ReplacingMer
 	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
 	  -q "SELECT count() AS rows, uniqExact(TenantId, TraceId, SpanId) AS spans FROM otel_spans"
 	@echo "The pre-migration table is kept as otel_spans_cto245. Drop it once you are satisfied."
+
+ch-rollup-check: ## Report rollup spend inflated by duplicated spans, per rollup and tenant (CTO-311)
+	@# READ-ONLY. The three materialized views sum spans into SummingMergeTree targets at INSERT
+	@# time, so a duplicate that reached ClickHouse is banked in the rollups forever and no merge
+	@# on the raw table removes it. This asks the database whether that happened here and for how
+	@# much money, by re-deriving each rollup's grain from a FINAL (deduplicated) read of
+	@# otel_spans and diffing. Safe to run any time, against a live stack, as often as you like.
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
+	@echo ""
+	@echo "derivable    = raw spans still exist for that day; drift_micro_usd is repairable by 'make ch-rollup-rebuild'."
+	@echo "not_derivable = raw spans have aged out, or that day is at the retention boundary and may be"
+	@echo "                only half-present; nothing can check or repair those grains and the rebuild"
+	@echo "                leaves them alone."
+
+ch-rollup-rebuild: ## One-shot: rebuild the rollup targets from the deduplicated raw spans (CTO-311)
+	@# Deliberately NOT part of ch-migrate, for the same reason as ch-migrate-otel-engine: it
+	@# rewrites three tables the dashboard reads, and it is not something to do implicitly on every
+	@# DDL replay. Run ch-rollup-check first and read the header of the script. Quiesce ingest for
+	@# the duration: the materialized views keep writing into the OLD targets until the exchange,
+	@# so spans ingested mid-run land in a table that is about to be discarded.
+	@# NOT re-runnable while the rollback copies exist. After a successful run the <rollup>_cto311
+	@# tables ARE the pre-rebuild snapshot, and for not_derivable grains they are the only record of
+	@# that money, so the script refuses rather than dropping them. Drop them by hand once the
+	@# dashboard has been checked.
+	@echo "Rollup drift BEFORE the rebuild:"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/migrations/rollup_rebuild_from_spans.sql
+	@echo ""
+	@echo "Rollup drift AFTER the rebuild (derivable drift_micro_usd should now be 0):"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/checks/rollup_drift.sql
+	@echo ""
+	@echo "The pre-rebuild tables are kept as <rollup>_cto311. Drop them once you are satisfied;"
+	@echo "until you do, re-running this target is refused so the snapshot cannot be destroyed."
 
 logs: ## Tail the gateway logs
 	$(COMPOSE) logs -f gateway
