@@ -61,6 +61,12 @@ services:
       # re-hydrates its in-memory corpus from this table on boot, so replay-backed Compare/eval
       # survives a restart. No dependency on the tables above, so any tail number is fine.
       - ../db/clickhouse/replay_samples.sql:/docker-entrypoint-initdb.d/06_replay_samples.sql:ro
+      # CTO-114: pairwise LLM-judge verdicts, written by the eval executor and read by /compare.
+      # It was never mounted and never in the Makefile's CH_DDL, so the table did not exist on a
+      # fresh stack at all; `make ch-apply-retention` failed on its last statement for that reason.
+      # Same class of miss as the four unmounted Postgres migrations fixed in #323. No dependency
+      # on the tables above, so any tail number is fine.
+      - ../db/clickhouse/eval_runs.sql:/docker-entrypoint-initdb.d/07_eval_runs.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s

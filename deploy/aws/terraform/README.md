@@ -29,9 +29,29 @@ What that does **not** establish, and what will therefore break first:
 - No plan has ever been produced against a real provider, so nothing here has been checked against
   live API validation: name-length limits, ACM and ELB naming rules, RDS engine version
   availability, and instance class availability per region are all unverified.
-- **`db_engine_version = "16.4"` is a guess about what RDS offers.** Check
-  `aws rds describe-db-engine-versions --engine postgres` and set it to a version that exists in
-  your region, or the first apply fails on the RDS instance after creating the VPC.
+- **`db_engine_version` and `db_instance_class` have no defaults, on purpose (CTO-360).** They used
+  to default to `"16.4"` and `"db.t4g.medium"`, which were guesses: nobody had run a plan against a
+  real account, and a Postgres minor version RDS has retired, or an instance class the region does
+  not offer for that version, fails at APPLY, on the RDS instance, after the VPC and the NAT gateway
+  exist. Terraform now refuses to plan until you supply both, so the failure is at the front instead
+  of halfway through. Look them up:
+
+  ```bash
+  aws rds describe-db-engine-versions --engine postgres --region "$REGION" \
+    --query 'DBEngineVersions[].EngineVersion' --output text | tr '\t' '\n' | sort -V
+
+  aws rds describe-orderable-db-instance-options --engine postgres \
+    --engine-version "$DB_ENGINE_VERSION" --region "$REGION" \
+    --query 'OrderableDBInstanceOptions[].DBInstanceClass' --output text | tr '\t' '\n' | sort -u
+  ```
+
+  The variable validations only check the shape of what you typed. Neither can prove the value
+  exists in your region without an account, and they do not pretend to.
+- **`availability_zones` is validated against `aws_region`, and that is all it is.** AZ names are
+  account-scoped, so list yours with
+  `aws ec2 describe-availability-zones --region "$REGION" --query 'AvailabilityZones[?State==`available`].ZoneName' --output text`.
+  The validation catches an AZ from the wrong region and fewer than two distinct AZs. It cannot
+  tell you whether a given AZ offers Fargate ARM64 or your chosen RDS instance class.
 - **Fargate ARM64 availability per region is unverified.** All three task definitions pin
   `cpuArchitecture: ARM64` (PR #351). If ARM64 Fargate is not offered in your region, or the images
   in ECR are not arm64 manifests, every task fails to start with an image-manifest error and the
@@ -360,11 +380,12 @@ NAT is in an AZ that is having a bad day and `single_nat_gateway = true`. Interf
 help here; see the section above.
 
 **The gateway logs region errors, or the replay store writes nowhere.** Check that `AWS_REGION` and
-`TALLY_REPLAY_S3_REGION` are still spelled that way in the registered task definition. The runbook's
-`sed -e "s/REGION/$REGION/g"` recipe rewrites those variable NAMES as well as their values, giving
-you `AWS_us-east-1`. The task registers and starts, and both settings are simply absent. This module
-substitutes by shape rather than as a bare word specifically to avoid that, so seeing it means
-something registered a task definition by hand.
+`TALLY_REPLAY_S3_REGION` are still spelled that way in the registered task definition. Before
+CTO-360 the placeholder was the bare word `REGION`, and the runbook's `sed -e "s/REGION/$REGION/g"`
+rewrote those variable NAMES as well as their values, giving you `AWS_us-east-1`; the task
+registered and started, and both settings were simply absent. The placeholders are `__REGION__` and
+`__ACCOUNT__` now, which cannot occur inside an identifier, so seeing this means an older recipe or
+an older copy of the files is still in use somewhere.
 
 **The edge proxy service cycles forever with nothing useful in the logs.** Somebody added a
 container `healthCheck` to `edge-proxy.taskdef.json`. The image is `FROM scratch`: no shell, no

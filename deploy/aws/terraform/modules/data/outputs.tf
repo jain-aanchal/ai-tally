@@ -7,7 +7,7 @@ output "kms_key_arn" {
 }
 
 output "kms_key_id" {
-  description = "Substituted for REPLACE_KMS_KEY_ID in the two IAM policy documents."
+  description = "Substituted for __KMS_KEY_ID__ in the two IAM policy documents."
   value       = local.kms_key_id
 }
 

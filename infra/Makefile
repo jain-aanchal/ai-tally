@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-apply-retention ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-apply-retention ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test prod-preflight ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -68,7 +68,8 @@ pg-migrate: ## Apply db/postgres migrations to a RUNNING stack (initdb only fire
 CH_DDL := ../db/clickhouse/otel_spans.sql ../db/clickhouse/rollups.sql \
           ../db/clickhouse/account_rollups.sql \
           ../db/clickhouse/last_touch_index.sql ../db/clickhouse/attribution.sql \
-          ../db/clickhouse/replay_samples.sql
+          ../db/clickhouse/replay_samples.sql \
+          ../db/clickhouse/eval_runs.sql
 
 ch-migrate: ## Apply db/clickhouse DDL to a RUNNING stack (initdb only fires on a fresh volume)
 	@# The /docker-entrypoint-initdb.d mounts in docker-compose.yml run ONLY on a first boot
@@ -279,6 +280,17 @@ chatbot-demo-stop: ## Stop the background chatbot dev server started by chatbot-
 
 test: ## Run gateway unit tests (pure mapping logic, no infra)
 	cd gateway && uv run --extra dev pytest -q
+
+prod-preflight: ## Validate a PRODUCTION deployment's config before deploying (CTO-360). ENV=file.env
+	@# Deliberately touches nothing in this Makefile's world: no compose, no containers, no local
+	@# stack, no AWS credentials. It reads the environment the operator has just filled in for
+	@# Vercel and for the gateway, and it never prints a secret value. The target lives here only
+	@# because this is the repository's one Makefile; the script runs standalone from anywhere.
+	@#
+	@# Pass ENV=path/to/file (repeatable via ENV="a.env b.env") to read settings from dotenv files
+	@# instead of, or on top of, the exported environment. Add ARGS=--no-probe to skip the outbound
+	@# reachability check on a network that blocks egress.
+	../scripts/prod-preflight.sh $(foreach f,$(ENV),--env $(f)) $(ARGS)
 
 ch: ## Open a ClickHouse SQL shell
 	$(COMPOSE) exec clickhouse clickhouse-client -u tally --password tally -d default

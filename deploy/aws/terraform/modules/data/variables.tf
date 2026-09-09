@@ -31,7 +31,7 @@ variable "create_kms_key" {
 }
 
 variable "replay_bucket_name" {
-  description = "Globally unique bucket for replay bodies. Substituted for REPLACE_REPLAY_BUCKET in task-role-policy.json and in gateway.taskdef.json."
+  description = "Globally unique bucket for replay bodies. Substituted for __REPLAY_BUCKET__ in task-role-policy.json and in gateway.taskdef.json."
   type        = string
 }
 
@@ -74,14 +74,17 @@ variable "secret_recovery_window_days" {
   default     = 30
 }
 
+# No defaults here either, for the reason the root module's variables.tf spells out: both are facts
+# about the target region that this repository cannot know, and a wrong one fails at apply after the
+# VPC exists. A default here would quietly reintroduce the guess the root module removed.
 variable "db_engine_version" {
-  type    = string
-  default = "16.4"
+  description = "RDS for PostgreSQL engine version. Discover with: aws rds describe-db-engine-versions --engine postgres --region <region> --query 'DBEngineVersions[].EngineVersion' --output text"
+  type        = string
 }
 
 variable "db_instance_class" {
-  type    = string
-  default = "db.t4g.medium"
+  description = "RDS instance class. Confirm it is orderable for db_engine_version in this region with: aws rds describe-orderable-db-instance-options --engine postgres --engine-version <version> --region <region> --query 'OrderableDBInstanceOptions[].DBInstanceClass' --output text"
+  type        = string
 }
 
 variable "db_allocated_storage" {

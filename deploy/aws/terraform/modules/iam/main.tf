@@ -26,29 +26,26 @@ locals {
   dropped_task_sids      = distinct(concat(local.auto_dropped_sids, var.drop_task_policy_sids))
   dropped_execution_sids = local.auto_dropped_sids
 
-  # `replace` on a file, not `templatefile`: the JSON carries bare placeholder words rather than
-  # ${...} interpolation, and rewriting them into Terraform syntax would break the `sed` recipes in
-  # deploy/aws/README.md that operate on the same files.
+  # `replace` on a file, not `templatefile`: the JSON carries `__DELIMITED__` placeholder words
+  # rather than ${...} interpolation, and rewriting them into Terraform syntax would break the `sed`
+  # recipes in deploy/aws/README.md that operate on the same files.
   #
-  # Order matters, and REGION is matched by shape rather than as a bare word. The runbook's
-  # `sed -e "s/REGION/$REGION/g"` is a blanket replace, which is harmless in these three documents
-  # and is NOT harmless in the task definitions (see modules/compute/taskdefs.tf, where it would
-  # rewrite the AWS_REGION environment variable's name). Doing it the same careful way in both
-  # places means nobody has to remember which files the shortcut is safe in.
+  # The delimiters are the point (CTO-360). A bare `REGION` token is a substring of the environment
+  # variable names `AWS_REGION` and `TALLY_REPLAY_S3_REGION`, so a blanket replace corrupted those
+  # names in the task definitions. `__REGION__` cannot occur inside an identifier, so one blanket
+  # replace per token is correct in every file and nobody has to remember which files the shortcut
+  # is safe in.
   render = {
     for name in ["task-role-policy", "execution-role-policy", "ecs-tasks-trust-policy"] :
     name => replace(
       replace(
         replace(
-          replace(
-            replace(file("${local.iam_dir}/${name}.json"), "REPLACE_REPLAY_BUCKET", var.replay_bucket_name),
-            "REPLACE_KMS_KEY_ID", var.kms_key_id == null ? "" : var.kms_key_id
-          ),
-          "ACCOUNT", data.aws_caller_identity.current.account_id
+          replace(file("${local.iam_dir}/${name}.json"), "__REPLAY_BUCKET__", var.replay_bucket_name),
+          "__KMS_KEY_ID__", var.kms_key_id == null ? "" : var.kms_key_id
         ),
-        ":REGION:", ":${var.aws_region}:"
+        "__ACCOUNT__", data.aws_caller_identity.current.account_id
       ),
-      ".REGION.", ".${var.aws_region}."
+      "__REGION__", var.aws_region
     )
   }
 

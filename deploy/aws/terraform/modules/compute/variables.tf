@@ -99,7 +99,7 @@ variable "edge_proxy_image" {
 }
 
 variable "clickhouse_host" {
-  description = "ClickHouse Cloud hostname, substituted for REPLACE_CLICKHOUSE_HOST. Created by hand in the ClickHouse Cloud console; see the README's prerequisites."
+  description = "ClickHouse Cloud hostname, substituted for __CLICKHOUSE_HOST__. Created by hand in the ClickHouse Cloud console; see the README's prerequisites."
   type        = string
 }
 

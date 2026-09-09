@@ -25,40 +25,35 @@
 locals {
   taskdef_dir = var.ecs_dir
 
-  # Placeholder substitution, and REGION is NOT done as a blanket replace.
+  # Placeholder substitution (CTO-360).
   #
-  # deploy/aws/README.md section 7A substitutes with `sed -e "s/REGION/$REGION/g"`, which also
-  # rewrites the environment variable NAMES `AWS_REGION` and `TALLY_REPLAY_S3_REGION` into
-  # `AWS_us-east-1` and `TALLY_REPLAY_S3_us-east-1`. The task registers fine and the gateway then
-  # runs with neither variable set, so the AWS default chain loses its region and the S3 replay
-  # store loses its. Matching the three shapes REGION actually appears in avoids that: inside an
-  # ARN, inside a service hostname, and as a whole quoted value. ACCOUNT is safe as a blanket
-  # replace because no identifier in these files contains that substring.
+  # Every placeholder in deploy/aws/ecs/ is delimited `__LIKE_THIS__`, which is what makes a blanket
+  # replace safe here and in the runbook's `sed`. It did not used to be. The tokens were the bare
+  # words `REGION` and `ACCOUNT`, and a blanket `s/REGION/$REGION/g` also rewrote the environment
+  # variable NAMES `AWS_REGION` and `TALLY_REPLAY_S3_REGION` into `AWS_us-east-1` and
+  # `TALLY_REPLAY_S3_us-east-1`. The task registered fine and the gateway then ran with neither
+  # variable set, so the AWS default credential chain lost its region and the S3 replay store lost
+  # its, with no error naming the cause. `__REGION__` cannot occur inside an identifier, so the
+  # shape-matching this block used to do is no longer needed.
   render_taskdef = {
     for name in ["gateway", "edge-proxy"] :
     name => replace(
       replace(
         replace(
           replace(
-            replace(
-              replace(
-                file("${local.taskdef_dir}/${name}.taskdef.json"),
-                "REPLACE_REPLAY_BUCKET", var.replay_bucket_name
-              ),
-              "REPLACE_CLICKHOUSE_HOST", var.clickhouse_host
-            ),
-            "ACCOUNT", data.aws_caller_identity.current.account_id
+            file("${local.taskdef_dir}/${name}.taskdef.json"),
+            "__REPLAY_BUCKET__", var.replay_bucket_name
           ),
-          ":REGION:", ":${var.aws_region}:"
+          "__CLICKHOUSE_HOST__", var.clickhouse_host
         ),
-        ".REGION.", ".${var.aws_region}."
+        "__ACCOUNT__", data.aws_caller_identity.current.account_id
       ),
-      "\"REGION\"", "\"${var.aws_region}\""
+      "__REGION__", var.aws_region
     )
   }
 
-  gateway_raw    = jsondecode(replace(local.render_taskdef["gateway"], "REPLACE_GATEWAY_URL", local.gateway_url))
-  edge_proxy_raw = jsondecode(replace(local.render_taskdef["edge-proxy"], "REPLACE_GATEWAY_URL", local.gateway_url))
+  gateway_raw    = jsondecode(replace(local.render_taskdef["gateway"], "__GATEWAY_URL__", local.gateway_url))
+  edge_proxy_raw = jsondecode(replace(local.render_taskdef["edge-proxy"], "__GATEWAY_URL__", local.gateway_url))
 
   gateway_container_raw    = local.gateway_raw.containerDefinitions[0]
   edge_proxy_container_raw = local.edge_proxy_raw.containerDefinitions[0]

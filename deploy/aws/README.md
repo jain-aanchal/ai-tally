@@ -31,13 +31,17 @@ the local dev flow. It reuses the **same images** the GCP path uses: the gateway
 > what that leaves unproven. This runbook stays the reference for what each resource is for, which
 > IAM grants to delete, and how to do it by hand.
 >
-> One warning that applies to the by-hand path only. The `sed -e "s/REGION/$REGION/g"` recipes below
-> are a blanket substitution, and `gateway.taskdef.json` contains the environment variable **names**
-> `AWS_REGION` and `TALLY_REPLAY_S3_REGION`. The `sed` rewrites those names too, producing
-> `AWS_us-east-1`. The task definition registers, the task starts, and both settings are simply
-> absent, so the AWS default credential chain and the S3 replay store each lose their region with no
-> error naming the cause. Check the registered task definition, or substitute `:REGION:`,
-> `.REGION.` and `"REGION"` separately the way `terraform/modules/compute/taskdefs.tf` does.
+> **Placeholder tokens are delimited, and that is load-bearing (CTO-360).** Every placeholder in
+> `ecs/` is spelled `__LIKE_THIS__`: `__ACCOUNT__`, `__REGION__`, `__REPLAY_BUCKET__`,
+> `__KMS_KEY_ID__`, `__CLICKHOUSE_HOST__`, `__CLICKHOUSE_URL__`, `__GATEWAY_URL__`. They used to be
+> the bare words `ACCOUNT` and `REGION`, and the `sed` recipes below are blanket substitutions, so
+> `s/REGION/$REGION/g` also rewrote the environment variable **names** `AWS_REGION` and
+> `TALLY_REPLAY_S3_REGION` in `gateway.taskdef.json` into `AWS_us-east-1` and
+> `TALLY_REPLAY_S3_us-east-1`. The output stayed valid JSON, `register-task-definition` accepted it,
+> the task started, and both settings were simply absent: the AWS default credential chain lost its
+> region and the S3 replay store lost its, with no error naming the cause. `__REGION__` cannot occur
+> inside an identifier, so a blanket replace is now safe in every file. If you add a placeholder,
+> give it the same delimiters.
 
 ## What's in this directory
 
@@ -157,13 +161,13 @@ aws iam create-open-id-connect-provider \
 
 # The trust policy restricts the role to this repository's main branch and its vX.Y.Z tags, so a
 # fork or a pull-request run cannot assume it. Substitute ACCOUNT before applying.
-sed "s/ACCOUNT/$ACCOUNT/g" deploy/aws/ecs/iam/github-actions-oidc-trust-policy.json \
+sed "s/__ACCOUNT__/$ACCOUNT/g" deploy/aws/ecs/iam/github-actions-oidc-trust-policy.json \
   > /tmp/gha-trust.json
 aws iam create-role --role-name ai-tally-ci-ecr-push \
   --assume-role-policy-document file:///tmp/gha-trust.json
 
 # Push rights on exactly the three repositories, and nothing else in the account.
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
   deploy/aws/ecs/iam/github-actions-ecr-policy.json > /tmp/gha-ecr.json
 aws iam put-role-policy --role-name ai-tally-ci-ecr-push \
   --policy-name ai-tally-ci-ecr-push --policy-document file:///tmp/gha-ecr.json
@@ -346,8 +350,8 @@ secrets + KMS + connector role assumption + Cost Explorer + Bedrock + Secrets Ma
 verbatim for both paths, only the **trust** differs.
 
 **Every IAM document here carries placeholders and none of them is usable unedited.** They are the
-same tokens the task definitions use, so one `sed` line covers a file: `ACCOUNT`, `REGION`,
-`REPLACE_REPLAY_BUCKET` (the same bucket `gateway.taskdef.json` names) and `REPLACE_KMS_KEY_ID`. The
+same tokens the task definitions use, so one `sed` line covers a file: `__ACCOUNT__`, `__REGION__`,
+`__REPLAY_BUCKET__` (the same bucket `gateway.taskdef.json` names) and `__KMS_KEY_ID__`. The
 bucket used to be spelled `my-org-ai-tally-replay`, which reads like a real name and is not one; it
 is a placeholder now so nobody grants their role access to somebody else's bucket.
 
@@ -356,9 +360,9 @@ export KMS_KEY_ID=YOUR_CMK_KEY_ID            # see "Which KMS key" below
 export REPLAY_BUCKET=$ACCOUNT-ai-tally-replay
 
 # The permissions policy (shared by both paths):
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
-    -e "s/REPLACE_REPLAY_BUCKET/$REPLAY_BUCKET/g" \
-    -e "s/REPLACE_KMS_KEY_ID/$KMS_KEY_ID/g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
+    -e "s/__REPLAY_BUCKET__/$REPLAY_BUCKET/g" \
+    -e "s/__KMS_KEY_ID__/$KMS_KEY_ID/g" \
     deploy/aws/ecs/iam/task-role-policy.json > /tmp/ai-tally-workload.json
 aws iam create-policy --policy-name ai-tally-workload \
   --policy-document file:///tmp/ai-tally-workload.json
@@ -370,7 +374,7 @@ trust policy pins `aws:SourceAccount` so no other account's ECS can assume these
 why it needs substituting too:
 
 ```bash
-sed "s/ACCOUNT/$ACCOUNT/g" deploy/aws/ecs/iam/ecs-tasks-trust-policy.json > /tmp/ecs-trust.json
+sed "s/__ACCOUNT__/$ACCOUNT/g" deploy/aws/ecs/iam/ecs-tasks-trust-policy.json > /tmp/ecs-trust.json
 
 # Task role = the app's own identity (S3 / tenant HMAC secrets / Cost Explorer / Bedrock).
 aws iam create-role --role-name ai-tally-workload \
@@ -378,8 +382,8 @@ aws iam create-role --role-name ai-tally-workload \
 aws iam attach-role-policy --role-name ai-tally-workload --policy-arn "$WORKLOAD_POLICY_ARN"
 
 # Execution role = what Fargate needs to START a task (ECR pull, logs, secret injection).
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
-    -e "s/REPLACE_KMS_KEY_ID/$KMS_KEY_ID/g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
+    -e "s/__KMS_KEY_ID__/$KMS_KEY_ID/g" \
     deploy/aws/ecs/iam/execution-role-policy.json > /tmp/ai-tally-execution.json
 aws iam create-role --role-name ai-tally-ecs-execution \
   --assume-role-policy-document file:///tmp/ecs-trust.json
@@ -403,7 +407,7 @@ The execution role's ECR grants are now scoped to the three `ai-tally/*` reposit
 
 ### Which KMS key
 
-`REPLACE_KMS_KEY_ID` is the customer-managed key your Secrets Manager secrets are encrypted with. If
+`__KMS_KEY_ID__` is the customer-managed key your Secrets Manager secrets are encrypted with. If
 you left them on the AWS-managed `aws/secretsmanager` key, delete the `SecretsManagerKmsUse` and
 `SecretsInjectionKmsDecrypt` statements instead of substituting: the AWS-managed key is usable by
 principals in the account that hold the Secrets Manager permission, so a grant would be redundant,
@@ -451,6 +455,26 @@ The IRSA role also needs the Secrets Store CSI driver's AWS provider installed (
 
 ## 7. Deploy
 
+### First, the preflight (CTO-360)
+
+```bash
+cd infra && make prod-preflight ENV=../prod.env      # or: scripts/prod-preflight.sh --env prod.env
+```
+
+Put both sides in the file: the gateway's settings and the Vercel project's. It checks the handful
+of settings whose failures are confusing and unrelated-looking, and each finding names the symptom
+it prevents: `TALLY_REQUIRE_API_KEY` false leaves the control plane ungated so an unauthenticated
+`POST /v1/tenant/provision` creates a real tenant; the web tier's `GATEWAY_SERVICE_TOKEN` and the
+gateway's `TALLY_GATEWAY_SERVICE_TOKEN` differing 401s every control-plane call; a leftover
+`TALLY_DEV_TENANT` pins one tenant for whoever loads the dashboard; `TALLY_HMAC_KEY_PROVIDER` unset
+falls back to the local provider, which holds per-tenant key material in configuration rather than
+by reference; a missing Clerk svix signing secret rejects `organization.created` so no tenant is
+ever provisioned; and an unreachable ClickHouse does not error but paints mock data.
+
+It uses no AWS credentials, makes no AWS API call, and never prints a secret value: secrets are
+compared and reported by SHA-256 prefix and length. It exits non-zero and says exactly what to fix.
+`ARGS=--no-probe` skips the outbound reachability check.
+
 ### Option A — ECS-Fargate (primary)
 
 Create the cluster and the CloudWatch log groups, then register the task defs and create the
@@ -470,9 +494,9 @@ for g in gateway web edge-proxy; do
 done
 
 # Substitute placeholders and register the gateway task def:
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
-    -e "s/REPLACE_CLICKHOUSE_HOST/YOUR_CLICKHOUSE_HOST/g" \
-    -e "s/REPLACE_REPLAY_BUCKET/$ACCOUNT-ai-tally-replay/g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
+    -e "s/__CLICKHOUSE_HOST__/YOUR_CLICKHOUSE_HOST/g" \
+    -e "s/__REPLAY_BUCKET__/$ACCOUNT-ai-tally-replay/g" \
     deploy/aws/ecs/gateway.taskdef.json > /tmp/gateway.taskdef.json
 aws ecs register-task-definition --cli-input-json file:///tmp/gateway.taskdef.json
 
@@ -480,9 +504,9 @@ aws ecs register-task-definition --cli-input-json file:///tmp/gateway.taskdef.js
 aws ecs create-service --cli-input-json file://deploy/aws/ecs/gateway.service.json
 
 # After the gateway is reachable behind its ALB, capture GATEWAY_URL (the ALB DNS/HTTPS URL), then:
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
-    -e "s#REPLACE_GATEWAY_URL#https://YOUR_GATEWAY_ALB#g" \
-    -e "s#REPLACE_CLICKHOUSE_URL#https://YOUR_CLICKHOUSE_HOST:8443#g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
+    -e "s#__GATEWAY_URL__#https://YOUR_GATEWAY_ALB#g" \
+    -e "s#__CLICKHOUSE_URL__#https://YOUR_CLICKHOUSE_HOST:8443#g" \
     deploy/aws/ecs/web.taskdef.json > /tmp/web.taskdef.json
 aws ecs register-task-definition --cli-input-json file:///tmp/web.taskdef.json
 aws ecs create-service --cli-input-json file://deploy/aws/ecs/web.service.json
@@ -494,8 +518,8 @@ else's product, unlike the gateway (whose SDK buffers and retries) or the dashbo
 loses nothing).
 
 ```bash
-sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
-    -e "s#REPLACE_GATEWAY_URL#https://ingest.YOUR_DOMAIN#g" \
+sed -e "s/__ACCOUNT__/$ACCOUNT/g" -e "s/__REGION__/$REGION/g" \
+    -e "s#__GATEWAY_URL__#https://ingest.YOUR_DOMAIN#g" \
     deploy/aws/ecs/edge-proxy.taskdef.json > /tmp/edge-proxy.taskdef.json
 aws ecs register-task-definition --cli-input-json file:///tmp/edge-proxy.taskdef.json
 aws ecs create-service --cli-input-json file://deploy/aws/ecs/edge-proxy.service.json
