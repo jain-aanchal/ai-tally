@@ -18,8 +18,12 @@
 -- ############################################################################################
 --
 -- otel_spans drops raw rows at 90 days (CTO-22/CTO-29; a per-tenant override in storage_tiering.sql
--- can make that shorter). The rollups carry NO TTL on purpose: they are the surviving long-horizon
--- aggregate, and for any period older than raw retention they are the ONLY record that exists.
+-- can make that shorter). The rollups outlive it by a wide margin, deliberately: they are the
+-- surviving long-horizon aggregate, and for any period older than raw retention they are the ONLY
+-- record that exists. CTO-338 gave them a stated horizon instead of an unbounded one (7 years for
+-- the daily and account rollups, 13 months for the hourly resolution tier), which does not change
+-- anything below: everything this script calls not_derivable is a grain whose RAW spans have gone,
+-- and every rollup horizon is far longer than the raw one.
 --
 -- Deriving those grains is impossible. There is nothing to derive them from. The tempting move is to
 -- write something anyway (scale the surviving days, assume the duplication ratio was uniform, or
@@ -183,14 +187,34 @@ CREATE TABLE daily_account_rollup_cto311  AS daily_account_rollup;
 -- `CREATE TABLE ... AS` copies columns, engine, partitioning, sorting key and skipping indexes, but
 -- NOT the TTL. That is not a guess: it is the lesson the CTO-245 engine migration paid for, where a
 -- missed TTL would have migrated the table cleanly and silently stopped it tiering to warm and cold
--- storage. These three rollups deliberately carry no TTL today (they are the long-horizon aggregate
--- that outlives raw retention), so there is nothing to restore.
+-- storage.
 --
--- "Deliberately carry no TTL today" is exactly the kind of statement that quietly stops being true,
--- so it is asserted rather than trusted. engine_full contains the whole engine clause, TTL included,
--- so comparing it against the live table catches a TTL, a settings change or a sorting-key change
--- that the copy failed to inherit. If this throws, add the missing clause to the shadow table with
--- ALTER before the exchange; do not skip the guard.
+-- CTO-338 is the moment that lesson stopped being hypothetical here. These three rollups used to
+-- carry no TTL, and the guard below was written to catch the day that changed. They now carry the
+-- retention policy generated from tally.storage_tiering, so the shadow tables come out of the
+-- CREATEs above with NO TTL while the live tables have one, and exchanging them would silently
+-- return all three rollups to unbounded growth. Restore it explicitly, before the guard runs.
+--
+-- These restatements must stay identical to the TTL clauses in rollups.sql and account_rollups.sql.
+-- The guard is what enforces that: it compares the whole engine clause, so a horizon changed in one
+-- place and not the other throws here rather than being exchanged into production.
+--
+-- If a per-tenant override is in force (a multiIf DELETE expression rather than the flat interval
+-- below), these three statements must carry the SAME multiIf. Regenerate them with
+-- tally.storage_tiering.retention_for(<table>).render_alter(<overrides>) rather than editing by
+-- hand, then re-run.
+SET materialize_ttl_after_modify = 0;
+ALTER TABLE daily_feature_rollup_cto311  MODIFY TTL toDateTime(Day) + INTERVAL 2555 DAY DELETE;
+ALTER TABLE hourly_feature_rollup_cto311 MODIFY TTL toDateTime(Hour) + INTERVAL 400 DAY DELETE;
+ALTER TABLE daily_account_rollup_cto311  MODIFY TTL toDateTime(Day) + INTERVAL 2555 DAY DELETE;
+
+-- The shadow tables are empty at this point, so materialize_ttl_after_modify is moot for them; it
+-- is set anyway so that nothing in this script can trigger a mass expiry as a side effect.
+--
+-- The guard below is unchanged in intent: engine_full contains the whole engine clause, TTL
+-- included, so comparing it against the live table catches a TTL, a settings change or a
+-- sorting-key change that the copy failed to inherit. If this throws, add the missing clause to the
+-- shadow table with ALTER before the exchange; do not skip the guard.
 --
 -- Both sides are read as scalar subqueries so the throwIf is evaluated exactly once whether or not
 -- the shadow table exists. An absent shadow yields the String default '', which fails the equality

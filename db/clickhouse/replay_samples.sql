@@ -31,7 +31,20 @@ CREATE TABLE IF NOT EXISTS replay_samples
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(CapturedAt)
-ORDER BY (TenantId, SampleId);
+ORDER BY (TenantId, SampleId)
+-- Retention (CTO-338): OPT-IN CORPUS, 30 days. This number is not a new product decision. It is
+-- the default of `tenant_replay_config.retention_days` (db/postgres/0004_tenant_replay_config.sql),
+-- which is described there as capping "how long the captured payloads live" and is disclosed to
+-- the tenant verbatim in gateway.tenant_replay.CANDIDATE_RESPONSE_RETENTION_CONSENT when they opt
+-- in. The blob side says the same (replay_store.py: lifecycle rules are out of band). ClickHouse
+-- simply never enforced the promise, so this row index grew to 903k rows while the gateway only
+-- ever reads the newest 5000 of them (store.recent_replay_samples, once, at boot). Enforcing a
+-- horizon we already stated beats inventing a new one.
+--
+-- PER-TENANT: retention_days is per tenant, and ClickHouse TTL is table-level, so a deployment with
+-- non-default values compiles them into a multiIf keyed on TenantId exactly as raw spans do. Render
+-- it with tally.storage_tiering.render_tenant_delete_expression; see storage_tiering.sql.
+TTL toDateTime(CapturedAt) + INTERVAL 30 DAY DELETE;
 
 
 -- replay_runs — outcomes from replaying a sample against a candidate model (CTO-113).
@@ -55,7 +68,13 @@ CREATE TABLE IF NOT EXISTS replay_runs
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(RanAt)
-ORDER BY (TenantId, RunId);
+ORDER BY (TenantId, RunId)
+-- Retention (CTO-338): OPT-IN CORPUS, 30 days, and here it is not merely a promise kept but a
+-- privacy obligation. ResponseText below is a verbatim candidate-model response body, held under
+-- the CTO-125 carve-out to the no-bodies invariant, and the consent text scopes that body to
+-- retention_days. A body kept past the horizon the tenant agreed to is the carve-out quietly
+-- widening itself, so this TTL must never be longer than replay_samples'.
+TTL toDateTime(RanAt) + INTERVAL 30 DAY DELETE;
 
 
 -- CTO-125 additive migration. Idempotent: `ADD COLUMN IF NOT EXISTS` plus defaults so existing

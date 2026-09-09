@@ -39,7 +39,18 @@ CREATE TABLE IF NOT EXISTS daily_feature_rollup
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(Day)
-ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Day);
+ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Day)
+-- Retention (CTO-338): BOOK OF RECORD, 7 years. Generated from
+-- tally.storage_tiering.retention_for('daily_feature_rollup'), the same single source of truth that
+-- generates the otel_spans TTL. This table had no retention at all, which was not a decision: it
+-- was the absence of one. The number is long on purpose. Past the 90d raw horizon this table is the
+-- ONLY record that the spend happened (the rebuild in CTO-311 carries such grains through labelled
+-- `not_derivable` for exactly that reason), so its TTL is the moment spend history stops existing
+-- anywhere in the system. Seven years is the ordinary books-and-records horizon, and an aggregate
+-- keyed by (tenant, feature, model, day) is small enough that the horizon is close to free.
+-- Applying this to an EXISTING populated table is NOT free: see
+-- db/clickhouse/migrations/derived_table_retention.sql and `make ch-apply-retention`.
+TTL toDateTime(Day) + INTERVAL 2555 DAY DELETE;
 
 
 -- CTO-244 migration for an EXISTING deployment. Two steps, and both are needed.
@@ -133,7 +144,17 @@ CREATE TABLE IF NOT EXISTS hourly_feature_rollup
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(Hour)
-ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Hour);
+ORDER BY (TenantId, FeatureTag, GenAiResponseModel, Hour)
+-- Retention (CTO-338): OPERATIONAL GRAIN, 13 months. Deliberately far SHORTER than the daily
+-- rollup above, and the difference is the point. This table holds the same money at a finer bucket,
+-- so expiring it loses intraday shape for old periods and never a total: every dollar in an
+-- expired hour is still in daily_feature_rollup for another five and a half years. It is also 20x
+-- the daily row count, which is what makes it worth bounding at all. 13 months so the same month
+-- can still be compared against itself a year earlier at hour granularity.
+--
+-- CONSUMER CONTRACT: a read for a window older than this horizon must fall back to the daily grain
+-- or render an honest blank. It must not report an empty hourly result as zero spend.
+TTL toDateTime(Hour) + INTERVAL 400 DAY DELETE;
 
 -- CTO-244 migration for an EXISTING deployment, the hourly half of the two steps documented above
 -- the daily ALTER. It must sit BELOW the CREATE TABLE it alters: the ClickHouse initdb entrypoint

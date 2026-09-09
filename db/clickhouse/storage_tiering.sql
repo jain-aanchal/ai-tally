@@ -64,3 +64,75 @@
 --           TenantId = 'alpha', INTERVAL 180 DAY,
 --           TenantId = 'ent',   INTERVAL 365 DAY,
 --           INTERVAL 90 DAY) DELETE;
+
+-- ---------------------------------------------------------------------------------------------- --
+-- DERIVED-TABLE RETENTION (CTO-338)
+-- ---------------------------------------------------------------------------------------------- --
+-- Everything above concerns otel_spans. Nothing DERIVED from it had any retention at all, which is
+-- how the three largest tables in the database came to be derived and unmanaged, each of them
+-- bigger than the raw span table they came from. Measured on a 1.54M-span local stack:
+--
+--   last_touch_index  89.3 MiB  |  business_events  69.3 MiB  |  replay_samples  53.8 MiB
+--   ...against otel_spans, the one table that WAS managed, at 49.0 MiB.
+--
+-- The policy is defined in tally.storage_tiering (DERIVED_TABLE_RETENTION), the same module that
+-- generates the raw-span TTL above, for the same reason: one place, or they drift. Each table's TTL
+-- is declared inline in its CREATE TABLE, and sdk/python/tests/test_derived_retention_ddl.py fails
+-- if a DDL file and the module disagree about a horizon.
+--
+-- Four classes, longest first. The class is the argument; the number is downstream of it.
+--
+--   CLASS                 DAYS   TABLES                          WHY
+--   book of record        2555   daily_feature_rollup            money that cannot be re-derived
+--                                daily_account_rollup            once raw spans age out. 7 years is
+--                                business_events                 the books-and-records horizon, and
+--                                attribution_records             these are the books.
+--   operational grain      400   hourly_feature_rollup           a finer or supporting copy of what
+--                                identity_graph                  class 1 already holds. Losing it
+--                                unattributed_events             costs resolution, never a total.
+--                                eval_runs                       13 months = same month, last year.
+--   follows raw spans       90   last_touch_index                pointers into otel_spans, and the
+--                                business_events.RawPayload      raw artifact behind a mapped event.
+--                                (column TTL: row survives)      Meaningless once the span is gone.
+--   opt-in replay corpus    30   replay_samples                  NOT our number: it is the default
+--                                replay_runs                     of tenant_replay_config.
+--                                                                retention_days, already disclosed
+--                                                                to the tenant in the opt-in
+--                                                                consent text and never enforced.
+--
+-- These are delete-only TTLs, not the hot/warm/cold ladder. The ladder exists to keep bulky raw
+-- spans queryable on cheap disk; these tables are small per row of answer and are read at
+-- interactive latency, so tiering them would buy little and cost query time.
+--
+-- RELATIONSHIPS THE NUMBERS HAVE TO EACH OTHER, asserted in storage_tiering._validate_retention_
+-- ladder() rather than left as prose here:
+--
+--   * last_touch_index == the raw span horizon, exactly. A per-tenant raw-retention override needs
+--     the SAME override on last_touch_index, compiled into the same multiIf, or stitching for that
+--     tenant silently reads a truncated index.
+--   * attribution_records == business_events, exactly, in both directions. Shorter and attributed
+--     revenue reads back as unattributed; longer and an attribution outlives its event.
+--   * every rollup > the raw span horizon, or checks/rollup_drift.sql reads the missing rollup rows
+--     as drift and the CTO-311 rebuild tries to repair a gap that is not one.
+--   * business_events and attribution_records >> the dashboard's longest selectable window
+--     (web/lib/explore.ts MAX_WINDOW_DAYS = 366). This one is a honesty constraint, not a cost one:
+--     several revenue and ROI reads take a user-selectable range up to that length and at least one
+--     KPI is unbounded, and their empty-result branches cannot currently distinguish "expired" from
+--     "never happened" (an empty business_events renders attribution rate as 100%). The horizon is
+--     therefore set where no read can reach it.
+--   * replay_runs <= replay_samples. replay_runs holds ResponseText, a real model response body
+--     under the CTO-125 carve-out; it must not outlive the retention the tenant consented to.
+--
+-- PER-TENANT OVERRIDES use exactly the mechanism raw spans use, via the shared primitive
+-- render_tenant_delete_expression:
+--
+--   ALTER TABLE replay_samples MODIFY TTL
+--       toDateTime(CapturedAt) + multiIf(
+--           TenantId = 'alpha', INTERVAL 7 DAY,
+--           TenantId = 'ent',   INTERVAL 90 DAY,
+--           INTERVAL 30 DAY) DELETE;
+--
+-- APPLYING ANY OF THIS TO A POPULATED TABLE IS NOT FREE, and is deliberately not part of
+-- `make ch-migrate`. See db/clickhouse/migrations/derived_table_retention.sql and
+-- `make ch-apply-retention`: ClickHouse's materialize_ttl_after_modify defaults to 1, so a bare
+-- MODIFY TTL mass-deletes on the spot.

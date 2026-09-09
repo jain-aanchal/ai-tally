@@ -41,4 +41,9 @@ CREATE TABLE IF NOT EXISTS eval_runs
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(JudgedAt)
-ORDER BY (TenantId, EvalRunId);
+ORDER BY (TenantId, EvalRunId)
+-- Retention (CTO-338): OPERATIONAL GRAIN, 13 months. Longer than the 30-day corpus it grades,
+-- deliberately: a verdict carries no body (only an enum, the judge's identity and a cost), and it
+-- is the record of a quality claim /compare already showed someone. Expiring the verdicts with the
+-- samples would delete the evidence for a published win-rate while keeping nothing sensitive.
+TTL toDateTime(JudgedAt) + INTERVAL 400 DAY DELETE;
