@@ -32,6 +32,21 @@ FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PRIVATE_STANDALONE=true
+
+# `next build` statically prerenders /_not-found, which evaluates app/layout.tsx, which mounts
+# ClerkProvider and throws "Missing publishableKey" unless it is in the dev escape hatch. So the
+# build needs one of the two, and this ARG supplies the second, exactly as the `web` job in
+# .github/workflows/ci.yml does for its own `npm run build` (CTO-334).
+#
+# It is a BUILD arg and nothing more: this stage is discarded, the runner stage below sets its own
+# environment, and deploy/aws/ecs/web.taskdef.json sets TALLY_DEV_TENANT to "" at runtime. It does
+# leave the prerendered 404 page rendered in escape-hatch form, which is why CI builds this image but
+# does not publish it. See deploy/aws/README.md section 1 for the real constraint: Clerk's
+# NEXT_PUBLIC_ publishable key is inlined at build time, so a web image is per-deployment and cannot
+# be a tenant-neutral registry artifact.
+ARG TALLY_DEV_TENANT=""
+ENV TALLY_DEV_TENANT=${TALLY_DEV_TENANT}
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

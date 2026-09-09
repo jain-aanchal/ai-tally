@@ -102,8 +102,15 @@ export IMAGE_TAG=1.0.0                         # or a git sha
 
 ## 1. ECR and the images
 
-CI builds and publishes all three images (CTO-334), so the ordinary path is to create the
-repositories and the push role once and then never build an image by hand again.
+CI builds all three images and publishes two of them (CTO-334), so the ordinary path is to create the
+repositories and the push role once and then never build the gateway or the proxy by hand again.
+
+**The web image is the exception and you build it yourself.** Clerk's `NEXT_PUBLIC_` publishable key
+is inlined into the client bundle at build time, so a web image built without one can never sign
+anybody in, and one built with yours belongs to your deployment and has no business in a shared
+registry. CI builds it on every publish run purely to catch the Dockerfile rotting, and pushes it
+nowhere. If you are using `ecs/web.taskdef.json` at all (the dashboard's supported home is Vercel,
+see `deploy/vercel/README.md`), see "Building by hand" below.
 
 The images are **ARM64** for ECS, because Fargate on ARM64 is cheaper per vCPU-hour and the edge
 proxy is deliberately kept warm. All three task definitions under `ecs/` set
@@ -169,21 +176,35 @@ a `vX.Y.Z` git tag it is additionally tagged `X.Y.Z`. There is no `latest`.
 export IMAGE_TAG=$(git rev-parse HEAD)     # what the task definitions below should reference
 ```
 
-### Building by hand (only if you must)
+### Building by hand
 
-The gateway build context is the **repo root** (its Dockerfile COPYs both the gateway and the SDK it
-depends on); the web context is `web/`; the edge-proxy context is `infra/edge-proxy/`. Pass
-`--platform linux/arm64` or the task will not start on the ARM64 platform the task definitions pin.
+Required for the web tier, optional for the other two. The gateway build context is the **repo root**
+(its Dockerfile COPYs both the gateway and the SDK it depends on); the web context is `web/`; the
+edge-proxy context is `infra/edge-proxy/`. Pass `--platform linux/arm64` or the task will not start
+on the ARM64 platform the task definitions pin.
 
 ```bash
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR"
+
+# The web image, with YOUR Clerk publishable key baked in. Without a key here `next build` fails
+# prerendering /_not-found; with the TALLY_DEV_TENANT build arg instead it builds but ships an
+# unauthenticated dashboard, which is only ever right for a demo. Push it to a repository only you
+# pull from.
+docker buildx build --platform linux/arm64 --push \
+  --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_... \
+  -t "$ECR/ai-tally/web:$IMAGE_TAG" web/
+
+# The two CI already publishes, if you would rather not wait for a merge.
 docker buildx build --platform linux/arm64 --push \
   -t "$ECR/ai-tally/gateway:$IMAGE_TAG" -f infra/gateway/Dockerfile .
-docker buildx build --platform linux/arm64 --push \
-  -t "$ECR/ai-tally/web:$IMAGE_TAG" web/
 docker buildx build --platform linux/amd64,linux/arm64 --push \
   -t "$ECR/ai-tally/edge-proxy:$IMAGE_TAG" infra/edge-proxy/
 ```
+
+> `web/Dockerfile` does not declare a `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` build arg today, so that
+> first command needs one added. It is left out of this change on purpose: `web/app/layout.tsx` and
+> the `TALLY_DEV_TENANT` guard around it are owned by another in-flight PR, and the web tier is not
+> part of the bundle. Track it with the Vercel path, which is where the dashboard actually ships.
 
 ## 2. Networking (shared)
 

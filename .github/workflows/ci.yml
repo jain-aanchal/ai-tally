@@ -111,6 +111,9 @@ jobs:
   # leave the other half of the tree pointing at an artifact nothing produces, which is the bug this
   # job closes.
   #
+  # What is published. The gateway and the edge proxy. The web image is built here but deliberately
+  # not pushed; the matrix entry says why.
+  #
   # Architecture. Fargate ARM64 is cheaper per vCPU-hour than X86_64 and the edge proxy is
   # deliberately kept warm, so the lever is worth pulling; the three task definitions under
   # `deploy/aws/ecs/` are pinned to ARM64 to match. The job runs on GitHub's native ARM runners
@@ -143,18 +146,36 @@ jobs:
             platforms: linux/arm64
             ghcr: ai-tally-gateway
             ecr: ai-tally/gateway
+            publish: "true"
+            build_args: ""
           - name: edge-proxy
             context: infra/edge-proxy
             dockerfile: infra/edge-proxy/Dockerfile
             platforms: linux/amd64,linux/arm64
             ghcr: ai-tally-edge-proxy
             ecr: ai-tally/edge-proxy
+            publish: "true"
+            build_args: ""
+          # Built on every publish run, never pushed. A web image cannot be a tenant-neutral registry
+          # artifact: Clerk's NEXT_PUBLIC_ publishable key is inlined into the client bundle at build
+          # time, so an image built without one can never sign anybody in and an image built with one
+          # belongs to a single deployment. The dashboard's production home is Vercel anyway
+          # (docs/self-hosted-scope.md), and docs/aws-bundle-scope.md keeps web.taskdef.json only as
+          # an escape hatch the bundle does not use, so the operator builds that one themselves with
+          # their own keys (deploy/aws/README.md section 1). Building it here still earns its place:
+          # the first run of this job caught web/Dockerfile silently dropping .npmrc, which had made
+          # the image unbuildable, and nothing else in CI would have noticed.
           - name: web
             context: web
             dockerfile: web/Dockerfile
             platforms: linux/arm64
             ghcr: ai-tally-web
             ecr: ai-tally/web
+            publish: "false"
+            # Same placeholder UUID the `web` job above builds with, and for the same reason: the
+            # static prerender of /_not-found would otherwise need a Clerk publishable key.
+            build_args: |
+              TALLY_DEV_TENANT=00000000-0000-0000-0000-000000000000
     steps:
       - uses: actions/checkout@v4
         with:
@@ -236,7 +257,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true'
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && matrix.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -252,7 +273,7 @@ jobs:
       # `deploy/aws/ecs/iam/github-actions-oidc-trust-policy.json` and its sibling policy for exactly
       # what to create. There is deliberately no access-key fallback.
       - name: Configure AWS credentials (OIDC)
-        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN != ''
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && matrix.publish == 'true' && vars.AWS_ECR_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
@@ -260,11 +281,11 @@ jobs:
           role-session-name: ai-tally-ci-${{ github.run_id }}
 
       - name: Log in to ECR
-        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN != ''
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && matrix.publish == 'true' && vars.AWS_ECR_ROLE_ARN != ''
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Report that ECR is not configured
-        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN == ''
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && matrix.publish == 'true' && vars.AWS_ECR_ROLE_ARN == ''
         env:
           IMAGE: ${{ matrix.name }}
         run: |
@@ -278,8 +299,9 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
-          push: ${{ steps.gate.outputs.push == 'true' }}
+          push: ${{ steps.gate.outputs.push == 'true' && matrix.publish == 'true' }}
           tags: ${{ steps.tags.outputs.tags }}
+          build-args: ${{ matrix.build_args }}
           # Provenance attestations wrap even a single-platform push in an index, which older pullers
           # handle badly. The immutable SHA tag is the provenance that matters here.
           provenance: false
