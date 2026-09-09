@@ -43,27 +43,50 @@ handled in code. `deploy/aws/README.md`'s Open TODOs still say "today the suppor
 `memory` and `gcs`", and `gateway.taskdef.json` still sets `TALLY_REPLAY_BLOB_BACKEND=memory`. Both
 are wrong now and are a one-line fix each.
 
-**There is no infrastructure-as-code anywhere in the repository.** A search across the tree for
-`*.tf`, `*.tfvars`, `cdk.json`, `template.yaml`, `*.template.json` and `serverless.yml` returns
-nothing. Everything above assumes a VPC, private and public subnets, security groups, an ALB with an
+**There was no infrastructure-as-code anywhere in the repository.** A search across the tree for
+`*.tf`, `*.tfvars`, `cdk.json`, `template.yaml`, `*.template.json` and `serverless.yml` returned
+nothing. Everything above assumed a VPC, private and public subnets, security groups, an ALB with an
 ACM certificate and two target groups, an RDS instance, an S3 bucket, ECR repositories, IAM roles and
 Secrets Manager entries already exist. A task definition is not a deployment; it is the last ten
 percent of one.
 
-**There is no image build or publish pipeline.** `.github/workflows/ci.yml` has exactly four jobs
-(`python-sdk`, `gateway`, `edge-proxy`, `web`) and every one of them lints and tests. Nothing builds
-a container, nothing tags one, nothing pushes to ECR or GHCR. The runbook's `docker build` and
-`docker push` are meant to be typed by a human on a laptop. Note also that
-`infra/edge-proxy/deploy/helm/edge-proxy/values.yaml` defaults its image to
-`ghcr.io/jain-aanchal/ai-tally-edge-proxy`, a registry nothing in this repo publishes to.
+> **Update (CTO-335).** `deploy/aws/terraform/` now exists and creates all of the above, consuming
+> `deploy/aws/ecs/*.taskdef.json` and `ecs/iam/*.json` as templates. It is `fmt`-clean, validates
+> against `hashicorp/aws` v6.63.0, and passes 189 of 210 checkov checks with every remaining failure
+> answered in its README. **It has never been applied against an AWS account**, so nothing in it is
+> proven to stand up: no plan has run against a live provider, the RDS engine version and regional
+> Fargate ARM64 availability are unchecked, and the one-shot migration task is still absent because
+> the `schema_migrations` ledger does not exist yet. The gap this section describes is closed as
+> *written*, not as *verified*.
 
-**The edge proxy has no artifact under `deploy/` at all.** There is no ECS task definition, no
+**There was no image build or publish pipeline.** `.github/workflows/ci.yml` had exactly four jobs
+(`python-sdk`, `gateway`, `edge-proxy`, `web`) and every one of them lints and tests. Nothing built
+a container, tagged one, or pushed to ECR or GHCR. The runbook's `docker build` and
+`docker push` were meant to be typed by a human on a laptop. Note also that
+`infra/edge-proxy/deploy/helm/edge-proxy/values.yaml` defaults its image to
+`ghcr.io/jain-aanchal/ai-tally-edge-proxy`, a registry nothing in this repo published to.
+
+> **Update (phase 0).** CI now builds all three images, tags them with the commit SHA (plus `main`
+> on a merge and `X.Y.Z` on a release tag, never `latest`), and pushes to GHCR and to ECR through an
+> OIDC role with no long-lived key. The ECR half was gated on an `AWS_ECR_ROLE_ARN` repository
+> variable because the role did not exist; `deploy/aws/terraform/bootstrap/` now creates it, from
+> the same two IAM documents, so setting that variable is the whole remaining step. Also done in
+> phase 0: `TALLY_REPLAY_BLOB_BACKEND` is `s3`, the stale "memory and gcs" line is gone, and
+> `ai-tally-gateway-service-token` is in both IAM ARN lists.
+
+**The edge proxy had no artifact under `deploy/` at all.** There was no ECS task definition, no
 service definition, no target group, and no template in either Helm chart under `deploy/`. Its only
-deployment artifact is `infra/edge-proxy/deploy/helm/edge-proxy/`, inside the component directory,
+deployment artifact was `infra/edge-proxy/deploy/helm/edge-proxy/`, inside the component directory,
 and it is not in `infra/docker-compose.yml` either. The chosen architecture puts the proxy on ECS
-Fargate kept warm because it sits in the LLM hot path, and that component cannot be deployed by any
-documented path today. `docs/self-hosted-scope.md` calls this the single largest undone piece of the
+Fargate kept warm because it sits in the LLM hot path, and that component could not be deployed by
+any documented path. `docs/self-hosted-scope.md` calls this the single largest undone piece of the
 architecture and it is right.
+
+> **Update (phase 0 and 4, partly).** `deploy/aws/ecs/edge-proxy.taskdef.json` and
+> `edge-proxy.service.json` exist, with the deliberate absence of a container health check recorded
+> in the file's `dockerLabels`, and the Terraform creates the service, its target group and its own
+> host-based listener rule. The remaining phase 4 item is the test that a gateway outage does not add
+> latency to a proxied request, which is still unwritten.
 
 **Nobody has demonstrably run `deploy/aws/ecs/` end to end.** I could not verify this either way from
 the repository. There is no recorded output, no CI job, no `deploy/aws/` changelog entry and no
@@ -76,13 +99,16 @@ One region, everything in it. Component by component:
 
 | Component | Where | Artifact today |
 | --- | --- | --- |
-| Dashboard | Vercel, function region pinned to the same AWS region | `deploy/vercel/README.md`, `web/vercel.json` |
-| Ingest gateway | ECS Fargate behind a public ALB | `deploy/aws/ecs/gateway.*.json` |
-| Edge proxy | ECS Fargate, kept warm, separate ALB listener | **none, must be written** |
-| Telemetry | ClickHouse Cloud on AWS, public HTTPS on 8443 | none needed |
-| Control plane | RDS for PostgreSQL, private subnets | none, RDS is created by hand today |
-| Replay bodies | S3 with a lifecycle policy | `S3ReplayBlobStore`, bucket created by hand |
-| Secrets | Secrets Manager, KMS for the HMAC root | `deploy/aws/ecs/iam/*`, entries created by hand |
+| Dashboard | Vercel, function region pinned to the same AWS region | `deploy/vercel/README.md`, `web/vercel.json`. Not Terraform: see "What was built" below. |
+| Ingest gateway | ECS Fargate behind a public ALB | `deploy/aws/ecs/gateway.*.json`, created by `terraform/modules/compute` |
+| Edge proxy | ECS Fargate, kept warm, separate ALB listener | `deploy/aws/ecs/edge-proxy.*.json`, created by `terraform/modules/compute` |
+| Telemetry | ClickHouse Cloud on AWS, public HTTPS on 8443 | none needed, and deliberately not Terraform |
+| Control plane | RDS for PostgreSQL, private subnets | `terraform/modules/data`. Schema still applied by hand: there is no migration runner. |
+| Replay bodies | S3 with a lifecycle policy | `S3ReplayBlobStore`, bucket and lifecycle in `terraform/modules/data` |
+| Secrets | Secrets Manager, KMS for the HMAC root | `deploy/aws/ecs/iam/*`; `terraform/modules/data` creates the containers and the key, never the values |
+
+Everything above marked as created by Terraform is created by code that has never been applied.
+
 
 `web.taskdef.json` and `web.service.json` stay in the tree as the escape hatch for anyone who does
 not want Vercel, and the bundle does not use them. Say so in the README rather than leaving two
@@ -157,6 +183,48 @@ inputs.
 Keep the JSON files. Terraform's `aws_ecs_task_definition` can take a rendered container definition,
 so `deploy/aws/ecs/*.taskdef.json` becomes a template the module fills in rather than a file a human
 `sed`s. That preserves the one artifact that is already reviewed and correct.
+
+### What was built (CTO-335)
+
+`deploy/aws/terraform/` implements this section, with the decisions it left open resolved as follows.
+
+**Structure.** Four modules (`network`, `data`, `iam`, `compute`) composed into one root, plus
+`bootstrap/` as a genuinely separate root. Four modules because those are four different change
+cadences and four different blast radii; one root because the coupling between them is dense enough
+that four state files would buy isolation nobody asked for and cost an apply order somebody will
+skip.
+
+**State.** An S3 bucket created by `bootstrap/`, which keeps local state because it cannot hold its
+own. **No DynamoDB table**: Terraform 1.11 promoted S3-native locking (`use_lockfile`) to GA, so the
+lock is a `.tflock` object beside the state object and the chicken-and-egg problem shrinks to one
+bucket. `bootstrap/` also carries the GitHub OIDC role, so unblocking CI's ECR push does not require
+standing up a VPC first.
+
+**Secrets.** Terraform creates secret *containers* and never a `secret_version`, because a
+`secret_string` in a resource is a `secret_string` in state and state is readable by anyone who can
+read the bucket. The RDS master password is minted and held by RDS itself
+(`manage_master_user_password`), never by `random_password`. Per-tenant HMAC keys stay entirely with
+the application: Terraform owns the KMS key and the IAM grant on `ai-tally/tenant-hmac/*` and nothing
+under that prefix, because a Terraform-managed resource there would be destroyed as drift and take
+every hash for that tenant with it.
+
+**Not Terraform.** The line is drawn at the AWS account edge: ClickHouse Cloud, Vercel, Clerk and
+an out-of-account DNS zone are documented prerequisites whose values become module inputs. Providers
+exist for the first two; using them would put a second and third vendor's credentials in the same
+plan and the same state to save one console visit per environment.
+
+**NAT versus endpoints, corrected.** The bullet above frames these as alternatives. They are not.
+Interface endpoints reach AWS services only, and this workload has to reach ClickHouse Cloud on 8443
+and the provider APIs the edge proxy exists to forward to. With `assignPublicIp: DISABLED` a private
+subnet without NAT reaches neither, and it fails as a runtime timeout rather than an apply error. So
+NAT is required (asserted by a precondition on both services), the free S3 gateway endpoint is always
+on because ECR layer pulls are S3 GETs, and the six interface endpoints are an off-by-default
+addition whose per-endpoint-per-AZ hourly meter is traded against NAT's per-GB one. Which wins
+depends on image-pull and log volume, both unmeasured. Still no dollar figures anywhere.
+
+**Not built.** The one-shot migration task, because it needs the `schema_migrations` ledger from
+phase 1 first and creating it here would ship a task that replays 32 files with no record of what
+already ran. And a WAF on the proxy listener, which this doc asks for and which stays a named gap.
 
 ## Secrets, IAM and least privilege
 
@@ -352,6 +420,11 @@ of someone opening the rate cards. That hour has not been spent.
 
 ## Phased plan
 
+Status as of CTO-335. Phase 0 is implemented. Phases 2 and 3 are implemented as code and **applied
+nowhere**, which is a weaker claim than done and is stated that way on purpose: the work that
+remains on them is running them against a real account and writing down what breaks. Phases 1, 4, 5
+and 6 are partly done, per the notes on each below.
+
 **Phase 0, a weekend, and genuinely shippable.** Add the container build and push to CI, and fix the
 three stale facts. A fifth job in `.github/workflows/ci.yml` that builds `infra/gateway/Dockerfile`
 from the repo root and `infra/edge-proxy/Dockerfile`, tags both with the commit SHA, and pushes to
@@ -366,25 +439,31 @@ reproducible artifact with a provenance.
 `deploy/aws/ecs/migrate.taskdef.json`. Add the boot-time assertion that refuses to start the web tier
 in a production deployment with `TALLY_DEV_TENANT` set (see the release gate below).
 
-**Phase 2.** Write `deploy/aws/terraform/`, network and data first: VPC, subnets, security groups,
-endpoints, RDS, S3, ECR, KMS, Secrets Manager, IAM. Apply it into a scratch account. This is the bulk
-of the work and the part that has never been done.
+**Phase 2. Written, not applied.** `deploy/aws/terraform/` covers network and data: VPC, subnets,
+security groups, endpoints, RDS, S3, ECR, KMS, Secrets Manager, IAM. What remains is the second half
+of this phase as originally written: applying it into a scratch account. That has not happened.
 
-**Phase 3.** Terraform the compute: cluster, ALB, ACM, target groups, log groups with retention, the
-gateway service from the existing task definition, and the migration task. Deploy the gateway, run
-the smoke test in `deploy/aws/README.md` §8, and write down what broke, because something will.
+**Phase 3. Written, not applied, and one piece missing.** The compute module creates the cluster,
+ALB, ACM, target groups, log groups with a retention, and the gateway service rendered from the
+existing task definition. The migration task is deliberately absent until phase 1's ledger exists.
+Nobody has deployed the gateway, run the §8 smoke test, or written down what broke, because nobody
+has run it.
 
-**Phase 4.** Write the edge-proxy ECS task definition and service definition (ALB health check on
-`/healthz`, no container health check, two tasks, no scale to zero) and Terraform them. Add the test
-that a gateway outage does not add latency to a proxied request.
+**Phase 4. Mostly done.** The edge-proxy task and service definitions exist with the ALB health
+check on `/healthz`, no container health check, two tasks and no autoscaling policy, and the
+Terraform creates the service, its target group and its own listener rule. Still open: the test that
+a gateway outage does not add latency to a proxied request.
 
-**Phase 5.** Implement `SecretManagerKeyProvider` against KMS, or record the decision to keep
-`LocalKeyMaterialProvider` with the root injected from Secrets Manager. Add the CORS middleware with
-an origin allowlist. Add the CloudWatch alarms. Choose and apply TTLs on the rollup and attribution
-tables.
+**Phase 5. Mostly done.** `SecretManagerKeyProvider` is implemented against AWS Secrets Manager, the
+CORS middleware ships with an explicit allowlist, the CloudWatch alarms are in the compute module
+(unhealthy hosts per target group, ALB 5xx, running-task count per service, RDS free storage and
+CPU, and a metric filter on gateway error lines), and the derived ClickHouse tables have a stated
+retention. The alarms notify nobody unless an SNS topic is passed, which the README says rather than
+implying paging exists.
 
-**Phase 6.** Demote or delete the EKS chart, update `deploy/aws/README.md` to describe running the
-bundle rather than typing the runbook, and keep the runbook as the "what the bundle does" appendix.
+**Phase 6. Not started, and now partly moot.** `deploy/aws/README.md` points at the Terraform and
+keeps its by-hand steps, which is the right shape while the Terraform is unapplied: the runbook is
+still the only path anyone has evidence for. Demoting the EKS chart is untouched.
 
 ### The release gate
 
@@ -417,9 +496,16 @@ determined whether that path has ever run against real AWS.
 Whether the edge proxy actually holds its latency budget with the gateway unreachable is untested.
 The design says it should. Nothing proves it.
 
-Terraform state has no home in this plan. An S3 backend with DynamoDB locking is the obvious answer,
-and it is also a chicken-and-egg bootstrap the module cannot create for itself. Decide it before
-phase 2 rather than during.
+~~Terraform state has no home in this plan.~~ **Resolved (CTO-335):** an S3 bucket created by
+`deploy/aws/terraform/bootstrap/`, a separate root module with local state, using S3-native locking
+rather than DynamoDB. See "What was built" above.
+
+**Nothing in `deploy/aws/terraform/` has been applied against an AWS account.** It was written and
+checked without credentials: `fmt`, `validate` against `hashicorp/aws` v6.63.0, checkov, and an
+isolated evaluation of its rendering logic (which found two real bugs). No plan has run against a
+live provider. The RDS engine version, regional Fargate ARM64 availability, and every AWS-side name
+and shape validation are unverified. The module set makes the ECS path *verifiable* by someone with
+an account; it does not make it verified.
 
 ---
 

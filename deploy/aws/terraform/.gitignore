@@ -1,0 +1,18 @@
+# Per-deployment inputs and state. None of these belong in the repository: backend.hcl and
+# terraform.tfvars name one account's resources, and a state file is a credential-adjacent artifact
+# even when this module set keeps secret material out of it.
+backend.hcl
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# The dependency lock file is normally committed for a root module, and it is not committed here for
+# one specific reason: the only lock this repository has produced was generated on darwin_arm64 and
+# records hashes for that platform alone, so committing it would break `terraform init` for anyone on
+# Linux. Whoever runs the first real apply should generate a multi-platform lock
+# (`terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64`),
+# commit it, and delete these six lines.
+.terraform.lock.hcl
+crash.log
