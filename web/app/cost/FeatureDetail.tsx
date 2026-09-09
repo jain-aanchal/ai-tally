@@ -27,13 +27,21 @@ import {
   type AttributionDiagnostics,
   type FeatureEconomics,
 } from "@/lib/features";
-import { asOfLabel, deriveDataState, relativeAge, STALE_AFTER_MS } from "@/lib/dataState";
+import {
+  asOfLabel,
+  deriveDataState,
+  relativeAge,
+  type SourceState,
+  STALE_AFTER_MS,
+} from "@/lib/dataState";
 
 import { FeatureValueEvents } from "../features/FeatureValueEvents";
 
 interface FeaturesDetailPayload {
   features: FeatureEconomics[];
-  diagnostics: AttributionDiagnostics;
+  /** null when the reconciler status could not be read, or has never run (#363). */
+  diagnostics: AttributionDiagnostics | null;
+  sources: { features: SourceState; diagnostics: SourceState };
 }
 
 type FetchStatus = "loading" | "ready" | "unavailable";
@@ -75,7 +83,11 @@ export function FeatureDetail({ feature }: { feature: string }) {
     );
   }
 
-  if (status === "unavailable" || data === null) {
+  // #363: the route answers 200 with an empty roster when the read FAILED as well as when there is
+  // genuinely nothing, so the fetch succeeding is no longer enough to know we have an answer. The
+  // payload's own state is what decides, and an unreadable source reads the same here as a fetch
+  // that never landed.
+  if (status === "unavailable" || data === null || data.sources.features === "unavailable") {
     return (
       <Card title={title}>
         <p className="py-6 text-center text-sm text-muted">
@@ -101,13 +113,21 @@ export function FeatureDetail({ feature }: { feature: string }) {
   }
 
   // Features has no reconciliation date; the reconciler's last-run minutes is its freshness signal,
-  // rendered exactly as the /features view did.
-  const reconciledThrough = new Date(
-    Date.now() - data.diagnostics.reconcilerLastRunMinutesAgo * 60_000,
-  ).toISOString();
-  const asOf = asOfLabel(reconciledThrough);
-  const dataState = deriveDataState({ isEmpty: false, isPartial: false, reconciledThrough });
-  const reconcilerStale = data.diagnostics.reconcilerLastRunMinutesAgo * 60_000 > STALE_AFTER_MS;
+  // rendered exactly as the /features view did. #363: with no reconciler run, or none we could
+  // read, there is no boundary to render, so the badge is omitted rather than anchored on now().
+  const lastRunMinutesAgo = data.diagnostics?.reconcilerLastRunMinutesAgo ?? null;
+  const reconciledThrough =
+    lastRunMinutesAgo === null
+      ? null
+      : new Date(Date.now() - lastRunMinutesAgo * 60_000).toISOString();
+  const asOf = reconciledThrough === null ? null : asOfLabel(reconciledThrough);
+  const dataState = deriveDataState({
+    isEmpty: false,
+    isPartial: false,
+    reconciledThrough: reconciledThrough ?? undefined,
+  });
+  const reconcilerStale =
+    lastRunMinutesAgo !== null && lastRunMinutesAgo * 60_000 > STALE_AFTER_MS;
 
   return (
     <div className="space-y-6">
@@ -115,7 +135,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
         <div className="flex justify-end">
           <StaleBadge
             asOf={asOf}
-            age={relativeAge(reconciledThrough)}
+            age={relativeAge(reconciledThrough!)}
             stale={dataState === "stale"}
           />
         </div>
@@ -153,24 +173,36 @@ export function FeatureDetail({ feature }: { feature: string }) {
 
           <div>
             <h3 className="mb-2 text-xs uppercase text-muted">Tenant-wide</h3>
-            <dl className="space-y-1.5 text-sm">
-              <Diag
-                k="late-arriving events (7d)"
-                v={data.diagnostics.lateArrivalEvents7d.toLocaleString()}
-                row
-              />
-              <Diag
-                k="median lag"
-                v={`${data.diagnostics.lateArrivalMedianHours.toFixed(1)}h`}
-                row
-              />
-              <Diag
-                k="reconciler last ran"
-                v={`${data.diagnostics.reconcilerLastRunMinutesAgo} min ago`}
-                good={!reconcilerStale}
-                row
-              />
-            </dl>
+            {/* #363: these three used to be filled from a fixture whenever the reconciler status
+                could not be read OR had never run, so a workspace that has never reconciled was
+                told 180 late events and a 4.2h median lag. The two cases are now separate, and
+                neither of them is a number. */}
+            {data.diagnostics === null ? (
+              <p className="text-sm text-muted">
+                {data.sources.diagnostics === "unavailable"
+                  ? "The reconciler status could not be read, so its diagnostics are not shown."
+                  : "The reconciler has not run for this workspace yet, so there is nothing to report."}
+              </p>
+            ) : (
+              <dl className="space-y-1.5 text-sm">
+                <Diag
+                  k="late-arriving events (7d)"
+                  v={data.diagnostics.lateArrivalEvents7d.toLocaleString()}
+                  row
+                />
+                <Diag
+                  k="median lag"
+                  v={`${data.diagnostics.lateArrivalMedianHours.toFixed(1)}h`}
+                  row
+                />
+                <Diag
+                  k="reconciler last ran"
+                  v={`${data.diagnostics.reconcilerLastRunMinutesAgo} min ago`}
+                  good={!reconcilerStale}
+                  row
+                />
+              </dl>
+            )}
           </div>
         </div>
       </Card>

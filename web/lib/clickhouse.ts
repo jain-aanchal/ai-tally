@@ -461,10 +461,15 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
     const attributed = parseInt(out[0]?.attributed ?? "0", 10);
     const total = parseInt(out[0]?.total ?? "0", 10);
     return {
-      // No value events yet → nothing to miss, rate is vacuously 1.0.
-      attributionRate: total > 0 ? attributed / total : 1,
-      contextDropCount: 0,
-      estimateCalibration: 0,
+      // #363: no business events used to mean a vacuous 1.0, which a caller cannot tell apart from
+      // a tenant whose every event really did attribute. Null is the only honest answer over an
+      // empty population, and it is also how the route recognises the empty state as empty.
+      attributionRate: total > 0 ? attributed / total : null,
+      // #363: both were hardcoded zeros. Nothing measures a context drop or an estimate-versus
+      // -invoice calibration on this path, so a 0 here asserted "no drops" and "perfectly
+      // calibrated" on no evidence. The /data-quality report is the surface that measures its own.
+      contextDropCount: null,
+      estimateCalibration: null,
     };
   });
 }
@@ -2000,9 +2005,26 @@ interface ReconciliationRun {
  * reflect one truth instead of independent hardcoded constants.
  *
  * Returns null when no reconciler run exists yet (`run` is null), or the gateway is unreachable /
- * non-2xx, so callers can apply honest-null (`—`) rather than fabricate a value.
+ * non-2xx, so callers can apply honest-null (`—`) rather than fabricate a value. Callers that need
+ * to tell those two apart use {@link fetchLatestReconciliationRunResult} instead.
  */
 async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null> {
+  const result = await fetchLatestReconciliationRunResult();
+  return result.state === "live" ? result.run : null;
+}
+
+/**
+ * The boxed form of {@link fetchLatestReconciliationRun}, keeping the two nulls apart (#363).
+ *
+ * "The gateway could not be read" and "the gateway answered, this tenant has never run the
+ * reconciler" both used to collapse to `null`, and a caller reading that null had no way to choose
+ * between an honest blank and an honest empty state. A new tenant is always the second case, so the
+ * collapse guaranteed the wrong one. This is the seam `queryAccountDetailResult` already opens for
+ * the account detail, and it is opened the same way here rather than by a second mechanism.
+ */
+async function fetchLatestReconciliationRunResult(): Promise<
+  { state: "live"; run: ReconciliationRun } | { state: "empty" } | { state: "unavailable" }
+> {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/reconciliation/status`, {
       headers: controlPlaneHeaders(await resolveTenantId()),
@@ -2010,15 +2032,15 @@ async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null>
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) {
-      console.warn(`[reconciliation] /v1/tenant/reconciliation/status HTTP ${res.status}; falling back`);
-      return null;
+      console.warn(`[reconciliation] /v1/tenant/reconciliation/status HTTP ${res.status}; unavailable`);
+      return { state: "unavailable" };
     }
     const body = (await res.json()) as { run?: ReconciliationRun | null };
-    // No reconciler run yet → null so callers render the honest "no data" state.
-    return body.run ?? null;
+    // No reconciler run yet is an ANSWER, not a failure: the gateway told us there is none.
+    return body.run ? { state: "live", run: body.run } : { state: "empty" };
   } catch (err) {
     console.warn("[reconciliation] gateway unreachable:", (err as Error).message);
-    return null;
+    return { state: "unavailable" };
   }
 }
 
@@ -2043,16 +2065,24 @@ export async function queryReconcilerLastRun(): Promise<number | null> {
  * convert to the page's units (hours / minutes-ago). Reads the same real source as
  * {@link queryReconcilerLastRun} so the freshness signal agrees across surfaces.
  *
- * Honest-null: when no reconciler run exists yet, or the gateway is unreachable / non-2xx, we
- * return null so the /api/features route falls back to its mock via `?? diagnostics`.
+ * Three states, not two (#363). `unavailable` is the gateway failing, which is genuinely unknown;
+ * `empty` is the gateway reporting that this tenant has never run the reconciler, which is a real
+ * answer and the normal state of a tenant that has not sent anything yet. The /api/features route
+ * renders a different thing for each, and used to render fixture diagnostics for both.
  */
-export async function queryAttributionDiagnostics(): Promise<AttributionDiagnostics | null> {
-  const run = await fetchLatestReconciliationRun();
-  if (!run) return null;
+export async function queryAttributionDiagnostics(): Promise<
+  { state: "live"; diagnostics: AttributionDiagnostics } | { state: "empty" | "unavailable" }
+> {
+  const result = await fetchLatestReconciliationRunResult();
+  if (result.state !== "live") return { state: result.state };
+  const { run } = result;
   return {
-    lateArrivalEvents7d: run.events_late,
-    lateArrivalMedianHours: Math.round((run.lag_seconds_median / 3600) * 10) / 10,
-    reconcilerLastRunMinutesAgo: minutesSince(run.finished_at),
+    state: "live",
+    diagnostics: {
+      lateArrivalEvents7d: run.events_late,
+      lateArrivalMedianHours: Math.round((run.lag_seconds_median / 3600) * 10) / 10,
+      reconcilerLastRunMinutesAgo: minutesSince(run.finished_at),
+    },
   };
 }
 

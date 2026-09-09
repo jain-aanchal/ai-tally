@@ -12,10 +12,9 @@
 // keys all survive) and only defaulting `outcome`.
 
 import { apiGet } from "@/lib/api";
-import type { AttributionReport } from "@/lib/attribution";
 import { querySpanFeatureTags } from "@/lib/clickhouse";
 import { parseFilters, rangeDays } from "@/lib/filters";
-import { AttributionLive } from "./Live";
+import { AttributionLive, type AttributionPayload } from "./Live";
 
 interface PageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -48,7 +47,7 @@ export default async function AttributionPage({ searchParams }: PageProps) {
 
   const endpoint = `/api/attribution?${qs.toString()}`;
   const [initialData, featureTags] = await Promise.all([
-    apiGet<AttributionReport>(endpoint),
+    apiGet<AttributionPayload>(endpoint),
     querySpanFeatureTags(windowDays),
   ]);
 

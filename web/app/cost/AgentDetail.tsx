@@ -27,6 +27,7 @@ import {
   boundaryFromMinutesAgo,
   deriveDataState,
   relativeAge,
+  type SourceState,
 } from "@/lib/dataState";
 import { formatUSD } from "@/lib/types";
 
@@ -34,6 +35,7 @@ interface AgentsDetailPayload {
   agents: AgentSummary[];
   runs: AgentRun[];
   reconcilerLastRunMinutesAgo: number | null;
+  sources: { agents: SourceState; runs: SourceState };
 }
 
 type FetchStatus = "loading" | "ready" | "unavailable";
@@ -77,7 +79,10 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
     );
   }
 
-  if (status === "unavailable" || data === null) {
+  // #363: the route now answers 200 with an empty roster when the READ failed too, so a landed
+  // fetch is no longer proof that we have an answer. Without this the branch below would report
+  // "no runs for this agent" on the strength of a ClickHouse outage.
+  if (status === "unavailable" || data === null || data.sources.agents === "unavailable") {
     return (
       <Card title={title}>
         <p className="py-6 text-center text-sm text-muted">

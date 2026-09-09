@@ -55,6 +55,74 @@ export function SyntheticPreviewBanner({
 }
 
 /**
+ * "The read succeeded and there is nothing yet" (#363).
+ *
+ * This is the state every new customer is in, and it is a real answer rather than an unknown one,
+ * so it is neither a blank nor a preview of somebody else's numbers. It says what has not arrived
+ * and points at the one action that changes that.
+ *
+ * `what` names the data, not the page: "no spend", "no agents", "no attributed sessions". The
+ * sentence reads "No <what> yet." so it stays short enough to sit inside a card.
+ */
+export function NoDataYet({
+  what,
+  detail,
+  onboarding = true,
+}: {
+  what: string;
+  /** One clause of context, when the bare noun is not enough to act on. */
+  detail?: string;
+  /**
+   * Whether nothing at all has arrived for the workspace (the new-tenant case), which is what makes
+   * onboarding the next step. A slice that is empty because a FILTER matched nothing passes false:
+   * pointing a customer with 500k spans at the install guide because they picked a quiet feature
+   * tag is its own kind of wrong answer.
+   */
+  onboarding?: boolean;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-edge px-4 py-10 text-center">
+      <p className="text-sm font-medium">No {what} yet.</p>
+      <p className="max-w-prose text-sm text-muted">
+        {detail ?? "Nothing has arrived for this workspace."}{" "}
+        {onboarding
+          ? "This is what we measured, not a placeholder: no telemetry has reached ai-tally for this workspace."
+          : "This is what we measured, not a placeholder."}
+      </p>
+      {onboarding && (
+        <Link
+          href="/onboarding"
+          className="inline-flex items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25"
+        >
+          Finish setup
+        </Link>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "We could not read the source, so we do not know" (#363).
+ *
+ * The counterpart to {@link NoDataYet}, and deliberately worded so the two can never be mistaken
+ * for each other: this one makes no claim about whether data exists. The reason travels with it for
+ * the same purpose the `Blank` primitive carries one.
+ */
+export function SourceUnavailable({ reason }: { reason: string }) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-warn/40 bg-warn/5 px-4 py-10 text-center">
+      <p className="text-sm font-medium text-warn">
+        <span aria-hidden>—</span> Source unavailable
+      </p>
+      <p className="max-w-prose text-sm text-muted">
+        {reason} Nothing is shown here rather than a number we cannot stand behind. This is not a
+        statement that there is no data.
+      </p>
+    </div>
+  );
+}
+
+/**
  * Partial-data state. A banner pointing at the missing connector, rendered above whatever real
  * data does exist.
  *

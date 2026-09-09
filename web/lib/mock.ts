@@ -6,7 +6,37 @@
 // with two providers in production (OpenAI + Anthropic) and Stripe revenue attributed back.
 // Numbers chosen to be believable for screenshots / a LinkedIn demo, not real telemetry.
 
+import { isDemoMode } from "./demoMode";
 import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "./types";
+
+/**
+ * The one gate every fixture fallback in `app/api/**` passes through (#363).
+ *
+ * Fixtures used to be the answer to "the read failed" AND to "the read came back empty", so a real
+ * signed-in customer with zero spans was shown this file's storyline as their own numbers: a
+ * research_agent they have never run, paying back in 7 days. That is the honesty invariant's
+ * headline failure, and no banner makes it acceptable, so the fixtures are now unreachable on the
+ * product path rather than merely labelled there.
+ *
+ * TWO conditions, and both are load-bearing:
+ *
+ *   NEXT_PUBLIC_DEMO_MODE=1  an explicit, deliberate opt-in. Nobody sets it by accident, and it is
+ *                            already the flag a demo build sets for the rest of its presentation.
+ *   TALLY_DEV_TENANT set     no Clerk organization was resolved. This is the ONLY way the dashboard
+ *                            serves a tenant without an authenticated org (see lib/getTenant.ts), so
+ *                            requiring it makes "a real tenant is signed in" and "fixtures render"
+ *                            mutually exclusive by construction, not by review vigilance.
+ *
+ * Deliberately NOT read here: whether ClickHouse is configured. An unreachable store is a reason to
+ * say so, not a licence to invent numbers, which is what `deploy/vercel/README.md` used to document.
+ *
+ * Read at call time rather than hoisted to a module constant so a test can set the environment per
+ * case; `NEXT_PUBLIC_*` is inlined at build time on the client, and this is only ever called from a
+ * Route Handler on the server, where both values are live.
+ */
+export function sampleDataAllowed(): boolean {
+  return isDemoMode() && Boolean(process.env.TALLY_DEV_TENANT?.trim());
+}
 
 export const mockSpend: SpendSummary = {
   totalMicroUsd: 52_400_000_000, // $52,400 over the last 30 days
