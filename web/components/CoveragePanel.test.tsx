@@ -71,15 +71,37 @@ describe("CoveragePanel", () => {
     expect(screen.getByText("12 spans")).toBeTruthy();
   });
 
+  // #320 item 4: a layer proven by exactly one span read "1 spans".
+  it("singularises a one-span count", () => {
+    render(
+      <CoveragePanel
+        initialLayers={layers({ llm: { provingSpans: 1, reason: "1 span proves this layer" } })}
+        poll={false}
+      />,
+    );
+    expect(screen.getByText("1 span")).toBeTruthy();
+    expect(screen.queryByText("1 spans")).toBeNull();
+  });
+
   it("counts only span-proven layers in the summary", () => {
     render(<CoveragePanel initialLayers={layers()} poll={false} />);
-    expect(screen.getByText(/1\/5 layers proven by a span/)).toBeTruthy();
+    expect(screen.getByText(/1\/5 layers proven/)).toBeTruthy();
     expect(screen.getByText(/1 could not be read/)).toBeTruthy();
+  });
+
+  // #320: with poll off the panel is a view of what its caller polled. It used to freeze at its
+  // first render's props, which put "0/5 layers proven" under a step 2 saying a trace had arrived.
+  it("follows its caller's answer on a rerender when it is not polling itself", () => {
+    const { rerender } = render(<CoveragePanel initialLayers={undefined} poll={false} />);
+    expect(screen.getAllByText("Unknown")).toHaveLength(5);
+    rerender(<CoveragePanel initialLayers={layers()} poll={false} />);
+    expect(screen.getByText("Flowing")).toBeTruthy();
+    expect(screen.getByText(/1\/5 layers proven/)).toBeTruthy();
   });
 
   it("starts unknown rather than claiming anything before the probe answers", () => {
     render(<CoveragePanel poll={false} />);
     expect(screen.getAllByText("Unknown")).toHaveLength(5);
-    expect(screen.getByText(/0\/5 layers proven by a span/)).toBeTruthy();
+    expect(screen.getByText(/0\/5 layers proven/)).toBeTruthy();
   });
 });

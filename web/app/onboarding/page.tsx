@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { CoveragePanel } from "@/components/CoveragePanel";
 import { apiGet } from "@/lib/api";
 import type { FunnelEvent, OnboardingProgress, TenantProxyCredentials } from "@/lib/onboarding";
 
@@ -24,12 +23,10 @@ export default async function OnboardingPage() {
           Two steps to your first dashboard. Most teams see their first trace in under five minutes.
         </p>
       </div>
+      {/* The coverage panel now renders inside Onboarding, because step 2 and the panel report the
+          same fact and #320 was them reporting it from two different sources. One client-side poll
+          feeds both; the page still does not block on the probe. */}
       <Onboarding initialProgress={progress} creds={creds} />
-      {/* Per-layer coverage (CTO-261, §4.1). Sits under the connect steps because it answers the
-          question that comes NEXT: the steps above get the LLM layer flowing, and this says which
-          of the remaining layers a span actually proves. It polls on the client, so the page does
-          not block on the probe. */}
-      <CoveragePanel />
     </div>
   );
 }

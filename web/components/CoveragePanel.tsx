@@ -3,7 +3,7 @@
 //
 // What the developer needs to see after a wired change runs is not "connected", it is WHICH of the
 // five layers is actually flowing and, for every layer that is not, why. So each row states its
-// case: a covered layer shows the span count that proves it, a dark layer says whether it is
+// case: a covered layer shows the count that proves it, a dark layer says whether it is
 // awaiting its first event or simply unwired, and a layer we could not read renders the honest
 // blank with the reason on hover rather than a zero (CLAUDE.md).
 //
@@ -21,8 +21,13 @@ import {
   type LayerCoverageState,
   unknownCoverage,
 } from "@/lib/firstEvent";
+// #320 item 4: a layer proven by a single span read "1 spans". Shared with step 2's readout, which
+// counts the same spans, so the two never drift apart on wording either. #329: the label also
+// carries the UNIT, because the account layer's count is rollup rows and not spans at all.
+import { provingCountLabel } from "@/lib/onboarding";
 
-const POLL_MS = 5000;
+/** Exported so the onboarding page's shared coverage poll runs on the same cadence (#320). */
+export const COVERAGE_POLL_MS = 5000;
 
 /** One row's badge. Wording is the developer-facing half of §7's honesty rule. */
 const STATE_COPY: Record<LayerCoverageState, { label: string; className: string }> = {
@@ -69,7 +74,7 @@ export function CoveragePanel({
       }
     };
     void tick();
-    const id = setInterval(tick, POLL_MS);
+    const id = setInterval(tick, COVERAGE_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -78,8 +83,14 @@ export function CoveragePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [poll, wired.join(",")]);
 
-  const covered = layers.filter((l) => l.state === "covered").length;
-  const unknown = layers.filter((l) => l.state === "unknown").length;
+  // With `poll` off the panel is a pure view of what its caller polled, so it renders the CURRENT
+  // prop rather than the copy `useState` captured at mount (#320). Without this the onboarding page
+  // reintroduced the very contradiction the ticket is about, from the other side: step 2 said "first
+  // trace received, 430,640 spans" while the panel below it, still holding its first render's
+  // answer, said "0/5 layers proven by a span".
+  const shown = poll ? layers : (initialLayers ?? layers);
+  const covered = shown.filter((l) => l.state === "covered").length;
+  const unknown = shown.filter((l) => l.state === "unknown").length;
 
   return (
     <section className="rounded-xl border border-edge bg-panel p-5">
@@ -92,7 +103,7 @@ export function CoveragePanel({
       </p>
 
       <ul className="space-y-2">
-        {layers.map((layer) => {
+        {shown.map((layer) => {
           const copy = STATE_COPY[layer.state];
           return (
             <li
@@ -104,11 +115,11 @@ export function CoveragePanel({
                 <div className="mt-0.5 text-xs text-muted">{layer.reason}</div>
               </div>
               <div className="flex shrink-0 items-center gap-3">
-                <span className="text-xs text-muted" title="spans proving this layer">
+                <span className="text-xs text-muted" title="the evidence proving this layer">
                   {layer.provingSpans === null ? (
                     <Blank reason={layer.reason} />
                   ) : (
-                    `${layer.provingSpans.toLocaleString()} spans`
+                    provingCountLabel(layer.layer, layer.provingSpans)
                   )}
                 </span>
                 <span
@@ -123,7 +134,9 @@ export function CoveragePanel({
       </ul>
 
       <div className="mt-4 border-t border-edge pt-3 text-xs text-muted">
-        {covered}/{layers.length} layers proven by a span
+        {/* #329: not "proven by a span" any more. Four layers are, and the account layer is
+            proven by attributed rollup rows, which the row itself now says in its own unit. */}
+        {covered}/{shown.length} layers proven
         {unknown > 0 ? `, ${unknown} could not be read` : ""}
       </div>
     </section>

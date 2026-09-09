@@ -12,10 +12,6 @@ import { GET as FeaturesGET } from "./features/route";
 import { GET as DataQualityGET } from "./data-quality/route";
 import { GET as EstimateGET } from "./estimate/route";
 import { GET as OnboardingGET, POST as OnboardingPOST } from "./onboarding/route";
-import {
-  GET as FirstTraceGET,
-  POST as FirstTracePOST,
-} from "./onboarding/first-trace/route";
 import { GET as GuardrailsGET, POST as GuardrailsPOST } from "./guardrails/route";
 import { GET as AttributionGET } from "./attribution/route";
 import { GET as CacGET } from "./cac/route";
@@ -129,12 +125,23 @@ describe("api routes", () => {
     expect(bad.status).toBe(400);
   });
 
-  it("POST /api/onboarding/first-trace marks the trace received", async () => {
-    const res = await FirstTracePOST();
-    const body = await json<{ received: boolean }>(res);
-    expect(body.received).toBe(true);
-    const poll = await json<{ received: boolean }>(await FirstTraceGET());
-    expect(poll.received).toBe(true);
+  // #329: first_trace is reported by the onboarding page off the coverage probe, flagged as an
+  // observation. It must be recorded WITHOUT a progress timestamp, because the probe cannot say
+  // when the trace arrived and a mirrored timestamp would be read as a measured duration.
+  it("POST /api/onboarding records a noticed first_trace without stamping progress", async () => {
+    const res = await OnboardingPOST(
+      new Request("http://test/x", {
+        method: "POST",
+        body: JSON.stringify({ stage: "first_trace", noticed: true }),
+      }),
+    );
+    const body = await json<{
+      event: { stage: string; noticed?: boolean } | null;
+      progress: Record<string, unknown>;
+    }>(res);
+    expect(body.event?.stage).toBe("first_trace");
+    expect(body.event?.noticed).toBe(true);
+    expect(body.progress).not.toHaveProperty("firstTraceAt");
   });
 
   it("GET /api/guardrails returns rules + refresh window", async () => {

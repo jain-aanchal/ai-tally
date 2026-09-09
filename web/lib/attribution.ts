@@ -20,8 +20,85 @@ export interface AttributionFilters {
   outcome: "conversion" | "positive_feedback" | "session_engaged" | null;
 }
 
+// -------------------------------------------------------------------------------------------
+// What the breakdown dimension actually is (#320, item 3).
+//
+// The rows are `gen_ai.system` values, and on a vector span that attribute is the vector vendor:
+// pinecone, weaviate, qdrant. The SDK is right to emit it that way (it is what the OTel semantic
+// convention says), and the page was wrong to call the resulting column "Provider", which reads as
+// "LLM provider" and made pinecone look like one.
+//
+// We relabel rather than filter, and the reason is the money. This is a cost-attribution view: the
+// cost column is real spend, and the totals and per-conversion ratios are aggregated upstream in
+// queryAttribution over the same span set. Dropping the vector rows in the presentation layer would
+// hide real money from a page whose whole job is to account for it, and would leave the visible
+// rows summing to less than the total beside them. Naming the dimension honestly costs nothing and
+// hides nothing. Scoping the QUERY to LLM systems is the real fix if the view should only ever be
+// about LLM spend, and that belongs in the ClickHouse layer, not here.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * `gen_ai.system` values that name a vector store rather than an LLM provider. Used only to tag a
+ * row in the UI, never to drop one: an unrecognised system is left untagged rather than guessed at.
+ */
+export const VECTOR_SYSTEMS: readonly string[] = [
+  "pinecone",
+  "weaviate",
+  "qdrant",
+  "chroma",
+  "milvus",
+  "pgvector",
+  "opensearch",
+  "elasticsearch",
+];
+
+/**
+ * `gen_ai.system` values we recognise as LLM providers. Same role as VECTOR_SYSTEMS: it names what
+ * we know, and says nothing about what we do not.
+ */
+export const LLM_SYSTEMS: readonly string[] = [
+  "openai",
+  "anthropic",
+  "azure_openai",
+  "azure",
+  "aws.bedrock",
+  "bedrock",
+  "vertex_ai",
+  "gcp.vertex_ai",
+  "google",
+  "gemini",
+  "cohere",
+  "mistral",
+  "groq",
+  "together",
+  "perplexity",
+  "deepseek",
+  "xai",
+  "ollama",
+];
+
+/**
+ * What kind of system this row names. Presentation only (#320).
+ *
+ * #329: an unrecognised system is "unknown", not "llm". It used to default to "llm", so a vector
+ * vendor nobody had added to the list yet was silently asserted to be an LLM provider by the model,
+ * on a page whose whole subject is which layer the money went to. Nothing renders a kind for
+ * "unknown" (the badge is for known vector stores), so the screen is unchanged: the difference is
+ * that the code no longer holds an assumption it cannot support.
+ */
+export function systemKind(system: string): "llm" | "vector" | "unknown" {
+  const s = system.trim().toLowerCase();
+  if (VECTOR_SYSTEMS.includes(s)) return "vector";
+  if (LLM_SYSTEMS.includes(s)) return "llm";
+  return "unknown";
+}
+
 export interface ProviderAttribution {
-  provider: string; // "openai" | "anthropic" | "unknown"
+  /**
+   * The span's `gen_ai.system`: an LLM provider on an LLM span, the vector vendor on a vector span.
+   * The field name is the wire shape and stays; the UI label is "System", not "Provider" (#320).
+   */
+  provider: string; // "openai" | "anthropic" | "pinecone" | "unknown" | ...
   sessions: number;
   conversions: number;
   costMicroUsd: MicroUSD;

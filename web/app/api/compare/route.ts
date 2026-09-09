@@ -12,6 +12,7 @@ import {
   queryReconcilerLastRun,
   queryReplayCandidates,
   type EvalCandidateRow,
+  type ReplayProjection,
 } from "@/lib/clickhouse";
 
 // CTO-114: minimum sample count before a candidate's pairwise-LLM-judge win-rate is shown as
@@ -28,6 +29,33 @@ const MIN_REPLAYED_SAMPLES = 50;
 // CTO-168: the current-model cost window queryCurrentModel reads (last 7 days). Used to derive the
 // `workload` label on the live path instead of shipping the fixture string.
 const WORKLOAD_WINDOW_DAYS = 7;
+
+// #320: the replay counts on every branch that has NOT run a replay. Null, not the fixture's
+// 4,200 traces / 87,400 available / $42.30, which the page rendered as though they were measured.
+// A count we did not take is unknown; the page's blank says so with the reason on hover.
+const NO_REPLAY_DIAGNOSTICS = {
+  samplesReplayed: null,
+  samplesAvailable: null,
+  replayCostMicroUsd: null,
+} as const;
+
+/**
+ * The replay corpus counts a projection actually measured (#329).
+ *
+ * These describe the replay CORPUS, not the candidate table, which is why they are derived
+ * separately from `replay_source`: a projection can exist on a branch that still ships fixture
+ * candidate rows, and nulling its counts there put a measured number behind a blank whose reason
+ * read "no cross-provider replay has run for this workload". A wrong reason on a blank is its own
+ * honesty failure, so whenever the projection exists we report what it counted.
+ */
+function replayDiagnostics(replay: ReplayProjection | null) {
+  if (!replay) return NO_REPLAY_DIAGNOSTICS;
+  return {
+    samplesReplayed: replay.per_candidate.reduce((s, c) => s + c.samples_replayed, 0),
+    samplesAvailable: replay.samples_available,
+    replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
+  };
+}
 
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
@@ -83,8 +111,20 @@ export async function GET(req: Request) {
       ...comparison,
       current: { ...comparison.current, qualityScore: null },
       candidates,
-      diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
-      replay_source: replay ? "replay" : "mock",
+      // #320: the fixture used to ship 4,200 / 87,400 / $42.30 here and the page printed them as
+      // measurements. #329: null is only right when there is nothing to count. A projection can
+      // come back with no incumbent behind it (a replay corpus is opted into per workload and does
+      // not need a current-model cost row), and those counts are real, so they are reported.
+      diagnostics: {
+        ...comparison.diagnostics,
+        ...replayDiagnostics(replay),
+        reconcilerLastRunMinutesAgo,
+      },
+      // #329: "mock" describes the candidate rows above, which are the fixture's on this branch
+      // whether or not a projection exists, because rescaling a candidate onto a monthly basis
+      // needs the incumbent's call volume and there is no incumbent here. Calling this "replay"
+      // told a consumer the cost table came from a replay it did not come from.
+      replay_source: "mock",
     });
   }
 
@@ -266,7 +306,10 @@ export async function GET(req: Request) {
     },
     candidates,
     recommendation,
-    diagnostics: { ...comparison.diagnostics, reconcilerLastRunMinutesAgo },
+    // #320: this branch has a live current model and rescaled-mock candidates, and no replay at
+    // all. It is the branch the issue was reported against: nine spans in the stack, "$42.30 /
+    // 4,200 traces replayed / 87,400 prod traces" on screen. All four counts are null now.
+    diagnostics: { ...comparison.diagnostics, ...NO_REPLAY_DIAGNOSTICS, reconcilerLastRunMinutesAgo },
     replay_source: "mock",
   });
 }

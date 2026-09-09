@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Server-only in-memory onboarding store backing the live first-trace detector and funnel sink.
+// Server-only in-memory onboarding store backing the activation funnel sink.
 //
-// In production these are control-plane rows + an ingest signal. In the prototype we keep a single
-// in-process record so the "waiting for first trace → received" transition is real and demonstrable
-// (the "Send a test trace" button stands in for the customer's first proxied request). State resets
-// on server restart — fine for a mock; `npm run dev/build/test` never need infra.
+// In production these are control-plane rows. In the prototype we keep a single in-process record
+// so the funnel is real and demonstrable. State resets on server restart, which is fine for a mock;
+// `npm run dev/build/test` never need infra.
+//
+// #329: there is no first-trace detector here any more, and no "Send a test trace" button behind
+// it. Whether a trace arrived is answered by the gateway coverage probe, which the onboarding page
+// polls directly, so the store no longer keeps a first-trace timestamp it had no way to measure.
 
 import {
   type FunnelEvent,
@@ -24,13 +27,17 @@ function freshState(): StoreState {
     progress: {
       signedUpAt: Date.now(),
       copiedConfigAt: null,
-      firstTraceAt: null,
       firstDashboardAt: null,
     },
     funnel: [{ stage: "signed_up", at: Date.now() }],
+    // #320: these are placeholders, not a provisioned key and endpoint, and they used to render in
+    // step 1 as though they were the tenant's own. The provisioning path is control-plane work; in
+    // the meantime the values carry `isExample` so every surface that shows them says what they are
+    // rather than presenting an invented key as fact (CLAUDE.md, honest under uncertainty).
     creds: {
-      tenantKey: "tk_demo_3f9c2a7b",
-      proxyBaseUrl: "https://proxy.ai-tally.dev/v1",
+      tenantKey: "tk_example_replace_me",
+      proxyBaseUrl: "https://proxy.example.ai-tally.dev/v1",
+      isExample: true,
     },
   };
 }
@@ -54,16 +61,23 @@ export function getFunnel(): FunnelEvent[] {
   return [...state().funnel];
 }
 
-export function recordFunnel(stage: FunnelStage): FunnelEvent {
-  const ev: FunnelEvent = { stage, at: Date.now() };
+/**
+ * Record a funnel stage.
+ *
+ * `noticed` marks a stage we observed after the fact rather than timed (#329). The onboarding page
+ * posts first_trace that way, off the coverage probe: the stage is real, the moment is only when we
+ * spotted it, so the event carries the flag and is never mirrored onto a progress timestamp that
+ * would then be read as a measured duration. A stage is recorded once; later reports are ignored.
+ */
+export function recordFunnel(stage: FunnelStage, opts: { noticed?: boolean } = {}): FunnelEvent {
   const s = state();
+  const ev: FunnelEvent = { stage, at: Date.now(), ...(opts.noticed ? { noticed: true } : {}) };
   s.funnel.push(ev);
-  // Mirror the stage onto progress timestamps (first occurrence wins).
+  // Mirror the stage onto progress timestamps (first occurrence wins). Only stages the page itself
+  // performs are mirrored; a noticed stage has no measured time to mirror.
+  if (opts.noticed) return ev;
   if (stage === "copied_config" && s.progress.copiedConfigAt === null) {
     s.progress.copiedConfigAt = ev.at;
-  }
-  if (stage === "first_trace" && s.progress.firstTraceAt === null) {
-    s.progress.firstTraceAt = ev.at;
   }
   if (stage === "first_dashboard" && s.progress.firstDashboardAt === null) {
     s.progress.firstDashboardAt = ev.at;
@@ -71,10 +85,9 @@ export function recordFunnel(stage: FunnelStage): FunnelEvent {
   return ev;
 }
 
-/** The "Send a test trace" action — stands in for the customer's first proxied request. */
-export function markFirstTrace(): OnboardingProgress {
-  if (state().progress.firstTraceAt === null) recordFunnel("first_trace");
-  return getProgress();
+/** Whether this stage has already been recorded, so a repeated report does not pile up events. */
+export function hasFunnelStage(stage: FunnelStage): boolean {
+  return state().funnel.some((e) => e.stage === stage);
 }
 
 /** Test-only: reset the in-memory store. */
