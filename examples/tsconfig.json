@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Typecheck scope for the standalone example scripts (#341).
+//
+// These files sat outside every CI check: web/tsconfig.json includes only paths under web/, and
+// `npm run typecheck` there is the repo's only TypeScript check, so nothing compiled
+// examples/vercel-chatbot/scripts/*.ts. That is not hypothetical. backfill-spans.ts has carried two
+// real bugs that review caught and CI could not (#315: a 503 {"status":"retry"} treated as fatal,
+// losing a run at 450,000 of 512,056 spans; #324: a bounded per-batch retry budget that turned a
+// gateway-down run into roughly four days while the progress lines counted undelivered spans as
+// posted).
+//
+// The options below describe how these files actually EXECUTE, which is `pnpm exec tsx <file>`
+// (infra/Makefile chatbot-demo-backfill, examples/vercel-chatbot/run.sh), not a bundle:
+//
+//   * `module`/`moduleResolution: bundler` matches tsx's esbuild-based resolution, which is what
+//     lets `import { postEmbeddingSpan } from "../app/lib/tally"` resolve without a file extension.
+//     Node's own ESM resolver would reject that, and "node16" here would report an error the
+//     runtime does not have.
+//   * `isolatedModules` is the truth about tsx: it transpiles file by file and erases types without
+//     a type checker, so anything that needs cross-file type information at emit time is a bug.
+//   * `lib` is ES only and `types` is node only. Inheriting web's DOM lib would let a browser-only
+//     API typecheck happily in a script that runs under node and would crash there.
+//
+// `typeRoots` points into web/node_modules because that is where the repo's single TypeScript
+// toolchain lives; the CI job runs this config from web/ after its `npm ci`. Giving examples/ its
+// own package.json and lockfile would add a second dependency surface to keep current for two
+// scripts, which buys nothing that this line does not.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "typeRoots": ["../web/node_modules/@types"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true
+  },
+  // The vendored Next.js app under vercel-chatbot/app is upstream's, with its own toolchain and its
+  // own dependencies, and is deliberately not checked here. Only the scripts we wrote are.
+  "include": ["vercel-chatbot/scripts/**/*.ts"]
+}
