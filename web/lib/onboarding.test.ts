@@ -17,7 +17,6 @@ const creds = { tenantKey: "tk_test_123", proxyBaseUrl: "https://proxy.example/v
 
 function progress(over: Partial<OnboardingProgress> = {}): OnboardingProgress {
   return {
-    signedUpAt: 1_000_000,
     copiedConfigAt: null,
     firstDashboardAt: null,
     ...over,

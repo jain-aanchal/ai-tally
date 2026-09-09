@@ -3,6 +3,8 @@ import { apiGet } from "@/lib/api";
 import type { ForecastPayload } from "@/lib/burndown";
 import { queryFirstEventSeen, queryPriorMonthSpend } from "@/lib/clickhouse";
 import { filtersToQueryString, parseFilters } from "@/lib/filters";
+import { resolveTenantId } from "@/lib/getTenant";
+import { hasFunnelStage, recordFunnel } from "@/lib/onboardingStore";
 import { searchParamsFromRecord } from "@/lib/searchParams";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import type { MicroUSD } from "@/lib/types";
@@ -36,6 +38,18 @@ export default async function HomePage({
     // funnel stage. Its `unknown` state is carried through, not folded into "nothing yet".
     queryFirstEventSeen(),
   ]);
+  // #358: the one place `first_dashboard` can honestly be recorded. Nothing anywhere posted it, so
+  // the onboarding checklist maxed out at 3 of 4 forever. The stage is "see your first dashboard",
+  // and this IS the dashboard being served with the tenant's own data behind it, so the moment is
+  // measured rather than noticed and the timestamp means what it says. The `connected` guard is
+  // load-bearing: rendering Home while the probe says `waiting` or `unknown` proves nothing about
+  // whether they ever saw data, and the store keeps only the first occurrence.
+  if (firstEvent === "connected") {
+    const tenantId = await resolveTenantId();
+    if (!hasFunnelStage(tenantId, "first_dashboard")) {
+      recordFunnel(tenantId, "first_dashboard");
+    }
+  }
   const forecast: ForecastPayload = budget.forecast;
   const priorMonth: MicroUSD | null = priorMonthMicroUsd;
   return (

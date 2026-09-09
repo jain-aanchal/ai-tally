@@ -110,10 +110,13 @@ describe("api routes", () => {
 
   it("GET /api/onboarding returns progress + creds (no OpenAI key leaked)", async () => {
     const body = await json<{
-      progress: { signedUpAt: number };
+      progress: Record<string, unknown>;
       creds: { tenantKey: string; proxyBaseUrl: string };
     }>(await OnboardingGET());
-    expect(body.progress.signedUpAt).toBeGreaterThan(0);
+    // #358: no signedUpAt. It was the moment the in-process record was built (server boot on the
+    // old process-global store), rendered as though it were the tenant's signup.
+    expect(body.progress).not.toHaveProperty("signedUpAt");
+    expect(body.progress.copiedConfigAt).toBeNull();
     expect(body.creds.tenantKey).toBeTypeOf("string");
     expect(body.creds.proxyBaseUrl).toContain("/v1");
   });

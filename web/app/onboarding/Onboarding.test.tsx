@@ -19,7 +19,6 @@ const creds: TenantProxyCredentials = {
 };
 
 const progress: OnboardingProgress = {
-  signedUpAt: 1_000_000,
   copiedConfigAt: null,
   firstDashboardAt: null,
 };
