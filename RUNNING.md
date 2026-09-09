@@ -841,6 +841,8 @@ Knobs:
 |---|---|
 | `Database tally does not exist` | Gateway pointed at the wrong DB. Use `TALLY_CLICKHOUSE_DB=default` (the compose gateway already does). |
 | Dashboard shows the **"mock data"** badge | A page's ClickHouse query failed and fell back to mock. Check `make logs` and that step 3's count is non-zero. |
+| `relation "tenant_bq_export_config" does not exist` (or `bq_export_watermarks`, `tenant_athena_export_config`, `athena_export_watermarks`) | Those four migrations were never mounted into initdb, so on a stack first booted before CTO-317 the tables are absent and the BigQuery / Athena export sinks fail on their first query. The mounts are fixed, but `docker-entrypoint-initdb.d` only fires on a first boot against an empty volume, so an existing stack needs them applied by hand. See the replay recipe in `db/postgres/README.md`; every migration is `IF NOT EXISTS`, so it is safe over a populated database. |
+| A control-plane table is missing after `git pull` | Same cause as the row above, and the same fix. New migrations reach a running stack only by hand, never by restarting it. `db/postgres/README.md` has the loop that replays the whole directory. |
 | Dashboard empty despite ingested rows | Tenant mismatch. The UI reads the tenant **UUID**, not the name, so spans must be tagged with the UUID: re-send with `tenant_id` set to the UUID from step 3. With no Clerk account, point the web app at that same UUID via `TALLY_DEV_TENANT` (the dev escape hatch); `TALLY_TENANT_ID` is no longer read by anything. |
 
 ## Make targets (run from `infra/`)

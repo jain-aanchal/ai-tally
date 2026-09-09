@@ -36,7 +36,7 @@ services:
     image: clickhouse/clickhouse-server:24.8
     environment:
       # NOTE: the official image runs /docker-entrypoint-initdb.d/*.sql against the `default`
-      # database, and our DDL is unqualified — so all tables live in `default`. We use `default`
+      # database, and our DDL is unqualified, so all tables live in `default`. We use `default`
       # throughout rather than create a confusing empty `tally` db.
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-tally}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
@@ -50,7 +50,7 @@ services:
       - clickhouse-data:/var/lib/clickhouse
       # Tiered storage policy: defines the `warm` volume that otel_spans' TTL moves parts to.
       - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
-      # DDL is applied alphabetically on first boot — numbered prefixes pin dependency order:
+      # DDL is applied alphabetically on first boot; numbered prefixes pin dependency order:
       # spans table must exist before the rollup MVs that target it.
       - ../db/clickhouse/otel_spans.sql:/docker-entrypoint-initdb.d/01_otel_spans.sql:ro
       - ../db/clickhouse/rollups.sql:/docker-entrypoint-initdb.d/02_rollups.sql:ro
@@ -82,11 +82,26 @@ services:
       - ../db/postgres/0002_tenant_connectors.sql:/docker-entrypoint-initdb.d/0002_tenant_connectors.sql:ro
       - ../db/postgres/0003_tenant_stripe_config.sql:/docker-entrypoint-initdb.d/0003_tenant_stripe_config.sql:ro
       - ../db/postgres/0004_tenant_replay_config.sql:/docker-entrypoint-initdb.d/0004_tenant_replay_config.sql:ro
+      # Two migrations share the number 0005. Deliberately NOT renumbered: both files have been
+      # applied to real installs under these names, and nothing here tracks applied migrations, so
+      # a rename would leave every operator with a by-hand record that matches no filename in the
+      # repo. Distinct mount targets are what make initdb's order deterministic; the `0005a_`
+      # target does NOT sequence these two the way its name suggests. postgres:16 runs with
+      # LANG=en_US.utf8 and its entrypoint iterates a bash glob, and glibc collation ignores the
+      # underscore, so initdb applies `0005a_tenant_eval_config.sql` BEFORE `0005_cac_periods.sql`
+      # (a LC_ALL=C sort orders them the other way). Harmless here because the two tables are
+      # independent, but do not use an `a` suffix to order a DEPENDENT pair: it would sequence them
+      # backwards on a fresh boot. See db/postgres/README.md (CTO-317).
       - ../db/postgres/0005_cac_periods.sql:/docker-entrypoint-initdb.d/0005_cac_periods.sql:ro
       - ../db/postgres/0005_tenant_eval_config.sql:/docker-entrypoint-initdb.d/0005a_tenant_eval_config.sql:ro
       - ../db/postgres/0006_tenant_guardrails.sql:/docker-entrypoint-initdb.d/0006_tenant_guardrails.sql:ro
       - ../db/postgres/0007_tenant_integration_runs.sql:/docker-entrypoint-initdb.d/0007_tenant_integration_runs.sql:ro
       - ../db/postgres/0008_reconciliation_runs.sql:/docker-entrypoint-initdb.d/0008_reconciliation_runs.sql:ro
+      # BigQuery export config + watermarks (CTO-154). These went unmounted from the day they
+      # landed, so on every fresh initdb both tables were simply absent and the export sink failed
+      # on its first query (CTO-317). Mounted now; an already-running stack needs them by hand.
+      - ../db/postgres/0009_tenant_bq_export_config.sql:/docker-entrypoint-initdb.d/0009_tenant_bq_export_config.sql:ro
+      - ../db/postgres/0010_bq_export_watermarks.sql:/docker-entrypoint-initdb.d/0010_bq_export_watermarks.sql:ro
       - ../db/postgres/0011_tenant_compute_config.sql:/docker-entrypoint-initdb.d/0011_tenant_compute_config.sql:ro
       - ../db/postgres/0012_tenant_egress_config.sql:/docker-entrypoint-initdb.d/0012_tenant_egress_config.sql:ro
       - ../db/postgres/0013_cac_revenue_fields.sql:/docker-entrypoint-initdb.d/0013_cac_revenue_fields.sql:ro
@@ -98,6 +113,10 @@ services:
       - ../db/postgres/0014_tenant_feature_value_events.sql:/docker-entrypoint-initdb.d/0014_tenant_feature_value_events.sql:ro
       - ../db/postgres/0015_tenant_compute_config_gcp.sql:/docker-entrypoint-initdb.d/0015_tenant_compute_config_gcp.sql:ro
       - ../db/postgres/0016_tenant_vercel_config.sql:/docker-entrypoint-initdb.d/0016_tenant_vercel_config.sql:ro
+      # S3 / Athena export config + watermarks (CTO-160), the AWS analog of 0009 / 0010 above and
+      # unmounted for the same reason (CTO-317).
+      - ../db/postgres/0020_tenant_athena_export.sql:/docker-entrypoint-initdb.d/0020_tenant_athena_export.sql:ro
+      - ../db/postgres/0021_athena_export_watermarks.sql:/docker-entrypoint-initdb.d/0021_athena_export_watermarks.sql:ro
       # Revenue: which sources count (CTO-194) and the uploaded-snapshot manifest (CTO-198), plus
       # the account labels table (CTO-186). initdb only runs when the data directory is empty, so
       # on an already-running local stack these have to be applied by hand (`make psql`).

@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -33,6 +33,36 @@ down: ## Stop the stack (keep data volumes)
 
 nuke: ## Stop and wipe all data volumes (DDL re-applies on next up)
 	$(COMPOSE) down -v
+
+# Directory replayed by pg-migrate. Overridable so the failure stop below can be exercised
+# against a scratch directory without pointing psql at the real migration set.
+PG_MIGRATIONS_DIR := ../db/postgres
+
+pg-migrate: ## Apply db/postgres migrations to a RUNNING stack (initdb only fires on a fresh volume)
+	@# Same gap as ch-migrate below: the /docker-entrypoint-initdb.d mounts in docker-compose.yml
+	@# run ONLY on a first boot against an empty volume, so an already-running stack never picks up
+	@# a new migration. That is how 0009/0010/0011/0012/0015/0016 stayed unapplied for months
+	@# (CTO-317). Every file in db/postgres is idempotent (CREATE ... IF NOT EXISTS, ADD COLUMN IF
+	@# NOT EXISTS), so replaying the whole directory is a no-op over a populated database.
+	@#
+	@# PG_USER / PG_DB rather than a hardcoded `tally`: a dev running POSTGRES_USER=ai_tally would
+	@# otherwise get `FATAL: role "tally" does not exist` on every file in the set.
+	@#
+	@# ON_ERROR_STOP=1 stops psql inside one file; the `|| { ...; exit 1; }` is what stops the LOOP.
+	@# Without it a failure scrolls past the remaining files and the operator walks away from a
+	@# partially applied schema believing the replay succeeded.
+	@#
+	@# Replay order is LC_ALL=C, which is NOT initdb's order: postgres:16 runs its entrypoint glob
+	@# under LANG=en_US.utf8, where glibc collation ignores the underscore and sorts
+	@# 0005a_tenant_eval_config.sql BEFORE 0005_cac_periods.sql. The two 0005 tables are
+	@# independent, so both orders work; see db/postgres/README.md before adding a dependent pair.
+	@for f in $$(LC_ALL=C ls $(PG_MIGRATIONS_DIR)/*.sql); do \
+	  echo "  applying $$f"; \
+	  $(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U $(PG_USER) -d $(PG_DB) -q < $$f \
+	    || { echo ""; echo "FAILED on $$f - stopping. The schema is PARTIALLY applied: fix that"; \
+	         echo "file and re-run 'make pg-migrate' (replaying is idempotent)."; exit 1; }; \
+	done
+	@echo "Postgres migrations applied."
 
 # Canonical ClickHouse DDL, in the same dependency order compose mounts it into initdb.
 CH_DDL := ../db/clickhouse/otel_spans.sql ../db/clickhouse/rollups.sql \
@@ -202,7 +232,7 @@ ch: ## Open a ClickHouse SQL shell
 	$(COMPOSE) exec clickhouse clickhouse-client -u tally --password tally -d default
 
 psql: ## Open a Postgres shell
-	$(COMPOSE) exec postgres psql -U tally -d tally
+	$(COMPOSE) exec postgres psql -U $(PG_USER) -d $(PG_DB)
 
 gateway-shell: ## Shell into the gateway container
 	$(COMPOSE) exec gateway bash
