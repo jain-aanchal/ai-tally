@@ -1,0 +1,50 @@
+{
+  "family": "ai-tally-edge-proxy",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-ecs-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-workload",
+  "containerDefinitions": [
+    {
+      "name": "edge-proxy",
+      "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/ai-tally/edge-proxy:1.0.0",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8088, "protocol": "tcp", "name": "http" }
+      ],
+      "environment": [
+        { "name": "EDGE_PROXY_LISTEN", "value": ":8088" },
+        { "name": "EDGE_PROXY_UPSTREAM", "value": "https://api.openai.com" },
+        { "name": "EDGE_PROXY_PROVIDER", "value": "openai" },
+        { "name": "EDGE_PROXY_MODE", "value": "passthrough" },
+        { "name": "EDGE_PROXY_REQUIRE_TENANT", "value": "true" },
+        { "name": "EDGE_PROXY_UPSTREAM_TIMEOUT", "value": "10m" },
+        { "name": "EDGE_PROXY_SELF_HOSTED", "value": "false" },
+        { "name": "EDGE_PROXY_TELEMETRY_URL", "value": "REPLACE_GATEWAY_URL/v1/batches" },
+        { "name": "EDGE_PROXY_KEYS_URL", "value": "REPLACE_GATEWAY_URL/v1/edge/keys" }
+      ],
+      "secrets": [
+        { "name": "EDGE_PROXY_SERVICE_TOKEN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-gateway-service-token" }
+      ],
+      "dockerLabels": {
+        "com.ai-tally.no-container-healthcheck": "Deliberate (CTO-339). Do NOT add a healthCheck block here. The image is FROM scratch: it carries the static binary and CA roots and nothing else, so there is no /bin/sh for CMD-SHELL and no curl, wget or python for CMD. Any container health check fails every attempt, the task is killed as unhealthy, and the service cycles forever with no error that names the cause. Liveness is checked by the ALB target group against GET /healthz on 8088 instead (see edge-proxy.service.json and deploy/aws/README.md section 7A).",
+        "com.ai-tally.health-path": "/healthz"
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ai-tally-edge-proxy",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "edge-proxy",
+          "awslogs-create-group": "false"
+        }
+      }
+    }
+  ]
+}

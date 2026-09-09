@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags publish a semver-tagged image (CTO-334). The four test jobs run on a tag push too,
+    # so nothing is ever published from a commit whose suites were not green.
+    tags: ["v*"]
   pull_request:
+  # Lets an operator rebuild and republish the images for a ref without an empty commit, which
+  # matters the first time the ECR role exists and the last green merge predates it.
+  workflow_dispatch:
 
 jobs:
   python-sdk:
@@ -93,3 +99,189 @@ jobs:
         run: npm run build
         env:
           TALLY_DEV_TENANT: "00000000-0000-0000-0000-000000000000"
+
+  # CTO-334: publish container images with a provenance. Until this job existed, every deploy began
+  # with "build it on your laptop" and no running container could be traced back to a commit.
+  #
+  # Registries, and why both. GHCR is the public distribution channel: it is the registry
+  # `infra/edge-proxy/deploy/helm/edge-proxy/values.yaml` already pointed at, it needs no AWS account
+  # to pull from, and self-hosted installs are its audience. ECR is the deployment registry for our
+  # own ECS Fargate services: tasks pull it over a VPC endpoint with no NAT egress, and the execution
+  # role in `deploy/aws/ecs/iam/` already grants exactly that pull. Publishing to only one would
+  # leave the other half of the tree pointing at an artifact nothing produces, which is the bug this
+  # job closes.
+  #
+  # Architecture. Fargate ARM64 is cheaper per vCPU-hour than X86_64 and the edge proxy is
+  # deliberately kept warm, so the lever is worth pulling; the three task definitions under
+  # `deploy/aws/ecs/` are pinned to ARM64 to match. The job runs on GitHub's native ARM runners
+  # rather than emulating, because QEMU would make `next build` and the pip install unreasonably
+  # slow. The edge proxy is additionally published for amd64, because its Helm chart targets customer
+  # clusters that are mostly x86 and a stdlib-only Go binary cross-compiles for free.
+  images:
+    name: images
+    needs: [python-sdk, gateway, edge-proxy, web]
+    # Free for public repositories, and native for the arm64 images we ship (see above).
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+      # Required for the OIDC token exchanged for the ECR push role. No long-lived AWS access key
+      # exists in this repository and none should be added.
+      id-token: write
+    strategy:
+      # One image failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          # The gateway Dockerfile COPYs both the gateway and the SDK it depends on, so its build
+          # context is the repo root (the same as `infra/docker-compose.yml` uses).
+          - name: gateway
+            context: .
+            dockerfile: infra/gateway/Dockerfile
+            platforms: linux/arm64
+            ghcr: ai-tally-gateway
+            ecr: ai-tally/gateway
+          - name: edge-proxy
+            context: infra/edge-proxy
+            dockerfile: infra/edge-proxy/Dockerfile
+            platforms: linux/amd64,linux/arm64
+            ghcr: ai-tally-edge-proxy
+            ecr: ai-tally/edge-proxy
+          - name: web
+            context: web
+            dockerfile: web/Dockerfile
+            platforms: linux/arm64
+            ghcr: ai-tally-web
+            ecr: ai-tally/web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pull-request gate below diffs against the base commit, which a shallow clone lacks.
+          fetch-depth: 0
+
+      # When this runs, and why not always. Building three images for every push on every PR branch
+      # spends runner minutes on changes that cannot affect an image. So: always on a merge to main
+      # and on a release tag, which are the artifacts anyone deploys; on demand via
+      # workflow_dispatch; and on a pull request ONLY when that PR touches a Dockerfile, a
+      # .dockerignore or this workflow. That last case builds without pushing, so a Dockerfile change
+      # is proven buildable in review rather than after it lands on main.
+      - name: Decide whether to build and whether to push
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          IMAGE: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "push=true"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "push=false" >> "$GITHUB_OUTPUT"
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          if printf '%s\n' "$changed" | grep -Eq '(^|/)(Dockerfile|\.dockerignore)$|^\.github/workflows/ci\.yml$'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Build inputs changed; building $IMAGE without pushing."
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile or workflow change in this PR; skipping the $IMAGE image."
+          fi
+
+      # Tags, and why these. The commit SHA is the point: it is the one tag that cannot be moved, and
+      # it is what a task definition should pin, so every image gets it. `main` is additionally
+      # published on a merge so a chart or a compose file has a working default to pull; it moves, so
+      # production pins a SHA or a release instead. A `vX.Y.Z` git tag additionally publishes
+      # `X.Y.Z`, which is what the Helm chart's appVersion and the task definitions' readable pin
+      # refer to. No `latest`: that is the tag that makes a running container untraceable, which is
+      # the whole complaint here.
+      - name: Compute image tags
+        id: tags
+        if: steps.gate.outputs.build == 'true'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+          GHCR_REPO: ghcr.io/${{ github.repository_owner }}/${{ matrix.ghcr }}
+          ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          ECR_REPO: ${{ matrix.ecr }}
+        run: |
+          set -euo pipefail
+          suffixes="$SHA"
+          if [ "$REF_TYPE" = "tag" ] && [ "${REF_NAME#v}" != "$REF_NAME" ]; then
+            suffixes="$suffixes ${REF_NAME#v}"
+          elif [ "$REF_NAME" = "main" ]; then
+            suffixes="$suffixes main"
+          fi
+          out="$RUNNER_TEMP/image-tags"
+          : > "$out"
+          for s in $suffixes; do
+            printf '%s:%s\n' "$GHCR_REPO" "$s" >> "$out"
+            if [ -n "$ECR_REGISTRY" ]; then
+              printf '%s/%s:%s\n' "$ECR_REGISTRY" "$ECR_REPO" "$s" >> "$out"
+            fi
+          done
+          {
+            echo "tags<<TAGS_EOF"
+            cat "$out"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          cat "$out"
+
+      - name: Set up buildx
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # The workflow's own short-lived token, not a stored credential.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # OIDC only. `AWS_ECR_ROLE_ARN`, `AWS_ECR_REGISTRY` and `AWS_REGION` are repository *variables*,
+      # not secrets: a role ARN and a registry hostname are not credentials, and keeping them visible
+      # makes it auditable which role CI can assume. While they are unset the ECR half is skipped and
+      # the GHCR half still publishes, which is the state of the world until an operator creates the
+      # role (there is no IaC in this repository yet, CTO-335). See
+      # `deploy/aws/ecs/iam/github-actions-oidc-trust-policy.json` and its sibling policy for exactly
+      # what to create. There is deliberately no access-key fallback.
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: ai-tally-ci-${{ github.run_id }}
+
+      - name: Log in to ECR
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Report that ECR is not configured
+        if: steps.gate.outputs.build == 'true' && steps.gate.outputs.push == 'true' && vars.AWS_ECR_ROLE_ARN == ''
+        env:
+          IMAGE: ${{ matrix.name }}
+        run: |
+          echo "::notice::AWS_ECR_ROLE_ARN is unset, so $IMAGE is published to GHCR only."
+          echo "::notice::Create the OIDC role in deploy/aws/README.md section 1 to enable the ECR push."
+
+      - name: Build and push
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: ${{ steps.gate.outputs.push == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          # Provenance attestations wrap even a single-platform push in an index, which older pullers
+          # handle badly. The immutable SHA tag is the provenance that matters here.
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          # ignore-error so a cache-service hiccup degrades the build to slow rather than red. The
+          # image is the deliverable; the cache is an optimisation.
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }},ignore-error=true
