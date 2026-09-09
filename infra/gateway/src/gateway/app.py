@@ -2120,7 +2120,16 @@ async def provision_tenant(
 
     provisioner: TenantProvisioner = app.state.tenant_provisioner
     try:
-        result = provisioner.provision(clerk_org_id=clerk_org_id, name=name)
+        # CTO-359: on a worker thread, never inline on the event loop. `provision` is fully blocking
+        # (psycopg round trips, plus a key-provider mint that is two Secrets Manager calls under
+        # TALLY_HMAC_KEY_PROVIDER=kms, at botocore's tens-of-seconds default timeouts). Awaiting it
+        # inline stalled every other request on the worker: measured against the local stack, an
+        # unrelated /healthz went from 0.04s to 2.71s while one provision with a 3s mint was in
+        # flight. Clerk retries webhooks, so a Secrets Manager slowdown arrives as a burst of these,
+        # and the gateway that stops answering is the one taking the tenant's ingest.
+        result = await asyncio.to_thread(
+            provisioner.provision, clerk_org_id=clerk_org_id, name=name
+        )
     except ProvisionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyProviderUnavailableError as exc:
