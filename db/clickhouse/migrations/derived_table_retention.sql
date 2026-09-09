@@ -140,13 +140,13 @@ ALTER TABLE business_events MODIFY COLUMN RawPayload String CODEC(ZSTD(3)) TTL t
 ALTER TABLE replay_samples MODIFY TTL toDateTime(CapturedAt) + INTERVAL 30 DAY DELETE;
 ALTER TABLE replay_runs MODIFY TTL toDateTime(RanAt) + INTERVAL 30 DAY DELETE;
 
--- eval_runs is LAST on purpose, and it is the one statement here that may legitimately fail.
--- db/clickhouse/eval_runs.sql is neither mounted into docker-entrypoint-initdb.d nor listed in the
--- Makefile's CH_DDL, so a stack that has not applied it by hand simply has no eval_runs table, and
--- ClickHouse has no ALTER TABLE IF EXISTS to express that. Ordering it after everything else means
--- an UNKNOWN_TABLE here aborts nothing that matters: every other TTL above is already recorded.
--- If it fails and you do run the eval harness, apply db/clickhouse/eval_runs.sql first (its CREATE
--- TABLE now carries the same TTL inline) and re-run this file.
+-- eval_runs is LAST on purpose, and it is the one statement here that may still legitimately fail.
+-- CTO-360 mounted db/clickhouse/eval_runs.sql into docker-entrypoint-initdb.d and added it to the
+-- Makefile's CH_DDL, so a fresh stack has the table and a running one gets it from `make ch-migrate`.
+-- A stack created before that and never migrated still has no eval_runs, and ClickHouse has no
+-- ALTER TABLE IF EXISTS to express that. Ordering it after everything else means an UNKNOWN_TABLE
+-- here aborts nothing that matters: every other TTL above is already recorded. If it fails, run
+-- `make ch-migrate` (its CREATE TABLE carries the same TTL inline) and re-run this file.
 ALTER TABLE eval_runs MODIFY TTL toDateTime(JudgedAt) + INTERVAL 400 DAY DELETE;
 
 -- ============================================================================================
@@ -165,7 +165,6 @@ ORDER BY name
 FORMAT PrettyCompactMonoBlock;
 
 -- Any table in that list with an empty ttl_clause did not take the ALTER. The usual cause is that
--- the table does not exist on this install: eval_runs in particular is NOT mounted into
--- docker-entrypoint-initdb.d and is NOT in the Makefile's CH_DDL list, so a stack that never ran
--- the eval harness has no such table and its ALTER above will have failed. That gap predates this
--- change and is not fixed here.
+-- the table does not exist on this install. eval_runs used to be that case permanently, because it
+-- was in neither the compose mounts nor CH_DDL; CTO-360 added it to both, so the answer now is to
+-- run `make ch-migrate` and re-run this file.
