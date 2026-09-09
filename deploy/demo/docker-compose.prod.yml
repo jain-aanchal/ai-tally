@@ -61,6 +61,14 @@ services:
       # empty on the very first `up` (before seeding), where the dashboard errors loudly rather
       # than rendering a blank page for an unknown tenant.
       TALLY_DEV_TENANT: ${TALLY_DEV_TENANT:-}
+      # CTO-268: the explicit "yes, serve this with no authentication" opt-in. TALLY_DEV_TENANT does
+      # not only pin the tenant, it turns the dashboard's auth off completely, and this kit is the
+      # thing operators copy when standing up a REAL instance. So the web image refuses to boot on
+      # TALLY_DEV_TENANT alone in a production build; disabling auth for real takes this second
+      # variable too. The demo sets it deliberately (deploy.sh / reseed.sh, via pin_dashboard_tenant)
+      # because the data here is synthetic and Caddy basic auth is the access control. Do NOT carry
+      # this line into a deployment that serves real tenant data.
+      TALLY_ALLOW_INSECURE_NO_AUTH: ${TALLY_ALLOW_INSECURE_NO_AUTH:-}
       # Initiative 1 §6: the control-plane service token, the same secret the gateway reads as
       # TALLY_GATEWAY_SERVICE_TOKEN (the gateway picks it up from the base compose file and the
       # same .env, so the two cannot disagree). The gateway's gate is a no-op while the demo VM

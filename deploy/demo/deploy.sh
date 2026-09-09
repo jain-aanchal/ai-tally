@@ -81,13 +81,13 @@ make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${R
 
 # --- Point the dashboard at the tenant that was just seeded -------------------------------------
 # The UUID only exists after `make seed`, so the web container above started without it. Resolve it
-# now and recreate just the web service with TALLY_DEV_TENANT set. Exported so Compose interpolation
-# picks it up: a host env var wins over the same key in --env-file.
+# now and recreate just the web service with TALLY_DEV_TENANT set (plus the explicit no-auth opt-in
+# this kit deliberately takes; see pin_dashboard_tenant in lib-tenant.sh, CTO-268).
 echo "==> Resolving the demo tenant UUID"
 TENANT_UUID="$(resolve_tenant_uuid)"
 echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
-export TALLY_DEV_TENANT="${TENANT_UUID}"
-"${COMPOSE[@]}" up -d web
+echo "==> Pointing the dashboard at it (auth OFF: synthetic demo data behind Caddy basic auth)"
+pin_dashboard_tenant "${TENANT_UUID}"
 
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # The `make chatbot-demo-backfill` target runs on the HOST and POSTs to localhost:8080 - neither

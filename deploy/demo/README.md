@@ -97,6 +97,18 @@ Edit `deploy/demo/.env`:
   `deploy.sh` resolves it from Postgres, hands it to the backfill, and recreates the web service
   with it. If resolution ever fails, both scripts abort with the reason instead of falling back.
 
+- **This kit runs with the dashboard's authentication switched OFF, on purpose.** `TALLY_DEV_TENANT`
+  does not only pin a tenant: with it set there is no Clerk middleware, no `ClerkProvider`, and
+  every visitor is treated as an org admin who can mint, rotate and revoke API keys. That is fine
+  *here*: the data is synthetic, the host is separate, and Caddy basic auth is the access control.
+  It is a disaster on an instance holding real tenant data, and this kit is the most copyable thing
+  in the repo, so the web image now **refuses to boot** on `TALLY_DEV_TENANT` alone in a production
+  build. Turning auth off takes a second, deliberate variable, `TALLY_ALLOW_INSECURE_NO_AUTH=1`,
+  which `deploy.sh` and `reseed.sh` set for you (`pin_dashboard_tenant` in `lib-tenant.sh`) and
+  which every boot then warns about in the web container's logs. **If you are adapting this kit to
+  stand up a real instance, delete both variables and configure Clerk** (see `deploy/aws/README.md`
+  or `deploy/vercel/README.md`); do not carry them across.
+
 ### 4. Deploy
 
 ```
@@ -199,6 +211,14 @@ scripts themselves read the env vars, only these copy-paste one-liners are liter
 
 All three must show the same **UUID**. A `local-dev` (the name) in either of the last two means
 something bypassed `deploy.sh`; re-running `./deploy/demo/reseed.sh` re-resolves and repairs it.
+
+**The `web` container restarts in a loop and its logs say "REFUSES TO START".** The image was
+started with `TALLY_DEV_TENANT` set but without `TALLY_ALLOW_INSECURE_NO_AUTH`, so it stopped rather
+than serve with authentication disabled. That happens when something bypassed the scripts, typically
+a bare `docker compose up` with a stale `TALLY_DEV_TENANT` still exported in the shell. Re-run
+`./deploy/demo/deploy.sh` (or `./deploy/demo/reseed.sh`), which set both variables together. If you
+are adapting this kit to serve REAL data, that message is telling you the truth: unset both and
+configure Clerk instead.
 
 **A control-plane write from the dashboard returns 401.** Gateway auth is on and the two tiers hold
 different tokens. They come from the single `TALLY_GATEWAY_SERVICE_TOKEN` key in `.env`, so confirm

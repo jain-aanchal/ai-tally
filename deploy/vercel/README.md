@@ -71,6 +71,7 @@ fallback — the dashboard boots without any of them (it just renders the mock/`
 | `TALLY_GATEWAY_URL` | Ingest gateway base URL | `https://gateway.example.com` | Plain env |
 | `GATEWAY_SERVICE_TOKEN` | Bearer token on every gateway `/v1/tenant/*` call | `openssl rand -hex 32` output | **Encrypted / Sensitive** |
 | `TALLY_DEV_TENANT` | Dev escape hatch: pin a tenant, skip Clerk | unset in prod (demo: the tenant **UUID**) | Plain env |
+| `TALLY_ALLOW_INSECURE_NO_AUTH` | Explicit "serve with NO authentication" opt-in, required alongside `TALLY_DEV_TENANT` in production | unset (demo: `1`) | Plain env |
 
 `GATEWAY_SERVICE_TOKEN` must be the exact same string the gateway holds as
 `TALLY_GATEWAY_SERVICE_TOKEN`. The gateway rejects every control-plane call without it once
@@ -83,6 +84,19 @@ caller's Clerk organization. Set it only for a single-tenant demo, and set it to
 ClickHouse read filter (`TenantId = ...`) and spans are tagged with the UUID, so a name matches no
 rows and the dashboard renders empty with no error. The older `TALLY_TENANT_ID` variable is gone;
 delete it from any project that still has it.
+
+That is no longer only advice. `TALLY_DEV_TENANT` does not only pin a tenant: it disables the
+dashboard's authentication completely (the Clerk middleware becomes a pass-through, no
+`ClerkProvider` is mounted, and every visitor is treated as an org admin who can mint, rotate and
+revoke API keys). A Production deployment that boots with it set now **fails to start**: it prints
+what is wrong and exits non-zero before serving a request, so Vercel shows a failed deployment
+rather than a public URL exposing every number in the system. Serving with no authentication on
+purpose, the way the public demo does, takes a second variable that nobody sets by accident,
+`TALLY_ALLOW_INSECURE_NO_AUTH=1`, and then every boot logs a standing warning. The check is
+`web/lib/authGuard.ts`, run at startup from `web/instrumentation.ts`. The trigger is
+`NODE_ENV=production`, which on Vercel covers **Preview** deployments as well as Production; a
+preview URL is public too, so that is deliberate. `vercel dev` runs with `NODE_ENV=development` and
+is unaffected.
 
 **Optional UI/build knobs (`NEXT_PUBLIC_*` are inlined at build time — non-secret by definition):**
 

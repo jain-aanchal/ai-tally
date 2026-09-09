@@ -311,7 +311,8 @@ organization to a tenant UUID through the gateway control plane. So leave `web.c
 `gateway.config.requireApiKey=true` (the cloud default) so ingest requires
 `Authorization: Bearer <key>`. Seed keys with the gateway's `seed.py` against Cloud SQL.
 
-Two things follow from that, and both bite silently if you get them wrong:
+Three things follow from that. The first two bite silently if you get them wrong; the third
+stops the deployment dead, on purpose:
 
 - **Control-plane calls need the service token.** Every `/v1/tenant/*` request carries
   `Authorization: Bearer $TALLY_GATEWAY_SERVICE_TOKEN`, and with `requireApiKey` on the gateway
@@ -320,6 +321,17 @@ Two things follow from that, and both bite silently if you get them wrong:
   `GATEWAY_SERVICE_TOKEN`; both are wired here as Secret Manager references, so put a real value in
   the `ai-tally-gateway-service-token` secret (`openssl rand -hex 32`) and never a committed
   literal. A mismatch surfaces as a `401` on every dashboard control-plane write.
+
+- **The dashboard refuses to boot with the escape hatch on.** `TALLY_DEV_TENANT` does not only pin a
+  tenant, it turns the dashboard's authentication OFF completely: the Clerk middleware becomes a
+  pass-through, no `ClerkProvider` is mounted, and `canManage()` returns true for every visitor, so
+  API key mint / rotate / revoke is ungated too. Anyone with the URL sees every number in the system.
+  A production build started with it set therefore prints an explanation and exits non-zero before
+  it serves a single request, so the task crash-loops with the reason in its logs rather than coming
+  up wide open. Serving with no authentication on purpose (a public demo of synthetic data behind
+  access control you supply yourself) takes a second, deliberate variable as well,
+  `TALLY_ALLOW_INSECURE_NO_AUTH=1` / `web.config.allowInsecureNoAuth: "1"`, and then every boot logs
+  a standing warning. The check is `web/lib/authGuard.ts`, run from `web/instrumentation.ts`.
 
 - **If you do pin a tenant, pin the UUID.** `TALLY_DEV_TENANT` / `web.config.devTenant` is a
   single-tenant demo escape hatch, and its value is bound straight into the ClickHouse read filter

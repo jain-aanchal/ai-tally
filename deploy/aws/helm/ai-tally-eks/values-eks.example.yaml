@@ -57,3 +57,6 @@ web:
     # Empty: the tenant comes from the caller's Clerk org. To pin one for a demo, use its
     # UUID (`make seed` prints it), never the name `local-dev`.
     devTenant: ""
+    # CTO-268: leave empty. Setting devTenant without this turns auth off, and the web container
+    # refuses to boot rather than serve every number in the system to anyone with the URL.
+    allowInsecureNoAuth: ""

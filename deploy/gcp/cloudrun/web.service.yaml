@@ -41,6 +41,11 @@ spec:
             # never to a name: the value is bound into the ClickHouse read filter (TenantId = ...),
             # so a name matches no rows and renders an empty dashboard.
             - { name: TALLY_DEV_TENANT,     value: "" }
+            # CTO-268: setting TALLY_DEV_TENANT does not only pin a tenant, it disables the
+            # dashboard's authentication completely. The container REFUSES TO BOOT when it is set in
+            # a production build unless this second variable explicitly says that is intended. Leave
+            # it empty. "1" only for a public demo of synthetic data behind your own access control.
+            - { name: TALLY_ALLOW_INSECURE_NO_AUTH, value: "" }
             - { name: TALLY_CLICKHOUSE_URL, value: "REPLACE_CLICKHOUSE_URL" }
             - { name: TALLY_CLICKHOUSE_DB,  value: "default" }
             - { name: TALLY_CLICKHOUSE_USER, value: "tally" }

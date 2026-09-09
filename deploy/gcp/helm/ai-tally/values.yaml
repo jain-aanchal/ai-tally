@@ -128,6 +128,11 @@ web:
     # single-tenant demo set the tenant UUID (`make seed` prints it), never the name
     # `local-dev`: this is bound into the ClickHouse read filter and a name matches no rows.
     devTenant: ""
+    # CTO-268: the explicit "yes, serve this with NO AUTHENTICATION" opt-in. devTenant alone in a
+    # production build makes the web container refuse to boot, because setting it turns auth off
+    # completely (no Clerk middleware, no ClerkProvider, every visitor an org admin). Leave EMPTY.
+    # "1" only for a public demo: synthetic data, behind access control you supply yourself.
+    allowInsecureNoAuth: ""
     clickhouseDb: default
     clickhouseUser: tally
     dashboardRefreshMs: "5000"   # NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS

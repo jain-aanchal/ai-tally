@@ -64,6 +64,25 @@ ERR
   printf '%s\n' "${uuid}"
 }
 
+# Export the two variables the demo's web tier needs, and recreate the web service with them.
+#
+# WHY TWO (CTO-268): TALLY_DEV_TENANT pins the tenant AND turns the dashboard's authentication off
+# entirely (no Clerk middleware, no ClerkProvider, every visitor an org admin). That is a deliberate
+# choice for this kit, which serves SYNTHETIC data behind Caddy basic auth on its own host. It is a
+# disaster on a real instance, and this kit is the thing people copy. So the web tier now REFUSES TO
+# BOOT on TALLY_DEV_TENANT alone in a production build, and serving with no auth takes a second,
+# unmistakable variable that nobody sets by accident. The demo says it out loud, here, once, so both
+# scripts agree and so an operator reading this file sees exactly what the demo is opting into.
+#
+# Takes the resolved tenant UUID. Exported (not passed in --env-file) so Compose interpolation picks
+# them up: a host env var wins over the same key in the env file.
+pin_dashboard_tenant() {
+  local tenant_uuid="$1"
+  export TALLY_DEV_TENANT="${tenant_uuid}"
+  export TALLY_ALLOW_INSECURE_NO_AUTH=1
+  "${COMPOSE[@]}" up -d web
+}
+
 # Fail before the stack is touched when gateway auth is on but no service token was supplied.
 #
 # WHY up front (Initiative 1, §6): with TALLY_REQUIRE_API_KEY on and TALLY_GATEWAY_SERVICE_TOKEN
