@@ -2,15 +2,24 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "EcrPull",
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrPullThreeRepositories",
       "Effect": "Allow",
       "Action": [
-        "ecr:GetAuthorizationToken",
         "ecr:BatchCheckLayerAvailability",
         "ecr:GetDownloadUrlForLayer",
         "ecr:BatchGetImage"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/gateway",
+        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/edge-proxy",
+        "arn:aws:ecr:REGION:ACCOUNT:repository/ai-tally/web"
+      ]
     },
     {
       "Sid": "CloudWatchLogs",
@@ -33,6 +42,17 @@
         "arn:aws:secretsmanager:*:*:secret:ai-tally-openai-api-key*",
         "arn:aws:secretsmanager:*:*:secret:ai-tally-anthropic-api-key*"
       ]
+    },
+    {
+      "Sid": "SecretsInjectionKmsDecrypt",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:REGION:ACCOUNT:key/REPLACE_KMS_KEY_ID",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.REGION.amazonaws.com"
+        }
+      }
     }
   ]
 }

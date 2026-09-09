@@ -27,9 +27,31 @@ class Settings(BaseSettings):
     # Postgres (control plane): used for API-key auth lookups.
     postgres_dsn: str = "postgresql://tally:tally@localhost:5432/tally"
 
+    # Deployment environment (CTO-268, gateway half). The gateway had NO notion of one, which is why
+    # PR #345 could guard the web tier's auth escape hatch (NODE_ENV=production is free there) and
+    # deliberately deferred the gateway's. This is that notion, and it exists for exactly one
+    # purpose today: `gateway.auth_guard` refuses to boot a deployment with authentication off
+    # unless the operator says TALLY_ALLOW_INSECURE_NO_AUTH. `development` (the default) keeps
+    # `make up`, CI and pytest working with no new variable; `production` / `staging` turn the guard
+    # on; an unrecognized value is treated as a deployment, because a typo in a manifest is likelier
+    # than a laptop and that is the fail-closed direction. Deployment manifests must set it.
+    env: str = "development"
+    # Explicit operator consent to run a DEPLOYED gateway with authentication off. Same variable
+    # name and same truthy spelling the web tier uses (web/lib/authGuard.ts), on purpose: one
+    # sentence covers both tiers of one deployment rather than two unrelated spellings.
+    allow_insecure_no_auth: str = ""
+
     # Auth. When false, the gateway trusts the batch's tenant_id (local dev). When true, requests
     # must carry `Authorization: Bearer <key>` whose SHA-256 is registered in api_keys.
     require_api_key: bool = False
+
+    # Browser origins allowed to read a gateway response (CTO-337). Comma-separated exact origins
+    # (`https://app.example.com,https://staging.example.com`); a wildcard is REFUSED at boot. Empty
+    # (the default) means the local dashboard origins, so `make up` needs no configuration. See
+    # gateway/cors.py for why the policy is an allowlist, why credentials mode stays off, and why
+    # the preflight cache is short. Local compose never needs this: the dashboard calls the gateway
+    # from its own server process, so no browser is involved there at all.
+    cors_allowed_origins: str = ""
 
     # Per-org HMAC key-material provider (Initiative 2, §3.2). Selects HOW the provisioner mints, and
     # the /v1/tenant/hmac-key bootstrap reads back, a tenant's active HMAC key set:
@@ -45,6 +67,18 @@ class Settings(BaseSettings):
     # across restarts (that is the point), so it must be overridden in any shared/staging environment
     # and is NEVER used by the ``kms`` provider. Not a production key.
     hmac_local_root_secret: str = "tally-local-dev-hmac-root-secret-do-not-use-in-prod"
+    # AWS Secrets Manager settings for the `kms` provider (CTO-336). Only the NAME PREFIX, an
+    # optional customer-managed KMS key id and a region live here: no credential and no key material.
+    # The client resolves the ECS task role / IRSA / instance profile through boto3's default chain.
+    # The prefix is what the IAM policy scopes on (deploy/aws/ecs/iam/task-role-policy.json), so
+    # changing it means changing that policy too; keep it short, because the minted reference
+    # (secret ARN + version selector) has to fit the length-bounded CHECK on
+    # tenants.hash_salt_kek_ref.
+    hmac_secrets_name_prefix: str = "ai-tally/tenant-hmac/"
+    hmac_secrets_kms_key_id: str = ""
+    # Empty means "resolve from the AWS default chain" (AWS_REGION / config / instance metadata),
+    # matching how the S3 replay backend treats its region.
+    hmac_secrets_region: str = ""
 
     # Control-plane service token (Initiative 1, §6). The web server is the ONLY legitimate caller of
     # the control-plane endpoints (`/v1/tenant/*`); it authenticates with this server-only shared

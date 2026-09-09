@@ -20,7 +20,7 @@ from gateway.app import app
 from gateway.config import get_settings
 from gateway.tenant_api_keys import ApiKeyMeta, MintedKey
 from gateway.tenant_budgets import Budget
-from gateway.tenant_provisioning import ProvisionResult
+from gateway.tenant_provisioning import KeyProviderUnavailableError, ProvisionResult
 
 TENANT_UUID = "8f14e45f-ceea-467a-9a3c-2f0e4d1b7c60"
 SERVICE_TOKEN = "svc-secret-token"
@@ -166,6 +166,28 @@ def test_provision_is_idempotent() -> None:
         second = r2.json()
         assert second["created"] is False
         assert second["tenant_id"] == first["tenant_id"]
+
+
+def test_provision_reports_503_when_the_key_provider_is_unavailable() -> None:
+    # CTO-336. Secrets Manager unreachable, or the task role missing the grant: the request was
+    # fine, so this is a 503 and not a 422, no tenant was created, and the response carries no
+    # invented identifier. Clerk retries the webhook and provisioning is idempotent, so the retry
+    # succeeds once the cause is fixed.
+    class _DeadProvisioner(FakeProvisioner):
+        def provision(self, *, clerk_org_id, name, region="auto"):
+            raise KeyProviderUnavailableError("Secrets Manager create_secret failed")
+
+    with _client(auth_on=True) as c:
+        app.state.tenant_provisioner = _DeadProvisioner()
+        r = c.post(
+            "/v1/tenant/provision",
+            json={"data": {"id": "org_dead", "name": "Dead Co"}},
+            headers=_svc_headers(),
+        )
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert "tenant_id" not in body
+    assert "key provider unavailable" in body["detail"]
 
 
 def test_provision_rejects_without_service_token() -> None:

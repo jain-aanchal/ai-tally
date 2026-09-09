@@ -24,6 +24,13 @@ gcs = [
 s3 = [
     "boto3>=1.34",
 ]
+# AWS Secrets Manager HMAC key provider (CTO-336). Only needed by a deployment that sets
+# TALLY_HMAC_KEY_PROVIDER=kms; `SecretManagerKeyProvider` lazy-imports boto3 at construction, so the
+# gateway imports and boots fine without this extra on the default `local` provider. The test suite
+# injects a fake client and needs neither this extra nor an AWS account.
+secrets = [
+    "boto3>=1.34",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6,<0.16",

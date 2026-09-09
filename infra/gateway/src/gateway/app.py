@@ -148,10 +148,17 @@ from gateway.tenant_api_keys import (
     TenantApiKeyStore,
     TenantNotFound as ApiKeyTenantNotFound,
 )
+from gateway.auth_guard import assert_auth_config
+from gateway.cors import install_cors
 from gateway.tenant_connectors import ALLOWED_LAYERS, TenantConnectorStore
 from gateway.edge_keys import EdgeKeyStore
 from gateway.tenant_hmac_key import HmacKeyUnavailableError, TenantHmacKeyStore
-from gateway.tenant_provisioning import ProvisionError, TenantProvisioner, build_key_provider
+from gateway.tenant_provisioning import (
+    KeyProviderUnavailableError,
+    ProvisionError,
+    TenantProvisioner,
+    build_key_provider,
+)
 from gateway.tenant_eval import TenantEvalStore
 from gateway.tenant_feature_value_events import TenantFeatureValueEventStore
 from gateway.tenant_identity import TenantIdentityResolver
@@ -278,6 +285,12 @@ async def lifespan(app: FastAPI):
     # Configure logging first so the startup INFO line below (and every other gateway logger.info)
     # is captured rather than dropped by uvicorn's WARNING-only root (CTO-218).
     _configure_logging(settings.log_level)
+    # Fail CLOSED at boot (CTO-268, gateway half): TALLY_REQUIRE_API_KEY=false turns authentication
+    # off for ingest AND for the control plane, so a deployed gateway may not start that way without
+    # the operator's explicit TALLY_ALLOW_INSECURE_NO_AUTH. Runs FIRST, before any store is built:
+    # the point is that the process never serves, and the message is the only useful output. See
+    # gateway/auth_guard.py for why the deployment-environment notion had to be introduced here.
+    assert_auth_config(settings)
     # Fail CLOSED at boot (Initiative 1 §6): if auth is required but no control-plane service token is
     # configured, the /v1/tenant/* gate would have nothing to check and every control-plane endpoint
     # would be unauthenticated. Refuse to start rather than come up wide open.
@@ -595,6 +608,17 @@ async def _in_flight_gauge(request: Request, call_next: Any) -> Any:
     finally:
         if is_ingest:
             app.state.in_flight = max(0, getattr(app.state, "in_flight", 1) - 1)
+
+
+# CTO-337: cross-origin policy, installed AFTER the middleware above so it is the OUTERMOST layer
+# (``add_middleware`` inserts at the front of the stack, so the last one added runs first). That
+# ordering matters twice: a preflight OPTIONS is answered without touching the routes underneath,
+# and an error response still carries the CORS headers a browser needs to report the real status
+# instead of an opaque network failure. Configured by TALLY_CORS_ALLOWED_ORIGINS, defaulting to the
+# local dashboard origins; a wildcard is refused here, at import, rather than served. Read at import
+# because the middleware stack is built once per process, which is also when a 12-factor env var is
+# already fixed; ``gateway.cors.resolve_allowed_origins`` holds the decision so it stays testable.
+_CORS_ORIGINS = install_cors(app, get_settings())
 
 
 def _parse_batch(payload: dict[str, Any]) -> BatchRequest:
@@ -2099,6 +2123,16 @@ async def provision_tenant(
         result = provisioner.provision(clerk_org_id=clerk_org_id, name=name)
     except ProvisionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyProviderUnavailableError as exc:
+        # CTO-336. The per-org HMAC key set could not be minted (Secrets Manager unreachable, or the
+        # task role lacks the grant). No tenant row was written and none will be: a tenant that
+        # cannot hash its identifiers must not exist, and a locally-derived key would be a fabricated
+        # answer that looks valid. 503, not 422: the caller sent nothing wrong. Clerk retries the
+        # webhook, and provisioning is idempotent, so the retry succeeds once the cause is fixed.
+        logger.error("provision failed: HMAC key provider unavailable (%s)", exc)
+        raise HTTPException(
+            status_code=503, detail="tenant key provider unavailable; provisioning was not performed"
+        ) from exc
     return JSONResponse(result.as_dict(), status_code=200)
 
 
@@ -2262,6 +2296,14 @@ def get_tenant_hmac_key(
     except HmacKeyUnavailableError as exc:
         # Honest under uncertainty: no fabricated bytes. The SDK degrades to unattributed (§3.3).
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyProviderUnavailableError as exc:
+        # CTO-336. "We could not ask the key store" is a different answer from "there is no key
+        # here", and answering 404 for it would tell the SDK to give up permanently on a transient
+        # outage. 503 says retryable, and still returns no bytes.
+        logger.error("hmac-key fetch failed: key provider unavailable (%s)", exc)
+        raise HTTPException(
+            status_code=503, detail="hmac key provider unavailable; no key material was returned"
+        ) from exc
     # No log line here: the only interesting thing to report is the material, which must not be
     # recorded. The access log may keep the request line; the body never appears in a log.
     return JSONResponse(material.as_dict(), status_code=200)

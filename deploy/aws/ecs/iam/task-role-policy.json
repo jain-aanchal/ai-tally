@@ -11,9 +11,42 @@
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::my-org-ai-tally-replay",
-        "arn:aws:s3:::my-org-ai-tally-replay/*"
+        "arn:aws:s3:::REPLACE_REPLAY_BUCKET",
+        "arn:aws:s3:::REPLACE_REPLAY_BUCKET/*"
       ]
+    },
+    {
+      "Sid": "TenantHmacSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:UpdateSecretVersionStage",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:ai-tally/tenant-hmac/*"
+    },
+    {
+      "Sid": "SecretsManagerKmsUse",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT:key/REPLACE_KMS_KEY_ID",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.REGION.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AssumeTenantConnectorRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/ai-tally-connector-*"
     },
     {
       "Sid": "CostExplorerRead",
