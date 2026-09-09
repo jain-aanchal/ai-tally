@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copy to terraform.tfvars (gitignored) and fill in. Nothing here is a secret: every value is a
+# name, an id or a hostname. Secret VALUES are written to Secrets Manager out of band, never here,
+# because a .tfvars file becomes state and state is readable by anyone who can read the bucket.
+
+aws_region         = "us-east-1"
+availability_zones = ["us-east-1a", "us-east-1b"]
+
+# Globally unique. Convention: <account-id>-ai-tally-replay.
+replay_bucket_name = "123456789012-ai-tally-replay"
+
+# arm64 images. CI publishes a SHA tag per merge; pin one.
+gateway_image    = "123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-tally/gateway:0000000"
+edge_proxy_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/ai-tally/edge-proxy:0000000"
+
+# From the ClickHouse Cloud console. Terraform does not create this; see the README.
+clickhouse_host = "abc123.us-east-1.aws.clickhouse.cloud"
+
+ingest_hostname = "ingest.example.com"
+
+# Give this one a name nobody guesses. It forwards to provider APIs with real keys.
+llm_hostname = "llm-7f3a.example.com"
+
+# Either a hosted zone in this account, or an existing certificate covering both hostnames.
+route53_zone_id = "Z0123456789ABCDEFGHIJ"
+# acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
+
+# The dashboard's origin on Vercel. A wildcard is refused by the gateway at boot.
+cors_allowed_origins = ["https://app.example.com"]
+
+# Optional: an SNS topic for the alarms. Without it the alarms exist and notify nobody.
+# alarm_sns_topic_arn = "arn:aws:sns:us-east-1:123456789012:ai-tally-alerts"

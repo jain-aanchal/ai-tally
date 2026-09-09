@@ -24,11 +24,30 @@ Everything here is **additive** — it does not touch `infra/docker-compose.yml`
 the local dev flow. It reuses the **same images** the GCP path uses: the gateway
 (`infra/gateway/Dockerfile`) and the web tier (`web/Dockerfile`).
 
+> **There is now Terraform for all of this.** [`terraform/`](terraform/README.md) creates the VPC,
+> RDS, S3, ECR, KMS, Secrets Manager entries, IAM roles, ALB and ECS services that every step below
+> assumes exist, and consumes `ecs/*.taskdef.json` and `ecs/iam/*.json` as templates rather than
+> replacing them. It has never been applied against a real account, and its README says so and says
+> what that leaves unproven. This runbook stays the reference for what each resource is for, which
+> IAM grants to delete, and how to do it by hand.
+>
+> One warning that applies to the by-hand path only. The `sed -e "s/REGION/$REGION/g"` recipes below
+> are a blanket substitution, and `gateway.taskdef.json` contains the environment variable **names**
+> `AWS_REGION` and `TALLY_REPLAY_S3_REGION`. The `sed` rewrites those names too, producing
+> `AWS_us-east-1`. The task definition registers, the task starts, and both settings are simply
+> absent, so the AWS default credential chain and the S3 replay store each lose their region with no
+> error naming the cause. Check the registered task definition, or substitute `:REGION:`,
+> `.REGION.` and `"REGION"` separately the way `terraform/modules/compute/taskdefs.tf` does.
+
 ## What's in this directory
 
 ```
 deploy/aws/
 ├── README.md                       this runbook
+├── terraform/                      IaC for everything this runbook creates by hand (CTO-335)
+│   ├── README.md                   bootstrap order, what to fill in, rollback, troubleshooting
+│   ├── bootstrap/                  state bucket + the CI OIDC role (§1), separate root module
+│   └── modules/                    network, data, iam, compute
 ├── ecs/                            PRIMARY — ECS-on-Fargate task/service definitions
 │   ├── gateway.taskdef.json        gateway task definition (Secrets Manager injection, task role)
 │   ├── web.taskdef.json            web task definition
@@ -650,9 +669,11 @@ done
 
 ## Open TODOs (documented, out of scope for CTO-159)
 
-- **Terraform/CloudFormation IaC** — this ticket ships ECS task defs + a Helm chart + `aws` CLI docs
-  for v1; codify the account bootstrap (VPC, RDS, ClickHouse, Secrets Manager, IAM, ALB) as IaC in a
-  follow-up.
+- **Terraform/CloudFormation IaC**: done in `terraform/` (CTO-335). VPC, RDS, S3, ECR, KMS, Secrets
+  Manager, IAM, ALB, ACM, the ECS cluster and both services, plus the CI OIDC role from §1. Written
+  and validated, **never applied against a real account**; see `terraform/README.md` for exactly what
+  that leaves unproven. Still not covered there: the one-shot migration task, which needs the
+  `schema_migrations` ledger first.
 - **In-cluster ClickHouse DDL bootstrap (EKS)** — the StatefulSet path expects you to mount
   `db/clickhouse` as an initdb ConfigMap; a chart hook to build/apply it automatically is a follow-up.
 - **ALB Ingress / TLS + custom domain** — the ECS services expect an ALB target group you create; the

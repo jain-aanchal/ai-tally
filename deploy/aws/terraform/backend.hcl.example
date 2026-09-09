@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copy to backend.hcl (gitignored) and pass it to init:
+#
+#   terraform init -backend-config=backend.hcl
+#
+# `bucket` is the state_bucket output of bootstrap/. There is no DynamoDB table: `use_lockfile`
+# keeps the lock as a .tflock object beside the state object, which is why versions.tf requires
+# Terraform 1.11 or newer.
+
+bucket       = "123456789012-ai-tally-tfstate"
+key          = "aws/prod/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true
