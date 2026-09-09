@@ -2,12 +2,12 @@
 """Projection engine + blow-up risk score for pre-deploy estimation (CTO-72, spec §9 W3).
 
 Pre-deploy estimation answers "if I ship this prompt/model change, what happens to cost?" The
-honest headline is **not** the mean — a change can leave the average flat while fattening the tail
+honest headline is **not** the mean: a change can leave the average flat while fattening the tail
 until one run in a hundred melts the budget. So this engine projects the **p99 cost per run** as the
 headline number and reports the probability the tail *blows up*.
 
 Inputs are per-run results of replaying a proposed change over a tail-weighted sample (the sample is
-CTO-71; the replay that produces the candidate costs is CTO-59 — both out of scope here). Each
+CTO-71; the replay that produces the candidate costs is CTO-59; both out of scope here). Each
 :class:`ProjectionRun` carries the run's baseline cost, its projected (replayed) cost, a
 ``population_weight`` (how many full-traffic runs this sampled run stands for, so a tail-weighted
 sample can be re-expanded to the true population), and an optional per-driver delta attribution.
@@ -16,7 +16,7 @@ From those the engine computes, all deterministically (seeded bootstrap):
 
 * **Headline** = projected p99 cost/run (configurable); mean is reported but secondary.
 * **Blow-up risk** = ``P(projected p99 > blowup_multiple x baseline p99)`` with a confidence
-  interval — estimated by resampling the observed runs, so the interval widens exactly where the
+  interval, estimated by resampling the observed runs, so the interval widens exactly where the
   data is thin (the p99 tail).
 * **Driver breakdown** attributing the projected delta to named cost drivers (e.g. longer system
   prompt, an added tool call), with a residual for whatever the named drivers do not explain.
@@ -52,7 +52,7 @@ class ProjectionRun:
     ``population_weight`` is how many full-traffic runs this sampled run represents (the inverse of
     its inclusion probability). A tail-weighted sample over-indexes the expensive end, so weights
     are what let the projection recover unbiased *population* percentiles. ``drivers`` maps a driver
-    name to its signed contribution (micro-USD) to this run's projected delta — they should sum to
+    name to its signed contribution (micro-USD) to this run's projected delta; they should sum to
     ``projected_cost_micro_usd - baseline_cost_micro_usd`` (any gap becomes the report residual).
     """
 
@@ -249,7 +249,7 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
 
 
 def _wilson_interval(successes: int, n: int, z: float) -> tuple[float, float]:
-    """Wilson score interval for a binomial proportion — well-behaved at p near 0/1 and small n."""
+    """Wilson score interval for a binomial proportion, well-behaved at p near 0/1 and small n."""
     if n <= 0:
         return (0.0, 0.0)
     phat = successes / n
@@ -324,7 +324,7 @@ def project(
        weighted baseline/projected cost at each configured percentile, plus the weighted mean.
     2. Bootstrap-resample the observed runs ``bootstrap_iterations`` times (seeded) to put a
        confidence interval on every projected percentile and on the blow-up probability. For
-       heavy-tailed costs the p99 interval comes out widest — that is where the data is thinnest.
+       heavy-tailed costs the p99 interval comes out widest; that is where the data is thinnest.
     3. Attribute the projected delta to named cost drivers, with a residual for the rest.
 
     Never raises: empty/degenerate input yields a zeroed report.

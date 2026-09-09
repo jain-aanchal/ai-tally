@@ -1,4 +1,4 @@
-"""Replay executor — run captured samples against candidate models (CTO-113).
+"""Replay executor: run captured samples against candidate models (CTO-113).
 
 For each ``(sample, candidate_model)`` the executor:
 
@@ -17,7 +17,7 @@ Two hard safety rails:
 * **Per-tenant concurrency limit.** No more than ``MAX_CONCURRENT`` candidate calls run at once
   per tenant; the rest queue.
 
-Retries: 1 retry on transient (5xx, network) errors; 0 on 4xx — replaying a 400 a second time
+Retries: 1 retry on transient (5xx, network) errors; 0 on 4xx; replaying a 400 a second time
 just costs money.
 
 v1 only supports the ``"resolved-context"`` fidelity tier (no live RAG, no live tool execution).
@@ -53,7 +53,7 @@ MAX_RETRIES_TRANSIENT = 1
 @dataclass(frozen=True, slots=True)
 class CandidateCall:
     """What the executor passes to the provider client. Free-form so different providers can
-    interpret it — text/chat/etc."""
+    interpret it: text/chat/etc."""
 
     provider: str
     model: str
@@ -115,7 +115,7 @@ class ReplayExecutor:
     blob_store: ReplayBlobStore
     client: CandidateClient
     todays_spend_micro_usd: TodaysSpendLookup
-    # Sink — anything callable that accepts a finished ReplayRunRow. The gateway wires this to
+    # Sink: anything callable that accepts a finished ReplayRunRow. The gateway wires this to
     # the ClickHouse writer; tests pass `list.append`.
     sink: Callable[[ReplayRunRow], None]
     # Per-tenant concurrency limiter. One semaphore per tenant, lazily created.
@@ -137,11 +137,11 @@ class ReplayExecutor:
         candidate_provider: str,
         candidate_model: str,
         daily_budget_usd: Decimal,
-        # Estimated cost in micro-USD for the upcoming candidate call — used for the pre-flight
+        # Estimated cost in micro-USD for the upcoming candidate call, used for the pre-flight
         # budget check. Callers compute this from the sample's known input tokens + an output
         # token estimate (default 1x input tokens, i.e. a 50/50 chat shape).
         estimated_call_cost_micro_usd: int = 0,
-        # Optional transform applied to the loaded envelope before the candidate call — used by
+        # Optional transform applied to the loaded envelope before the candidate call, used by
         # the body-driven what-if estimate (CTO-128) to apply a system_prompt_override. Pure;
         # must return a (possibly new) envelope dict and never mutate the input.
         envelope_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
@@ -170,7 +170,7 @@ class ReplayExecutor:
                 # /v1/replay request; the projection is computed over the bodies that ARE present.
                 # We emit nothing for it (no guessed cost) to preserve honesty under uncertainty.
                 logger.info(
-                    "replay: body missing for sample=%s key=%s — skipping",
+                    "replay: body missing for sample=%s key=%s, skipping",
                     sample_id, object_key,
                 )
                 return ReplayResult(
@@ -210,7 +210,7 @@ class ReplayExecutor:
             ran_at=datetime.now(UTC),
             # CTO-125: persist the candidate's actual response body so the LLM judge grades what
             # the candidate model really produced, not an envelope re-render. See the PII
-            # carve-out note on ReplayRunRow — this is an opt-in replay-only path, distinct from
+            # carve-out note on ReplayRunRow: this is an opt-in replay-only path, distinct from
             # the span-side "no bodies in telemetry" guard.
             response_text=response.response_text,
             finish_reason=response.finish_reason,
@@ -235,7 +235,7 @@ class ReplayExecutor:
             attempts += 1
             try:
                 last = await self.client(call)
-            except Exception as exc:  # noqa: BLE001 — surface as a synthetic 0 status
+            except Exception as exc:  # noqa: BLE001 - surface as a synthetic 0 status
                 last = CandidateResponse(
                     input_tokens=0, output_tokens=0,
                     status_code=0, error_msg=f"network: {exc}",

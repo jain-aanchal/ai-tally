@@ -3,10 +3,10 @@
 The dashboard's ``ltvCacBand`` / ``paybackBand`` classifiers colored the LTV:CAC ratio and payback
 months green/yellow/red using hardcoded B2B-SaaS defaults ("tenant-configurable in v2"). This module
 is v2: one row per tenant in ``tenant_unit_economics_config`` overrides the four cutoffs. A tenant
-with no row keeps the hardcoded defaults — the web classify helpers apply the tenant's overrides ON
+with no row keeps the hardcoded defaults; the web classify helpers apply the tenant's overrides ON
 TOP of the defaults, so the defaults are always the fallback.
 
-Reads/writes go through ``GET/POST /v1/tenant/unit-economics/config`` — the web app never touches
+Reads/writes go through ``GET/POST /v1/tenant/unit-economics/config``; the web app never touches
 Postgres directly (same rule as :mod:`gateway.tenant_guardrails` and :mod:`gateway.tenant_cac`).
 Every upsert appends a row to ``tenant_unit_economics_config_changes`` keyed by a client-supplied
 ``change_id`` UUID, so a retried request is idempotent: both the config write and the audit row are
@@ -26,7 +26,7 @@ from gateway.tenant_lookup import resolve_tenant_uuid
 
 
 class UnitEconomicsConfigError(ValueError):
-    """Caller-facing validation error — surfaces as HTTP 422 in the gateway."""
+    """Caller-facing validation error, surfaces as HTTP 422 in the gateway."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +173,7 @@ class TenantUnitEconomicsStore:
 
         On a new change_id: capture the current row as ``before`` (NULL if absent), apply the
         upsert, append an audit row with both before/after JSON. On a replayed change_id: no config
-        write — return the existing row unchanged.
+        write, return the existing row unchanged.
         """
         config.sanity_check()
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -211,7 +211,7 @@ class TenantUnitEconomicsStore:
             )
             reserved = cur.fetchone()
             if reserved is None:
-                # change_id already applied — replay is a no-op. Return the current row.
+                # change_id already applied: replay is a no-op. Return the current row.
                 conn.commit()
                 current = before
                 if current is None:
@@ -228,7 +228,7 @@ class TenantUnitEconomicsStore:
                     row = cur.fetchone()
                     if row is None:
                         raise RuntimeError(
-                            "change_id reserved but config absent — out-of-band delete?"
+                            "change_id reserved but config absent; out-of-band delete?"
                         )
                     return _row_to_config(row)
                 return current

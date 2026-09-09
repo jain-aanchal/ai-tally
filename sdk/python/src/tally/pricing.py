@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Price catalog — versioned, multi-provider rate table + cost computation.
+"""Price catalog: versioned, multi-provider rate table + cost computation.
 
 Implements CTO-52.
 
@@ -7,7 +7,7 @@ All ``EstimatedCost`` derives from this table. It is *versioned* and *time-windo
 cost can be recomputed if a rate is corrected, and so a price change doesn't retroactively rewrite
 past cost. Per-tenant overrides take precedence over the public catalog (enterprise contracts).
 
-Rates are :class:`~decimal.Decimal` (never float — this is money). Cost is returned as integer
+Rates are :class:`~decimal.Decimal` (never float; this is money). Cost is returned as integer
 micro-USD via :func:`tally.schema.usd_to_micro`.
 
 The seed data here is illustrative and meant to be replaced by the daily scraper (CTO-53); treat
@@ -176,7 +176,7 @@ def compute_embedding_cost_micro_usd(
 ) -> tuple[int, str]:
     """Compute embedding cost in micro-USD.
 
-    Resolves the ``PriceType.EMBEDDING`` tier — NOT ``INPUT``. The seed catalog prices embedding
+    Resolves the ``PriceType.EMBEDDING`` tier, NOT ``INPUT``. The seed catalog prices embedding
     models under ``EMBEDDING`` (see ``text-embedding-3-*``), so ``compute_cost_micro_usd`` (which
     only looks at INPUT/OUTPUT) would return 0 for them. Returns ``(micro_usd, catalog_version)``;
     ``(0, "")`` when no embedding rate is seeded for ``(provider, model)`` at ``at``.
@@ -201,7 +201,7 @@ def compute_call_cost_micro_usd(
 
     Used for tool calls (``PriceType.TOOL_CALL``) and vector-DB calls
     (``PriceType.VECTOR_CALL``), both of which price per *call* rather than per token. ``name`` is
-    the catalog ``model`` slot — e.g. the tool name (``"search"``) or the vector operation
+    the catalog ``model`` slot, e.g. the tool name (``"search"``) or the vector operation
     (``"query"``). The matching seed entry must use ``Unit.PER_CALL``.
 
     Returns ``(micro_usd, catalog_version)``; ``(0, "")`` when no entry is seeded for
@@ -227,14 +227,14 @@ def _line(entry: PriceEntry, tokens: int) -> Decimal:
 # Hand-maintained until the pricing scraper lands; rates valid as of 2026-06-15.
 # Expanded for CTO-106 to cover the OpenAI + Anthropic models the example demos
 # actually call. Previously the gpt-5-mini pinning workaround in examples/* was
-# needed because of catalog gaps (CTO-104/CTO-105) — once the catalog knows the
+# needed because of catalog gaps (CTO-104/CTO-105); once the catalog knows the
 # real models the workaround can come out. Live pricing pages should be the
 # source of truth; any rate below tagged "[unverified at implementation time]"
 # could not be reached at edit time and was filled in from training-data values.
 
 _SEED_VERSION = "seed-2026-06-15"
 # valid_from kept at 2026-05-01 (the prior catalog window) so any test or
-# replay at the existing 2026-06-01 cutover keeps resolving — the 2026-06-15
+# replay at the existing 2026-06-01 cutover keeps resolving; the 2026-06-15
 # date in the header is the verification date for the *rates*, not the
 # valid_from window.
 _SEED_FROM = date(2026, 5, 1)
@@ -270,7 +270,7 @@ def _per_call(provider: str, name: str, pt: PriceType, usd_per_call: str) -> Pri
 # micro). The ``model`` slot holds the tool name (tools) or operation (vector). All rates
 # [unverified at implementation time].
 _TOOL_SEEDS: list[tuple[str, str, PriceType, str]] = [
-    # Tools — $0.01 tavily == 10_000 micro, etc.
+    # Tools: $0.01 tavily == 10_000 micro, etc.
     ("tavily", "search", PriceType.TOOL_CALL, "0.01"),
     ("serpapi", "search", PriceType.TOOL_CALL, "0.015"),
     ("brave", "search", PriceType.TOOL_CALL, "0.005"),
@@ -281,7 +281,7 @@ _TOOL_SEEDS: list[tuple[str, str, PriceType, str]] = [
     ("openai", "code_interpreter", PriceType.TOOL_CALL, "0.03"),
 ]
 _VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
-    # Vector DB — keep micro-USD parity with the old inline dict (pinecone query 400 micro).
+    # Vector DB: keep micro-USD parity with the old inline dict (pinecone query 400 micro).
     ("pinecone", "query", PriceType.VECTOR_CALL, "0.0004"),
     ("pinecone", "upsert", PriceType.VECTOR_CALL, "0.0002"),
     ("weaviate", "query", PriceType.VECTOR_CALL, "0.0003"),
@@ -289,13 +289,13 @@ _VECTOR_SEEDS: list[tuple[str, str, PriceType, str]] = [
     # --- Vertex AI Vector Search (formerly Matching Engine), CTO-151 -------------------------
     # GCP-native vector provider. Keyed off the operation name (query/upsert) like the other
     # vector DBs above, so it resolves through the same compute_call_cost_micro_usd path in
-    # record_vector_call (provider="vertex"). Mirrors the CTO-142 span shape — no new wrapper.
+    # record_vector_call (provider="vertex"). Mirrors the CTO-142 span shape, no new wrapper.
     #
-    # COST SPLIT (important — avoids double-counting):
+    # COST SPLIT (important, avoids double-counting):
     # Vertex Vector Search bills in two parts:
-    #   1. Per-query / serving requests — the online-query request portion. Priced HERE, on the
+    #   1. Per-query / serving requests: the online-query request portion. Priced HERE, on the
     #      Vector cost layer, per call.
-    #   2. Deployed-index node-hours — the compute cost of keeping the index endpoint warm
+    #   2. Deployed-index node-hours: the compute cost of keeping the index endpoint warm
     #      (the dominant Vertex Vector Search spend). This is a COMPUTE cost, NOT a per-query
     #      cost, and is DEFERRED to the GCP Cloud Billing compute connector (CTO-150). It is
     #      deliberately NOT modeled here so the Vector layer and the future Compute layer do not
@@ -314,7 +314,7 @@ def seed_catalog() -> PriceCatalog:
     eventually own this; until then these are hand-maintained rates.
 
     Rates are USD per million tokens unless noted. All rates below are
-    [unverified at implementation time] — the live pricing pages were not
+    [unverified at implementation time]: the live pricing pages were not
     reachable from the implementation environment, so values are taken from
     the assistant's training data and reflect publicly-listed prices as of
     early 2026. Update once the scraper lands.
@@ -322,7 +322,7 @@ def seed_catalog() -> PriceCatalog:
     cat = PriceCatalog()
     seeds: list[tuple[str, str, PriceType, str]] = [
         # --- OpenAI (https://openai.com/api/pricing/) -------------------------
-        # Legacy gpt-5 family — kept for backward compat with existing tests.
+        # Legacy gpt-5 family: kept for backward compat with existing tests.
         ("openai", "gpt-5-mini", PriceType.INPUT, "0.25"),
         ("openai", "gpt-5-mini", PriceType.CACHED_INPUT, "0.025"),
         ("openai", "gpt-5-mini", PriceType.OUTPUT, "2.00"),
@@ -336,7 +336,7 @@ def seed_catalog() -> PriceCatalog:
         ("openai", "gpt-4o-mini", PriceType.INPUT, "0.15"),
         ("openai", "gpt-4o-mini", PriceType.CACHED_INPUT, "0.075"),
         ("openai", "gpt-4o-mini", PriceType.OUTPUT, "0.60"),
-        # gpt-4-turbo — no cached-input tier listed. [unverified at implementation time]
+        # gpt-4-turbo: no cached-input tier listed. [unverified at implementation time]
         ("openai", "gpt-4-turbo", PriceType.INPUT, "10.00"),
         ("openai", "gpt-4-turbo", PriceType.OUTPUT, "30.00"),
         # Embeddings. [unverified at implementation time]
@@ -368,7 +368,7 @@ def seed_catalog() -> PriceCatalog:
         # (multimodal token accounting is out of scope). Usage field mapping:
         # promptTokenCount -> input, candidatesTokenCount -> output,
         # cachedContentTokenCount -> cached_input. All rates
-        # [unverified at implementation time] — taken from training-data values
+        # [unverified at implementation time]: taken from training-data values
         # for the published per-MTok prices; update once the scraper (CTO-53) lands.
         ("google", "gemini-2.5-flash", PriceType.INPUT, "0.30"),
         ("google", "gemini-2.5-flash", PriceType.CACHED_INPUT, "0.075"),
@@ -376,7 +376,7 @@ def seed_catalog() -> PriceCatalog:
         ("google", "gemini-2.5-pro", PriceType.INPUT, "1.25"),
         ("google", "gemini-2.5-pro", PriceType.CACHED_INPUT, "0.31"),
         ("google", "gemini-2.5-pro", PriceType.OUTPUT, "10.00"),
-        # gemini-3-flash — the id the /compare mock lists. Priced in line with the
+        # gemini-3-flash: the id the /compare mock lists. Priced in line with the
         # 2.5-flash tier pending a verified published rate. [unverified at implementation time]
         ("google", "gemini-3-flash", PriceType.INPUT, "0.30"),
         ("google", "gemini-3-flash", PriceType.CACHED_INPUT, "0.075"),
@@ -389,7 +389,7 @@ def seed_catalog() -> PriceCatalog:
         # which is exactly what a Bedrock caller passes as gen_ai.request_model and
         # what list_foundation_models advertises. This deliberately does NOT collide
         # with the vendor-direct entries above (provider="anthropic",
-        # model="claude-sonnet-4-5") — same model, different surface, different price.
+        # model="claude-sonnet-4-5"): same model, different surface, different price.
         #
         # Bedrock re-prices some models ABOVE the vendor-direct rate (the managed
         # infra premium): e.g. Bedrock's Claude Sonnet output is listed higher than
@@ -399,19 +399,19 @@ def seed_catalog() -> PriceCatalog:
         # modeled by the current PriceType enum. Usage field mapping mirrors the
         # Bedrock Converse API: usage.inputTokens -> input,
         # usage.outputTokens -> output, usage.cacheReadInputTokens -> cached_input.
-        # All rates [unverified at implementation time] — the live Bedrock pricing
+        # All rates [unverified at implementation time]: the live Bedrock pricing
         # page was not reachable from the implementation environment, so values are
         # taken from training-data values for the published per-MTok on-demand
         # prices; update once the scraper (CTO-53) lands.
         #
-        # Anthropic on Bedrock — priced above Anthropic-direct (managed premium).
+        # Anthropic on Bedrock: priced above Anthropic-direct (managed premium).
         ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.INPUT, "3.30"),
         ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.CACHED_INPUT, "0.33"),
         ("bedrock", "anthropic.claude-sonnet-4-5", PriceType.OUTPUT, "16.50"),
         ("bedrock", "anthropic.claude-haiku-4-5", PriceType.INPUT, "1.10"),
         ("bedrock", "anthropic.claude-haiku-4-5", PriceType.CACHED_INPUT, "0.11"),
         ("bedrock", "anthropic.claude-haiku-4-5", PriceType.OUTPUT, "5.50"),
-        # Meta Llama on Bedrock — no cached tier published on-demand.
+        # Meta Llama on Bedrock: no cached tier published on-demand.
         ("bedrock", "meta.llama3-3-70b-instruct", PriceType.INPUT, "0.72"),
         ("bedrock", "meta.llama3-3-70b-instruct", PriceType.OUTPUT, "0.72"),
         # Amazon Nova (first-party flagship-ish + micro tiers).
@@ -421,7 +421,7 @@ def seed_catalog() -> PriceCatalog:
         ("bedrock", "amazon.nova-micro", PriceType.INPUT, "0.035"),
         ("bedrock", "amazon.nova-micro", PriceType.CACHED_INPUT, "0.00875"),
         ("bedrock", "amazon.nova-micro", PriceType.OUTPUT, "0.14"),
-        # Amazon Titan (legacy first-party text) — no cached tier.
+        # Amazon Titan (legacy first-party text): no cached tier.
         ("bedrock", "amazon.titan-text-express", PriceType.INPUT, "0.20"),
         ("bedrock", "amazon.titan-text-express", PriceType.OUTPUT, "0.60"),
     ]

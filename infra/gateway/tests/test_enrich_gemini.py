@@ -3,7 +3,7 @@
 
 The gateway recomputes cost from the catalog in ``enrich_cost``. A span with
 ``gen_ai.system="google"`` and a seeded gemini model must price to a non-zero cost with
-no ``catalog_miss`` — proving Google needs no special-casing in the mapping/enrich path
+no ``catalog_miss``, proving Google needs no special-casing in the mapping/enrich path
 (provider is just the catalog lookup key).
 """
 

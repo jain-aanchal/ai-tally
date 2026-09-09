@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-tenant price overrides — versioned + audited (CTO-54, spec §6).
+"""Per-tenant price overrides: versioned + audited (CTO-54, spec §6).
 
 Enterprise / committed-use customers negotiate custom provider rates; their cost must reflect their
 *contract*, not list price. :mod:`tally.pricing` already supports per-tenant override entries that
 take precedence over the public catalog (see :meth:`PriceCatalog.add_override` /
-:meth:`PriceCatalog.lookup`). What it lacks — and what this module adds — is the **governance
+:meth:`PriceCatalog.lookup`). What it lacks, and what this module adds, is the **governance
 layer**:
 
 * **Versioned.** Every override slot ``(tenant_id, provider, model, price_type)`` carries a
   monotonic integer version. Re-pricing the same slot bumps the version and records which prior
   version it supersedes, so historical cost can be recomputed against the rate that was in force and
   a later correction never silently rewrites the past.
-* **Audited.** Changes are an **append-only ledger** — nothing is ever mutated or deleted in
+* **Audited.** Changes are an **append-only ledger**; nothing is ever mutated or deleted in
   place. Each entry captures *who* (``actor``), *why* (``reason``), and *when* (``recorded_at``,
   UTC). A revocation is a tombstone entry, not a deletion, so the audit trail is complete and
   tamper-evident by construction (append-only + monotonic versions).
@@ -19,7 +19,7 @@ layer**:
 The ledger is the source of truth; :meth:`OverrideLedger.apply_to_catalog` materializes the
 currently *active* overrides onto a freshly-seeded :class:`~tally.pricing.PriceCatalog` so the cost
 path (:func:`tally.enrichment.enrich_cost`, which already threads ``tenant_id``) picks them up with
-no further wiring. Pure logic — no infra, no clock except an injectable ``now`` for deterministic
+no further wiring. Pure logic: no infra, no clock except an injectable ``now`` for deterministic
 tests.
 """
 
@@ -47,7 +47,7 @@ def _utcnow() -> datetime:
 
 
 def _to_decimal(value: Decimal | str | int) -> Decimal:
-    """Coerce a price to :class:`~decimal.Decimal` — never via float (this is money)."""
+    """Coerce a price to :class:`~decimal.Decimal`, never via float (this is money)."""
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
@@ -56,7 +56,7 @@ class OverrideRecord:
     """One immutable, audited entry in the override ledger.
 
     A record either sets a rate (``price_per_unit`` is a :class:`~decimal.Decimal`) or *revokes* the
-    slot (``price_per_unit is None`` — a tombstone). Records are never mutated; a change appends a
+    slot (``price_per_unit is None``, a tombstone). Records are never mutated; a change appends a
     new record with the next ``version`` for its slot and a ``supersedes`` back-reference.
     """
 
@@ -159,7 +159,7 @@ class OverrideLedger:
     ) -> OverrideRecord:
         """Set (or re-price) a tenant's override for a slot. Appends a new versioned record.
 
-        ``price_per_unit`` is coerced to :class:`~decimal.Decimal` (accepts str/int) — never a
+        ``price_per_unit`` is coerced to :class:`~decimal.Decimal` (accepts str/int), never a
         float, because this is money. ``actor`` and ``reason`` are required for the audit trail.
         """
         now = self._now()
@@ -254,7 +254,7 @@ class OverrideLedger:
         return self._current(tenant_id, provider, model, price_type)
 
     def active(self, tenant_id: str | None = None) -> list[OverrideRecord]:
-        """Currently effective overrides — latest non-revoked record per slot.
+        """Currently effective overrides: latest non-revoked record per slot.
 
         Pass ``tenant_id`` to scope to one tenant. A slot whose latest record is a tombstone is
         omitted (it has fallen back to the public catalog).

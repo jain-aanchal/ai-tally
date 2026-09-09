@@ -13,7 +13,7 @@ export default async function EstimatePage() {
   const projection = await apiGet<Projection>("/api/estimate");
   const { workload, pr, current, sample } = projection;
 
-  // This projection samples a reconciled historical window — surface that window's freshness so a
+  // This projection samples a reconciled historical window; surface that window's freshness so a
   // forecast off a stale baseline is never shown as fresh (CTO-80).
   const reconciledThrough = boundaryFromMinutesAgo(projection.reconcilerLastRunMinutesAgo);
   const noBaseline = current.monthlyCostMicroUsd === 0;

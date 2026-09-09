@@ -3,7 +3,7 @@
 
 Pulls the last N days of cloud compute spend and lands one synthetic ``compute`` span per day, so a
 tenant that just enabled the connector doesn't start with an empty Compute column. Idempotent on
-``(tenant_id, provider, day)`` — the base connector's emitter skips any day that already has a
+``(tenant_id, provider, day)``; the base connector's emitter skips any day that already has a
 synthetic span, so re-running never double-counts.
 
     uv run python scripts/backfill_compute.py --tenant <uuid> --days 30
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     config_store = TenantComputeConfigStore(settings)
     config = config_store.load_config(args.tenant)
     if config is None:
-        logger.error("tenant %s has no tenant_compute_config row — nothing to backfill", args.tenant)
+        logger.error("tenant %s has no tenant_compute_config row, nothing to backfill", args.tenant)
         return 2
 
     store = ClickHouseStore(settings)

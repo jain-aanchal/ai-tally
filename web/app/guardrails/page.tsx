@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Guardrails page (CTO-120): renders the tenant's guardrail rules from the control plane (gateway
-// GET /v1/tenant/guardrails, via /api/guardrails — falling back to the typed mock when the gateway
+// GET /v1/tenant/guardrails, via /api/guardrails, falling back to the typed mock when the gateway
 // is unreachable). Each rule is interactive: flip its enforcement mode, edit its caps (behind a
 // confirm dialog), and inspect its audit log. Edits POST through /api/guardrails, which forwards an
 // idempotent change_id to the gateway; the SDK picks the change up on its next config-refresh window.

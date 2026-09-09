@@ -1,7 +1,7 @@
 """SDK guardrails control-plane refresh (CTO-116).
 
 Covers the engine's gateway-poll fail-soft behavior and the shadow/enforce span-attr emission.
-Uses a monkeypatched ``urllib.request.urlopen`` — no real network.
+Uses a monkeypatched ``urllib.request.urlopen``, no real network.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _ok_response(rules: list[dict]):
 
 
 def test_config_refresh_seconds_mirrors_web() -> None:
-    # The web side advertises a 60s window — keep them in lockstep.
+    # The web side advertises a 60s window; keep them in lockstep.
     assert CONFIG_REFRESH_SECONDS == 60
 
 
@@ -92,7 +92,7 @@ def test_fail_soft_on_gateway_unreachable_keeps_last_known(
         "http://gw.local", "t-acme", start=False
     )
     assert len(engine.rules) == 1
-    # Next refresh blows up — engine should keep the cached rule set.
+    # Next refresh blows up; engine should keep the cached rule set.
     def boom(req, timeout=None):  # noqa: ARG001
         raise urllib.error.URLError("connection refused")
 
@@ -142,7 +142,7 @@ def test_shadow_rule_emits_shadow_observed_and_does_not_alter(
     verdicts = engine.apply_rules({"cost_micro_usd": 5000})
     assert verdicts[0].verdict == "shadow_observed"
     assert engine.shadow_fire_counts["gr_cost"] == 1
-    # Firing again increments the counter — apply_rules itself never raises.
+    # Firing again increments the counter; apply_rules itself never raises.
     engine.apply_rules({"cost_micro_usd": 5000})
     assert engine.shadow_fire_counts["gr_cost"] == 2
 
@@ -214,12 +214,12 @@ def test_verdict_span_attributes_merges_batch_counts_only(
     )
     attrs = verdict_span_attributes(verdicts)
 
-    # One verdict + kind key per evaluated rule — this is exactly what the 7d dashboard counts.
+    # One verdict + kind key per evaluated rule; this is exactly what the 7d dashboard counts.
     assert attrs["gen_ai.guardrail.gr_cost.verdict"] == "enforced"
     assert attrs["gen_ai.guardrail.gr_loop.verdict"] == "shadow_observed"
     assert attrs["gen_ai.guardrail.gr_pii.verdict"] == "passed"
     assert attrs["gen_ai.guardrail.gr_cost.kind"] == "cost_cap"
-    # PII bar: only verdict/kind keys leak — never the call body or rule inputs.
+    # PII bar: only verdict/kind keys leak, never the call body or rule inputs.
     assert all(k.startswith("gen_ai.guardrail.") for k in attrs)
     assert all(k.endswith(".verdict") or k.endswith(".kind") for k in attrs)
     assert not any("secret" in v for v in attrs.values())

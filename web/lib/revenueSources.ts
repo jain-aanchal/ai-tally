@@ -12,7 +12,7 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // ('monetary'=1,'count'=2,'mrr'=3,'refund'=4). Engagement signals are 'count' and carry no amount;
 // money is 'monetary'/'mrr'; refunds must NET OFF rather than be ignored.
 //
-// Per-tenant config (GET/POST /v1/tenant/revenue-sources/config, backed by Postgres — the web app
+// Per-tenant config (GET/POST /v1/tenant/revenue-sources/config, backed by Postgres; the web app
 // never touches Postgres directly, same rule as web/lib/unitEconomicsConfig.ts) only ever NARROWS
 // that default, by naming which sources a tenant considers revenue-bearing. A tenant with no row,
 // or an unreachable gateway (CI / fresh clone), gets the defaults, so nothing is broken by absence.
@@ -24,7 +24,7 @@ export const REFUND_VALUE_TYPE = "refund";
 /** Resolved policy the ClickHouse query builds its revenue expression from. */
 export interface RevenuePolicy {
   /**
-   * Source values that count as revenue, lowercased. `null` means "every source counts" — the
+   * Source values that count as revenue, lowercased. `null` means "every source counts", the
    * default, and deliberately distinct from an empty list (which the gateway rejects, because
    * "nothing is revenue" is a misconfiguration that silently blanks the dashboard).
    */
@@ -58,7 +58,7 @@ export function policyFromApi(cfg: RevenueSourceConfigApi | null): RevenuePolicy
     : null;
   return {
     // An empty array after cleaning means the row said nothing usable. Treat that as "all sources"
-    // rather than "no revenue exists" — blanking the dashboard on bad config is the original bug.
+    // rather than "no revenue exists"; blanking the dashboard on bad config is the original bug.
     sources: sources && sources.length > 0 ? sources : null,
     includeMrr: cfg.include_mrr !== false,
   };

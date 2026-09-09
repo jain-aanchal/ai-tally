@@ -1,7 +1,7 @@
-"""Backpressure + retry semantics — flow-control advice the gateway returns (CTO-36).
+"""Backpressure + retry semantics: flow-control advice the gateway returns (CTO-36).
 
 The gateway can't push back via TCP alone: a well-behaved SDK self-throttles only if we *tell*
-it to. So every response carries :class:`tally.wire.ServerHints` — a flush cadence, a per-batch
+it to. So every response carries :class:`tally.wire.ServerHints`: a flush cadence, a per-batch
 ceiling, an optional sample-rate override, and (on a retryable response) a backoff. A conformant
 client treats these as the new ceiling until the next response updates them.
 
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from tally.wire import ServerHints
 
 # Retryable HTTP statuses: 429 (slow down) and any 5xx (transient server fault). A 4xx other than
-# 429 is a client contract error — retrying replays the same rejection, so it is NOT retryable.
+# 429 is a client contract error; retrying replays the same rejection, so it is NOT retryable.
 _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 503})
 
 

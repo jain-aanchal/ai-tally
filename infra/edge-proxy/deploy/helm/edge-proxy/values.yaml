@@ -30,9 +30,9 @@ proxy:
   upstreamTimeout: 10m
 
   # passthrough | broker
-  #   passthrough — the customer app sends the provider key on each request (cloud default).
-  #   broker      — the provider key stays in KMS; the app sends only the tenant key and the proxy
-  #                 mints a short-lived credential. Requires broker.keys below.
+  #   passthrough: the customer app sends the provider key on each request (cloud default).
+  #   broker:      the provider key stays in KMS; the app sends only the tenant key and the proxy
+  #                mints a short-lived credential. Requires broker.keys below.
   mode: broker
   # How long a minted credential is reused before re-minting (broker mode only).
   brokerTTL: 5m
@@ -67,7 +67,7 @@ broker:
   #   1. inline (dev / quick trials): paste the JSON here and the chart renders a Secret for you.
   #   2. existingSecret: reference a Secret you manage out-of-band (rendered from your KMS at deploy
   #      time, e.g. via an external-secrets operator). This keeps the provider key out of values.yaml
-  #      and out of git — the recommended production path.
+  #      and out of git, the recommended production path.
   #
   # The file format is: {"tenants": {"tk_live_acme": "Bearer sk-...", ...}}
   inline: ""

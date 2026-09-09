@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Price scraper scaffold — pluggable fetchers, diff, and a human-review gate.
+"""Price scraper scaffold: pluggable fetchers, diff, and a human-review gate.
 
 Implements CTO-53.
 
@@ -7,7 +7,7 @@ A stale catalog silently corrupts every cost number, so price updates are:
 1. fetched from pluggable per-provider :class:`PriceFetcher` sources into a *candidate* version,
 2. diffed against the current catalog,
 3. published only behind an explicit human :class:`Approval` (the review gate). New versions are
-   additive — old versions are retained so historical cost stays recomputable (CTO-52).
+   additive: old versions are retained so historical cost stays recomputable (CTO-52).
 
 This is the scaffold (the actual scraping of provider pages lives in concrete fetchers); tested
 here with a fake fetcher.
@@ -85,7 +85,7 @@ class PriceScraper:
     def build_candidate(self, *, version: str, valid_from: date) -> list[PriceEntry]:
         """Fetch all sources into a candidate set tagged with ``version``.
 
-        A fetcher that raises does not abort the run — its failure is skipped (and the missing
+        A fetcher that raises does not abort the run; its failure is skipped (and the missing
         provider simply isn't updated). Callers should monitor for missing providers.
         """
         out: list[PriceEntry] = []

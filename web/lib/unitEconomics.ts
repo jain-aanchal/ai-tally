@@ -2,11 +2,11 @@
 // Unit-economics formulas (CTO-111). Pure functions, no I/O.
 //
 // CAC has three "flavors" people argue about endlessly:
-//   * Marketing CAC — paid spend per paid customer. The narrowest cut; ignores the org cost of
+//   * Marketing CAC:  paid spend per paid customer. The narrowest cut; ignores the org cost of
 //     converting free trials, salaried AEs, and the content team.
-//   * Blended CAC   — paid + sales + content per *total* customer (paid + free). Closer to what
+//   * Blended CAC:    paid + sales + content per *total* customer (paid + free). Closer to what
 //     the business actually spent to land a logo.
-//   * Fully-loaded  — adds overhead (the team's salaries, tools, allocated rent). What the CFO
+//   * Fully-loaded:   adds overhead (the team's salaries, tools, allocated rent). What the CFO
 //     defends to the board.
 // We surface all three with explicit labels so nobody has to guess which one the dashboard means.
 //
@@ -62,7 +62,7 @@ export function valuePerUser(p: CacPeriod, totalRevenueFromBusinessEvents: numbe
 }
 
 /**
- * Margin per user. CAN BE NEGATIVE — we deliberately don't clamp. A business that pays more to
+ * Margin per user. CAN BE NEGATIVE: we deliberately don't clamp. A business that pays more to
  * serve each customer than it earns is the headline the dashboard exists to show.
  */
 export function marginPerUser(value: number | null, cost: number | null): number | null {
@@ -78,7 +78,7 @@ export function marginPct(value: number | null, cost: number | null): number | n
 }
 
 /**
- * Payback months: how many months of contribution margin recoup the CAC. Null when margin <=0 —
+ * Payback months: how many months of contribution margin recoup the CAC. Null when margin <=0:
  * the business is currently losing money per user, so the answer isn't "Infinity months", it's
  * "this formula doesn't apply". The UI renders "—" in that case.
  */
@@ -108,7 +108,7 @@ export type Band = "green" | "yellow" | "red" | "unknown";
  * These were hardcoded B2B-SaaS defaults inline in `ltvCacBand` ("tenant-configurable in v2"). They
  * are now per-tenant configurable: the gateway stores a partial or full override per tenant, and
  * `resolveThresholds` layers those overrides ON TOP of `DEFAULT_THRESHOLDS`. A tenant with no row (or
- * a field left unset) keeps the default — the defaults are always the fallback.
+ * a field left unset) keeps the default; the defaults are always the fallback.
  *
  * Semantics: higher LTV:CAC is healthier (green is the high end); lower payback is healthier (green
  * is the low end).
@@ -124,7 +124,7 @@ export interface UnitEconomicsThresholds {
   paybackYellow: number;
 }
 
-/** The historical hardcoded B2B-SaaS cutoffs — the fallback for any tenant without an override. */
+/** The historical hardcoded B2B-SaaS cutoffs: the fallback for any tenant without an override. */
 export const DEFAULT_THRESHOLDS: UnitEconomicsThresholds = {
   ltvCacGreen: 3.0,
   ltvCacYellow: 1.0,
@@ -142,7 +142,7 @@ export interface UnitEconomicsThresholdOverrides {
 
 /**
  * Layer a tenant's (possibly partial) overrides on top of `DEFAULT_THRESHOLDS`. Passing
- * `null`/`undefined` (no tenant row) returns the defaults unchanged — the defaults are the fallback.
+ * `null`/`undefined` (no tenant row) returns the defaults unchanged; the defaults are the fallback.
  */
 export function resolveThresholds(
   overrides?: UnitEconomicsThresholdOverrides | null,
@@ -171,7 +171,7 @@ export function ltvCacBand(
 }
 
 /**
- * Color band for payback months — lower is healthier. Null (undefined payback) → "unknown". Cutoffs
+ * Color band for payback months: lower is healthier. Null (undefined payback) → "unknown". Cutoffs
  * default to the hardcoded values; pass a tenant's resolved thresholds to apply their overrides.
  */
 export function paybackBand(

@@ -4,7 +4,7 @@ An **optional, additive** worker that mirrors a tenant's telemetry into the tena
 as partitioned Parquet, queryable through **Athena** (an external table / Glue catalog entry) and
 loadable into **Redshift** with a `COPY` recipe. It is the AWS analog of the BigQuery export
 ([`docs/bigquery-export.md`](./bigquery-export.md), CTO-154). ClickHouse stays ai-tally's primary
-telemetry store and the dashboard keeps reading it — S3/Athena is a **mirror, never a replacement**.
+telemetry store and the dashboard keeps reading it; S3/Athena is a **mirror, never a replacement**.
 There is no reverse sync and no realtime-streaming SLA; batch / near-real-time passes are the v1
 contract.
 
@@ -16,13 +16,13 @@ contract.
   (Parquet-to-S3 instead of a BigQuery `MERGE`).
 - Optional dependency: the `[athena]` extra (`pyarrow` + `boto3`), **lazy-imported** inside the real
   sink. The gateway imports and boots without it.
-- Default: **disabled** — at the process level (`TALLY_ATHENA_EXPORT_ENABLED=false`) and per-tenant
+- Default: **disabled**, at the process level (`TALLY_ATHENA_EXPORT_ENABLED=false`) and per-tenant
   (`tenant_athena_export_config.enabled=false`, the state for any tenant with no row).
 
 ## What is exported
 
 The same reconciled cost/attribution facts as the BigQuery export (identical columns, natural keys,
-and incremental watermark columns — they are the *same* `ExportTableSpec` objects):
+and incremental watermark columns; they are the *same* `ExportTableSpec` objects):
 
 | S3 prefix / Athena table | ClickHouse source     | Incremental column   | Natural key (dedupe)                            |
 | ------------------------ | --------------------- | -------------------- | ----------------------------------------------- |
@@ -46,7 +46,7 @@ new partitions with `MSCK REPAIR TABLE <table>` (or a Glue crawler) after a pass
 
 ### Type mapping
 
-The Athena/Redshift schema is generated from the **same** `BQField` schema the BigQuery sink uses —
+The Athena/Redshift schema is generated from the **same** `BQField` schema the BigQuery sink uses,
 one schema, two dialects:
 
 | BigQuery type | Athena / Parquet type |
@@ -105,7 +105,7 @@ A ready-to-edit static copy of the four `CREATE EXTERNAL TABLE` statements lives
 The export preserves ai-tally's "counts only, never bodies" invariant (CTO-118). Because the specs
 are shared with CTO-154, the same guards apply:
 
-1. The exported tables hold no message text to begin with — `otel_spans` already drops body-keyed
+1. The exported tables hold no message text to begin with: `otel_spans` already drops body-keyed
    attributes on ingest (`mapping.span_to_row`).
 2. At import time the worker re-asserts no exported column is body-keyed (reusing the span-side
    `mapping._is_body_key` guard) and that no spec reads a replay table.
@@ -113,7 +113,7 @@ are shared with CTO-154, the same guards apply:
    before they leave (`strip_body_keys`).
 
 The replay **candidate-response text** (CTO-125, `replay_runs.ResponseText`) is a **separate, opt-in
-tier** and is explicitly **excluded** here — no export spec sources a replay table. Covered by
+tier** and is explicitly **excluded** here: no export spec sources a replay table. Covered by
 `infra/gateway/tests/test_athena_export.py`: `test_no_exported_column_is_body_keyed`,
 `test_no_spec_sources_a_replay_body_table`, `test_span_attribute_map_strips_body_keys_before_write`.
 
@@ -121,7 +121,7 @@ tier** and is explicitly **excluded** here — no export spec sources a replay t
 
 Each pass reads rows strictly greater than the stored watermark, groups them by day partition, and
 **upserts** each partition on the same natural key ClickHouse dedupes on (read-merge-write of the
-partition's Parquet object). Re-running a pass — e.g. after a crash — never duplicates rows, and a
+partition's Parquet object). Re-running a pass (e.g. after a crash) never duplicates rows, and a
 later pass that adds more rows to a day already partially exported keeps the earlier rows. The
 watermark advances only to the max value actually seen. Covered by
 `test_rerun_over_same_window_does_not_duplicate`,
@@ -130,7 +130,7 @@ watermark advances only to the max value actually seen. Covered by
 
 ## Configuration
 
-Process-level settings (env, `TALLY_`-prefixed — see `gateway/config.py`):
+Process-level settings (env, `TALLY_`-prefixed; see `gateway/config.py`):
 
 | Setting                                | Default        | Meaning                                        |
 | -------------------------------------- | -------------- | ---------------------------------------------- |
@@ -145,7 +145,7 @@ Per-tenant config (`tenant_athena_export_config`, migration `db/postgres/0020_..
 `bucket`, `prefix`, `database`, `region`, `credential_ref`. Incremental cursor
 (`athena_export_watermarks`, migration `db/postgres/0021_...`): one row per (tenant, source table).
 
-### Auth — reference only, never a raw key
+### Auth: reference only, never a raw key
 
 `credential_ref` is a **reference**, not a secret: an IAM **role ARN** the worker assumes, or a
 Secrets Manager / SSM parameter resource name. The gateway **rejects** anything that looks like an
@@ -190,7 +190,7 @@ is safe.
 
 `Boto3S3ParquetSink` (the real `pyarrow`-encode + `boto3` put, read-merge-write per partition) and
 `ClickHouseExportReader` (shared with CTO-154) are implemented but exercised only against live S3 /
-ClickHouse — the unit suite drives the in-memory fakes (`InMemoryS3ParquetSink`, `FakeReader`) so
+ClickHouse; the unit suite drives the in-memory fakes (`InMemoryS3ParquetSink`, `FakeReader`) so
 the partitioning + incremental + idempotency + no-body logic is fully testable with no cloud
 dependencies. Per-tenant *scheduling* (a running daemon / cron wiring) is intentionally out of scope;
 `run_export` is the invocable entry point a scheduler calls.

@@ -1,4 +1,4 @@
-"""GET/POST /v1/tenant/connectors — list + toggle declared cost-layer connectors (CTO-107)."""
+"""GET/POST /v1/tenant/connectors: list + toggle declared cost-layer connectors (CTO-107)."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def test_enable_disable_round_trip(client: TestClient) -> None:
     listing = client.get("/v1/tenant/connectors", headers={"X-Tenant-Id": T}).json()
     assert sorted(listing["enabled_layers"]) == ["llm", "vector"]
 
-    # Disable vector — it should remain in the list as a tombstone, but not in enabled_layers
+    # Disable vector: it should remain in the list as a tombstone, but not in enabled_layers
     r = client.post(
         "/v1/tenant/connectors",
         headers={"X-Tenant-Id": T},

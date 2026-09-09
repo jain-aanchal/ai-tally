@@ -3,12 +3,12 @@
 //
 // The backend ships pluggable connector frameworks (tally.cost_connectors, tally.cdp_connectors):
 // each connector normalizes one provider's payload into the shared cost/business-event model. This
-// module is the UI's view of that catalog — the supported sources and whether each is currently
-// producing data — so the page reflects the real frameworks rather than inventing providers.
+// module is the UI's view of that catalog, the supported sources and whether each is currently
+// producing data, so the page reflects the real frameworks rather than inventing providers.
 //
 // "Connected" is derived honestly from telemetry: a cost source counts as connected when its cost
 // layer has rows in otel_spans; a revenue source when business_events carries its Source. Nothing
-// is fetched here — configuration/credentials live in the backend runner, not the dashboard.
+// is fetched here; configuration/credentials live in the backend runner, not the dashboard.
 
 import type { Layer } from "./cost";
 
@@ -21,7 +21,7 @@ export type LiveKey =
       layer: Layer;
       /**
        * `GenAiSystem` values that belong to this connector. Required whenever two connectors feed
-       * the SAME layer (AWS vs GCP on `compute`, Vercel vs Cloudflare on `egress`) — without it the
+       * the SAME layer (AWS vs GCP on `compute`, Vercel vs Cloudflare on `egress`); without it the
        * layer→connector lookup collides and credits every row to whichever connector the catalog
        * happens to list last.
        */
@@ -31,8 +31,8 @@ export type LiveKey =
 
 /**
  * Whether the backend ingest path for this connector actually exists today.
- * - `live`        — a real worker / SDK / webhook ingests data when configured.
- * - `coming_soon` — catalog entry only; no worker yet, the UI advertises a placeholder so users
+ * - `live`:         a real worker / SDK / webhook ingests data when configured.
+ * - `coming_soon`:  catalog entry only; no worker yet, the UI advertises a placeholder so users
  *                   know it's planned.
  *
  * The four cloud connectors moved to `live` once their workers shipped: AWS Cost Explorer and GCP
@@ -42,7 +42,7 @@ export type LiveKey =
 export type Availability = "live" | "coming_soon";
 
 export interface ConnectorDef {
-  /** Stable id — matches the backend connector's `name`. */
+  /** Stable id: matches the backend connector's `name`. */
   id: string;
   name: string;
   category: ConnectorCategory;
@@ -220,7 +220,7 @@ export function comingSoonCount(rows: ConnectorStatus[]): number {
  * Typed fallback activity for the cost / revenue source rows. Used when the gateway and
  * ClickHouse are both unreachable so a fresh clone / CI keeps rendering. Real per-tenant
  * third-party integration status now comes from the gateway's
- * `GET /v1/tenant/integrations/status` (CTO-117) — this map is the demo-friendly fallback
+ * `GET /v1/tenant/integrations/status` (CTO-117); this map is the demo-friendly fallback
  * rather than the primary data path.
  */
 export const mockActivity: ConnectorActivity = {

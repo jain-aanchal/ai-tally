@@ -7,7 +7,7 @@ import (
 )
 
 // TraceRecord is the telemetry copy emitted for one proxied request. It carries only metadata and
-// byte counts — never request or response *content*. The forwarded bytes are streamed straight
+// byte counts, never request or response *content*. The forwarded bytes are streamed straight
 // through untouched; we count them as they pass but never buffer or persist them. This keeps the
 // "bodies never written to logs/DB/disk" guarantee (CTO-42) structurally true: there is no field
 // here that could hold a prompt, completion, or the customer's provider key.
@@ -23,7 +23,7 @@ type TraceRecord struct {
 	// emitted as the canonical tag.
 	TenantId string
 	// FeatureTag is the per-request feature/agent identifier from the control header
-	// (X-Tally-Feature-Tag). Optional and informational only — empty when the caller didn't tag
+	// (X-Tally-Feature-Tag). Optional and informational only; empty when the caller didn't tag
 	// the request. Downstream telemetry uses this to segment cost and traces by feature (CTO-104).
 	FeatureTag string
 	// AccountIdHash is the HMAC-SHA256 hex of the caller's own paying customer / account id, taken
@@ -58,7 +58,7 @@ type TraceRecord struct {
 	PromptTokens     *int64
 	CompletionTokens *int64
 	// StatusCode is the upstream response status relayed to the client (0 if the upstream failed
-	// before any status, e.g. connection refused — see Failed).
+	// before any status, e.g. connection refused, see Failed).
 	StatusCode int
 	// ReqBytes / RespBytes are the body sizes that transited the proxy, measured by counting.
 	ReqBytes  int64
@@ -71,7 +71,7 @@ type TraceRecord struct {
 }
 
 // Sink consumes telemetry copies. Implementations must be safe for concurrent use and must not
-// block the request path — Record is called inline after the response is fully relayed, so a slow
+// block the request path; Record is called inline after the response is fully relayed, so a slow
 // sink directly inflates tail latency. The real ingest sink (CTO-40/41) hands off to a buffered
 // async channel; the default here is a no-op.
 type Sink interface {

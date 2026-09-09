@@ -3,7 +3,7 @@
 //
 // The proxy is deliberately stateless: every knob comes from an env var so the same binary
 // scales horizontally behind a load balancer with no per-instance state to coordinate. Nothing
-// here is a secret — the customer's provider key rides on each request's Authorization header and
+// here is a secret; the customer's provider key rides on each request's Authorization header and
 // is never read into config (see package proxy for the in-memory-only guarantee).
 package config
 
@@ -59,7 +59,7 @@ const (
 
 // Provider names the upstream API protocol so the proxy knows how to read scalar metadata (model,
 // token usage) out of the relayed response (CTO-167). It is orthogonal to Mode: it changes what the
-// proxy *understands* about the traffic, never how the request is forwarded — every provider is
+// proxy *understands* about the traffic, never how the request is forwarded; every provider is
 // still a byte-for-byte pass-through.
 //
 // The empty Provider ("") is the CTO-39 default: pure pass-through with zero response inspection, so
@@ -94,7 +94,7 @@ type Config struct {
 	// (default X-Tally-Feature-Tag). Like TenantHeader, it is stripped before the request leaves for
 	// the upstream provider; its value is recorded on the TraceRecord so downstream telemetry can
 	// segment traffic by feature (CTO-104). Unlike the tenant key, the feature tag is purely
-	// informational — missing/empty is fine and never rejected.
+	// informational; missing/empty is fine and never rejected.
 	FeatureTagHeader string
 	// AccountIdHashHeader names an optional control header carrying the HMAC-SHA256 hex of the
 	// caller's own paying customer / account id (default X-Tally-Account-Id-Hash). It exists so
@@ -180,7 +180,7 @@ const (
 	DefaultListenAddr = ":8088"
 	DefaultUpstream   = "https://api.openai.com"
 	// DefaultGeminiUpstream is the origin used when Provider is gemini and EDGE_PROXY_UPSTREAM is
-	// unset — Google's Generative Language API (CTO-167).
+	// unset, Google's Generative Language API (CTO-167).
 	DefaultGeminiUpstream   = "https://generativelanguage.googleapis.com"
 	DefaultTenantHeader     = "X-Tenant-Key"
 	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"

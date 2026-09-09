@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CTO-165 daily-job tests: proposal flow, skipped-provider + large-diff alerting, review artifact,
-and the publish gate. Zero network — everything runs off recorded fixtures."""
+and the publish gate. Zero network: everything runs off recorded fixtures."""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ def test_seed_catalog_untouched():
     assert cat.lookup(
         "openai", "gpt-4o", PriceType.INPUT, at=date(2026, 7, 1)
     ).price_per_unit == Decimal("2.50")  # seed value, not the fixture's 2.55
-    # Gemini is seeded (CTO-149) at the seed rate, not our fixture rate — proves no seed edit.
+    # Gemini is seeded (CTO-149) at the seed rate, not our fixture rate; proves no seed edit.
     assert cat.lookup(
         "google", "gemini-2.5-pro", PriceType.INPUT, at=date(2026, 7, 1)
     ).price_per_unit == Decimal("1.25")  # seed value, not the fixture's 1.30

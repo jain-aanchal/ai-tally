@@ -27,7 +27,7 @@ func tokensStr(got *int64) string {
 }
 
 // recordedGeminiResponse is a real-shape generateContent response body (content elided): the parts
-// text is irrelevant to metadata — only usageMetadata and, via the path, the model matter.
+// text is irrelevant to metadata; only usageMetadata and, via the path, the model matter.
 const recordedGeminiResponse = `{
   "candidates": [
     {"content": {"parts": [{"text": "ok"}], "role": "model"}, "finishReason": "STOP"}
@@ -41,7 +41,7 @@ const recordedGeminiResponse = `{
 }`
 
 // TestGeminiMetaFromRecordedResponse is the CTO-167 acceptance test: the proxy parses a recorded
-// Gemini response into a correct set of TraceRecord scalars — model (from the request path) plus
+// Gemini response into a correct set of TraceRecord scalars: model (from the request path) plus
 // prompt/candidate token counts (from usageMetadata).
 func TestGeminiMetaFromRecordedResponse(t *testing.T) {
 	path := "/v1beta/models/gemini-2.5-flash:generateContent"
@@ -189,7 +189,7 @@ func TestGeminiProxyStreamingModelFromPath(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// No usageMetadata in this chunk — exercises the "model without tokens" path.
+		// No usageMetadata in this chunk, exercises the "model without tokens" path.
 		_, _ = io.WriteString(w, `[{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}]`)
 	})
 	front, sink := newGeminiProxy(t, upstream)

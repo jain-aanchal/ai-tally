@@ -7,7 +7,7 @@ the outcome via :meth:`TenantIntegrationStore.record_run`.
 
 This module holds what all three share:
 
-* :class:`HttpClient` — the injectable transport Protocol (one ``get_json`` method).
+* :class:`HttpClient`, the injectable transport Protocol (one ``get_json`` method).
 * :class:`IngestWorker`, the base that owns credential resolution, the incremental window, the
   ClickHouse writes' error boundary, and the ``record_run`` bookkeeping (with PII-scrubbed errors
   and honest success / partial / failed / skipped status), so each connector only describes its own
@@ -229,7 +229,7 @@ class CycleResult:
 
     ``status`` is one of ``success`` / ``partial`` / ``failed`` (mirroring ``record_run``) plus
     ``skipped`` when the tenant has not connected this integration (nothing to do, nothing
-    recorded). ``recorded`` is False when ``record_run`` itself failed — a best-effort write that
+    recorded). ``recorded`` is False when ``record_run`` itself failed, a best-effort write that
     never propagates, so a control-plane blip can't crash the cycle.
     """
 
@@ -279,7 +279,7 @@ def as_event_list(payload: Any) -> list[Any]:
     """Coax a fetched payload into a list of raw event objects.
 
     Accepts a bare list or the common ``{"events"|"results"|"data": [...]}`` envelope shapes.
-    Anything else yields an empty list — an unrecognized shape is zero events, not a crash.
+    Anything else yields an empty list; an unrecognized shape is zero events, not a crash.
     """
     if isinstance(payload, list):
         return payload
@@ -297,7 +297,7 @@ def build_hasher(
     """Return a per-tenant identifier hasher: ``str -> 64-hex HMAC`` (``""`` for empty input).
 
     Provisions the tenant's key once up front. Unlike the Stripe email hasher this does *not*
-    lowercase — a track/visitor id is case-sensitive; callers that hash an email lowercase it
+    lowercase: a track/visitor id is case-sensitive; callers that hash an email lowercase it
     themselves before calling.
     """
     registry.provision(tenant_id)
@@ -316,8 +316,8 @@ def build_hasher(
 class IngestWorker:
     """Base for the Segment / HubSpot / Pendo workers.
 
-    Subclasses set :attr:`connector_id` and implement :meth:`_ingest`. Everything else — credential
-    resolution, the ``record_run`` write with a scrubbed error, and the honest status derivation —
+    Subclasses set :attr:`connector_id` and implement :meth:`_ingest`. Everything else (credential
+    resolution, the ``record_run`` write with a scrubbed error, and the honest status derivation)
     lives here so the connectors stay small and consistent.
     """
 
@@ -353,7 +353,7 @@ class IngestWorker:
         self._account_linker = account_linker if account_linker is not None else AccountLinker()
 
     def run_cycle(self, tenant_id: str) -> CycleResult:
-        """Run one ingest cycle for one tenant. Never raises — every failure is recorded, not thrown.
+        """Run one ingest cycle for one tenant. Never raises: every failure is recorded, not thrown.
 
         Skips silently (no ``record_run``) when the tenant hasn't connected this integration, since
         an absent row is the honest "not connected" state the dashboard already renders.
@@ -370,13 +370,13 @@ class IngestWorker:
 
         try:
             token = self._resolver.resolve(secret.secret_ref)
-        except Exception as exc:  # noqa: BLE001 — any resolver failure is an honest 'failed' cycle
+        except Exception as exc:  # noqa: BLE001 - any resolver failure is an honest 'failed' cycle
             return self._finish(tenant_id, "failed", 0, f"credential resolution failed: {exc}")
 
         window = self._window(tenant_id)
         try:
             outcome = self._ingest(tenant_id, secret, token, window)
-        except Exception as exc:  # noqa: BLE001 — a fetch / insert failure is a 'failed' cycle
+        except Exception as exc:  # noqa: BLE001 - a fetch / insert failure is a 'failed' cycle
             # NO cursor advance on a failed cycle. The window has not been handled, so the next
             # cycle must ask for it again; advancing here would silently drop every event in it.
             return self._finish(tenant_id, "failed", 0, str(exc))
@@ -448,7 +448,7 @@ class IngestWorker:
     ) -> CycleResult:
         # No raw PII may reach the returned CycleResult, so scrub it here with the shared util.
         # record_run applies the *same* util before it persists, so we hand it the raw message and
-        # let it scrub exactly once — the scrub isn't idempotent (its own "[redacted-email]" marker
+        # let it scrub exactly once; the scrub isn't idempotent (its own "[redacted-email]" marker
         # contains the forbidden substring "email"), so a pre-scrubbed value would over-collapse.
         scrubbed = scrub_error_message(error)
         recorded = False
@@ -461,7 +461,7 @@ class IngestWorker:
                 error_message=error,
             )
             recorded = True
-        except Exception:  # noqa: BLE001 — best-effort: a control-plane blip can't crash the cycle
+        except Exception:  # noqa: BLE001 - best-effort: a control-plane blip can't crash the cycle
             logger.exception(
                 "record_run failed for tenant %s connector %s", tenant_id, self.connector_id
             )

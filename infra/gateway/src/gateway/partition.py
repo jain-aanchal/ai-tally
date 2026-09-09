@@ -3,13 +3,13 @@
 A burst buffer (Kafka in prod) sits between the gateway and ClickHouse async inserts. The topic is
 partitioned by ``(tenant_id, trace_id_hash % N)`` so that:
 
-* **Per-trace ordering** is preserved — every span of a given ``(tenant_id, trace_id)`` hashes to the
+* **Per-trace ordering** is preserved: every span of a given ``(tenant_id, trace_id)`` hashes to the
   same partition, so a consumer sees them in produce order.
 * **Per-tenant spread** keeps one trace from hot-spotting; a tenant's traces fan out across the N
   partitions rather than serializing on one.
 
 The hash is :func:`hashlib.blake2b` (not Python's salted ``hash()``) so partitioning is *stable across
-processes and restarts* — a replayed batch lands on the same partition as the original.
+processes and restarts*: a replayed batch lands on the same partition as the original.
 """
 
 from __future__ import annotations

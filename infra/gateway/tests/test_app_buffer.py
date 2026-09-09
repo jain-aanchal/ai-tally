@@ -1,7 +1,7 @@
 """App-level ingest-buffer tests (CTO-37): a burst never 5xxs, and buffered spans land in ClickHouse.
 
 Buffering is wired in ``lifespan`` from ``settings.ingest_buffered`` and wraps ``app.state.store``, so
-the test enables the flag and patches the store factory *before* the TestClient runs startup — that
+the test enables the flag and patches the store factory *before* the TestClient runs startup; that
 way the background drain loop writes to our fake store rather than a real ClickHouse.
 """
 
@@ -68,7 +68,7 @@ def _buffered_client(store: FakeStore) -> Iterator[TestClient]:
 
 
 def _spans(n: int, batch: int = 0) -> list[dict]:
-    # Unique (trace_id, span_id) per call — the buffer's BufferConsumer dedups on that pair, so
+    # Unique (trace_id, span_id) per call: the buffer's BufferConsumer dedups on that pair, so
     # repeating IDs across batches makes the drained-store count race with chunk boundaries.
     return [
         {
@@ -87,7 +87,7 @@ def _post(c: TestClient, spans: list[dict]):
 
 
 def _wait_for(predicate, timeout_s: float = 60.0) -> bool:
-    # 60s ceiling — loaded GitHub Actions runners have been seen taking >30s
+    # 60s ceiling: loaded GitHub Actions runners have been seen taking >30s
     # for the burst drain to fully settle. Locally this test finishes in
     # <500ms; a real regression would never complete in 60s either.
     deadline = time.monotonic() + timeout_s
@@ -101,7 +101,7 @@ def _wait_for(predicate, timeout_s: float = 60.0) -> bool:
 def test_buffered_burst_is_accepted_and_persisted() -> None:
     store = FakeStore()
     with _buffered_client(store) as c:
-        # Several batches in quick succession — a burst the synchronous path would push through CH.
+        # Several batches in quick succession: a burst the synchronous path would push through CH.
         total = 0
         for batch in range(5):
             r = _post(c, _spans(40, batch=batch))
@@ -112,7 +112,7 @@ def test_buffered_burst_is_accepted_and_persisted() -> None:
             total += 40
         # The buffered spans land in ClickHouse off the hot path. We drive drain_once() from the
         # test thread (idempotent + lock-guarded against the background loop) so the assertion is
-        # deterministic. Predicate is "buffer empty AND store has all spans" — checking
+        # deterministic. Predicate is "buffer empty AND store has all spans"; checking
         # drain_once() == 0 alone has a race: it can return 0 transiently while the background
         # loop is mid-flight and spans haven't reached the store yet.
         buf = app.state.ingest_buffer

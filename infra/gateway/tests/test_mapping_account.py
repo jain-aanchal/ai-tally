@@ -2,12 +2,12 @@
 
 Three contracts checked here:
 
-1. Presence — ``gen_ai.account_id_hash`` / ``gen_ai.account_id_hash_key_version`` land in the
+1. Presence: ``gen_ai.account_id_hash`` / ``gen_ai.account_id_hash_key_version`` land in the
    ``AccountIdHash`` / ``AccountIdHashKeyVersion`` typed columns, exactly like the user hash.
-2. Absence — a span with no account attribute still maps cleanly, writing ``''`` (the
+2. Absence: a span with no account attribute still maps cleanly, writing ``''`` (the
    unattributed bucket the DDL documents), never a null and never a placeholder that could be
    mistaken for a real account.
-3. Label passthrough — ``gen_ai.account_label`` is wire-only. It is accepted without error and is
+3. Label passthrough: ``gen_ai.account_label`` is wire-only. It is accepted without error and is
    NOT persisted: not as a column, not in the ``SpanAttributes`` long-tail map. The Postgres label
    store it belongs in is CTO-186 (B7).
 """
@@ -37,7 +37,7 @@ def test_account_hash_promoted_to_typed_columns() -> None:
 
 
 def test_account_hash_absent_writes_empty_string_not_null() -> None:
-    """The unattributed bucket is '' — never None, never a 'unknown'-style placeholder."""
+    """The unattributed bucket is '', never None, never a 'unknown'-style placeholder."""
     row = _row_dict(span_to_row({}, tenant_id="t1", effective_ts_ns=0))
     assert row["AccountIdHash"] == ""
     assert row["AccountIdHashKeyVersion"] == ""

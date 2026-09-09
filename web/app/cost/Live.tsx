@@ -221,7 +221,7 @@ export function CostLive({
 
   // Tile values: the filter-aware slice totals when /api/explore answered, else the shipped
   // /api/cost figures on the default slice (so the byte-for-byte default and the offline view hold),
-  // else an honest blank (null) on a non-default slice we could not read — never a zero.
+  // else an honest blank (null) on a non-default slice we could not read, never a zero.
   const slice = explore.totals;
   // CTO-244 follow-up: a slice in which NOTHING could be priced has an unknown total, not a zero
   // one, and the tile must say so or it contradicts the breakdown footer directly beneath it.

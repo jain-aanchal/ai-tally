@@ -4,7 +4,7 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 //
 // The band cutoffs used to be hardcoded B2B-SaaS defaults inline in unitEconomics.ts. They are now
 // tenant-configurable: the gateway persists a per-tenant row (GET/POST /v1/tenant/unit-economics/
-// config). This module is the server-only reader — the web app never touches Postgres directly, same
+// config). This module is the server-only reader; the web app never touches Postgres directly, same
 // rule as web/lib/cac.ts and web/lib/tenant.ts. A tenant with no row (or an unreachable gateway on
 // CI / fresh clones) yields `null`, which the classify helpers treat as "use the defaults".
 
@@ -38,7 +38,7 @@ export function overridesFromApi(
 
 /**
  * Fetch the tenant's threshold overrides. Returns `null` when the tenant has no row OR the gateway
- * is unreachable — callers pass that straight to `resolveThresholds`, which falls back to defaults.
+ * is unreachable; callers pass that straight to `resolveThresholds`, which falls back to defaults.
  */
 export async function queryUnitEconomicsConfig(): Promise<UnitEconomicsThresholdOverrides | null> {
   try {

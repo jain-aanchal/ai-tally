@@ -25,9 +25,9 @@ interface NavItem {
 // backed by the gateway control plane, CTO-208 F4) rather than hidden behind /settings.
 //
 // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
-//   - /settings        — guardrail config only, nothing else wired
-//   - /estimate        — mock fixtures (re-add when CTO-128 lands)
-//   - /data-quality    — placeholder rows (re-add when DQ follow-ups land)
+//   - /settings:         guardrail config only, nothing else wired
+//   - /estimate:         mock fixtures (re-add when CTO-128 lands)
+//   - /data-quality:     placeholder rows (re-add when DQ follow-ups land)
 const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
   {
     caption: "Overview",

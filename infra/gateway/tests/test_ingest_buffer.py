@@ -1,6 +1,6 @@
 """Async ingest burst-buffer service: capacity, at-least-once, burst absorption, fairness (CTO-37).
 
-These exercise :class:`gateway.ingest_buffer.AsyncIngestBuffer` — the service that wires the pure
+These exercise :class:`gateway.ingest_buffer.AsyncIngestBuffer`, the service that wires the pure
 buffer core into the gateway. Async behavior is driven with ``asyncio.run`` so no pytest plugin is
 needed. Rows here are minimal tuples whose indices 2/3 are the TraceId/SpanId the buffer routes on
 (matching ``gateway.mapping.COLUMNS``); the remaining columns are irrelevant to buffering.
@@ -38,7 +38,7 @@ class FakeStore:
 
 
 def _row(tenant: str, trace: str, span: str) -> tuple:
-    # (TenantId, Timestamp, TraceId, SpanId, ...) — only indices 2/3 matter to the buffer.
+    # (TenantId, Timestamp, TraceId, SpanId, ...): only indices 2/3 matter to the buffer.
     return (tenant, "ts", trace, span, "payload")
 
 
@@ -102,7 +102,7 @@ def _drain_until_empty(buf: AsyncIngestBuffer, timeout_s: float = 5.0) -> None:
 
 def test_burst_is_absorbed_and_fully_drained() -> None:
     # A burst far larger than one drain batch, against a deliberately slow store, must be fully
-    # written without the producer ever blocking or losing a row — the core CTO-37 guarantee.
+    # written without the producer ever blocking or losing a row, the core CTO-37 guarantee.
     store = FakeStore(delay_s=0.002)
     buf = AsyncIngestBuffer(store, drain_batch=50, poll_interval_s=0.01)
     total = 1000
@@ -135,8 +135,8 @@ def test_drain_recovers_after_transient_store_outage() -> None:
 def test_one_tenant_flood_does_not_starve_another() -> None:
     # Fairness is a *cross-partition* property: the partition hash includes tenant_id, so distinct
     # tenants land on distinct partitions and a fair drain serves each partition's head once per
-    # round. (It deliberately does NOT reorder within a partition — that would break per-trace
-    # ordering — so a tenant sharing a partition behind another's earlier records correctly waits;
+    # round. (It deliberately does NOT reorder within a partition: that would break per-trace
+    # ordering, so a tenant sharing a partition behind another's earlier records correctly waits;
     # real fairness comes from spreading across many partitions.) Here we put a hog's flood on every
     # partition *except* the small tenant's, so the small tenant owns its partition and must be
     # served on the very first drain round despite the flood.

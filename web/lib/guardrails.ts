@@ -4,7 +4,7 @@
 //
 // The product bet: customers graduate to enforcement *with confidence*. Every rule starts in
 // observe-only, where the engine records what *would* have fired without touching agent behavior.
-// The "would-have-fired this week" count is the graduation signal — once you can see the blast
+// The "would-have-fired this week" count is the graduation signal: once you can see the blast
 // radius of a cap, flipping it to warn/graceful is a low-risk decision.
 
 import type { MicroUSD } from "./types";
@@ -84,9 +84,9 @@ export type GraduationSignal = "ready" | "review" | "noisy" | "insufficient-data
 
 // The graduation heuristic the UI surfaces for observe-only rules:
 //  - insufficient-data: too few runs to judge the blast radius yet.
-//  - ready:  a small, non-zero fraction would fire — a meaningful but contained cap. Graduate.
-//  - review: nothing would fire — the cap may be set too loose to matter.
-//  - noisy:  a large fraction would fire — enforcing now would disrupt many runs; tune the cap first.
+//  - ready:  a small, non-zero fraction would fire: a meaningful but contained cap. Graduate.
+//  - review: nothing would fire: the cap may be set too loose to matter.
+//  - noisy:  a large fraction would fire: enforcing now would disrupt many runs; tune the cap first.
 export function graduationSignal(rule: GuardrailRule): GraduationSignal {
   if (rule.runsThisWeek < 100) return "insufficient-data";
   const rate = fireRate(rule);
@@ -128,7 +128,7 @@ export function summarize(rules: GuardrailRule[]): GuardrailSummary {
   return { total: rules.length, enforcing, observing, readyToGraduate };
 }
 
-// Mock rules — typed exactly like the eventual control-plane response.
+// Mock rules: typed exactly like the eventual control-plane response.
 export const guardrailRules: GuardrailRule[] = [
   {
     id: "gr_research_cost",
@@ -165,7 +165,7 @@ export const guardrailRules: GuardrailRule[] = [
     scopeKind: "feature",
     scope: "smart_search",
     mode: "observe",
-    maxCostMicroUsd: 5_000_000, // $5.00 / run — likely too loose
+    maxCostMicroUsd: 5_000_000, // $5.00 / run, likely too loose
     maxSteps: null,
     wouldHaveFiredThisWeek: 0,
     runsThisWeek: 1_900,

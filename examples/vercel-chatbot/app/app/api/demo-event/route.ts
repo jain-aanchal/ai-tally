@@ -5,7 +5,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { type CdpEventType, postCdpEvent } from "@/lib/tally";
 
-// ai-tally: see demo-chat/route.ts — Next.js 16 cacheComponents rejects
+// ai-tally: see demo-chat/route.ts: Next.js 16 cacheComponents rejects
 // runtime/dynamic route segment exports.
 
 interface Body {

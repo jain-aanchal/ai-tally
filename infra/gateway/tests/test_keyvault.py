@@ -1,6 +1,6 @@
 """Pure tests for the in-memory provider-key vault (CTO-42, spec §4.2 / §14.12).
 
-No infra, network, or filesystem — this is the audit surface for the never-log/never-persist
+No infra, network, or filesystem: this is the audit surface for the never-log/never-persist
 guarantee and the fail-open-routing / fail-closed-guardrail policy.
 """
 

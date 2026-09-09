@@ -1,4 +1,4 @@
-# Vercel AI Chatbot — vendored copy
+# Vercel AI Chatbot: vendored copy
 
 This directory vendors the [Vercel AI Chatbot](https://github.com/vercel/ai-chatbot)
 template at a pinned upstream SHA. We patch a small number of files to wire
@@ -33,7 +33,7 @@ where the file isn't TS/JS). To audit: `grep -rn "ai-tally:" examples/vercel-cha
 
 ### `app/lib/tally.ts` (new file)
 
-A small helper module — POSTs spans and CDP events to the ai-tally gateway,
+A small helper module: POSTs spans and CDP events to the ai-tally gateway,
 and classifies prompts into feature tags (`chatbot.support` /
 `chatbot.brainstorm` / `chatbot.code`). Emits the real provider / model on
 the standard `gen_ai.*` attributes; the gateway's price catalog
@@ -59,7 +59,7 @@ would do the same.
 ### Why separate routes vs. patching upstream `(chat)/api/chat/route.ts`
 
 The upstream route is ~400 lines and is wired hard to NextAuth, Drizzle,
-Vercel Blob, BotID, and a resumable-stream context — none of which is
+Vercel Blob, BotID, and a resumable-stream context, none of which is
 relevant to a 50-session demo driven from a script. Stripping all of that to
 make the upstream route runnable in standalone mode would require touching
 ≈20 files and a custom DB shim; the value of the demo is the **gateway-side
@@ -77,7 +77,7 @@ after `streamText` finalizes in `app/(chat)/api/chat/route.ts`.
 
 We do not modify `app/(auth)/auth.ts` or the middleware. The demo driver
 never enters the auth flow because it hits `/api/demo-chat` directly. A
-human visiting `:3001` will be redirected to `/login` as upstream intends —
+human visiting `:3001` will be redirected to `/login` as upstream intends;
 the demo is the cost-and-attribution pipeline, not the chat UI.
 
 ## Pricing
@@ -86,7 +86,7 @@ The gateway's seed catalog ([sdk/python/src/tally/pricing.py](../../sdk/python/s
 covers the OpenAI gpt-4o family and the Anthropic Claude 4 family directly
 (CTO-106). Spans emit the real `gen_ai.system` + `gen_ai.request.model` and
 the gateway's `enrich_cost` computes authoritative cost from real input /
-output tokens — no pinning, no back-computation. Historical rows from before
+output tokens: no pinning, no back-computation. Historical rows from before
 CTO-106 still carry `chatbot.real_provider` / `chatbot.real_model` on
 SpanAttributes; the dashboard queries coalesce both shapes so the rollout
 window stays clean.
@@ -94,12 +94,12 @@ window stays clean.
 ## Buildability
 
 The upstream template depends on Postgres, Vercel Blob, NextAuth, Redis and a
-handful of paid services. We do **not** depend on those for the demo —
+handful of paid services. We do **not** depend on those for the demo;
 `run.sh` boots the chatbot with `next dev --turbo`, the driver hits the
 ai-tally-added `/api/demo-chat` route directly, and the gateway-side
 infrastructure does the actual work.
 
 `next build` is therefore not part of the demo's acceptance check. The added
 files (`lib/tally.ts`, `api/demo-chat`, `api/demo-event`) are TypeScript
-that the Next.js compiler picks up automatically — `tsc --noEmit` against the
+that the Next.js compiler picks up automatically; `tsc --noEmit` against the
 chatbot's own `tsconfig.json` is a faster sanity check.

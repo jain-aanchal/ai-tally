@@ -2,7 +2,7 @@
 
 Run after `make up`:  `python -m gateway.seed`  (or `make seed`).
 
-Prints a freshly generated API key ONCE — only its SHA-256 is stored (api_keys.key_hash), matching
+Prints a freshly generated API key ONCE; only its SHA-256 is stored (api_keys.key_hash), matching
 the production invariant that raw key material is never persisted. Use the printed key as the
 gateway bearer token when TALLY_REQUIRE_API_KEY=true.
 """
@@ -19,7 +19,7 @@ from gateway.config import get_settings
 _TENANT_NAME = "local-dev"
 _REGION = "local"
 _FEATURE_TAGS = ["assistant", "search", "summarize"]
-# Cost-layer connectors enabled out of the box. Only `llm` is wired today — the rest stay un-enabled
+# Cost-layer connectors enabled out of the box. Only `llm` is wired today; the rest stay un-enabled
 # so the "Partial data" banner doesn't fire on a fresh stack (CTO-107).
 _ENABLED_LAYERS = ["llm"]
 
@@ -38,7 +38,7 @@ def seed() -> None:
             ON CONFLICT (name) DO NOTHING
             """
         )
-        # tenant — reuse the existing local-dev tenant if present
+        # tenant: reuse the existing local-dev tenant if present
         cur.execute("SELECT id FROM tenants WHERE name = %s", (_TENANT_NAME,))
         row = cur.fetchone()
         if row:

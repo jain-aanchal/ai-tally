@@ -1,8 +1,8 @@
-"""Stable gateway error codes — the wire contract for rejections.
+"""Stable gateway error codes: the wire contract for rejections.
 
 These strings are part of the public ingest contract: clients branch on them (e.g. the SDK egress
 loop drops 4xx-class items but retries QUOTA_EXCEEDED/RATE_LIMITED honoring ``retry_after``). Keep
-them additive — never rename or repurpose an existing code.
+them additive: never rename or repurpose an existing code.
 """
 
 from __future__ import annotations

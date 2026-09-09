@@ -71,7 +71,7 @@ describe("per-user economics", () => {
     expect(valuePerUser(p(), 500_000_000)).toBe(50_000_000);
   });
 
-  it("marginPerUser allows NEGATIVE — don't clamp", () => {
+  it("marginPerUser allows NEGATIVE, don't clamp", () => {
     // Honest: business loses money per user when cost > value
     expect(marginPerUser(10, 30)).toBe(-20);
   });
@@ -95,12 +95,12 @@ describe("payback months", () => {
     expect(paybackMonths(120, 10)).toBe(12);
   });
 
-  it("is NULL when margin is zero — not Infinity", () => {
+  it("is NULL when margin is zero, not Infinity", () => {
     // Honest: zero margin means we never recoup CAC.
     expect(paybackMonths(120, 0)).toBeNull();
   });
 
-  it("is NULL when margin is NEGATIVE — business losing money", () => {
+  it("is NULL when margin is NEGATIVE, business losing money", () => {
     expect(paybackMonths(120, -5)).toBeNull();
   });
 

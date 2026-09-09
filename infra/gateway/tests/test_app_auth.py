@@ -1,6 +1,6 @@
 """Gateway auth + rate-limit wiring tests (CTO-33).
 
-These exercise the rejection paths only — every assertion here returns *before* any ClickHouse
+These exercise the rejection paths only; every assertion here returns *before* any ClickHouse
 write, so the tests need no running infra. The happy path (which inserts) is covered by the pure
 limiter/mapping tests plus the live smoke in the PR description.
 """

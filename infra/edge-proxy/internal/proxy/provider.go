@@ -13,7 +13,7 @@ import (
 //
 // When a provider protocol is configured, the proxy reads a handful of scalar fields (model id,
 // prompt/completion token counts) out of the relayed response and hangs them on the TraceRecord.
-// This is metadata only — no prompt, no completion, no key is ever retained. The response still
+// This is metadata only: no prompt, no completion, no key is ever retained. The response still
 // streams to the client byte-for-byte and unbuffered on the wire; we merely tee a bounded copy
 // aside to parse the usage block, then discard it (see metaCapture). In pure pass-through mode
 // (empty Provider) none of this runs and the hot path is byte-identical to CTO-39.
@@ -40,7 +40,7 @@ const metaCaptureCap = 1 << 20
 
 // extractMeta parses provider metadata from a response body and, for Gemini, the request path.
 // It is a pure function so the CTO-167 test can feed it a recorded response and assert the mapping.
-// Unknown providers and unparseable bodies yield a zero responseMeta rather than an error — metadata
+// Unknown providers and unparseable bodies yield a zero responseMeta rather than an error; metadata
 // is best-effort and must never fail the proxied request.
 func extractMeta(p config.Provider, path string, body []byte) responseMeta {
 	switch p {
@@ -141,8 +141,8 @@ func geminiModelFromPath(path string) string {
 }
 
 // metaCapture wraps a response body, streaming it through untouched while teeing a bounded copy
-// aside so the usage block can be parsed on Close. It preserves the streaming contract — every Read
-// returns the provider's bytes immediately, adding no buffering latency — and never retains content
+// aside so the usage block can be parsed on Close. It preserves the streaming contract: every Read
+// returns the provider's bytes immediately, adding no buffering latency, and never retains content
 // beyond the transient capture, which is freed as soon as the scalar metadata is extracted. The
 // parsed result lands in *out; the raw bytes are discarded.
 type metaCapture struct {

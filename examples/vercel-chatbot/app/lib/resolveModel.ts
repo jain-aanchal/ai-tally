@@ -9,7 +9,7 @@ import path from "node:path";
 
 // CTO-170: added "google" so the chatbot picker's Gemini slots (CTO-164) self-heal
 // from discovery like the OpenAI/Anthropic slots already do. The family union gains
-// "flash"/"pro" — the exact strings tally.models.classify_family() writes for Gemini
+// "flash"/"pro", the exact strings tally.models.classify_family() writes for Gemini
 // ids (see _FAMILY_RULES in sdk/python/src/tally/models.py: `flash` is the cheap
 // tier, `pro` the flagship). Keep these in lockstep with that classifier.
 export type Provider = "openai" | "anthropic" | "google";
@@ -35,7 +35,7 @@ interface CachedModel {
 const DATE_SUFFIX = /-\d{8}$/;
 
 // Best-effort load. If the cache is missing or malformed, callers fall back to
-// their hardcoded defaults — the whole feature is quality-of-life, not critical
+// their hardcoded defaults; the whole feature is quality-of-life, not critical
 // path. Honors TALLY_MODELS_CACHE so the demo can point at the gateway's mount.
 function loadCache(): CachedModel[] | null {
   const overridePath = process.env.TALLY_MODELS_CACHE;

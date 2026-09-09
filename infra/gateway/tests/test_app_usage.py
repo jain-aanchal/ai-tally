@@ -16,7 +16,7 @@ T = "t-acme"
 
 
 class _FakeStore:
-    """Stand-in for ClickHouseStore — accepts writes, no real infra."""
+    """Stand-in for ClickHouseStore: accepts writes, no real infra."""
 
     def ping(self) -> bool:
         return True
@@ -79,7 +79,7 @@ def test_ingest_meters_distinct_traces_and_features(client: TestClient) -> None:
 
 
 def test_billed_count_is_independent_of_sample_rate(client: TestClient) -> None:
-    # A heavily-sampled batch (1%) must still bill every trace — metering is at HEAD.
+    # A heavily-sampled batch (1%) must still bill every trace: metering is at HEAD.
     spans = [_span(f"trace_{i}", "checkout") for i in range(10)]
     assert client.post("/v1/batches", json=_batch(spans, sample_rate=0.01)).status_code == 200
 

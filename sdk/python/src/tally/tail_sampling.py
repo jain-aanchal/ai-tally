@@ -3,7 +3,7 @@
 
 Pre-deploy estimation answers "what will switching model/prompt cost and how will quality move?" by
 *replaying* a representative sample of a workload's historical prompts. The trap: agent cost and
-failure are a power law — the blow-ups (retry loops, step-cap hits, long-context premium calls) live
+failure are a power law: the blow-ups (retry loops, step-cap hits, long-context premium calls) live
 in the **tail**. A sample drawn from *average* prompts would systematically under-predict both cost
 and risk, because the expensive tail is exactly what it misses.
 
@@ -12,12 +12,12 @@ So this sampler deliberately **over-indexes the expensive end**:
 * It defines the "tail" as runs at/above a configurable cost percentile (P90 by default) and draws
   the bulk of the budget from there.
 * It **mandatorily includes** the top-K most expensive runs and any run that hit a retry loop or a
-  step cap — the pathological cases an estimate must never skip.
+  step cap, the pathological cases an estimate must never skip.
 * The rest of the budget is a random body sample, so the composition still reflects ordinary
   traffic.
 
 It is **deterministic and reproducible**: selection within each pool is ranked by a seeded hash of
-``run_id``, so the same workload + seed always yields the same sample — reruns and CI are stable.
+``run_id``, so the same workload + seed always yields the same sample; reruns and CI are stable.
 Pure logic; no infra. The projection math that consumes this sample is CTO-72 (out of scope here).
 """
 
@@ -40,7 +40,7 @@ class HistoricalRun:
     """One historical run in a workload, with the signals that drive tail weighting.
 
     ``cost_micro_usd`` is the expense signal (integer micro-USD, consistent with
-    :mod:`tally.pricing` — never float). ``hit_retry_loop`` / ``hit_step_cap`` flag
+    :mod:`tally.pricing`, never float). ``hit_retry_loop`` / ``hit_step_cap`` flag
     pathological runs that must always be included in an estimation sample regardless of cost.
     """
 
@@ -127,7 +127,7 @@ class TailSample:
 
 
 def _seeded_rank(seed: int, run_id: str) -> float:
-    """Deterministic [0, 1) rank for a run under a seed — stable across runs, varies with seed."""
+    """Deterministic [0, 1) rank for a run under a seed: stable across runs, varies with seed."""
     digest = hashlib.sha256(f"{seed}:{run_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big") / 2**64
 
@@ -166,11 +166,11 @@ def tail_weighted_sample(
 
     Order of selection:
 
-    1. **Mandatory** — the ``top_k_expensive`` most expensive runs, plus every run that hit a retry
+    1. **Mandatory**: the ``top_k_expensive`` most expensive runs, plus every run that hit a retry
        loop or step cap. These are always included (capped at ``sample_size``).
-    2. **Tail-weighted** — ``tail_fraction`` of the remaining budget, drawn from runs at/above the
+    2. **Tail-weighted**: ``tail_fraction`` of the remaining budget, drawn from runs at/above the
        ``tail_percentile`` cost cutoff.
-    3. **Random body** — the rest of the budget, drawn from the cheaper body.
+    3. **Random body**: the rest of the budget, drawn from the cheaper body.
 
     Pools 2 and 3 are sampled by seeded hash for determinism. Shortfalls cascade (a thin tail pool
     spills its budget to the body and vice-versa) so the sample reaches ``sample_size`` whenever the

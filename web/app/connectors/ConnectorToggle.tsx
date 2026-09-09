@@ -3,7 +3,7 @@
 
 // Client toggle for one cost-layer connector (CTO-107). Posts to the gateway via a server action,
 // then shows an inline confirmation. Disabled layers stop contributing to the "Partial data" banner
-// on /cost and /home — that's the whole behavior change this ticket ships.
+// on /cost and /home; that's the whole behavior change this ticket ships.
 import { useState, useTransition } from "react";
 
 import { toggleConnectorAction } from "./actions";

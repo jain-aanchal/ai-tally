@@ -28,7 +28,7 @@ def _make(provider: str, model_id: str) -> M.ModelInfo:
 
 
 def test_lifespan_populates_state_models_from_pinned(tmp_path: Path, monkeypatch) -> None:
-    # Use TALLY_PINNED_MODELS so discovery is hermetic — no network, no cache hunt
+    # Use TALLY_PINNED_MODELS so discovery is hermetic: no network, no cache hunt
     # in the real .tally/ directory the developer may have on disk.
     pinned = tmp_path / "pinned.json"
     M.save_cache(

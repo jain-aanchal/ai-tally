@@ -36,7 +36,7 @@ export interface SpendSummary {
   totalMicroUsd: MicroUSD;
   estimatedMicroUsd: MicroUSD;
   reconciledMicroUsd: MicroUSD;
-  reconciledThrough: string; // ISO date — boundary between reconciled and estimated
+  reconciledThrough: string; // ISO date, boundary between reconciled and estimated
   byLayer: SpendByLayer;
   /**
    * Spans in the window we could not put a price on (CTO-244).

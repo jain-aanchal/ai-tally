@@ -149,7 +149,7 @@ def test_key_rotation_edge_tagged_with_source() -> None:
 
 def test_late_alias_relinks_anonymous_to_authenticated() -> None:
     g = _g()
-    # Before login, only the anonymous id is known — resolution is just itself.
+    # Before login, only the anonymous id is known; resolution is just itself.
     assert g.resolve_identity(T, "anon_1") == {"anon_1"}
     # An identify/alias arrives after the conversion: now the prior anonymous traces re-link.
     g.ingest_identify(T, IdentifyEvent(user_id="u_alice", anonymous_id="anon_1", observed_at=NOW))

@@ -121,7 +121,7 @@ class ClickHouseStore:
         The delete half of the CSV revenue upload's replace-a-period (CTO-198). ``business_events``
         is a ``ReplacingMergeTree`` on ``(TenantId, BusinessEventId)``, which collapses a re-upload
         of the SAME account onto one row but does nothing about an account that was in the previous
-        upload and is absent from this one — that row would linger and inflate revenue forever.
+        upload and is absent from this one; that row would linger and inflate revenue forever.
         Deleting the whole period first is what makes an upload a true snapshot replacement.
 
         Scoped by ``Source`` as well as by the derived-id prefix so this can never reach a row a

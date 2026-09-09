@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""/v1/tenant/revenue-uploads — round trip, idempotent re-upload, per-line rejection (CTO-198).
+"""/v1/tenant/revenue-uploads: round trip, idempotent re-upload, per-line rejection (CTO-198).
 
 The fake ClickHouse store below mirrors the real one's contract closely enough to prove the
 property that matters: a second upload of the same period REPLACES it. If the delete half of the
@@ -97,7 +97,7 @@ class FakeUploadStore:
 
 
 class FakeRevenueSourceStore:
-    """Only ``get`` is exercised — the upload's advisory narrowing note reads it."""
+    """Only ``get`` is exercised; the upload's advisory narrowing note reads it."""
 
     def __init__(self, config: object = None) -> None:
         self.config = config
@@ -138,7 +138,7 @@ def test_upload_writes_events_and_a_manifest_row(client: TestClient) -> None:
 
 
 def test_uploaded_events_look_like_every_other_revenue_source(client: TestClient) -> None:
-    # Same table, same ValueType discriminator, account hash in both identity columns — nothing
+    # Same table, same ValueType discriminator, account hash in both identity columns: nothing
     # downstream should need to know these arrived by spreadsheet.
     _upload(client)
     event = next(iter(app.state.store.rows.values()))

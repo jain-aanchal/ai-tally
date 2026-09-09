@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-151 — Vertex AI Vector Search on the Vector cost layer.
+"""CTO-151: Vertex AI Vector Search on the Vector cost layer.
 
 Vertex AI Vector Search (formerly Matching Engine) is a GCP-native vector provider. It rides the
 same ``record_vector_call`` path as the CTO-142 vector DBs (Pinecone/Weaviate/Qdrant): a query or
@@ -8,7 +8,7 @@ catalog (CTO-141) under ``PriceType.VECTOR_CALL`` keyed by ``(provider="vertex",
 
 Only the per-query / serving portion is priced here. Deployed-index node-hours (a compute cost)
 are deferred to the GCP Cloud Billing compute connector (CTO-150), so they must NOT show up on the
-Vector layer — see the cost-split comment in pricing.py.
+Vector layer; see the cost-split comment in pricing.py.
 """
 
 from __future__ import annotations

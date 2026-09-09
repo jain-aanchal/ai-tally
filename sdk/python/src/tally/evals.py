@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pluggable eval framework — attach a quality signal to cost comparisons.
+"""Pluggable eval framework: attach a quality signal to cost comparisons.
 
 Implements CTO-61 (spec §9 W1).
 
@@ -8,22 +8,22 @@ evals attach a *quality* signal so a model swap shows a quality delta alongside 
 Evals run over **replayed outputs** (the replay engine is CTO-59, out of scope here): you receive
 already-produced outputs as plain :class:`Sample` data and score them.
 
-This module is pure logic — **no network, no real LLM calls**. The "LLM-as-judge" correctness eval
+This module is pure logic: **no network, no real LLM calls**. The "LLM-as-judge" correctness eval
 takes an **injected judge callable** the caller supplies, so tests are deterministic and offline.
-The judge reports its own token usage, which we accumulate into ``eval_cost_micro_usd`` — surfaced
+The judge reports its own token usage, which we accumulate into ``eval_cost_micro_usd``, surfaced
 **separately** from the inference cost being evaluated (a cheaper model must not look better just
 because judging it was cheap).
 
 Design:
 
-- :class:`Evaluator` — a stable protocol: a ``name`` and ``evaluate(sample) -> EvalResult``.
+- :class:`Evaluator`, a stable protocol: a ``name`` and ``evaluate(sample) -> EvalResult``.
   Stateless and composable. Users register custom evaluators by name on a :class:`EvalRegistry`.
 - Three defaults ship: :class:`CorrectnessEvaluator` (LLM-as-judge, injected judge),
   :class:`FormatAdherenceEvaluator` (JSON / regex / required-keys), :class:`RefusalEvaluator`.
 - :class:`EvalHarness` holds the registry, runs evaluators over samples, aggregates per-model
   scores, and computes a delta vs. a designated baseline ("current") model.
 
-Defensiveness: a ``None`` / garbage output must never raise — it scores as failing (or refused, as
+Defensiveness: a ``None`` / garbage output must never raise; it scores as failing (or refused, as
 appropriate). Money mirrors :mod:`tally.pricing`: integer micro-USD, :class:`~decimal.Decimal` for
 rate math, never float dollars.
 """
@@ -60,7 +60,7 @@ class Sample:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def output_text(self) -> str:
-        """The output coerced to a safe string. ``None``/non-str become ``""`` — never raises."""
+        """The output coerced to a safe string. ``None``/non-str become ``""``; never raises."""
         if isinstance(self.output, str):
             return self.output
         if self.output is None:
@@ -77,7 +77,7 @@ class EvalResult:
 
     ``score`` is in ``[0, 1]`` (1 == best). ``passed`` is a boolean view for pass/fail evals.
     ``eval_cost_micro_usd`` is the cost the evaluator itself incurred (non-zero only for
-    judge-style evals) — kept distinct from the inference cost of the model under test.
+    judge-style evals), kept distinct from the inference cost of the model under test.
     """
 
     evaluator: str
@@ -99,7 +99,7 @@ class EvalResult:
 
 
 def _clamp01(value: float) -> float:
-    """Clamp to ``[0, 1]``; coerce non-finite/garbage to 0.0 — never raises."""
+    """Clamp to ``[0, 1]``; coerce non-finite/garbage to 0.0; never raises."""
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -171,7 +171,7 @@ class JudgeVerdict:
 
 @runtime_checkable
 class Judge(Protocol):
-    """Injected judge callable. The caller supplies this — we never call a network ourselves.
+    """Injected judge callable. The caller supplies this; we never call a network ourselves.
 
     A judge may return a :class:`JudgeVerdict` or a bare float in ``[0, 1]`` (then it incurs no
     reported eval cost).
@@ -184,7 +184,7 @@ class Judge(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CorrectnessEvaluator:
-    """LLM-as-judge correctness — scores ``output`` vs. ``reference``/criteria.
+    """LLM-as-judge correctness: scores ``output`` vs. ``reference``/criteria.
 
     The ``judge`` is **injected**; this evaluator never touches the network. The judge's token
     usage is priced at ``judge_*_micro_usd_per_token`` (Decimal rate math, integer micro-USD out)
@@ -213,7 +213,7 @@ class CorrectnessEvaluator:
         output = sample.output_text()
         try:
             verdict = self.judge(sample.prompt, output, sample.reference)
-        except Exception as exc:  # noqa: BLE001 — never let a judge crash the harness
+        except Exception as exc:  # noqa: BLE001 - never let a judge crash the harness
             return EvalResult(
                 evaluator=self.name,
                 model=sample.model,
@@ -407,7 +407,7 @@ class ModelQuality:
     overall_score: float
     sample_count: int
     breakdown: tuple[EvalBreakdown, ...]
-    #: total cost of *running the evals* on this model — distinct from its inference cost.
+    #: total cost of *running the evals* on this model, distinct from its inference cost.
     eval_cost_micro_usd: int
 
     def as_dict(self) -> dict[str, Any]:
@@ -492,7 +492,7 @@ class EvalHarness:
             for ev in evaluators:
                 try:
                     res = ev.evaluate(sample)
-                except Exception:  # noqa: BLE001 — a broken evaluator scores 0, never crashes run
+                except Exception:  # noqa: BLE001 - a broken evaluator scores 0, never crashes run
                     res = EvalResult(
                         evaluator=getattr(ev, "name", "unknown"),
                         model=sample.model,

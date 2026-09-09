@@ -138,7 +138,7 @@ def test_direct_plus_shared_combine() -> None:
 
 
 def test_unsettled_day_stays_estimated_and_is_skipped() -> None:
-    # job runs only 1h after the day closed — invoice not final yet
+    # job runs only 1h after the day closed, invoice not final yet
     as_of = datetime(2026, 5, 2, 1, tzinfo=timezone.utc)
     est = [EstimatedCostRow("chat", DAY, estimated_micro_usd=1_000_000)]
     billing = [CloudBillingLineItem("svc-chat", DAY, cost_micro_usd=9_999_999)]

@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
-// GET /api/features/value-events — the modal's data source: distinct business events observed over
+// GET /api/features/value-events, the modal's data source: distinct business events observed over
 // the last 30 days (for the picker) + the tenant's already-configured feature -> event mappings.
 // `observedAvailable` distinguishes "ClickHouse down" (null) from "no events yet" (empty array) so
 // the modal can show the honest-empty state only in the latter case.
@@ -28,7 +28,7 @@ export async function GET() {
   });
 }
 
-// POST /api/features/value-events — pin a value event to a feature. Validates the shape, then
+// POST /api/features/value-events: pin a value event to a feature. Validates the shape, then
 // forwards to the gateway's idempotent upsert with a client-supplied change_id (UUID). When the
 // gateway is unreachable we still validate and echo the mapping back (the client treats the echo as
 // the saved state) so the prototype works without infra.
@@ -76,7 +76,7 @@ export async function POST(req: Request) {
   }
 }
 
-// DELETE /api/features/value-events — clear a feature's value-event mapping. Forwards to the
+// DELETE /api/features/value-events: clear a feature's value-event mapping. Forwards to the
 // gateway's idempotent delete with a client-supplied change_id.
 export async function DELETE(req: Request) {
   let body: { feature?: string };

@@ -1,4 +1,4 @@
-"""GET /v1/tenant/integrations/status — per-tenant third-party integration status (CTO-117).
+"""GET /v1/tenant/integrations/status: per-tenant third-party integration status (CTO-117).
 
 The dashboard reads this to drive the three card states (connected-healthy / connected-failing /
 not-connected) on /connectors. These tests pin: fresh tenants get an empty list, listing reflects
@@ -25,7 +25,7 @@ T = "t-acme"
 
 
 class FakeIntegrationStore:
-    """In-memory stand-in for :class:`TenantIntegrationStore` — no Postgres."""
+    """In-memory stand-in for :class:`TenantIntegrationStore`, no Postgres."""
 
     def __init__(self) -> None:
         # (tenant_id, connector_id) -> IntegrationStatus
@@ -76,7 +76,7 @@ def client() -> Iterator[TestClient]:
 
 
 def test_fresh_tenant_returns_empty_list(client: TestClient) -> None:
-    # The honest "not connected anywhere" state — no rows means no third-party integration has
+    # The honest "not connected anywhere" state: no rows means no third-party integration has
     # ever produced a run for this tenant. The web app renders catalog-entries-without-a-row
     # as "Not connected" cards.
     r = client.get("/v1/tenant/integrations/status", headers={"X-Tenant-Id": T})
@@ -121,7 +121,7 @@ def test_pii_email_in_error_message_is_scrubbed(client: TestClient) -> None:
 
 def test_pii_forbidden_key_in_error_message_is_redacted(client: TestClient) -> None:
     # If a third-party error embeds a forbidden-key marker (email=, user.email, phone…) we
-    # collapse the whole message rather than try to parse-and-strip — easier to keep honest.
+    # collapse the whole message rather than try to parse-and-strip; easier to keep honest.
     store: FakeIntegrationStore = app.state.tenant_integrations
     store.record_run(
         T,

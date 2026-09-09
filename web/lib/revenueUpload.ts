@@ -9,7 +9,7 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 //
 // What this module adds on the reading side is the thing an uploaded number cannot claim for
 // itself: freshness. A connector is continuously re-fetched, so "the data is there" and "the data
-// is current" are the same statement. An upload is a POINT-IN-TIME SNAPSHOT — someone exported a
+// is current" are the same statement. An upload is a POINT-IN-TIME SNAPSHOT: someone exported a
 // month and pasted it once. Six months later that number renders identically to a live one unless
 // something says otherwise, and every margin figure derived from it is quietly wrong. So the
 // gateway records when each period was uploaded and this module turns that into the same

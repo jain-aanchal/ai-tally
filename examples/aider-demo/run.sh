@@ -42,7 +42,7 @@ else
   upstream="https://api.openai.com"
 fi
 
-# 2. Stack must be up — fail with a helpful pointer otherwise.
+# 2. Stack must be up; fail with a helpful pointer otherwise.
 if ! curl -sf "$GATEWAY_URL/healthz" >/dev/null 2>&1; then
   echo "ERROR: ai-tally gateway not reachable at $GATEWAY_URL"
   echo "       Run \`cd infra && make up && make seed\` first."
@@ -69,7 +69,7 @@ start_proxy() {
   done
   echo "ERROR: edge-proxy didn't bind on :$PROXY_PORT (see /tmp/ai-tally-aider-edge-proxy.log)"; exit 1
 }
-# CTO-167: every provider — including Gemini — now routes through the edge-proxy. For google the
+# CTO-167: every provider, including Gemini, now routes through the edge-proxy. For google the
 # proxy runs in native-Gemini mode (EDGE_PROXY_PROVIDER=gemini): it forwards LiteLLM's `gemini/*`
 # calls to generativelanguage.googleapis.com with the `?key=`/`x-goog-api-key` credential untouched
 # and reads model + token usage off the response into its metadata-only TraceRecord.
@@ -82,10 +82,10 @@ start_proxy
 # CTO-109: resolve the current cheapest in-family id from the gateway's
 # auto-discovered cache (.tally/models.json) so a retired SKU doesn't break the
 # demo. Falls back to the hardcoded default if the helper errors or the cache
-# is empty. The cache lives at the repo root — same directory as `make up`.
+# is empty. The cache lives at the repo root, same directory as `make up`.
 repo_root="$(cd "$here/../.." && pwd)"
 resolve_from_cache() {
-  # $1=provider $2=family — prints the id, or empty on miss/error.
+  # $1=provider $2=family; prints the id, or empty on miss/error.
   TALLY_SDK_SRC="$repo_root/sdk/python/src" TALLY_CACHE="$repo_root/.tally/models.json" \
     python3 - "$1" "$2" <<'PY' 2>/dev/null || true
 import os, sys
@@ -114,10 +114,10 @@ if [[ "$PROVIDER" == "anthropic" ]]; then
   export ANTHROPIC_DEFAULT_HEADERS="X-Tally-Feature-Tag=$FEATURE_TAG,X-Tenant-Key=$TENANT"
 elif [[ "$PROVIDER" == "google" ]]; then
   # CTO-167: LiteLLM's `gemini/<model>` path reads GEMINI_API_KEY from the env
-  # and honors GEMINI_API_BASE for the origin — so we point it at the edge-proxy,
+  # and honors GEMINI_API_BASE for the origin, so we point it at the edge-proxy,
   # which forwards to generativelanguage.googleapis.com (key preserved as `?key=`)
   # and records native-Gemini metadata. The fallback id must be one CTO-149
-  # prices — gemini-2.5-flash is in seed_catalog(), so the batch POST below
+  # prices; gemini-2.5-flash is in seed_catalog(), so the batch POST below
   # enriches with a real cost.
   resolved=$(resolve_from_cache google flash)
   AIDER_MODEL="${AIDER_MODEL:-gemini/${resolved:-gemini-2.5-flash}}"
@@ -135,7 +135,7 @@ fi
 echo "  using model: $AIDER_MODEL"
 
 # Strip the LiteLLM provider prefix (e.g. "anthropic/claude-sonnet-4-5" →
-# "claude-sonnet-4-5") for the gateway-facing model attribute — the price
+# "claude-sonnet-4-5") for the gateway-facing model attribute; the price
 # catalog keys models without the prefix. CTO-106.
 TALLY_MODEL="${AIDER_MODEL#*/}"
 

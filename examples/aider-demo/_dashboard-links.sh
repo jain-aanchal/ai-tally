@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Helpers sourced by run.sh: deep-link builders + cross-platform URL opener.
-# No state, no side effects on source — define functions only.
+# No state, no side effects on source; define functions only.
 
 TALLY_WEB_URL="${TALLY_WEB_URL:-http://localhost:3000}"
 
@@ -29,7 +29,7 @@ workflow3_url() {
 }
 
 # Open a URL in the default browser. macOS uses `open`, Linux uses `xdg-open`,
-# anything else just prints — never fail the demo over a missing opener.
+# anything else just prints; never fail the demo over a missing opener.
 open_url() {
   local url="$1"
   if command -v open >/dev/null 2>&1; then

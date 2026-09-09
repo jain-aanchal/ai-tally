@@ -5,14 +5,14 @@ happens here, per span, so one bad item never fails the whole batch.
 
 Three rejection classes (item dropped) and one non-fatal flag:
 
-* ``INVALID_SCHEMA``   — span isn't a dict, or a *known* gen_ai typed field has the wrong type /
+* ``INVALID_SCHEMA``:    span isn't a dict, or a *known* gen_ai typed field has the wrong type /
   negative value / malformed currency or operation. Unknown keys are tolerated (additive-only
-  contract, CTO-31) — they pass through to the ``SpanAttributes`` map.
-* ``PII_DETECTED``     — a raw e-mail appears in any string value, ``user_id_hash`` looks un-hashed,
+  contract, CTO-31); they pass through to the ``SpanAttributes`` map.
+* ``PII_DETECTED``:      a raw e-mail appears in any string value, ``user_id_hash`` looks un-hashed,
   or a forbidden raw-PII key (``email``, ``user.email``, ...) is present. The SDK is supposed to
   hash before egress; this is the server-side backstop.
-* ``PAYLOAD_TOO_LARGE`` — the JSON-serialized span exceeds ``max_span_bytes``.
-* ``UNKNOWN_FEATURE_TAG`` (flag, not a rejection) — a feature tag the tenant never declared. We keep
+* ``PAYLOAD_TOO_LARGE``:  the JSON-serialized span exceeds ``max_span_bytes``.
+* ``UNKNOWN_FEATURE_TAG`` (flag, not a rejection):  a feature tag the tenant never declared. We keep
   the span but surface the flag so the dashboard can prompt the customer to declare it.
 
 This module is pure (no infra) and unit-tested without a stack.
@@ -32,7 +32,7 @@ from gateway.errors import ErrorCode
 # An e-mail anywhere in a string value is treated as raw PII.
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
-# Keys that must never carry raw identifiers — their mere presence is a PII violation.
+# Keys that must never carry raw identifiers: their mere presence is a PII violation.
 _FORBIDDEN_PII_KEYS = frozenset(
     {
         "email", "user_email", "user.email", "gen_ai.user.email",
@@ -89,7 +89,7 @@ def _looks_unhashed(value: str) -> bool:
     """A real HMAC-SHA256 hex is 64 lowercase hex chars. Reject obvious raw ids / e-mails.
 
     Heuristic, deliberately conservative to avoid false positives: only flag when the value clearly
-    isn't a hash — contains '@', or contains non-hex characters (a raw username/id would).
+    isn't a hash: contains '@', or contains non-hex characters (a raw username/id would).
     """
     if "@" in value:
         return True
@@ -120,7 +120,7 @@ class SpanValidator:
         if not isinstance(span, dict):
             return ItemResult(False, ErrorCode.INVALID_SCHEMA, "span is not an object")
 
-        # 1) size — cheap reject before deeper inspection.
+        # 1) size: cheap reject before deeper inspection.
         try:
             size = len(json.dumps(span, default=str).encode("utf-8"))
         except (TypeError, ValueError):
@@ -130,12 +130,12 @@ class SpanValidator:
                 False, ErrorCode.PAYLOAD_TOO_LARGE, f"span {size}B exceeds {self._max_bytes}B cap"
             )
 
-        # 2) PII — forbidden keys, raw e-mails, un-hashed user id.
+        # 2) PII: forbidden keys, raw e-mails, un-hashed user id.
         pii = self._detect_pii(span)
         if pii is not None:
             return ItemResult(False, ErrorCode.PII_DETECTED, pii)
 
-        # 3) schema — only *known* typed keys are checked; unknown keys pass through.
+        # 3) schema: only *known* typed keys are checked; unknown keys pass through.
         schema_err = self._check_schema(span)
         if schema_err is not None:
             return ItemResult(False, ErrorCode.INVALID_SCHEMA, schema_err)

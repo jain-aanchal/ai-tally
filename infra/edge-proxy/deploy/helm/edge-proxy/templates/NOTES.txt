@@ -19,7 +19,7 @@ Upstream: {{ .Values.proxy.upstream }}
 {{- if eq .Values.proxy.mode "broker" }}
 
    export OPENAI_BASE_URL=http://localhost:{{ .Values.service.port }}/v1
-   # Broker mode: send ONLY the ai-tally tenant key. Do NOT send a provider Authorization header —
+   # Broker mode: send ONLY the ai-tally tenant key. Do NOT send a provider Authorization header;
    # the proxy mints the provider credential from the broker key-file and injects it.
    #   header on each request:  {{ .Values.proxy.tenantHeader }}: tk_live_yourtenant
 {{- else }}

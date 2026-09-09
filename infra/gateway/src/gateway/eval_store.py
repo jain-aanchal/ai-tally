@@ -18,7 +18,7 @@ EVAL_RUN_COLS = (
     "JudgedAt", "CostMicroUsd", "ErrorMsg",
 )
 
-# Verdict strings — match the ClickHouse Enum8 ordering in db/clickhouse/eval_runs.sql.
+# Verdict strings: match the ClickHouse Enum8 ordering in db/clickhouse/eval_runs.sql.
 VERDICT_CURRENT_WINS = "current_wins"
 VERDICT_CANDIDATE_WINS = "candidate_wins"
 VERDICT_TIE = "tie"

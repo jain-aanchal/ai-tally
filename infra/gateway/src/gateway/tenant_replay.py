@@ -1,11 +1,11 @@
 """Per-tenant opt-in config for the replay sampler + executor (CTO-113).
 
-Sampling captures the resolved prompt + tools — a real trust ask. The default for every tenant is
+Sampling captures the resolved prompt + tools, a real trust ask. The default for every tenant is
 ``enabled=false``; the dashboard surfaces an opt-in toggle. ``daily_budget_usd`` is the hard cap
 on the replay executor's spend per tenant per day; it's enforced in
 :mod:`gateway.replay_executor` and can't be exceeded by buggy/runaway projections.
 
-Reads/writes go through ``GET/POST /v1/tenant/replay/config`` — the web app never touches
+Reads/writes go through ``GET/POST /v1/tenant/replay/config``; the web app never touches
 Postgres directly.
 """
 
@@ -58,7 +58,7 @@ class TenantReplayStore:
     """Tiny Postgres surface over ``tenant_replay_config``.
 
     A tenant with no row yet returns :data:`DEFAULT_CONFIG` (off, 5%, 30d, $5/day). This means the
-    gateway never has to provision a row at signup — the row only appears when the tenant
+    gateway never has to provision a row at signup; the row only appears when the tenant
     explicitly opts in.
     """
 

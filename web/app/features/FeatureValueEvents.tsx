@@ -6,7 +6,7 @@
 //   - "Finish setup" walks a sequential modal over every unconfigured feature, then a success state.
 // The modal lists the tenant's distinct business events (observed live over the last 30d via
 // /api/features/value-events) plus a free-text option; confirming POSTs to the same route, which
-// forwards an idempotent change_id to the gateway. Saved events update in place — the banner clears
+// forwards an idempotent change_id to the gateway. Saved events update in place; the banner clears
 // itself once every feature is configured.
 
 import { useCallback, useEffect, useState } from "react";

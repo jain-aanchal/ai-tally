@@ -3,7 +3,7 @@
 Exporting a tenant's telemetry into their own BigQuery dataset is opt-in and off by default: a
 tenant with no row returns :data:`DEFAULT_CONFIG` (``enabled=False``), so no existing deployment
 starts mirroring on upgrade. When enabled, the tenant supplies their destination
-(``project_id`` / ``dataset`` / ``table_prefix``) and a **credential reference** — an ADC hint,
+(``project_id`` / ``dataset`` / ``table_prefix``) and a **credential reference**: an ADC hint,
 a Workload-Identity service-account email, or a Secret Manager resource name. We deliberately
 reject anything that looks like an inline service-account key: raw keys never live in this table.
 
@@ -35,7 +35,7 @@ def _reject_raw_key(credential_ref: str) -> None:
     if any(marker in lowered for marker in _RAW_KEY_MARKERS):
         raise RawKeyRejected(
             "credential_ref must be a reference (ADC hint, Workload-Identity SA email, or "
-            "Secret Manager resource name) — never an inline service-account key."
+            "Secret Manager resource name), never an inline service-account key."
         )
 
 
@@ -162,7 +162,7 @@ class BQExportWatermarkStore:
     """Postgres-backed incremental cursor: one row per (tenant, source table).
 
     Implements the :class:`gateway.bq_export.WatermarkStore` protocol so it drops straight into
-    ``run_export``. A missing row means "never exported" and reads back as ``None`` — a full
+    ``run_export``. A missing row means "never exported" and reads back as ``None``, a full
     initial backfill on first run.
     """
 

@@ -6,8 +6,8 @@ Recurly, Zuora, NetSuite or plain invoices, and the revenue truth sits in a spre
 already maintains. Uploading ``account_id, period, amount, currency`` is the fastest path from zero
 to a populated margin column and it works regardless of billing stack.
 
-The uploaded rows become ordinary ``business_events`` rows — same table, same columns, same
-``ValueType`` discriminator every other revenue source uses — so nothing downstream special-cases
+The uploaded rows become ordinary ``business_events`` rows (same table, same columns, same
+``ValueType`` discriminator every other revenue source uses) so nothing downstream special-cases
 them. In particular they flow through the CTO-194 revenue-source policy unchanged: a tenant who has
 narrowed ``revenue_sources`` will see uploaded revenue only if they name this source, which is the
 same rule Stripe and HubSpot live under.
@@ -81,7 +81,7 @@ _INT64_MAX = 2**63 - 1
 _PERIOD_MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 _PERIOD_DAY_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
-# Accepts "1234.56", "1,234.56", "$1,234.56", "-1234.56", "(1234.56)" — the shapes a spreadsheet
+# Accepts "1234.56", "1,234.56", "$1,234.56", "-1234.56", "(1234.56)": the shapes a spreadsheet
 # export actually produces. Anything else is rejected by line number rather than coerced to zero.
 _AMOUNT_STRIP_RE = re.compile(r"[,\s$]")
 
@@ -253,7 +253,7 @@ def parse_revenue_csv(text: str) -> ParsedUpload:
             # A trailing blank line is not an error; every export has one.
             continue
         if len(rows) >= MAX_ROWS:
-            errors.append(RowError(line, f"more than {MAX_ROWS} data rows — split the file"))
+            errors.append(RowError(line, f"more than {MAX_ROWS} data rows; split the file"))
             break
         if len(raw_row) < width:
             errors.append(
@@ -299,7 +299,7 @@ def parse_revenue_csv(text: str) -> ParsedUpload:
                 RowError(
                     line,
                     f"account_id {account_id!r} already appears for period {period} on line "
-                    f"{first_seen[key]} — one row per account per period",
+                    f"{first_seen[key]}; one row per account per period",
                 )
             )
             continue
@@ -313,7 +313,7 @@ def parse_revenue_csv(text: str) -> ParsedUpload:
                 RowError(
                     line,
                     f"currency {currency_raw} does not match {pinned[0]} used for period {period} "
-                    f"on line {pinned[1]} — we will not sum currencies without an FX rate",
+                    f"on line {pinned[1]}; we will not sum currencies without an FX rate",
                 )
             )
             continue
@@ -357,7 +357,7 @@ def period_occurred_at(period: str, *, now: datetime | None = None) -> datetime:
     """Timestamp stamped on a period's rows: the period's last instant, clamped to now.
 
     A monthly total is not an instant, so something has to be chosen. The period END is the honest
-    choice — the total is only complete once the month is — and it keeps a closed month inside the
+    choice: the total is only complete once the month is, and it keeps a closed month inside the
     dashboard's trailing windows for as long as the window covers the month. Clamping to `now`
     stops a snapshot of the month currently in progress from being stamped in the future, which
     would read as revenue we have not earned yet.

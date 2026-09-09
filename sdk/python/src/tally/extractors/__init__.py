@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Provider extractor framework — versioned, pluggable, fixture-tested.
+"""Provider extractor framework: versioned, pluggable, fixture-tested.
 
 Implements CTO-41.
 
@@ -11,13 +11,13 @@ independently of the rest of the SDK.
 
 Design goals (per CTO-41):
 
-* **Versioned** — each extractor carries an explicit version in its registry key (``"openai_v1"``),
+* **Versioned**: each extractor carries an explicit version in its registry key (``"openai_v1"``),
   so a breaking change in a provider's response shape becomes ``"openai_v2"`` without disturbing
   callers pinned to v1.
-* **Pluggable** — :class:`ProviderExtractor` is a structural :class:`~typing.Protocol`; new
+* **Pluggable**: :class:`ProviderExtractor` is a structural :class:`~typing.Protocol`; new
   providers register via :func:`register` (or the :func:`extractor` decorator). Adding a provider
-  requires *zero* changes to dispatch — :func:`get_extractor` is a pure registry lookup.
-* **Never crash** — extractors honour the SDK's "never break the host app" invariant: malformed,
+  requires *zero* changes to dispatch; :func:`get_extractor` is a pure registry lookup.
+* **Never crash**: extractors honour the SDK's "never break the host app" invariant: malformed,
   missing, or wrongly-typed provider data yields whatever subset of attributes can be salvaged,
   never an exception.
 
@@ -35,7 +35,7 @@ class ProviderExtractor(Protocol):
     """Per-provider, per-version response extractor.
 
     Implementations are pure functions over a provider response object. They MUST NOT raise on
-    malformed input — return whatever subset of attributes is available instead.
+    malformed input; return whatever subset of attributes is available instead.
     """
 
     #: Registry key carrying provider + version, e.g. ``"openai_v1"``.
@@ -52,7 +52,7 @@ _REGISTRY: dict[str, ProviderExtractor] = {}
 def register(extractor_obj: ProviderExtractor) -> ProviderExtractor:
     """Register ``extractor_obj`` under its ``.key``. Returns it (so it can be used as a value).
 
-    Raises :class:`ValueError` on a missing/empty key or a duplicate registration — these are
+    Raises :class:`ValueError` on a missing/empty key or a duplicate registration; these are
     programmer errors at import time, not host-app runtime data, so failing loudly is correct.
     """
     key = getattr(extractor_obj, "key", None)

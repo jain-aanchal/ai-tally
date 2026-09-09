@@ -6,7 +6,7 @@ Implements CTO-75 (Access control + audit log).
 Privileged admin actions (tenant create, config change, deletion, key rotation) and every
 production data read must leave an immutable trail that an auditor can later trust and query.
 "Trust" here means tamper-evidence: if anyone edits, reorders, or drops a record after the fact,
-verification must surface it. We get that with a per-entry SHA-256 **hash chain** — each entry
+verification must surface it. We get that with a per-entry SHA-256 **hash chain**: each entry
 commits to the previous entry's hash, so a single altered field invalidates every link after it.
 The log is **append-only**: even retention (7 years) is reported, never enforced by deletion, so
 the chain can always be re-verified end-to-end.
@@ -14,7 +14,7 @@ the chain can always be re-verified end-to-end.
 The companion concern is *who* may touch production data. We model the policy, not the infra:
 production DB access is granted through **short-lived STS-style tokens** (max TTL 1h, scoped),
 there are no shared standing admin credentials, and the **break-glass** path that mints an
-elevated token ALWAYS forces a ``BREAK_GLASS`` audit entry — emergency access is allowed but never
+elevated token ALWAYS forces a ``BREAK_GLASS`` audit entry: emergency access is allowed but never
 silent.
 
 Everything is pure Python over injected stores/clocks so dev and test run offline with no database.
@@ -36,7 +36,7 @@ from typing import Protocol, runtime_checkable
 
 GENESIS_PREV_HASH = "0" * 64
 MAX_TOKEN_TTL_S = 3600  # short-lived STS-style tokens: at most one hour
-SEVEN_YEARS_S = 7 * 365 * 24 * 3600  # retention window (ignores leap days — coarse on purpose)
+SEVEN_YEARS_S = 7 * 365 * 24 * 3600  # retention window (ignores leap days, coarse on purpose)
 
 
 class AuditAction(str, Enum):
@@ -60,7 +60,7 @@ class AuditEntry:
     """One link in the hash chain. Immutable once recorded.
 
     ``entry_hash`` is derived from every other field (including ``prev_hash``) and is therefore
-    excluded from the hashed payload — it is the output, not an input.
+    excluded from the hashed payload: it is the output, not an input.
     """
 
     sequence: int
@@ -84,7 +84,7 @@ class AuditEntry:
             raise ValueError("tenant_id must be non-empty")
 
     def canonical_payload(self) -> dict[str, object]:
-        """The fields the chain commits to — everything except the derived ``entry_hash``."""
+        """The fields the chain commits to: everything except the derived ``entry_hash``."""
         return {
             "sequence": self.sequence,
             "actor": self.actor,
@@ -97,7 +97,7 @@ class AuditEntry:
         }
 
     def recompute_hash(self) -> str:
-        """Recompute ``entry_hash`` from the canonical payload — the verification primitive."""
+        """Recompute ``entry_hash`` from the canonical payload, the verification primitive."""
         return hashlib.sha256(_canonical_json(self.canonical_payload()).encode()).hexdigest()
 
     def as_dict(self) -> dict[str, object]:
@@ -118,7 +118,7 @@ class AuditStore(Protocol):
 
 
 class InMemoryAuditStore:
-    """Default offline store — a list nobody outside this class may reorder."""
+    """Default offline store, a list nobody outside this class may reorder."""
 
     __slots__ = ("_entries",)
 
@@ -160,7 +160,7 @@ class VerificationResult:
 
 @dataclass(frozen=True, slots=True)
 class RetentionReport:
-    """Which entries have aged past the 7-year window. Informational only — nothing is deleted."""
+    """Which entries have aged past the 7-year window. Informational only; nothing is deleted."""
 
     now_s: int
     window_s: int
@@ -321,7 +321,7 @@ class AuditLog:
         now_s: int | None = None,
         window_s: int = SEVEN_YEARS_S,
     ) -> RetentionReport:
-        """Report entries older than the window. Never deletes — the log stays append-only."""
+        """Report entries older than the window. Never deletes; the log stays append-only."""
         now = now_s if now_s is not None else self._clock()
         cutoff = now - window_s
         expired = tuple(
@@ -377,7 +377,7 @@ class TokenIssuer:
     """Mints short-lived scoped tokens, capping TTL at :data:`MAX_TOKEN_TTL_S` (1h).
 
     The **break-glass** path issues an elevated token for emergencies but ALWAYS writes a
-    ``BREAK_GLASS`` audit entry first — emergency access is permitted, never silent.
+    ``BREAK_GLASS`` audit entry first: emergency access is permitted, never silent.
     """
 
     __slots__ = ("_max_ttl_s", "_clock", "_token_id_factory")

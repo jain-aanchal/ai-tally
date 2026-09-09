@@ -3,11 +3,11 @@
 
 Keeping every raw span on hot SSD forever is the dominant storage cost. We tier by age:
 
-* **hot** SSD — recent spans, fully queried at row granularity.
-* **warm** volume — still raw, cheaper disk; powers the last-month deep dives.
-* **cold** volume — still raw but object-store-backed; rare late-billing true-ups.
+* **hot** SSD: recent spans, fully queried at row granularity.
+* **warm** volume: still raw, cheaper disk; powers the last-month deep dives.
+* **cold** volume: still raw but object-store-backed; rare late-billing true-ups.
 * after the cold horizon the **raw span is dropped** and only the daily rollup aggregate
-  (``daily_feature_rollup``, CTO-24) survives — enough for YoY cohorts + reconciliation.
+  (``daily_feature_rollup``, CTO-24) survives, enough for YoY cohorts + reconciliation.
 
 This module is the single source of truth for the tier boundaries. It both *classifies* a span's
 tier at query time and *generates* the ClickHouse ``TTL`` DDL, so the table definition and the
@@ -172,7 +172,7 @@ def render_tenant_ttl_delete_expression(
     """Compile per-tenant raw-drop horizons into a single ClickHouse ``multiIf`` DELETE expression.
 
     ClickHouse TTL is table-level, so a per-tenant override can't be a separate clause. Instead the
-    delete interval becomes a ``multiIf`` on ``TenantId`` — overrides first (deterministic order),
+    delete interval becomes a ``multiIf`` on ``TenantId``: overrides first (deterministic order),
     then the default horizon as the fallback branch.
     """
     if not store.overrides:

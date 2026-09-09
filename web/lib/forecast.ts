@@ -88,11 +88,11 @@ export type ForecastStatus = "ok" | "insufficient_history";
 /**
  * What happened to the budget, kept distinct on purpose.
  *
- * `breaches`   — the projection crosses the budget inside the period; `date` says when.
- * `never`      — we projected, and the projection stays under budget for the whole period.
- * `no_budget`  — no budget was configured. Not a forecast failure; render the forecast without a
+ * `breaches`:    the projection crosses the budget inside the period; `date` says when.
+ * `never`:       we projected, and the projection stays under budget for the whole period.
+ * `no_budget`:   no budget was configured. Not a forecast failure; render the forecast without a
  *                variance rather than assuming a budget of zero (scope: "honest under uncertainty").
- * `cannot_project` — below the minimum history. We are not saying it will not breach; we are saying
+ * `cannot_project`:  below the minimum history. We are not saying it will not breach; we are saying
  *                we do not know. A caller MUST render this differently from `never`.
  */
 export type BreachOutcome = "breaches" | "never" | "no_budget" | "cannot_project";

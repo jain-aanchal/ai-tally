@@ -1,10 +1,10 @@
-"""Compute cost-layer connector (CTO-143) — offline tests, NO live cloud calls.
+"""Compute cost-layer connector (CTO-143): offline tests, NO live cloud calls.
 
 Pins the contract the /cost Compute column depends on:
 
   * AWS Cost Explorer + GCP Cloud Billing fixtures parse to the correct per-day micro-USD totals.
   * The connector lands ONE synthetic span per day with GenAiOperation='compute' and the day's total
-    as EstimatedCost (cost set directly — no catalog enrichment).
+    as EstimatedCost (cost set directly, no catalog enrichment).
   * Backfill is idempotent: running twice does not double-count (the deterministic span-id guard).
   * Run status is recorded on success and failure; a failed fetch emits NO span (never a guess).
 
@@ -49,7 +49,7 @@ def _fixture(name: str) -> object:
 
 
 class FakeStore:
-    """In-memory stand-in for ClickHouseStore — records inserted rows, answers span_exists."""
+    """In-memory stand-in for ClickHouseStore: records inserted rows, answers span_exists."""
 
     def __init__(self) -> None:
         self.rows: list[tuple[object, ...]] = []
@@ -109,7 +109,7 @@ def _gcp_config(
 
 def test_parse_aws_cost_response_daily_totals() -> None:
     costs = parse_aws_cost_response(_fixture("aws_cost_explorer.json"))
-    # The $0 day is dropped — a zero-cost day carries no synthetic span.
+    # The $0 day is dropped; a zero-cost day carries no synthetic span.
     assert costs == [
         DailyCost(day=date(2026, 7, 1), cost_micro_usd=12_500_000),
         DailyCost(day=date(2026, 7, 2), cost_micro_usd=8_250_000),
@@ -162,7 +162,7 @@ def test_run_emits_one_compute_span_with_direct_cost() -> None:
     assert row[_OP] == "compute"
     assert row[_SYSTEM] == "aws"
     assert row[_SOURCE] == "estimated"
-    # EstimatedCost is the Decimal64(8) USD value — 12_500_000 micro-USD == $12.50.
+    # EstimatedCost is the Decimal64(8) USD value: 12_500_000 micro-USD == $12.50.
     assert float(row[_COST]) == pytest.approx(12.50)
 
 
@@ -256,7 +256,7 @@ def test_build_gcp_billing_query_binds_days_and_labels() -> None:
     assert "UNNEST(labels)" in sql and "l.key = @label_key_0 AND l.value = @label_val_0" in sql
     assert params["start_day"] == date(2026, 7, 1)
     assert params["end_day"] == date(2026, 7, 30)
-    # DEFAULT_GCP_LABEL_FILTER == {"tally-workload": "ai"} — note the '-' (GCP keys can't hold ':').
+    # DEFAULT_GCP_LABEL_FILTER == {"tally-workload": "ai"}; note the '-' (GCP keys can't hold ':').
     assert params["label_key_0"] == "tally-workload"
     assert params["label_val_0"] == "ai"
     assert DEFAULT_GCP_LABEL_FILTER == {"tally-workload": "ai"}

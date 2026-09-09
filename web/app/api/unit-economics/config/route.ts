@@ -20,13 +20,13 @@ const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 export interface ThresholdConfigPayload {
   /** The tenant's resolved thresholds (overrides layered on defaults, or defaults when no row). */
   thresholds: UnitEconomicsThresholds;
-  /** The hardcoded defaults — the settings panel's reset target. */
+  /** The hardcoded defaults, the settings panel's reset target. */
   defaults: UnitEconomicsThresholds;
   /** True when the tenant has a stored override row (vs. running on pure defaults). */
   hasOverride: boolean;
 }
 
-// GET /api/unit-economics/config — the tenant's resolved thresholds + defaults for the settings panel.
+// GET /api/unit-economics/config: the tenant's resolved thresholds + defaults for the settings panel.
 export async function GET(): Promise<NextResponse<ThresholdConfigPayload>> {
   const overrides = await queryUnitEconomicsConfig();
   return NextResponse.json({
@@ -36,7 +36,7 @@ export async function GET(): Promise<NextResponse<ThresholdConfigPayload>> {
   });
 }
 
-// POST /api/unit-economics/config — persist edited thresholds. Validates the shape, then forwards to
+// POST /api/unit-economics/config: persist edited thresholds. Validates the shape, then forwards to
 // the gateway's idempotent upsert with a client-supplied change_id (UUID). When the gateway is
 // unreachable we validate and echo the values back (persisted:false) so the prototype works without
 // infra.

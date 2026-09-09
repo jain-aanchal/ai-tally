@@ -633,7 +633,7 @@ When you're done: `make aider-demo-stop` kills the background proxy.
 ## Step 6: chatbot + conversion attribution
 
 Aider is the right shape for agent-loop and cross-provider visibility (steps
-1–3 of the five workflows). For **workflow 4: business-outcome
+1-3 of the five workflows). For **workflow 4: business-outcome
 attribution**, run the chatbot demo. It vendors the Vercel AI SDK chatbot
 template, drives 50 synthetic sessions split across OpenAI and Anthropic,
 and emits conversion events (thumbs-up + session-engaged) so the
@@ -786,7 +786,7 @@ those rows predate the UUID switch and the dashboard will not render them.
 **B. Live realistic mode (higher fidelity, real spend).** Drives ~**5,000**
 sessions across the seed feature tags over a bounded window (~10 min), making
 **real** OpenAI/Anthropic calls. Spend is bounded by a `--max-usd` cap
-(default **$10**) so a laptop run stays ~$5–10.
+(default **$10**) so a laptop run stays ~$5-10.
 
 ```bash
 cd infra && make chatbot-demo-realistic        # == make chatbot-demo MODE=realistic

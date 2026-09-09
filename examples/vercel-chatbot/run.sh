@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boots the vendored Vercel AI Chatbot on :3001 (if not already running) and
 # drives 50 synthetic chat sessions through it into the local ai-tally
-# gateway. Scripted sessions — not real users.
+# gateway. Scripted sessions, not real users.
 # Usage:  bash examples/vercel-chatbot/run.sh [-- --sessions N --conversion-rate 0..1 ...]
 
 set -euo pipefail
@@ -33,9 +33,9 @@ if [ -z "${GOOGLE_API_KEY:-}" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
   export GOOGLE_API_KEY="${GEMINI_API_KEY}"
 fi
 if [ -n "${GOOGLE_API_KEY:-}" ]; then
-  echo "✓ Google key detected — google/* models (Gemini) enabled in the picker"
+  echo "✓ Google key detected: google/* models (Gemini) enabled in the picker"
 else
-  echo "· No GOOGLE_API_KEY/GEMINI_API_KEY — google/* models will 401 on send (anthropic/openai unaffected)"
+  echo "· No GOOGLE_API_KEY/GEMINI_API_KEY: google/* models will 401 on send (anthropic/openai unaffected)"
 fi
 
 GATEWAY_HEALTH="${GATEWAY_URL%/}/healthz"
@@ -45,7 +45,7 @@ fi
 
 # CTO-147: refresh the model lineup before launch so the picker's pinned IDs
 # (lib/ai/models.ts) and providers.ts's resolveLatest() fallbacks track what the
-# providers currently advertise — this is what stops the gpt-4o/gpt-4o-mini class
+# providers currently advertise; this is what stops the gpt-4o/gpt-4o-mini class
 # of "provider retired the SKU, every send 404s" breakage from silently returning.
 # We force-refresh the gateway's discovery cache (.tally/models.json, CTO-109) by
 # calling tally.models.discover_models with TALLY_MODELS_REFRESH=1 (bypasses the
@@ -53,7 +53,7 @@ fi
 #
 # Fail-soft (mirrors CTO-109): offline / no API key / SDK import error just warns
 # and proceeds with the corrected pinned IDs. Set TALLY_PINNED_MODELS=<path> for
-# hermetic/offline runs — discover_models loads it verbatim and skips the network.
+# hermetic/offline runs; discover_models loads it verbatim and skips the network.
 # Skip entirely with TALLY_SKIP_MODEL_REFRESH=1.
 REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
 MODELS_CACHE="${TALLY_MODELS_CACHE:-${REPO_ROOT}/.tally/models.json}"
@@ -62,19 +62,19 @@ if [ "${TALLY_SKIP_MODEL_REFRESH:-0}" = "1" ]; then
 else
   echo "→ Refreshing model lineup (.tally/models.json)…"
   TALLY_SDK_SRC="${REPO_ROOT}/sdk/python/src" TALLY_MODELS_CACHE="${MODELS_CACHE}" \
-    TALLY_MODELS_REFRESH=1 python3 - <<'PY' || echo "  ⚠ model refresh failed — continuing with pinned IDs (see lib/ai/models.ts)" >&2
+    TALLY_MODELS_REFRESH=1 python3 - <<'PY' || echo "  ⚠ model refresh failed, continuing with pinned IDs (see lib/ai/models.ts)" >&2
 import os, sys
 from pathlib import Path
 sys.path.insert(0, os.environ["TALLY_SDK_SRC"])
 try:
     from tally import models as M
-except Exception as exc:  # SDK not importable — fail soft.
-    print(f"  ⚠ could not import tally.models ({exc}) — using pinned IDs", file=sys.stderr)
+except Exception as exc:  # SDK not importable, fail soft.
+    print(f"  ⚠ could not import tally.models ({exc}), using pinned IDs", file=sys.stderr)
     sys.exit(0)
 cache = Path(os.environ["TALLY_MODELS_CACHE"])
 found = M.discover_models(cache_path=cache)  # honors TALLY_MODELS_REFRESH / TALLY_PINNED_MODELS
 if not found:
-    print("  ⚠ discovery returned no models (offline / no key?) — using pinned IDs", file=sys.stderr)
+    print("  ⚠ discovery returned no models (offline / no key?), using pinned IDs", file=sys.stderr)
     sys.exit(0)
 oi = sorted(m.id for m in found if m.provider == "openai")
 an = sorted(m.id for m in found if m.provider == "anthropic")
@@ -120,7 +120,7 @@ else
       "SELECT to_regclass('public.\"User\"')" 2>/dev/null | grep -q User; then
     echo "  · pushing chatbot schema to chatbot_demo…"
     (cd "${APP_DIR}" && pnpm --silent exec drizzle-kit push >>"${LOG_FILE}" 2>&1) || \
-      err "drizzle-kit push failed — see ${LOG_FILE}"
+      err "drizzle-kit push failed, see ${LOG_FILE}"
   fi
   # Seed the deterministic demo user that the auth flow pins every guest session to
   # (see app/(auth)/auth.ts). Without this row, saveChat 400s on a foreign-key violation
@@ -140,7 +140,7 @@ SQL
     if curl -fsS --max-time 1 "${CHATBOT_URL}" >/dev/null 2>&1; then break; fi
   done
   curl -fsS --max-time 2 "${CHATBOT_URL}" >/dev/null 2>&1 || \
-    err "Chatbot did not come up — see ${LOG_FILE}"
+    err "Chatbot did not come up, see ${LOG_FILE}"
   echo "✓ Chatbot up (pid $(cat "${PID_FILE}"), log ${LOG_FILE})"
 fi
 

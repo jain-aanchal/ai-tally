@@ -8,11 +8,11 @@ an async telemetry path that reconstructs the full message off the hot path.
 
 This module is the transport-agnostic, fully-testable core of that telemetry path:
 
-* :func:`tee` — a pass-through generator. It yields each upstream chunk to the client *immediately*
+* :func:`tee`: a pass-through generator. It yields each upstream chunk to the client *immediately*
   (before doing any work), then feeds a copy into a :class:`StreamReconstructor`. Yielding first is
   what guarantees the tee adds no latency to the client path; reconstruction happens between yields
   and never blocks a chunk.
-* :class:`StreamReconstructor` — incrementally parses OpenAI Chat Completions SSE
+* :class:`StreamReconstructor`: incrementally parses OpenAI Chat Completions SSE
   (``data: {json}\\n\\n`` framing, terminated by ``data: [DONE]``), reassembling the streamed
   content and tool-call deltas and capturing the authoritative ``usage`` object emitted as the
   final chunk when the request set ``stream_options.include_usage``.
@@ -24,7 +24,7 @@ This module is the transport-agnostic, fully-testable core of that telemetry pat
 The real proxy's hot-path tee is implemented in the edge proxy (Go/Rust, CTO-39); this Python module
 is the reference reconstruction logic the proxy mirrors, and the SDK's own streaming wrapper uses it
 directly. Provider coverage here is OpenAI SSE; Anthropic SSE / Vertex chunked-JSON are follow-ups.
-Cost calculation itself is CTO-35 — this module only produces the normalized usage.
+Cost calculation itself is CTO-35; this module only produces the normalized usage.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ class StreamResult:
 class StreamReconstructor:
     """Incrementally reconstructs an OpenAI SSE completion. Never raises on malformed input.
 
-    Feed raw SSE — whole chunks (:meth:`feed`) or single decoded lines (:meth:`feed_line`) — then
+    Feed raw SSE, whole chunks (:meth:`feed`) or single decoded lines (:meth:`feed_line`), then
     call :meth:`result`. Honours the SDK's never-crash invariant: a malformed frame is skipped, not
     raised. Mark a transport drop with :meth:`mark_dropped` so the result is classified PARTIAL.
     """
@@ -155,7 +155,7 @@ class StreamReconstructor:
             self._consume(obj)
 
     def mark_dropped(self) -> None:
-        """Signal the upstream connection dropped (200 then cut) — forces PARTIAL classification."""
+        """Signal the upstream connection dropped (200 then cut): forces PARTIAL classification."""
         self._dropped = True
 
     # --- parsing ---------------------------------------------------------------------------------
@@ -280,7 +280,7 @@ def tee(
     """
     try:
         for chunk in upstream:
-            yield chunk  # client path first — zero added latency
+            yield chunk  # client path first, zero added latency
             reconstructor.feed(chunk)
     except Exception:
         if on_drop:

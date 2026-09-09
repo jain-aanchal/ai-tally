@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Identity graph + resolution — transitive, bounded depth (CTO-67 / spec §7 identity correction).
+"""Identity graph + resolution: transitive, bounded depth (CTO-67 / spec §7 identity correction).
 
-Attribution's highest-value case — anonymous→authenticated conversion — only works with an identity
+Attribution's highest-value case, anonymous→authenticated conversion, only works with an identity
 graph. A naive ``user_id`` join silently loses the pre-login traces. This module is the canonical,
 transport-agnostic home for that graph; the stitcher (CTO-69) consumes it.
 
 The graph is **undirected, tenant-scoped, and over hashed IDs only** (no raw PII ever). It is
 populated from two event kinds that any SDK or CDP emits:
 
-* **identify** — ties an ``anonymous_id`` (and optional ``session_id``) to a ``user_id`` at login.
-* **alias** — merges two ids the product knows are the same person (e.g. a CDP ``alias`` call).
+* **identify**: ties an ``anonymous_id`` (and optional ``session_id``) to a ``user_id`` at login.
+* **alias**: merges two ids the product knows are the same person (e.g. a CDP ``alias`` call).
 
 :meth:`IdentityGraph.resolve_identity` does a bounded-depth (default 2) transitive walk that bridges
 ``anonymous_id ↔ user_id ↔ session_id`` and across **HMAC key versions** (CTO-74 rotates the user-id
@@ -107,7 +107,7 @@ class AccountResolution:
 class IdentifyEvent:
     """SDK/CDP ``identify``: an anonymous visitor logs in and becomes a known user.
 
-    Produces the ``anonymous_id ↔ user_id`` link (and ``session_id ↔ user_id`` when present) — the
+    Produces the ``anonymous_id ↔ user_id`` link (and ``session_id ↔ user_id`` when present), the
     edges that let a conversion attributed to ``user_id`` reach back to pre-login anonymous traces.
     """
 

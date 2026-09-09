@@ -1,6 +1,6 @@
 // ai-tally: switched from Vercel AI Gateway to direct OpenAI/Anthropic SDK
 // providers so the demo runs without a Vercel account. The chatbot template's
-// model IDs ("moonshotai/kimi-k2.5", etc.) are gateway-only — map them to
+// model IDs ("moonshotai/kimi-k2.5", etc.) are gateway-only; map them to
 // real provider model names here. Real provider is preserved on the span
 // for the dashboard via the existing instrumentation patch.
 import { anthropic } from "@ai-sdk/anthropic";
@@ -42,7 +42,7 @@ const FALLBACK_ANTHROPIC_TITLE = resolveLatest("anthropic", "haiku", "claude-hai
 const FALLBACK_GOOGLE = resolveLatest("google", "flash", "gemini-3-flash");
 
 function resolve(modelId: string) {
-  // Honor an explicit anthropic/<model> id — strip the prefix; pass the rest
+  // Honor an explicit anthropic/<model> id: strip the prefix; pass the rest
   // straight to @ai-sdk/anthropic so e.g. "claude-opus-4-8" routes correctly.
   if (modelId.startsWith("anthropic/")) {
     return anthropic(modelId.slice("anthropic/".length));

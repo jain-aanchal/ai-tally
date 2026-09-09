@@ -4,9 +4,9 @@
 // The /connectors page shows a card per supported third-party integration (Stripe, Segment,
 // HubSpot, Pendo, …) with three honest states:
 //
-//   - "healthy" — last run succeeded, real event count and relative age shown
-//   - "failing" — last run failed (or partial), shows last successful sync + a truncated error
-//   - "not-connected" — no rows yet for this tenant, gray CTA, no fabricated numbers
+//   - "healthy": last run succeeded, real event count and relative age shown
+//   - "failing": last run failed (or partial), shows last successful sync + a truncated error
+//   - "not-connected": no rows yet for this tenant, gray CTA, no fabricated numbers
 //
 // The catalog lives here (rather than on web/lib/connectors.ts) so the cost-layer connector list
 // stays narrowly about CTO-63/68 and this stays narrowly about third-party webhooks/pollers.
@@ -16,7 +16,7 @@ import type { IntegrationStatusRow } from "./clickhouse";
 export type IntegrationState = "healthy" | "failing" | "not-connected";
 
 export interface IntegrationDef {
-  /** Stable id — matches the gateway's connector_id and the backend worker's name. */
+  /** Stable id: matches the gateway's connector_id and the backend worker's name. */
   id: string;
   name: string;
   blurb: string;
@@ -27,8 +27,8 @@ export interface IntegrationDef {
 /**
  * The third-party integrations we surface cards for. Each is wired to a gateway worker that calls
  * record_run per cycle: Stripe (CTO-110 webhook), Segment / HubSpot / Pendo ingest workers
- * (CTO-127). A card only lights up once its worker has recorded a run for the tenant — until then
- * it stays "not-connected", the honest default. Order is deliberate — Stripe first.
+ * (CTO-127). A card only lights up once its worker has recorded a run for the tenant; until then
+ * it stays "not-connected", the honest default. Order is deliberate: Stripe first.
  */
 export const INTEGRATIONS: IntegrationDef[] = [
   {
@@ -78,7 +78,7 @@ export interface IntegrationCardView {
  * Merge the static catalog with the per-tenant rows returned by the gateway. Pure / deterministic
  * so the page can be unit-tested without a fetch.
  *
- * Tenants with no row for a given integration get ``state: "not-connected"`` — the honest default.
+ * Tenants with no row for a given integration get ``state: "not-connected"``, the honest default.
  * A row with ``last_run_status === "success"`` is "healthy"; ``"failed"`` or ``"partial"`` is
  * "failing".
  */

@@ -1,7 +1,7 @@
 [project]
 name = "tally-gateway"
 version = "0.1.0"
-description = "ai-tally ingest gateway — accepts SDK batches, enriches cost, writes to ClickHouse."
+description = "ai-tally ingest gateway: accepts SDK batches, enriches cost, writes to ClickHouse."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

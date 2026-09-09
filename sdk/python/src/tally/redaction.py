@@ -8,14 +8,14 @@ payloads (prompts, completions, tool arguments) sit next to strangers'. Three
 controls keep that safe, and this module implements the parts that are pure
 logic and therefore belong in the SDK / a shared library:
 
-1. **Configurable redactors** — detect and strip common PII (emails, phone
+1. **Configurable redactors**: detect and strip common PII (emails, phone
    numbers, card numbers, government IDs, IP addresses, secrets) from free-text
    payload fields *before* they leave the customer process.
-2. **Per-tenant payload policy** — every tenant chooses how much payload we
+2. **Per-tenant payload policy**: every tenant chooses how much payload we
    retain at all: ``FULL`` (keep, but still redact detected PII), ``HASHED``
    (keep only a tenant-scoped HMAC of the content so equality/joins survive but
    the plaintext does not), or ``NONE`` (drop content entirely).
-3. **Right-to-deletion planning** — a tenant submits subject identifiers; we
+3. **Right-to-deletion planning**: a tenant submits subject identifiers; we
    hash them (a raw identifier is never stored) and produce a deterministic
    :class:`DeletionPlan` enumerating the tables a worker must purge and the
    30-day SLA deadline. Executing the DML is a storage-plane concern and lives
@@ -27,7 +27,7 @@ Security invariants honoured here
   :class:`HmacKeyProvider` (KMS-backed in production). The default in-memory
   provider exists only so dev/test never need running infra. Raw keys are never
   logged or embedded.
-* Raw subject identifiers are **never** retained — deletion plans carry only the
+* Raw subject identifiers are **never** retained; deletion plans carry only the
   hashed forms.
 
 Deferred (still infra-bound, tracked on CTO-76)
@@ -152,7 +152,7 @@ class Redactor:
     """Applies an ordered set of :class:`Detector` s to free text.
 
     Construct with the default detector set, or pass ``detectors`` to override.
-    ``disable`` names detectors to drop from whatever set is active — handy for
+    ``disable`` names detectors to drop from whatever set is active, handy for
     tenants who, say, legitimately store IP addresses.
     """
 
@@ -246,10 +246,10 @@ def hmac_hash(value: str, key: bytes) -> str:
 class PayloadMode(str, Enum):
     """How much payload content a tenant retains.
 
-    * ``FULL`` — keep content, but still strip detected PII via the redactor.
-    * ``HASHED`` — replace content with a tenant-scoped HMAC; plaintext gone,
+    * ``FULL``: keep content, but still strip detected PII via the redactor.
+    * ``HASHED``: replace content with a tenant-scoped HMAC; plaintext gone,
       equality/joins on identical content still work.
-    * ``NONE`` — drop content fields entirely.
+    * ``NONE``: drop content fields entirely.
     """
 
     FULL = "full"
@@ -364,7 +364,7 @@ class PayloadPolicyEnforcer:
                 digest = hmac_hash(_coerce_str(value), key_bytes)
                 out[key] = f"hmac:{version}:{digest}"
                 hashed.append(key)
-            else:  # FULL — keep, but redact detected PII
+            else:  # FULL, keep, but redact detected PII
                 result = self._redactor.redact_text(value)
                 out[key] = result.text
                 for name, count in result.findings.items():
@@ -412,7 +412,7 @@ def hash_subject_id(subject_id: str) -> str:
 
     Deletion targets are matched on this hash; a raw identifier is never stored.
     Plain SHA-256 (not HMAC) so the hash is reproducible across services and key
-    rotations — it's an opaque lookup token, not a secret-bearing value.
+    rotations; it's an opaque lookup token, not a secret-bearing value.
     """
     return hashlib.sha256(subject_id.encode("utf-8")).hexdigest()
 

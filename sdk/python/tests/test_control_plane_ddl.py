@@ -39,7 +39,7 @@ def test_table_present(ddl, table):
 
 
 def test_secrets_are_kms_refs_not_raw(ddl):
-    # tenants store a KEK reference; connectors store secret_kek_ref — never raw key columns
+    # tenants store a KEK reference; connectors store secret_kek_ref, never raw key columns
     assert "hash_salt_kek_ref" in ddl
     assert "secret_kek_ref" in ddl
     assert "no_raw_secret" in ddl  # CHECK guards against an obvious raw secret

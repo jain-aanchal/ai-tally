@@ -26,7 +26,7 @@ function stateForMode(mode: GuardrailMode): "enabled" | "shadow" | "disabled" {
 }
 
 // Map a web rule's caps onto a control-plane kind: cost_cap when a cost cap is set, else loop_limit
-// for a step cap. (pii_gate / model_deprecation are managed elsewhere — out of scope for CTO-120.)
+// for a step cap. (pii_gate / model_deprecation are managed elsewhere; out of scope for CTO-120.)
 function kindForRule(
   rule: Pick<GuardrailRule, "maxCostMicroUsd" | "maxSteps">,
 ): "cost_cap" | "loop_limit" {
@@ -61,7 +61,7 @@ export async function GET(req: Request) {
   return NextResponse.json({ rules, configRefreshSeconds: CONFIG_REFRESH_SECONDS });
 }
 
-// POST /api/guardrails — persist an edited rule. Validates the shape, then forwards to the gateway's
+// POST /api/guardrails: persist an edited rule. Validates the shape, then forwards to the gateway's
 // idempotent upsert with a client-supplied change_id (UUID). When the gateway is unreachable we still
 // validate and echo the rule back (the client treats the echo as the saved state) so the prototype
 // works without infra; the SDK picks the change up on its next config-refresh window.
@@ -116,7 +116,7 @@ export async function POST(req: Request) {
         configRefreshSeconds: CONFIG_REFRESH_SECONDS,
       });
     }
-    // Gateway rejected the upsert (e.g. validation) — surface 422 so the client knows it didn't persist.
+    // Gateway rejected the upsert (e.g. validation): surface 422 so the client knows it didn't persist.
     if (res.status >= 400 && res.status < 500) {
       const detail = await res.text();
       return NextResponse.json({ error: `gateway rejected upsert: ${detail}` }, { status: 422 });

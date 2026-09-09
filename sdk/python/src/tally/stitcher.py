@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Attribution stitcher — bridge async business events to traces.
+"""Attribution stitcher: bridge async business events to traces.
 
 Implements CTO-69 / spec §7.
 
@@ -187,7 +187,7 @@ class MemoryTouchStore:
 class Stitcher:
     """Per-tenant stitcher. Holds rules + identity graph + touches.
 
-    Idempotent on ``(tenant_id, business_event_id, feature_tag)`` — re-stitching produces an
+    Idempotent on ``(tenant_id, business_event_id, feature_tag)``; re-stitching produces an
     upsert in :attr:`records`, not a duplicate.
     """
 
@@ -211,7 +211,7 @@ class Stitcher:
         is explicit that summing across features double-counts at the conversion level (spec §7.2).
 
         ``identity_as_of`` bounds which identity edges are eligible. Defaults to
-        ``event.occurred_at`` (initial stitch — don't leak edges observed after the event). Pass
+        ``event.occurred_at`` (initial stitch; don't leak edges observed after the event). Pass
         ``now`` from :func:`restitch_on_new_edge` so a late edge retroactively reveals identity.
         """
         now = now or event.occurred_at
@@ -219,7 +219,7 @@ class Stitcher:
         applicable = [r for r in self.rules if r.event_name == event.event_name]
 
         if not applicable:
-            # Not a value event for this tenant — ignore (not an unattributed-with-reason).
+            # Not a value event for this tenant, ignore (not an unattributed-with-reason).
             return []
 
         identity_set = self.identity_graph.resolve(
@@ -304,7 +304,7 @@ def restitch_on_new_edge(
     """When a new identity edge lands, re-run stitch for unattributed events whose user_hash
     is now connected to ``edge.a`` or ``edge.b``.
 
-    ``pending_events`` is the set of stored business events for the tenant — typically the rows in
+    ``pending_events`` is the set of stored business events for the tenant, typically the rows in
     ``business_events`` whose ids appear in :attr:`Stitcher.unattributed`.
     """
     stitcher.identity_graph.add_edge(tenant_id, edge)

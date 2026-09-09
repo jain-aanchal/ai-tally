@@ -79,7 +79,7 @@ def test_clean_stream_reconstructs_content_and_exact_usage() -> None:
     assert result.content == "Hello world"
     assert result.model == "gpt-4o-mini"
     assert result.finish_reason == "stop"
-    # Provider usage is authoritative — matches the reported numbers exactly.
+    # Provider usage is authoritative; matches the reported numbers exactly.
     assert result.input_tokens == 10
     assert result.output_tokens == 5
     assert result.usage_from_provider is True

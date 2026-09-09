@@ -8,7 +8,7 @@ from now. This script fetches the last ``--days`` of supported event types from 
 and feeds them through the same mapper + insert path the webhook uses, so idempotency on
 ``stripe_event_id`` makes the operation safe to re-run.
 
-It does NOT import the ``stripe`` SDK — we use ``urllib`` against ``api.stripe.com`` directly.
+It does NOT import the ``stripe`` SDK; we use ``urllib`` against ``api.stripe.com`` directly.
 Same reason the gateway doesn't pull the SDK: this is a few hundred lines for one API call, and
 the SDK would force a dependency bump for no real win.
 
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         store.close()
 
     logger.info(
-        "backfill done: mapped=%d inserted=%d skipped_unsupported=%d (re-runs are safe — "
+        "backfill done: mapped=%d inserted=%d skipped_unsupported=%d (re-runs are safe, "
         "ReplacingMergeTree on (TenantId, BusinessEventId) collapses duplicates)",
         mapped_total,
         inserted_total,

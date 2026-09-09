@@ -6,7 +6,7 @@ and stamps run status back onto it. Same narrow, tenant-scoped CRUD shape as
 :class:`gateway.tenant_integrations.TenantIntegrationStore`.
 
 ``record_run`` mirrors ``TenantIntegrationStore.record_run`` so egress (CTO-144) can reuse the exact
-recorder contract — it just updates ``last_run_at`` / ``last_status`` on the config row.
+recorder contract; it just updates ``last_run_at`` / ``last_status`` on the config row.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class TenantComputeConfigStore:
     def load_config(self, tenant_id: str) -> ConnectorConfig | None:
         """Return the tenant's compute connector config, or ``None`` if not configured.
 
-        ``None`` means "compute connector not enabled for this tenant" — the connector skips it,
+        ``None`` means "compute connector not enabled for this tenant"; the connector skips it,
         which keeps the migration additive (existing tenants have zero rows).
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -76,7 +76,7 @@ class TenantComputeConfigStore:
     ) -> None:
         """Stamp the outcome of one connector cycle on the tenant's config row.
 
-        Only ``last_run_at`` / ``last_status`` are persisted for v1 — the config row is not an
+        Only ``last_run_at`` / ``last_status`` are persisted for v1; the config row is not an
         append-only run log (that's the deferred /connectors tile's concern, CTO-140). ``connector_id``
         and ``error_message`` are accepted so the signature matches the ``RunRecorder`` protocol the
         base connector (and egress) call through.
@@ -103,7 +103,7 @@ class TenantEgressConfigStore:
     egress providers (Vercel + Cloudflare + AWS), so the table's PK is ``(tenant_id, egress_provider)``
     and :meth:`load_configs` returns a LIST (one :class:`EgressConfig` per provider). Running the
     :class:`gateway.connectors.egress.EgressCostConnector` once per returned config is what makes the
-    providers sum without double-counting — each provider keys a distinct synthetic span id.
+    providers sum without double-counting; each provider keys a distinct synthetic span id.
 
     ``record_run`` matches the ``RunRecorder`` protocol the base connector calls through, and is
     scoped to a single provider (the connector runs one provider at a time).
@@ -115,7 +115,7 @@ class TenantEgressConfigStore:
     def load_configs(self, tenant_id: str) -> list[EgressConfig]:
         """Return every egress provider configured for the tenant (empty list if none).
 
-        An empty list means "egress connector not enabled" — the connector skips the tenant, keeping
+        An empty list means "egress connector not enabled"; the connector skips the tenant, keeping
         the migration additive.
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -186,7 +186,7 @@ class TenantVercelConfigStore:
 
     ``record_run`` matches the ``RunRecorder`` protocol the reused connectors call through; the
     Vercel connector runs both a compute and (gated) an egress sub-run, and both stamp this single
-    row — ``connector_id`` is ignored (only ``last_run_at`` / ``last_status`` are persisted for v1).
+    row; ``connector_id`` is ignored (only ``last_run_at`` / ``last_status`` are persisted for v1).
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -195,7 +195,7 @@ class TenantVercelConfigStore:
     def load_config(self, tenant_id: str) -> VercelConfig | None:
         """Return the tenant's Vercel connector config, or ``None`` if not configured.
 
-        ``None`` means "Vercel connector not enabled for this tenant" — the connector skips it,
+        ``None`` means "Vercel connector not enabled for this tenant"; the connector skips it,
         keeping the migration additive (existing tenants have zero rows).
         """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:

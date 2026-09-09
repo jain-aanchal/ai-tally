@@ -1,12 +1,12 @@
 """Per-tenant feature value-event config (CTO-140).
 
 Companion to :mod:`gateway.tenant_guardrails`. Each row in ``tenant_feature_value_events`` pins one
-business value event (e.g. ``subscription_created``) to one ``(tenant, feature_tag)`` — the config
+business value event (e.g. ``subscription_created``) to one ``(tenant, feature_tag)``, the config
 the /features attribution reads its ROI against. Every upsert or delete appends a row to
 ``tenant_feature_value_event_changes``, keyed by a client-supplied ``change_id`` UUID so a retried
-request is idempotent — both the config write and the audit row are no-ops on replay.
+request is idempotent; both the config write and the audit row are no-ops on replay.
 
-Reads and writes both go through ``GET/POST/DELETE /v1/tenant/feature-value-events`` — the web app
+Reads and writes both go through ``GET/POST/DELETE /v1/tenant/feature-value-events``; the web app
 never touches Postgres directly.
 """
 
@@ -43,7 +43,7 @@ class FeatureValueEvent:
 
 @dataclass(frozen=True, slots=True)
 class FeatureValueEventChange:
-    """One audit row — before/after JSON snapshots of the mapping around a change."""
+    """One audit row, before/after JSON snapshots of the mapping around a change."""
 
     change_id: str
     feature_tag: str
@@ -77,7 +77,7 @@ class TenantFeatureValueEventStore:
     """Tiny Postgres-backed CRUD over ``tenant_feature_value_events`` + audit log.
 
     Every method takes the ``tenant_id`` resolved by upstream auth so the SQL never crosses tenants.
-    Writes are idempotent on the client-supplied ``change_id`` — the second call with the same id is
+    Writes are idempotent on the client-supplied ``change_id``; the second call with the same id is
     a no-op and returns the existing mapping unchanged.
     """
 
@@ -114,7 +114,7 @@ class TenantFeatureValueEventStore:
 
         On a new change_id: capture the current row as ``before`` (NULL if absent), apply the
         upsert, then append an audit row with both before/after JSON. On a replayed change_id: no
-        SQL writes — just return the existing mapping.
+        SQL writes, just return the existing mapping.
         """
         if not event_name:
             raise ValueError("event_name required")
@@ -146,7 +146,7 @@ class TenantFeatureValueEventStore:
                 current = self._fetch(cur, resolved, feature_tag)
                 if current is None:
                     raise RuntimeError(
-                        "change_id reserved but mapping absent — out-of-band delete?"
+                        "change_id reserved but mapping absent; out-of-band delete?"
                     )
                 return current
 

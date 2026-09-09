@@ -1,7 +1,7 @@
 """Cloud-billing connectors (CTO-143).
 
 A small reusable skeleton for daily connectors that pull cloud spend from a provider's billing API
-and land it as synthetic cost-layer spans in ``otel_spans`` — populating a cost layer that no live
+and land it as synthetic cost-layer spans in ``otel_spans``, populating a cost layer that no live
 telemetry feeds today. CTO-143 ships the ``compute`` layer (AWS Cost Explorer / GCP Cloud Billing);
 CTO-144 (egress) subclasses the same base with ``operation='egress'``.
 

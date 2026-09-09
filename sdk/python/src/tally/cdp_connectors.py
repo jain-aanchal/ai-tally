@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CDP / revenue connectors — Segment, Rudderstack, Stripe, HubSpot (CTO-68).
+"""CDP / revenue connectors: Segment, Rudderstack, Stripe, HubSpot (CTO-68).
 
 Why this module exists
 ----------------------
 ROI has two halves: the **cost** of an AI feature (the telemetry spine) and the
-**value** it produced. The value half lives in CDPs and CRMs — a Segment
+**value** it produced. The value half lives in CDPs and CRMs: a Segment
 ``track`` of a conversion, a Stripe ``invoice.paid``, a HubSpot deal moving to
 closed-won. This module turns those provider-specific webhook payloads into two
 normalized streams the rest of the platform understands:
 
-* :class:`BusinessEvent` — a value event (revenue or a named conversion) written
+* :class:`BusinessEvent`: a value event (revenue or a named conversion) written
   to ``business_events``.
-* :class:`~tally.identity.IdentifyEvent` / :class:`~tally.identity.AliasEvent` —
+* :class:`~tally.identity.IdentifyEvent` / :class:`~tally.identity.AliasEvent`:
   identity links fed into the identity graph (CTO-67) so an anonymous→known
   conversion can reach back to pre-login traces.
 
@@ -25,7 +25,7 @@ Correctness rules baked in
   :class:`EventDeduplicator` drops replays so a re-delivered webhook never
   double-counts revenue.
 * **Never raises on junk.** A malformed payload yields an empty
-  :class:`ConnectorResult` (skipped), not an exception — a bad webhook must not
+  :class:`ConnectorResult` (skipped), not an exception; a bad webhook must not
   take down the ingest path.
 
 Also here: :class:`GenericRevenueConnector` (CTO-199), the documented shape a tenant on a biller we
@@ -49,7 +49,7 @@ from tally.account_identity import hubspot_account_id, stripe_account_id
 from tally.identity import AliasEvent, IdentifyEvent, IdentityType
 from tally.schema import DEFAULT_CURRENCY, usd_to_micro
 
-#: micro-USD per cent — Stripe amounts arrive in the smallest currency unit.
+#: micro-USD per cent: Stripe amounts arrive in the smallest currency unit.
 _MICRO_PER_CENT = 10_000
 
 #: ``business_events.ValueType``, the ClickHouse enum in db/clickhouse/attribution.sql, which is
@@ -152,7 +152,7 @@ class ConnectorResult:
 
 
 # --------------------------------------------------------------------------- #
-# Parsing helpers (all tolerant — return None on junk)
+# Parsing helpers (all tolerant: return None on junk)
 # --------------------------------------------------------------------------- #
 def _as_str(value: object) -> str | None:
     if value is None:
@@ -675,7 +675,7 @@ class WebhookIngestor:
 
     Stateless except for the injected :class:`EventDeduplicator`. Unknown
     sources and unparseable payloads yield an empty :class:`IngestResult` rather
-    than raising — a bad webhook is skipped, never fatal.
+    than raising; a bad webhook is skipped, never fatal.
     """
 
     __slots__ = ("_registry", "_dedup")

@@ -59,7 +59,7 @@ func TestBrokerInjectsMintedCredential(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
 	req.Header.Set("X-Tenant-Key", "tk_live_acme")
-	// The client deliberately sends NO Authorization header — broker mode supplies it.
+	// The client deliberately sends NO Authorization header; broker mode supplies it.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)

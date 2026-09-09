@@ -1,4 +1,4 @@
-"""Unit tests for the Pendo ingest worker (CTO-127). No network, no DB — all deps are fakes."""
+"""Unit tests for the Pendo ingest worker (CTO-127). No network, no DB: all deps are fakes."""
 
 from __future__ import annotations
 

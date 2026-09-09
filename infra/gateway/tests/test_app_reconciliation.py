@@ -39,7 +39,7 @@ def test_compute_no_events_is_all_zero() -> None:
 
 
 def test_compute_on_time_events_are_not_late() -> None:
-    # 0 min, 30 min, exactly 60 min after the span — none breach the strict >1h threshold.
+    # 0 min, 30 min, exactly 60 min after the span: none breach the strict >1h threshold.
     pairs = [_pair(0), _pair(30), _pair(60)]
     assert compute_late_arrivals(pairs) == (0, 0, 0)
 
@@ -67,7 +67,7 @@ def test_compute_threshold_is_strict_greater_than() -> None:
 
 
 class FakeReconciliationStore:
-    """In-memory stand-in for :class:`ReconciliationStore` — no Postgres."""
+    """In-memory stand-in for :class:`ReconciliationStore`, no Postgres."""
 
     def __init__(self) -> None:
         self._runs: dict[str, list[ReconciliationRun]] = {}

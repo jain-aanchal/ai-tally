@@ -208,7 +208,7 @@ def test_rerun_over_same_window_does_not_duplicate() -> None:
 
 def test_intraday_incremental_pass_keeps_earlier_rows_of_partition() -> None:
     # Two rows for the same day arriving across two passes must both survive (partition upsert,
-    # not overwrite) — the failure mode a naive "overwrite the day file" sink would have.
+    # not overwrite), the failure mode a naive "overwrite the day file" sink would have.
     t_early = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
     t_late = datetime(2026, 7, 1, 18, 0, tzinfo=UTC)
     reader = _spans_reader([_span_row("tr1", "sp1", t_early)])
@@ -376,7 +376,7 @@ def test_reject_inline_aws_key() -> None:
 
 
 def test_accept_role_arn_reference() -> None:
-    # An IAM role ARN is a reference, not a raw key — must be accepted.
+    # An IAM role ARN is a reference, not a raw key; must be accepted.
     _reject_raw_key("arn:aws:iam::123456789012:role/tally-export")
 
 

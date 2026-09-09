@@ -1,17 +1,17 @@
-"""Egress cost-layer connector — Vercel / Cloudflare / AWS bandwidth (CTO-144).
+"""Egress cost-layer connector: Vercel / Cloudflare / AWS bandwidth (CTO-144).
 
 Same connector shape as compute (CTO-143): pull a tenant's daily *egress* (bandwidth-out) spend and
 hand it to :class:`gateway.connectors.base.CloudBillingConnector`, which lands ONE synthetic
-``egress`` span per provider per day. Egress is a smaller-scope variant — it REUSES the CTO-143 base
+``egress`` span per provider per day. Egress is a smaller-scope variant: it REUSES the CTO-143 base
 verbatim (emitter, idempotency guard, run contract, run recorder); only the per-provider fetch
 differs, and that is the single abstract method the base already exposes.
 
 Three providers for v1, each behind an INJECTABLE ``BillingClient`` so no test touches the network:
 
-  * **Vercel**    — bandwidth line items from the Vercel billing/usage API (dollar amounts already).
-  * **Cloudflare** — bytes-out from the Cloudflare GraphQL analytics aggregates for the configured
+  * **Vercel**:     bandwidth line items from the Vercel billing/usage API (dollar amounts already).
+  * **Cloudflare**:  bytes-out from the Cloudflare GraphQL analytics aggregates for the configured
     zone(s), converted to USD at the tenant's configured ``usd_per_gb`` rate.
-  * **AWS**       — ``get_cost_and_usage`` filtered to the ``DataTransfer-Out-Bytes`` usage type
+  * **AWS**:        ``get_cost_and_usage`` filtered to the ``DataTransfer-Out-Bytes`` usage type
     (dollar amounts already). Reuses compute's boto3 client pattern and AWS response parser.
 
 Multiple egress providers per tenant SUM cleanly with NO double-counting: each provider is a separate
@@ -21,7 +21,7 @@ distinct span ids → the /cost Egress column sums them once each. Re-running is
 ``span_exists`` guard).
 
 Honest-under-uncertainty: a failed fetch (or a Cloudflare zone with no configured ``usd_per_gb``
-rate — we will not invent a price for bytes) records a ``failed`` run and emits NO span.
+rate; we will not invent a price for bytes) records a ``failed`` run and emits NO span.
 
 Structure mirrors compute: pure parse functions unit-tested against recorded fixtures, thin
 SDK-touching clients that fetch-then-parse with the vendor SDK/HTTP imported LAZILY.
@@ -42,11 +42,11 @@ from gateway.connectors.base import (
     DailyCost,
 )
 
-# Reuse compute's AWS Cost Explorer response parser verbatim — an egress query is the same
+# Reuse compute's AWS Cost Explorer response parser verbatim: an egress query is the same
 # get_cost_and_usage shape, only the Filter (usage type) differs.
 from gateway.connectors.compute import _to_micro, parse_aws_cost_response
 
-# One GiB in bytes — the unit ``usd_per_gb`` is quoted in.
+# One GiB in bytes, the unit ``usd_per_gb`` is quoted in.
 _BYTES_PER_GB = Decimal(1024 * 1024 * 1024)
 
 # AWS usage type that isolates bytes-out egress. AWS bills DataTransfer-Out-Bytes across regions;
@@ -61,7 +61,7 @@ class EgressConfig(ConnectorConfig):
     """One tenant+provider egress config. Extends :class:`ConnectorConfig` with the per-provider
     resource id and the Cloudflare byte→USD rate.
 
-    ``cloud_provider`` carries the egress provider (``'vercel' | 'cloudflare' | 'aws'``) — the base
+    ``cloud_provider`` carries the egress provider (``'vercel' | 'cloudflare' | 'aws'``); the base
     is provider-agnostic and only uses it to key the synthetic span, which is exactly the
     distinct-provider guarantee egress needs. ``resource_id`` is the Cloudflare zone id / Vercel team
     id / AWS account id (a public identifier, NOT a secret). ``usd_per_gb`` is required ONLY for
@@ -97,7 +97,7 @@ def parse_vercel_usage(response: dict[str, object]) -> list[DailyCost]:
     """Parse a Vercel billing/usage response into per-day BANDWIDTH totals (micro-USD).
 
     Expects ``items[]`` each with a ``date`` (``YYYY-MM-DD``), an ``amount`` (decimal USD string) and
-    a ``type``. Only ``type == 'bandwidth'`` items are summed — compute/build/other line items are
+    a ``type``. Only ``type == 'bandwidth'`` items are summed; compute/build/other line items are
     ignored so egress never double-counts another layer's spend. Same-day items sum to ONE total.
     """
     per_day: dict[date, int] = {}
@@ -124,7 +124,7 @@ def parse_cloudflare_bytes(response: dict[str, object]) -> dict[date, int]:
     Expects the ``httpRequests1dGroups`` shape:
     ``data.viewer.zones[].httpRequests1dGroups[] -> {dimensions.date, sum.bytes}``. Multiple zones
     (or groups) for the same day sum, so a tenant with several Cloudflare zones still lands ONE
-    egress span per day. Returns raw bytes — the client applies the tenant's ``usd_per_gb`` rate.
+    egress span per day. Returns raw bytes; the client applies the tenant's ``usd_per_gb`` rate.
     """
     per_day: dict[date, int] = {}
     data = response.get("data") if isinstance(response, dict) else None
@@ -198,7 +198,7 @@ class VercelBandwidthClient:
 
 
 class CloudflareAnalyticsClient:
-    """Cloudflare GraphQL analytics fetcher — bytes-out priced at the tenant's ``usd_per_gb`` rate.
+    """Cloudflare GraphQL analytics fetcher: bytes-out priced at the tenant's ``usd_per_gb`` rate.
 
     Client imported lazily. ``resource_id`` is the zone id; ``usd_per_gb`` MUST be set on the config
     or the fetch fails soft (no guessed price).
@@ -297,7 +297,7 @@ class EgressCostConnector(CloudBillingConnector):
     """Daily egress connector. ``operation='egress'`` → synthetic ``egress``-layer spans.
 
     Constructed with ONE provider's :class:`BillingClient` (the tenant+provider control-plane row).
-    The base handles emission, idempotency, and run recording; this subclass only wires the fetch —
+    The base handles emission, idempotency, and run recording; this subclass only wires the fetch,
     identical to :class:`gateway.connectors.compute.ComputeCostConnector`, proving the base is reused
     unchanged. Running the connector once per configured provider is what makes multiple egress
     providers sum without double-counting (distinct provider per synthetic span id).

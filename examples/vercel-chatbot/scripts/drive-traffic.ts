@@ -5,7 +5,7 @@
 // and a fixed prompt set so two demo runs at the same `--seed` produce the
 // same cost + attribution numbers. The point of the demo is to exercise the
 // ai-tally workflow-2/3/4 dashboards end-to-end, not to mimic real user
-// behavior — anyone reading the README must understand that.
+// behavior; anyone reading the README must understand that.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -13,11 +13,11 @@ import path from "node:path";
 // ai-tally (CTO-137): import the embedding-span helper directly. The real chat
 // route has no embedding/RAG path today, so rather than fabricate one we have a
 // fraction of synthetic sessions emit a RAG-retrieval embedding span straight
-// to the gateway. This is DEMO SEED TRAFFIC — clearly not a real code path.
+// to the gateway. This is DEMO SEED TRAFFIC, clearly not a real code path.
 import { postEmbeddingSpan } from "../app/lib/tally";
 
 // Embedding pricing for the simulated RAG retrieval. text-embedding-3-small is
-// $0.02 per 1M input tokens. Demo-seed only — the gateway catalog remains the
+// $0.02 per 1M input tokens. Demo-seed only; the gateway catalog remains the
 // source of truth for any real numbers.
 const EMBED_MODEL = "text-embedding-3-small";
 const EMBED_USD_PER_MTOK = 0.02;
@@ -61,7 +61,7 @@ const REALISTIC_DEFAULTS = {
   parallel: 12,
 };
 
-// Feature mix for realistic mode — share of sessions. Matches the seed fixtures
+// Feature mix for realistic mode: share of sessions. Matches the seed fixtures
 // in web/lib/mock.ts. The chatbot route classifies prompts into chatbot.* tags,
 // so we additionally pass these as the run's higher-level feature label.
 const REALISTIC_FEATURE_MIX: { tag: string; share: number }[] = [
@@ -181,7 +181,7 @@ function parseArgs(argv: string[]): Args {
   return out;
 }
 
-// Mulberry32 — small, deterministic PRNG. Plenty good for picking prompts.
+// Mulberry32: small, deterministic PRNG. Plenty good for picking prompts.
 function makeRng(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
@@ -218,7 +218,7 @@ interface SessionResult {
 // `drive-traffic`. The gateway's catalog (CTO-106) computes authoritative cost
 // from real provider+model+tokens; ClickHouse remains the source of truth.
 // Rates here are a coarse blended average and are not used for any dashboard
-// number — only the local summary line.
+// number, only the local summary line.
 const SUMMARY_BLENDED_INPUT_PER_MTOK = 1.5;
 const SUMMARY_BLENDED_OUTPUT_PER_MTOK = 8.0;
 
@@ -332,7 +332,7 @@ async function runSession(
 
   // ai-tally (CTO-137): ~30% of sessions ALSO emit a simulated RAG-retrieval
   // embedding span so the Cost tab's Embeddings bar is non-zero on a live demo.
-  // DEMO SEED TRAFFIC — the real chat route has no embedding path; this stands
+  // DEMO SEED TRAFFIC: the real chat route has no embedding path; this stands
   // in for a retrieval step. Best-effort; never fails the session.
   if (rng() < 0.3 && errors === 0 && !args.dryRun) {
     const embedTokens = 200 + Math.floor(rng() * 600); // 200..799
@@ -352,7 +352,7 @@ async function runSession(
     }
   }
 
-  // positive_feedback signal regardless of conversion — this is what the
+  // positive_feedback signal regardless of conversion; this is what the
   // workflow-4 dashboard counts when filtered by outcome=positive_feedback.
   // Quick mode keeps the original ~30%; realistic mode fires ~75% to match the
   // attribution screenshot.
@@ -450,7 +450,7 @@ async function runAll(args: Args): Promise<SessionResult[]> {
   await Promise.all(workers);
   if (capped) {
     console.log(
-      `  · --max-usd cap (${fmtUsd(maxMicroUsd)}) reached — stopped after ${results.length} sessions.`,
+      `  · --max-usd cap (${fmtUsd(maxMicroUsd)}) reached, stopped after ${results.length} sessions.`,
     );
   }
   return results;
@@ -473,7 +473,7 @@ async function main(): Promise<void> {
     );
     console.log(
       "  NOTE: scripted sessions, not real users. This path makes REAL LLM " +
-        "calls — spend is capped by --max-usd. For $0 screenshot data, use the " +
+        "calls; spend is capped by --max-usd. For $0 screenshot data, use the " +
         "backfill script instead (make chatbot-demo-backfill).",
     );
   } else {
@@ -499,7 +499,7 @@ async function main(): Promise<void> {
       `(${Math.round((conversions / results.length) * 100)}%).`,
   );
   if (errored > 0) {
-    console.log(`  · ${errored} session(s) hit errors — see warnings above.`);
+    console.log(`  · ${errored} session(s) hit errors, see warnings above.`);
   }
 }
 

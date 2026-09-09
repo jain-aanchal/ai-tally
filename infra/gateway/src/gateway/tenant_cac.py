@@ -1,16 +1,16 @@
 """Per-tenant monthly CAC inputs for the unit-economics view (CTO-111).
 
-CAC is a *tenant-scoped monthly aggregate* — finance edits one row per month, locks it when the
+CAC is a *tenant-scoped monthly aggregate*: finance edits one row per month, locks it when the
 period closes, ~12 rows per tenant per year steady-state. That shape lives in Postgres next to the
 other control-plane state (tenant_connectors, tenant_replay_config); it emphatically does not
 belong in ClickHouse.
 
-Reads/writes go through the gateway's ``/v1/tenant/cac`` endpoints — the web app never touches
+Reads/writes go through the gateway's ``/v1/tenant/cac`` endpoints; the web app never touches
 Postgres directly, same pattern as :mod:`gateway.tenant_replay`.
 
 Locking rule: a period is editable until the *next* period exists. The upsert path refuses to
 mutate a row whose ``closed_at`` is set; closing the prior period happens implicitly when the
-successor month is inserted. The frontend grays out the form for the same months — backend is the
+successor month is inserted. The frontend grays out the form for the same months; backend is the
 authoritative check.
 """
 
@@ -72,7 +72,7 @@ CSV_COLUMNS = (
 
 
 class CacPeriodError(ValueError):
-    """Caller-facing validation error — surfaces as HTTP 422 in the gateway."""
+    """Caller-facing validation error, surfaces as HTTP 422 in the gateway."""
 
 
 def _parse_period_start(s: str) -> date:
@@ -105,7 +105,7 @@ class CacFormInput:
     new_customers_paid: int
     new_customers_total: int
     notes: str | None
-    # Revenue side (CTO-145). Nullable — finance may fill spend one month and ARPA/margin later.
+    # Revenue side (CTO-145). Nullable: finance may fill spend one month and ARPA/margin later.
     arpa_micro_usd: int | None = None
     gross_margin_pct: float | None = None
 
@@ -252,7 +252,7 @@ def parse_csv(body: str) -> list[CacFormInput]:
 
 
 def csv_template() -> str:
-    """Downloadable template — header row + one example row finance can fill in."""
+    """Downloadable template: header row + one example row finance can fill in."""
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(CSV_COLUMNS)

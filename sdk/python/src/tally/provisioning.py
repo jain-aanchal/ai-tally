@@ -3,8 +3,8 @@
 
 Self-serve GTM needs a new customer to go from "click signup" to "send my first trace" with **zero
 manual steps**. That means the moment a :class:`SignupRequest` arrives we must deterministically
-plan every control-plane row the tenant needs — the ``tenants`` row, a scoped ``api_keys`` row, the
-per-tenant HMAC key set (CTO-74), and a sane default config — onto the shared cluster, in the
+plan every control-plane row the tenant needs: the ``tenants`` row, a scoped ``api_keys`` row, the
+per-tenant HMAC key set (CTO-74), and a sane default config, onto the shared cluster, in the
 region the customer picked for data residency (CTO-76).
 
 This module is the **pure planner** for that: given a signup request it produces a
@@ -15,7 +15,7 @@ keeping the decision logic here makes it unit-testable with no Postgres, no KMS,
 Security invariants enforced structurally (never just by convention):
 
 * The **raw API key is returned exactly once** (in :class:`ApiKeyIssue`) and is *never* stored in
-  the plan — the plan carries only its SHA-256 hash, mirroring the ``api_keys.key_hash`` column.
+  the plan; the plan carries only its SHA-256 hash, mirroring the ``api_keys.key_hash`` column.
 * The **HMAC key set is a KMS reference** (``hash_salt_kek_ref``), never raw key material, and is
   checked against the same ``no_raw_secret`` shape the DDL's CHECK constraint enforces.
 * :meth:`TenantBootstrapPlan.assert_no_raw_secret` is a belt-and-suspenders guard so a refactor
@@ -49,7 +49,7 @@ API_KEY_PREFIX = "tk_live_"
 API_KEY_ENTROPY_BYTES = 32
 
 #: Default analytics sample rate for a fresh tenant (billing counts head traces *before* sampling,
-#: so this only affects analytics fidelity, never the bill — see CTO-87).
+#: so this only affects analytics fidelity, never the bill; see CTO-87).
 DEFAULT_SAMPLE_RATE = 1.0
 
 #: Default guardrail posture for a brand-new tenant: watch, never block (CTO-51/58).
@@ -122,7 +122,7 @@ class SignupRequest:
             raise ValueError("org_name too long (max 200)")
         email = (self.admin_email or "").strip()
         # Deliberately permissive: one '@' with non-empty local + domain, and a dot in the domain.
-        # We gate provisioning, not RFC 5322 — over-strict validation rejects real users.
+        # We gate provisioning, not RFC 5322; over-strict validation rejects real users.
         if email.count("@") != 1:
             raise ValueError("admin_email must contain exactly one '@'")
         local, _, domain = email.partition("@")
@@ -133,7 +133,7 @@ class SignupRequest:
 
     @property
     def normalized_email(self) -> str:
-        """Lowercased, trimmed email — the identity we dedup signups on."""
+        """Lowercased, trimmed email, the identity we dedup signups on."""
         return self.admin_email.strip().lower()
 
     @property
@@ -224,7 +224,7 @@ class TenantRow:
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyRow:
-    """The ``api_keys`` row to INSERT — hash only, never the token."""
+    """The ``api_keys`` row to INSERT: hash only, never the token."""
 
     tenant_id: str
     key_hash: str
@@ -275,7 +275,7 @@ class TenantBootstrapPlan:
     def ingest_credentials(self) -> dict:
         """The minimal config a fresh tenant points its proxy/SDK at to send its first trace.
 
-        Note: this returns the *key hash* and host, not the raw key — the raw key is delivered once
+        Note: this returns the *key hash* and host, not the raw key; the raw key is delivered once
         via :class:`ProvisionResult`. Callers compose the env from that.
         """
         return {
@@ -392,7 +392,7 @@ class TenantRegistry:
 
     Stands in for the unique constraint the real control plane enforces: provisioning the *same*
     signup twice (double-click, client retry) returns the original tenant rather than creating a
-    second one. The raw key is only returned on the first call — a reused result has no key to show,
+    second one. The raw key is only returned on the first call; a reused result has no key to show,
     because the original was already delivered once and is not stored.
     """
 
@@ -435,7 +435,7 @@ def verify_isolation(plans: list[TenantBootstrapPlan]) -> list[str]:
     """Verify freshly-provisioned tenants share no isolation-critical material (AC).
 
     Returns a list of human-readable violations; empty means isolation holds. We check that across
-    every pair of tenants the tenant id, API-key hash, and HMAC KMS reference are all distinct —
+    every pair of tenants the tenant id, API-key hash, and HMAC KMS reference are all distinct:
     the three things that, if shared, would let one tenant read or be billed for another's data.
     """
     violations: list[str] = []
@@ -458,7 +458,7 @@ def verify_isolation(plans: list[TenantBootstrapPlan]) -> list[str]:
             violations.append(f"shared HMAC kek_ref across tenants ({plan.tenant_id!r})")
         seen_keks[kek] = 1
 
-        # Each tenant's HMAC ref must be namespaced under its own id — a cross-namespaced ref would
+        # Each tenant's HMAC ref must be namespaced under its own id; a cross-namespaced ref would
         # mean two tenants could resolve to the same key.
         if f"/tenant/{plan.tenant_id}/" not in kek:
             violations.append(f"HMAC kek_ref not namespaced to tenant {plan.tenant_id!r}")

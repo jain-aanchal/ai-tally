@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Account dimension — context scoping, per-call override, and hashing (CTO-181 / B2).
+"""Account dimension: context scoping, per-call override, and hashing (CTO-181 / B2).
 
 The two properties worth guarding hardest:
 

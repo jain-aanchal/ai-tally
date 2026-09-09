@@ -1,4 +1,4 @@
--- Athena external tables for the S3 export sink (CTO-160) — GENERATED from the shared
+-- Athena external tables for the S3 export sink (CTO-160). GENERATED from the shared
 -- gateway.bq_export specs via gateway.athena_export.all_ddl(). Edit `<bucket>`/`<prefix>` to taste,
 -- or regenerate with:  python -c "from gateway.athena_export import all_ddl; ...".
 --

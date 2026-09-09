@@ -1,4 +1,4 @@
-"""GET/POST /v1/tenant/guardrails — control-plane CRUD + idempotent audit (CTO-116)."""
+"""GET/POST /v1/tenant/guardrails: control-plane CRUD + idempotent audit (CTO-116)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ T = "t-acme"
 
 
 class FakeStore:
-    """In-memory stand-in for :class:`TenantGuardrailStore` — no Postgres required.
+    """In-memory stand-in for :class:`TenantGuardrailStore`, no Postgres required.
 
     Mirrors the idempotency contract: a repeated ``change_id`` is a no-op and returns the
     existing rule unchanged.
@@ -55,7 +55,7 @@ class FakeStore:
             raise ValueError(f"unknown state '{state}'")
         key = (tenant_id, change_id)
         if key in self._seen_changes:
-            # Replay — return the existing rule unchanged.
+            # Replay: return the existing rule unchanged.
             existing = self._rows.get((tenant_id, rule_id))
             assert existing is not None, "change_id seen but rule missing"
             return existing

@@ -7,7 +7,7 @@ ai-tally bills on **billable telemetry the customer is paying to send us**.
 That creates a hard product constraint: a usage limit must *never* become a
 reason to drop that telemetry. If a customer blows past their plan's
 trace-count or active-feature-count for the period, the correct response is to
-**accept the data and prompt them to upgrade** — not to silently lose the very
+**accept the data and prompt them to upgrade**, not to silently lose the very
 events they are paying for. Dropping billable data would both break their
 observability and quietly undercharge us; both are unacceptable.
 
@@ -23,9 +23,9 @@ to drop billable data.
 
 Two meters are tracked per billing period:
 
-* **head trace-count** — every trace counted at HEAD (before sampling), the
+* **head trace-count**: every trace counted at HEAD (before sampling), the
   canonical billable unit (mirrors :class:`tally.sampling.BillingMeter`).
-* **distinct active feature-count** — the number of distinct feature tags seen
+* **distinct active feature-count**: the number of distinct feature tags seen
   in the period (plan tiers cap how many product features a customer may meter).
 
 Built-in tiers FREE / PRO / SCALE / ENTERPRISE are provided (enterprise =
@@ -183,9 +183,9 @@ class EnforcementLevel(str, Enum):
     """Escalating ladder. Crucially, **none** of these means "drop data"."""
 
     OK = "ok"  # comfortably under cap
-    WARN = "warn"  # >=80% of cap — surface a heads-up
-    SOFT_CAP = "soft_cap"  # >=100% of cap — still accepting, prompt to upgrade
-    UPGRADE_REQUIRED = "upgrade_required"  # well over — upgrade strongly indicated
+    WARN = "warn"  # >=80% of cap, surface a heads-up
+    SOFT_CAP = "soft_cap"  # >=100% of cap, still accepting, prompt to upgrade
+    UPGRADE_REQUIRED = "upgrade_required"  # well over, upgrade strongly indicated
 
     @property
     def severity(self) -> int:
@@ -217,7 +217,7 @@ class EnforcementDecision:
 
     @property
     def drops_data(self) -> bool:
-        """**Always False.** Billable telemetry is never dropped — this module
+        """**Always False.** Billable telemetry is never dropped; this module
         only ever warns or prompts an upgrade. The invariant exists so callers
         can assert on it and never gate ingestion on a plan limit.
         """
@@ -268,7 +268,7 @@ def _classify_meter(tier: PlanTier, usage: UsageSnapshot, meter: Meter) -> Enfor
         level = EnforcementLevel.OK
     elif limit == 0:
         # A zero cap means the feature is disabled on this tier: any usage is
-        # immediately over. Still never drops data — prompt to upgrade.
+        # immediately over. Still never drops data, prompt to upgrade.
         level = EnforcementLevel.UPGRADE_REQUIRED if value > 0 else EnforcementLevel.OK
     elif value >= limit * UPGRADE_REQUIRED_MULTIPLE:
         level = EnforcementLevel.UPGRADE_REQUIRED
@@ -301,21 +301,21 @@ def _message_for(
     """Human-readable prompt for a level. Always upgrade-oriented, never punitive."""
     label = "traces" if meter is Meter.TRACES else "active features"
     if level is EnforcementLevel.OK:
-        return f"{tier.name}: {usage} {label} used — within plan limits."
+        return f"{tier.name}: {usage} {label} used, within plan limits."
     if level is EnforcementLevel.WARN:
         return (
             f"{tier.name}: {usage} of {limit} {label} used ({pct:.0f}%). "
-            f"Approaching your plan limit — consider upgrading to avoid surprises."
+            f"Approaching your plan limit; consider upgrading to avoid surprises."
         )
     if level is EnforcementLevel.SOFT_CAP:
         return (
             f"{tier.name}: {usage} {label} used, over your plan limit of {limit}. "
-            f"We're still accepting all your data — upgrade to raise this limit."
+            f"We're still accepting all your data; upgrade to raise this limit."
         )
     # UPGRADE_REQUIRED
     return (
         f"{tier.name}: {usage} {label} used, well over your plan limit of {limit}. "
-        f"Your data is still being collected — please upgrade your plan."
+        f"Your data is still being collected; please upgrade your plan."
     )
 
 
@@ -323,8 +323,8 @@ def classify(tier: PlanTier, usage: UsageSnapshot) -> EnforcementDecision:
     """Classify *usage* against *tier*, returning the **worst** meter's decision.
 
     Both meters are evaluated; the decision for the meter with the higher
-    severity is returned (ties break to TRACES, the billable unit). Never raises
-    — :class:`UsageSnapshot` has already clamped boundary junk.
+    severity is returned (ties break to TRACES, the billable unit). Never raises:
+    :class:`UsageSnapshot` has already clamped boundary junk.
     """
     decisions = [_classify_meter(tier, usage, meter) for meter in Meter]
     # Higher severity wins; on a tie keep the first (TRACES, evaluated first).
@@ -373,7 +373,7 @@ class LimitState:
 
     @property
     def drops_data(self) -> bool:
-        """Always False — surfaced here too so the UI can state it plainly."""
+        """Always False; surfaced here too so the UI can state it plainly."""
         return False
 
     def as_dict(self) -> dict[str, object]:

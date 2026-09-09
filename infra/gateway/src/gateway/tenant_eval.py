@@ -3,12 +3,12 @@
 Mirror of :mod:`gateway.tenant_replay`, with three differences:
 
 * Default off (same).
-* Default daily budget is ``$10`` — judges are pricier than replay candidates.
+* Default daily budget is ``$10``; judges are pricier than replay candidates.
 * ``judge_model`` is a string, not derived. Default ``claude-opus-4-8`` (best capability /
   best at following the rubric's "answer with exactly A, B, or TIE" format). Overridable per
-  tenant — e.g. to mitigate judge-self-bias if all candidates are claude-family.
+  tenant, e.g. to mitigate judge-self-bias if all candidates are claude-family.
 
-Reads/writes go through ``GET/POST /v1/tenant/eval/config`` — the web app never touches
+Reads/writes go through ``GET/POST /v1/tenant/eval/config``; the web app never touches
 Postgres directly.
 """
 

@@ -1,6 +1,6 @@
-# ADR 0001 — ClickHouse: managed (Cloud) vs. self-hosted
+# ADR 0001: ClickHouse: managed (Cloud) vs. self-hosted
 
-**Status:** Proposed — pending verification of multi-tenant isolation knobs (see §6).
+**Status:** Proposed, pending verification of multi-tenant isolation knobs (see §6).
 **Date:** 2026-05-28
 **Tracks:** CTO-94 spike. Blocks: CTO-22 cluster bring-up, CTO-30 isolation, CTO-29 tiering.
 **Decision-maker:** founder / eng lead.
@@ -29,7 +29,7 @@ the same DDL we already wrote. Migrating off managed later is real but not a rew
 - Hosted, multi-tier offering with on-demand compute and S3-backed storage.
 - Operationally: backups, upgrades, replication, monitoring all handled.
 - Adds a control-plane dependency we don't control (incidents on their side become ours).
-- Per-tenant isolation: **needs verification** — see §6.
+- Per-tenant isolation: **needs verification**; see §6.
 
 ### B. Self-hosted on cloud VMs
 
@@ -56,7 +56,7 @@ the same DDL we already wrote. Migrating off managed later is real but not a rew
 both conditions hold:
 
 1. Managed cost is a visible % of COGS (rule of thumb: when monthly bill exceeds ~$30k *or*
-   exceeds 20% of revenue — whichever comes first).
+   exceeds 20% of revenue, whichever comes first).
 2. We have at least one engineer with bandwidth to run it well, and we have a real customer asking
    for something managed can't provide (typically dedicated isolation or data residency in a
    region the managed offering doesn't cover).
@@ -84,12 +84,12 @@ with a real ingest sample.
 
 | Tier | Spans/month | Compressed storage / mo (90d hot retention) | Notional managed cost / mo | Notional self-host (VM + people) |
 |---|---|---|---|---|
-| **MVP** (5 design partners) | ~5M | ~200 MB | ~$200–400 (smallest tier) | $400 infra + 0.25 FTE = $5k effective |
-| **Series A** | ~50M | ~3 GB | ~$1.5k–3k | $1.2k infra + 0.5 FTE = $10k effective |
-| **Series B** | ~500M (→ 2B with child spans, per spec) | ~150 GB | ~$15k–30k | $10k infra + 1.0 FTE = $24k effective |
+| **MVP** (5 design partners) | ~5M | ~200 MB | ~$200-400 (smallest tier) | $400 infra + 0.25 FTE = $5k effective |
+| **Series A** | ~50M | ~3 GB | ~$1.5k-3k | $1.2k infra + 0.5 FTE = $10k effective |
+| **Series B** | ~500M (→ 2B with child spans, per spec) | ~150 GB | ~$15k-30k | $10k infra + 1.0 FTE = $24k effective |
 
 **Assumptions** (each independently flag-and-revisit):
-- Average compressed span size 1.5–2 KB after the codecs we specified (Delta+ZSTD on ts, T64 on
+- Average compressed span size 1.5-2 KB after the codecs we specified (Delta+ZSTD on ts, T64 on
   tokens, ZSTD elsewhere). Real data may be larger or smaller; verify with a 1M-row sample.
 - 90-day hot retention; ≥90d aggregated cold lives in the rollup MVs (CTO-24) which compress an
   additional ~10×.
@@ -101,7 +101,7 @@ the lines start crossing if you don't account for engineering opportunity cost. 
 account for it, the crossover moves later. **Translate**: don't self-host until you're ready to
 hire for it.
 
-## 6. Verification checklist — **MUST do before locking in**
+## 6. Verification checklist: **MUST do before locking in**
 
 These are the questions that would force Option B if any answer is "no":
 
@@ -133,7 +133,7 @@ Any one of:
 **Positive:**
 - Phase 1 unblocks now (weeks, not month-plus, for a production-grade cluster).
 - Engineering time goes into the cost workflows and the integrated data spine.
-- Backups, replication, version upgrades — not our problem yet.
+- Backups, replication, version upgrades: not our problem yet.
 
 **Negative:**
 - A line item on COGS we can't fully optimize.
@@ -147,7 +147,7 @@ Any one of:
 
 - [ ] Spin up a free / smallest-tier Cloud instance.
 - [ ] Apply `db/clickhouse/*.sql` (otel_spans, rollups, last_touch_index, attribution).
-- [ ] Verify checklist §6 #1–#8 against that instance + the docs.
+- [ ] Verify checklist §6 #1-#8 against that instance + the docs.
 - [ ] Ingest a 1M-row synthetic sample (we have the schema; generate from `tally.schema` + price catalog) and measure compressed size vs. our assumption.
 - [ ] Make the call: managed (recommended) or pivot to self-hosted.
 - [ ] Update CTO-22 status from blocked → ready.
@@ -157,5 +157,5 @@ Any one of:
 - ai-tally System Specification §5 (storage), §11 (multi-tenancy), §14 (security).
 - ai-tally PR #8 (otel_spans DDL), PR #17 (rollups + attribution DDL), PR #18 (Postgres
   control-plane), PR #19 (clock-skew handling).
-- ClickHouse docs — cluster settings, materialized views, TTL, mutations.
+- ClickHouse docs: cluster settings, materialized views, TTL, mutations.
 - ClickHouse Cloud pricing & SLA pages (verify current).

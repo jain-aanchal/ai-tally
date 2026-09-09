@@ -3,10 +3,10 @@
 //
 // Every workflow surface derives one of four DataStates from the data it already receives, and
 // renders the matching banner/badge so users can never mistake synthetic, partial, or stale
-// numbers for fresh real data. These are pure functions — no I/O, no React — so they are unit
+// numbers for fresh real data. These are pure functions, no I/O, no React, so they are unit
 // testable and reused identically across all five workflows.
 
-/** Two hours in milliseconds — the freshness threshold from spec 13.8. */
+/** Two hours in milliseconds: the freshness threshold from spec 13.8. */
 export const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 
 /**
@@ -30,8 +30,8 @@ export function ageMs(reconciledThrough: string, now: number = Date.now()): numb
  * as a minutes-ago number instead; this converts it so they share the same stale/fresh logic.
  *
  * `null` means the reconciler last-run is unknown (never ran / source unavailable, CTO-169). We map
- * it to the epoch sentinel so downstream logic reads it as pre-data — no "as of" label, no stale
- * badge — rather than inventing a boundary. The surface shows an honest `—` instead of a claim.
+ * it to the epoch sentinel so downstream logic reads it as pre-data (no "as of" label, no stale
+ * badge) rather than inventing a boundary. The surface shows an honest `—` instead of a claim.
  */
 export function boundaryFromMinutesAgo(minutesAgo: number | null, now: number = Date.now()): string {
   if (minutesAgo === null) return new Date(0).toISOString();
@@ -63,7 +63,7 @@ export function isStale(
 }
 
 export interface DataStateInput {
-  /** True when no real telemetry exists — render the synthetic preview + connector CTA. */
+  /** True when no real telemetry exists: render the synthetic preview + connector CTA. */
   isEmpty: boolean;
   /** True when some sources/layers are populated but others are missing. */
   isPartial: boolean;
@@ -117,7 +117,7 @@ export function allZero(values: Record<string, number>): boolean {
   return xs.length === 0 || xs.every((v) => v === 0);
 }
 
-/** True if some values are zero and some are non-zero — the signature of partial coverage. */
+/** True if some values are zero and some are non-zero: the signature of partial coverage. */
 export function someZero(values: Record<string, number>): boolean {
   const xs = Object.values(values) as number[];
   if (xs.length === 0) return false;
@@ -129,10 +129,10 @@ export function someZero(values: Record<string, number>): boolean {
 /**
  * Connector-aware partial detection (CTO-107).
  *
- * Returns the subset of *enabled* layers that report zero — those are the real gaps. Layers the
+ * Returns the subset of *enabled* layers that report zero; those are the real gaps. Layers the
  * tenant never enabled don't count: a tenant who only declared the LLM connector should never see
  * the banner for vector/tools/etc., because they were never expected to fire. With the empty
- * input (no enabled connectors declared) we return [], i.e. nothing partial — by design.
+ * input (no enabled connectors declared) we return [], i.e. nothing partial, by design.
  */
 export function zeroEnabledLayers<L extends string>(
   // Keys are decoupled from L: byLayer carries every layer the system knows

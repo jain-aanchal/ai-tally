@@ -1,12 +1,12 @@
 // ai-tally: model list reflects what the demo can actually call. Once the
 // runtime stopped using the Vercel AI Gateway, the template's stock IDs
-// (deepseek/, moonshotai/, openai/gpt-oss-*, xai/) all became unreachable —
+// (deepseek/, moonshotai/, openai/gpt-oss-*, xai/) all became unreachable;
 // the picker would happily select them and every send would 404. Listing the
 // real OpenAI + Anthropic models we route through @ai-sdk/* keeps the UI
 // honest.
 //
 // CTO-147: the OpenAI entries used to pin `gpt-4o` / `gpt-4o-mini`, which the
-// provider has since retired — `make chatbot-demo` 404'd on every OpenAI send.
+// provider has since retired; `make chatbot-demo` 404'd on every OpenAI send.
 // They're now `gpt-5` / `gpt-5-mini` (both priced in tally.pricing.seed_catalog,
 // so dashboard cost stays non-zero). run.sh refreshes .tally/models.json on each
 // launch (TALLY_MODELS_REFRESH=1) so operators see the live lineup logged and
@@ -21,7 +21,7 @@
 // CTO-170: this module is now the CLIENT-SAFE, plain-data half. The literals below
 // are the pinned fail-soft fallbacks (and what the picker renders offline / before
 // /api/models loads). The discovery-RESOLVED lineup is built server-side in
-// ./models.server.ts (it imports resolveModel.ts, which uses node:fs — so it must
+// ./models.server.ts (it imports resolveModel.ts, which uses node:fs, so it must
 // never reach the browser bundle). Client components import from HERE; the chat
 // route, /api/models, and actions import the resolved shape from ./models.server.
 export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-5";
@@ -57,7 +57,7 @@ export const chatModels: ChatModel[] = [
     id: "anthropic/claude-sonnet-4-5",
     name: "Claude Sonnet 4.5",
     provider: "anthropic",
-    description: "Anthropic flagship — best quality, mid latency",
+    description: "Anthropic flagship: best quality, mid latency",
   },
   {
     id: "anthropic/claude-haiku-4-5",
@@ -69,33 +69,33 @@ export const chatModels: ChatModel[] = [
     id: "anthropic/claude-opus-4-8",
     name: "Claude Opus 4.8",
     provider: "anthropic",
-    description: "Anthropic's most capable model — slower, pricier",
+    description: "Anthropic's most capable model: slower, pricier",
   },
   {
     id: "openai/gpt-5-mini",
     name: "GPT-5 mini",
     provider: "openai",
-    description: "OpenAI cheap-and-fast — needs OPENAI_API_KEY with credit",
+    description: "OpenAI cheap-and-fast: needs OPENAI_API_KEY with credit",
   },
   {
     id: "openai/gpt-5",
     name: "GPT-5",
     provider: "openai",
-    description: "OpenAI flagship — needs OPENAI_API_KEY with credit",
+    description: "OpenAI flagship: needs OPENAI_API_KEY with credit",
   },
   {
     id: "google/gemini-3-flash",
     name: "Gemini 3 Flash",
     provider: "google",
     description:
-      "Google fast-and-cheap — needs GOOGLE_API_KEY or GEMINI_API_KEY",
+      "Google fast-and-cheap: needs GOOGLE_API_KEY or GEMINI_API_KEY",
   },
   {
     id: "google/gemini-2.5-pro",
     name: "Gemini 2.5 Pro",
     provider: "google",
     description:
-      "Google flagship — higher quality, pricier; needs GOOGLE_API_KEY or GEMINI_API_KEY",
+      "Google flagship: higher quality, pricier; needs GOOGLE_API_KEY or GEMINI_API_KEY",
   },
 ];
 
@@ -103,7 +103,7 @@ export const chatModels: ChatModel[] = [
 // (provider, family) that the CTO-109 gateway discovery classifies it under, so
 // ./models.server.ts can resolve the newest non-deprecated id per slot from
 // .tally/models.json. `provider`/`family` strings MUST match
-// tally.models.classify_family (sdk/python/src/tally/models.py) — that's what's
+// tally.models.classify_family (sdk/python/src/tally/models.py); that's what's
 // written into the cache. Kept as plain data (parallel arrays / consts) here so
 // the client bundle never needs the fs-backed discovery machinery.
 export type DiscoveryProvider = "openai" | "anthropic" | "google";
@@ -145,7 +145,7 @@ export const defaultChatModelSlot: ModelSlot = {
 // cost silently drops to $0 (a "catalog_miss"). A discovery-resolved id that isn't
 // in this set is rejected in favor of the pinned literal (see models.server.ts).
 // There's no build-time export of the Python catalog into JS, so this small set is
-// maintained by hand — keep it in sync with seed_catalog()'s chat SKUs.
+// maintained by hand; keep it in sync with seed_catalog()'s chat SKUs.
 export const catalogPricedIds: ReadonlySet<string> = new Set<string>([
   "anthropic/claude-sonnet-4-5",
   "anthropic/claude-haiku-4-5",

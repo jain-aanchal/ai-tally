@@ -4,7 +4,7 @@ The AWS analog of ``tenant_bq_export`` (CTO-154). Exporting a tenant's telemetry
 bucket as partitioned Parquet is opt-in and off by default: a tenant with no row returns
 :data:`DEFAULT_CONFIG` (``enabled=False``), so no existing deployment starts mirroring on upgrade.
 When enabled, the tenant supplies their destination (``bucket`` / ``prefix`` / ``database`` + AWS
-``region``) and a **credential reference** — an IAM **role ARN** the worker assumes, or a Secrets
+``region``) and a **credential reference**: an IAM **role ARN** the worker assumes, or a Secrets
 Manager / SSM parameter resource name. We deliberately reject anything that looks like an inline AWS
 access key / secret: raw keys never live in this table.
 
@@ -45,7 +45,7 @@ def _reject_raw_key(credential_ref: str) -> None:
     if any(marker in lowered for marker in _RAW_KEY_MARKERS):
         raise RawKeyRejected(
             "credential_ref must be a reference (an IAM role ARN, or a Secrets Manager / SSM "
-            "resource name) — never an inline AWS access key or secret."
+            "resource name), never an inline AWS access key or secret."
         )
 
 
@@ -60,7 +60,7 @@ class AthenaExportConfig:
     credential_ref: str
 
     def dataset_ref(self) -> str:
-        """The S3 key prefix a table name appends to — always trailing-slash-terminated."""
+        """The S3 key prefix a table name appends to, always trailing-slash-terminated."""
         return self.prefix if self.prefix.endswith("/") else self.prefix + "/"
 
     def s3_uri(self, table: str) -> str:
@@ -184,7 +184,7 @@ class AthenaExportWatermarkStore:
     """Postgres-backed incremental cursor: one row per (tenant, source table).
 
     Implements the :class:`gateway.bq_export.WatermarkStore` protocol so it drops straight into
-    ``run_export``. A missing row means "never exported" and reads back as ``None`` — a full
+    ``run_export``. A missing row means "never exported" and reads back as ``None``, a full
     initial backfill on first run.
     """
 

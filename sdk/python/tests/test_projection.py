@@ -33,7 +33,7 @@ def _tail_workload() -> list[ProjectionRun]:
     """490 cheap runs + 10 monsters (top 2%); the change inflates only the monster tail.
 
     The monsters are >1% of the population so they land at/above the nearest-rank p99, while the
-    mean stays small — exactly the case where a mean-only estimate would miss the blow-up.
+    mean stays small, exactly the case where a mean-only estimate would miss the blow-up.
     """
     runs = [
         ProjectionRun(f"c{i}", baseline_cost_micro_usd=1_000, projected_cost_micro_usd=1_000)
@@ -130,7 +130,7 @@ def test_blowup_risk_low_when_change_is_flat() -> None:
 
 def test_p99_interval_is_wider_than_median_interval() -> None:
     # Heavy-tailed (power-law) costs: a dense cheap body + a sparse, widely-spread expensive tail.
-    # This is the case the feature targets — the p99 estimate is genuinely noisier than the median.
+    # This is the case the feature targets: the p99 estimate is genuinely noisier than the median.
     body = [
         ProjectionRun(f"b{i}", baseline_cost_micro_usd=1_000 + (i % 5),
                       projected_cost_micro_usd=1_000 + (i % 5))

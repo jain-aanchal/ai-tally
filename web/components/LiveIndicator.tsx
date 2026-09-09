@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Compact "live · updated Ns ago" badge for dashboard pages (CTO-108).
 //
-// Sits alongside the existing StaleBadge in the page header — additive, not replacing it.
+// Sits alongside the existing StaleBadge in the page header: additive, not replacing it.
 // StaleBadge reports the reconciler-boundary freshness; LiveIndicator reports whether the page
 // itself is auto-refreshing and how long since the last successful client fetch.
 

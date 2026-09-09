@@ -1,4 +1,4 @@
-"""In-memory customer provider-key vault — CTO-42 (spec §4.2 / §14.12).
+"""In-memory customer provider-key vault: CTO-42 (spec §4.2 / §14.12).
 
 These are the *customer's* outbound provider bearer keys (OpenAI/Anthropic/etc.) that transit our
 proxy on their way to the upstream LLM. They are the top trust concern in the system, so this module
@@ -8,7 +8,7 @@ NEVER-LOG / NEVER-PERSIST GUARANTEE
 -----------------------------------
 * Raw key material lives **only in process memory**, keyed by ``(tenant_id, provider)``. It is never
   written to logs, disk, or the control-plane DB. (Mirrors ``auth.py``, where ``api_keys.key_hash``
-  stores only a SHA-256 hash — keys are never stored raw.)
+  stores only a SHA-256 hash; keys are never stored raw.)
 * The secret is wrapped in :class:`pydantic.SecretStr`. Its ``repr``/``str`` render as ``**********``,
   so the value cannot leak via accidental f-strings, logging, or exception messages.
 * :class:`ProviderKey` (the container) has a redacting ``__repr__``/``__str__`` of the form
@@ -28,9 +28,9 @@ CONTROL-PLANE PARTITION POLICY (spec §14.12)
 --------------------------------------------
 When the control plane is unreachable we apply an asymmetric, deliberately-conservative policy:
 
-* **Fail-open on routing** — keep serving with the last-known-good cached key. Losing the control
+* **Fail-open on routing**: keep serving with the last-known-good cached key. Losing the control
   plane should not take down a customer's traffic (availability). See :func:`should_allow_routing`.
-* **Fail-closed on guardrails** — a newly-added guardrail/deny must block even while partitioned. A
+* **Fail-closed on guardrails**: a newly-added guardrail/deny must block even while partitioned. A
   safety control we *intended* to apply must never be silently dropped because we couldn't confirm it
   (safety). See :func:`should_apply_guardrail`.
 
@@ -105,7 +105,7 @@ class ProviderKeyVault:
             return self._keys.get((tenant_id, provider))
 
     def has_key(self, tenant_id: str, provider: str) -> bool:
-        """Whether a usable cached key exists — used by :func:`should_allow_routing`."""
+        """Whether a usable cached key exists, used by :func:`should_allow_routing`."""
         return self.get(tenant_id, provider) is not None
 
     def upsert(self, tenant_id: str, provider: str, value: str) -> ProviderKey:
@@ -156,7 +156,7 @@ class GuardrailState(Enum):
     """Intended state of a guardrail as last known from the control plane.
 
     ``PENDING`` means a guardrail was newly added/changed but we could not confirm it because the
-    control plane is partitioned — we must fail closed on it.
+    control plane is partitioned; we must fail closed on it.
     """
 
     DISABLED = "disabled"
@@ -169,7 +169,7 @@ def should_allow_routing(partitioned: bool, have_cached_key: bool) -> bool:
 
     A control-plane partition must not take down customer traffic, so when ``partitioned`` we keep
     routing on the last-known-good cached key. Routing always requires an actual cached key to be
-    present — there is nothing to serve without one, partitioned or not. The fail-*open* property is
+    present; there is nothing to serve without one, partitioned or not. The fail-*open* property is
     precisely that a partition does **not** flip a present key to a deny.
     """
     return have_cached_key
@@ -178,8 +178,8 @@ def should_allow_routing(partitioned: bool, have_cached_key: bool) -> bool:
 def should_apply_guardrail(partitioned: bool, guardrail_state: GuardrailState) -> bool:
     """Fail-closed on guardrails: apply (block) whenever the guardrail isn't confirmed-disabled.
 
-    A guardrail explicitly known to be ``DISABLED`` is not applied. Anything else — ``ENABLED``, or a
-    ``PENDING`` change we couldn't confirm because we're ``partitioned`` — is applied. A safety
+    A guardrail explicitly known to be ``DISABLED`` is not applied. Anything else (``ENABLED``, or a
+    ``PENDING`` change we couldn't confirm because we're ``partitioned``) is applied. A safety
     control we *meant* to enforce must never be dropped just because the control plane is unreachable.
     """
     if guardrail_state is GuardrailState.DISABLED:

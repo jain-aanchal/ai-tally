@@ -1,7 +1,7 @@
-# ai-tally edge proxy — self-hostable single binary (CTO-43).
+# ai-tally edge proxy: self-hostable single binary (CTO-43).
 #
 # Multi-stage: build a fully static binary, then ship it on `scratch` so the runtime image is just
-# the proxy (~10 MB) with no shell, package manager, or OS surface to attack — appropriate for
+# the proxy (~10 MB) with no shell, package manager, or OS surface to attack; appropriate for
 # running inside a regulated customer's VPC.
 
 # --- build ------------------------------------------------------------------------------------

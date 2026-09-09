@@ -96,7 +96,7 @@ def _fixture_bytes(name: str) -> bytes:
 def test_happy_path_inserts_business_event() -> None:
     with _client() as (client, ch):
         body = _fixture_bytes("checkout_session_completed.json")
-        # The fixture's `created` is well in the past — bump current time forward via the same
+        # The fixture's `created` is well in the past; bump current time forward via the same
         # timestamp used for signing so the verifier's tolerance window is satisfied.
         r = _post(client, body)
         assert r.status_code == 200, r.text
@@ -171,7 +171,7 @@ def test_subscription_deleted_inserts_churn_with_zero_value() -> None:
         ev = ch.events[0][1][0]
         assert ev.event_name == "churn"
         assert ev.value_amount_micro == 0
-        # No email on subscription objects, so the join key is empty — honest, not fabricated.
+        # No email on subscription objects, so the join key is empty: honest, not fabricated.
         assert ev.user_id_hash == ""
 
 

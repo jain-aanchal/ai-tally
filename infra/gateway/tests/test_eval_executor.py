@@ -1,4 +1,4 @@
-"""Eval executor — judge call, budget cap, position-bias mitigation, concurrency (CTO-114)."""
+"""Eval executor: judge call, budget cap, position-bias mitigation, concurrency (CTO-114)."""
 
 from __future__ import annotations
 
@@ -120,14 +120,14 @@ def test_judge_pair_skipped_when_budget_exceeded() -> None:
 def test_position_bias_a_b_randomized_per_call() -> None:
     """Over many calls A and B should each carry the candidate roughly half the time.
 
-    We expose this via the judge_client: the prompt contains "RESPONSE A:\n<text>" — when the
+    We expose this via the judge_client: the prompt contains "RESPONSE A:\n<text>"; when the
     candidate's marker text appears on the A side, that's an "a_is_candidate" call. Across N
     calls with a fixed PRNG, we should see *both* placements (not all-A or all-B).
     """
     a_is_candidate_count = {"true": 0, "false": 0}
 
     async def inspector(call: JudgeCall) -> JudgeResponse:
-        # Find which response is "CANDIDATE_MARKER" — that side is the candidate.
+        # Find which response is "CANDIDATE_MARKER"; that side is the candidate.
         # RESPONSE A: appears once in the prompt; just look at what follows it.
         a_idx = call.prompt.index("RESPONSE A:")
         b_idx = call.prompt.index("RESPONSE B:")
@@ -152,11 +152,11 @@ def test_position_bias_a_b_randomized_per_call() -> None:
             )
 
     asyncio.run(run_many())
-    # Both sides must be picked at least a few times — if A/B placement were fixed, one count
+    # Both sides must be picked at least a few times; if A/B placement were fixed, one count
     # would be zero. With seed=12345 and 40 calls we expect roughly 20/20.
     assert a_is_candidate_count["true"] > 5
     assert a_is_candidate_count["false"] > 5
-    # And they should sum to 40 — no calls dropped.
+    # And they should sum to 40: no calls dropped.
     assert a_is_candidate_count["true"] + a_is_candidate_count["false"] == 40
 
 

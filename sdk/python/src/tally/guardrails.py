@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Local guardrail engine — protect budget without ever corrupting customer state.
+"""Local guardrail engine: protect budget without ever corrupting customer state.
 
 Implements CTO-51.
 
@@ -16,7 +16,7 @@ default**:
 - ``HARD_STOP``: opt-in only, for idempotent/read-only agents.
 
 v1 is single-process (counters are per-process). The metric that triggers v2 (a shared counter)
-is ``agent_run.cross_process_ratio`` — see CTO-83.
+is ``agent_run.cross_process_ratio``; see CTO-83.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class Limit(str, Enum):
 
 
 class CostLimitExceededException(Exception):
-    """Raised in GRACEFUL/HARD_STOP modes. Localized — meant to be caught by the agent framework
+    """Raised in GRACEFUL/HARD_STOP modes. Localized: meant to be caught by the agent framework
     so it can clean up and return a degraded response. Never a process kill."""
 
     def __init__(self, limit: Limit, value: float, cap: float, trace_id: str | None = None):
@@ -120,16 +120,16 @@ def _near_breach(state: GuardrailState, config: GuardrailConfig) -> str | None:
 
 
 # --------------------------------------------------------------------------------------------
-# Control-plane refresh (CTO-116) — pull the active rule set from the gateway periodically.
+# Control-plane refresh (CTO-116): pull the active rule set from the gateway periodically.
 #
 # The gateway is the canonical source of truth. We poll on CONFIG_REFRESH_SECONDS (mirroring
 # web/lib/guardrails.ts) and fail soft: if the gateway is unreachable, we keep enforcing the
-# last-known config. A rule that hasn't loaded yet is a no-op — never a hard fail.
+# last-known config. A rule that hasn't loaded yet is a no-op, never a hard fail.
 #
 # Each rule emits two span attributes when it fires:
 #   gen_ai.guardrail.{rule_id}.verdict in {"enforced","shadow_observed","passed"}
 #   gen_ai.guardrail.{rule_id}.kind    in pii_gate | cost_cap | loop_limit | model_deprecation
-# Shadow-state rules emit "shadow_observed" — they record what would have fired without altering
+# Shadow-state rules emit "shadow_observed": they record what would have fired without altering
 # the call. The dashboard counts shadow_observed/wk as the graduation signal.
 # --------------------------------------------------------------------------------------------
 
@@ -184,12 +184,12 @@ def verdict_span_attributes(verdicts: list[RuleVerdict]) -> dict[str, str]:
     """Merge a batch of per-rule verdicts into a single span-attribute dict.
 
     This is what the enforcement path attaches to the active span after
-    :meth:`GuardrailEngine.apply_rules` — one ``gen_ai.guardrail.{rule_id}.verdict``
+    :meth:`GuardrailEngine.apply_rules`: one ``gen_ai.guardrail.{rule_id}.verdict``
     (plus ``.kind``) key per rule evaluated. The dashboard (CTO-146) counts these over
     the trailing 7d to source ``runsThisWeek`` (every verdict) and
     ``wouldHaveFiredThisWeek`` (verdict ∈ {enforced, shadow_observed}).
 
-    PII bar: verdict/kind only — never the request/response body or any rule input.
+    PII bar: verdict/kind only, never the request/response body or any rule input.
     """
     attrs: dict[str, str] = {}
     for v in verdicts:
@@ -239,7 +239,7 @@ class GuardrailEngine:
                 warning=f"guardrail \'{limit.value}\' exceeded ({value}/{cap})",
             )
 
-        # GRACEFUL or HARD_STOP — localized exception, never a process kill.
+        # GRACEFUL or HARD_STOP: localized exception, never a process kill.
         raise CostLimitExceededException(limit, value, cap, state.trace_id)
 
     # ---- Control-plane refresh (CTO-116) -----------------------------------------------------
@@ -255,7 +255,7 @@ class GuardrailEngine:
     ) -> GuardrailEngine:
         """Build an engine bound to a gateway tenant, sync rules once, optionally start the loop.
 
-        Fail-soft: an unreachable gateway is logged but does not raise — the engine is returned
+        Fail-soft: an unreachable gateway is logged but does not raise; the engine is returned
         with an empty rule list and the next refresh will retry.
         """
         engine = cls()
@@ -357,7 +357,7 @@ class GuardrailEngine:
 
 
 def _rule_fires(rule: ControlPlaneRule, ctx: dict) -> bool:
-    """Heuristic per-kind firing predicate. Keep these dumb on purpose — the gateway is the
+    """Heuristic per-kind firing predicate. Keep these dumb on purpose; the gateway is the
     source of truth for what each kind means, the SDK just evaluates the cached predicate."""
     if rule.kind == RuleKind.PII_GATE:
         return bool(ctx.get("contains_pii"))

@@ -32,7 +32,7 @@ UTC = timezone.utc
 
 
 def build_replay_object_key(tenant_id: str, sample_id: UUID, captured_at: datetime) -> str:
-    """``tenants/{tenant_id}/replay_samples/{yyyy/mm/dd}/{sample_id}.json`` — deterministic, sortable."""
+    """``tenants/{tenant_id}/replay_samples/{yyyy/mm/dd}/{sample_id}.json``: deterministic, sortable."""
     if not tenant_id:
         raise ValueError("tenant_id must be non-empty")
     d = captured_at.astimezone(UTC)
@@ -43,7 +43,7 @@ def build_replay_object_key(tenant_id: str, sample_id: UUID, captured_at: dateti
 
 
 class ReplayBlobStore(Protocol):
-    """Minimal contract — put/get raw bytes at a key. Decoupled from the SDK's ObjectRef shape so
+    """Minimal contract: put/get raw bytes at a key. Decoupled from the SDK's ObjectRef shape so
     we can plug in MinIO, S3, or a tmp-dir fake without converting category enums."""
 
     def put_bytes(self, key: str, body: bytes, content_type: str = "application/json") -> None: ...
@@ -53,7 +53,7 @@ class ReplayBlobStore(Protocol):
 
 @dataclass(slots=True)
 class InMemoryReplayBlobStore:
-    """Dict-backed blob store — used by tests and by the local dev gateway."""
+    """Dict-backed blob store, used by tests and by the local dev gateway."""
 
     _objects: dict[str, bytes]
 
@@ -85,23 +85,23 @@ class GCSReplayBlobStore:
     :func:`build_replay_object_key`, so the ClickHouse index rows and the executor read path are
     unchanged regardless of which backend is wired.
 
-    **PII scrub** — the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
+    **PII scrub**: the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
     ``persist_sample`` ingest path, before any ``put_bytes`` call. This backend only moves already
     scrubbed bytes, so it inherits the scrub unchanged; the CTO-125 candidate-response retention
     carve-out likewise applies identically here.
 
-    **Auth** — no raw key material is passed. The ``google-cloud-storage`` client is constructed
+    **Auth**: no raw key material is passed. The ``google-cloud-storage`` client is constructed
     with Application Default Credentials (ADC), so it transparently picks up Workload Identity in
     GKE / GCE metadata credentials / a ``GOOGLE_APPLICATION_CREDENTIALS`` file / ``gcloud`` user
     creds, in that resolution order.
 
-    **Retention** — object lifecycle (TTL / deletion) is expected to be enforced by a GCS bucket
+    **Retention**: object lifecycle (TTL / deletion) is expected to be enforced by a GCS bucket
     lifecycle policy provisioned out-of-band (e.g. Terraform), mirroring the replay
     ``retention_days`` knob. This backend does NOT create or manage lifecycle rules (out of scope
     for CTO-152).
 
     The ``google-cloud-storage`` dependency is OPTIONAL (``[gcs]`` extra) and imported lazily at
-    construction — importing this module never requires the package; only instantiating this class
+    construction; importing this module never requires the package; only instantiating this class
     does. That keeps the base gateway install slim and lets it boot without GCS when unused.
     """
 
@@ -113,7 +113,7 @@ class GCSReplayBlobStore:
         if client is None:
             # Lazy import: keep google-cloud-storage optional. Constructing the client with no
             # explicit credentials makes it resolve Application Default Credentials (ADC) /
-            # Workload Identity automatically — we never handle a raw key here.
+            # Workload Identity automatically; we never handle a raw key here.
             from google.cloud import storage  # type: ignore[import-not-found]
 
             client = storage.Client()
@@ -126,11 +126,11 @@ class GCSReplayBlobStore:
         blob.upload_from_string(body, content_type=content_type)
 
     def get_bytes(self, key: str) -> bytes:
-        # CTO-241: mirror the in-memory/S3 path — a missing blob is the typed, non-fatal
+        # CTO-241: mirror the in-memory/S3 path: a missing blob is the typed, non-fatal
         # ReplayBodyMissing, not a raw google-cloud NotFound that would 500 /v1/replay.
         try:
             return self._bucket.blob(key).download_as_bytes()
-        except Exception as exc:  # noqa: BLE001 — normalise google-cloud NotFound (404) to a miss.
+        except Exception as exc:  # noqa: BLE001 - normalise google-cloud NotFound (404) to a miss
             if _is_gcs_not_found(exc):
                 raise ReplayBodyMissing(key) from exc
             raise
@@ -139,30 +139,30 @@ class GCSReplayBlobStore:
 class S3ReplayBlobStore:
     """AWS S3 (or S3-compatible, e.g. MinIO) backend for replay sample blobs (CTO-158).
 
-    Mirror of :class:`GCSReplayBlobStore` — satisfies the same :class:`ReplayBlobStore` protocol
+    Mirror of :class:`GCSReplayBlobStore`: satisfies the same :class:`ReplayBlobStore` protocol
     as :class:`InMemoryReplayBlobStore` and the GCS path: objects are keyed with the identical
     ``tenants/{tenant_id}/replay_samples/{yyyy/mm/dd}/{sample_id}.json`` layout produced by
     :func:`build_replay_object_key`, so the ClickHouse index rows and the executor read path are
     unchanged regardless of which backend is wired. An optional ``prefix`` is prepended to every
-    key (e.g. to share a bucket across environments) without touching the stored index key — the
+    key (e.g. to share a bucket across environments) without touching the stored index key; the
     prefix is a storage-layout detail applied on the way in/out only.
 
-    **PII scrub** — the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
+    **PII scrub**: the pre-storage PII scrub from CTO-113 runs upstream in the sampler /
     ``persist_sample`` ingest path, before any ``put_bytes`` call. This backend only moves already
     scrubbed bytes, so it inherits the scrub unchanged; the CTO-125 candidate-response retention
     carve-out likewise applies identically here.
 
-    **Auth** — no raw key material is passed. The ``boto3`` S3 client is constructed with the AWS
+    **Auth**: no raw key material is passed. The ``boto3`` S3 client is constructed with the AWS
     default credential chain, so it transparently picks up an IAM role / IRSA (EKS) / EC2 instance
     profile / ``AWS_*`` environment credentials / a shared credentials file, in boto3's normal
     resolution order. We never handle an access key or secret here.
 
-    **Retention** — object lifecycle (TTL / expiration) is expected to be enforced by an S3 bucket
+    **Retention**: object lifecycle (TTL / expiration) is expected to be enforced by an S3 bucket
     lifecycle policy provisioned out-of-band (e.g. Terraform), mirroring the replay
     ``retention_days`` knob. This backend does NOT create or manage lifecycle rules (out of scope
     for CTO-158).
 
-    The ``boto3`` dependency is OPTIONAL (``[s3]`` extra) and imported lazily at construction —
+    The ``boto3`` dependency is OPTIONAL (``[s3]`` extra) and imported lazily at construction;
     importing this module never requires the package; only instantiating this class does. That
     keeps the base gateway install slim and lets it boot without boto3 when unused.
     """
@@ -183,7 +183,7 @@ class S3ReplayBlobStore:
         if client is None:
             # Lazy import: keep boto3 optional. Constructing the client with no explicit
             # credentials makes it resolve the AWS default credential chain (IAM role / IRSA /
-            # instance profile / env / shared file) automatically — we never handle a raw key here.
+            # instance profile / env / shared file) automatically; we never handle a raw key here.
             import boto3  # type: ignore[import-not-found]
 
             # CTO-241: ``endpoint_url`` points the client at an S3-compatible service (MinIO in the
@@ -213,7 +213,7 @@ class S3ReplayBlobStore:
         # typed, non-fatal miss like the in-memory path, not a raw botocore 404 that 500s /v1/replay.
         try:
             resp = self._client.get_object(Bucket=self._bucket, Key=self._full_key(key))
-        except Exception as exc:  # noqa: BLE001 — normalise botocore ClientError (404/NoSuchKey).
+        except Exception as exc:  # noqa: BLE001 - normalise botocore ClientError (404/NoSuchKey)
             if _is_s3_not_found(exc):
                 raise ReplayBodyMissing(key) from exc
             raise
@@ -223,7 +223,7 @@ class S3ReplayBlobStore:
         """True if an object lives at ``key``. Uses ``head_object``; a 404/NoSuchKey means absent."""
         try:
             self._client.head_object(Bucket=self._bucket, Key=self._full_key(key))
-        except Exception as exc:  # noqa: BLE001 — normalise botocore ClientError (404) to False.
+        except Exception as exc:  # noqa: BLE001 - normalise botocore ClientError (404) to False
             if _is_s3_not_found(exc):
                 return False
             raise
@@ -319,7 +319,7 @@ class ReplayRunRow:
     context_fidelity: str = "resolved-context"
     # --- Candidate response body (CTO-125) ---------------------------------------------------
     # PII CARVE-OUT: ``response_text`` is the verbatim text the candidate model produced. This is
-    # a message body — exactly the kind of payload the span-side PII guard (mapping.py
+    # a message body: exactly the kind of payload the span-side PII guard (mapping.py
     # ``_is_body_key``) refuses to persist into telemetry. Replay is a *separate, opt-in* path:
     # a tenant must explicitly enable ``tenant_replay_config`` (default OFF), the body lives in
     # the replay store under its own retention TTL (``retention_days``) and access tier, and it is
@@ -343,7 +343,7 @@ class ReplayRunRow:
             self.error_msg,
             self.ran_at,
             self.context_fidelity,
-            # Candidate response body — see PII carve-out note on the dataclass above.
+            # Candidate response body: see PII carve-out note on the dataclass above.
             self.response_text,
             self.finish_reason,
         )

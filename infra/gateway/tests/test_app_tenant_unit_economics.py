@@ -1,4 +1,4 @@
-"""/v1/tenant/unit-economics/config — round-trip + idempotency + validation (CTO-126)."""
+"""/v1/tenant/unit-economics/config: round-trip + idempotency + validation (CTO-126)."""
 
 from __future__ import annotations
 

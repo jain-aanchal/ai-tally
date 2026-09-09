@@ -5,7 +5,7 @@ Every provider fetcher parses a recorded pricing SOURCE (HTML/JSON) into
 :class:`~tally.pricing.PriceEntry` rows. The raw content is obtained through an *injectable*
 callable so tests feed recorded fixtures and never touch the network; a stdlib-only best-effort
 live fetch is the default. A parse/network failure logs *which provider/URL* failed and then
-re-raises — the scaffold's :meth:`PriceScraper.build_candidate` swallows the exception per-fetcher,
+re-raises; the scaffold's :meth:`PriceScraper.build_candidate` swallows the exception per-fetcher,
 so the log line is the only breadcrumb a silently-skipped provider leaves behind.
 """
 

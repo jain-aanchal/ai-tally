@@ -3,12 +3,12 @@
 Turns the four Stripe events that map cleanly onto value-attribution outcomes (paid checkout,
 recurring invoice, refund, subscription cancellation) into rows in the existing ``business_events``
 ClickHouse table. The attribution join (cost spans ⋈ revenue events on ``UserIdHash``) lights up
-once these rows arrive — see web/lib/clickhouse.ts:queryAttribution.
+once these rows arrive; see web/lib/clickhouse.ts:queryAttribution.
 
 Idempotency
 -----------
 Stripe redelivers webhooks routinely (after a 5xx, after operator replay, sometimes just because).
-Each Stripe ``event.id`` is unique and durable, so we use it as ``BusinessEventId`` — ClickHouse's
+Each Stripe ``event.id`` is unique and durable, so we use it as ``BusinessEventId``; ClickHouse's
 ``ReplacingMergeTree`` on ``(TenantId, BusinessEventId)`` will collapse duplicates at merge time,
 and the in-process ``IdempotencyCache`` (keyed on ``(tenant_id, event_id)``) blocks the second
 insert before it ever reaches CH so the 200 returns fast.
@@ -30,7 +30,7 @@ before: the account is an additional column, not a reinterpretation of an existi
 
 Webhook secret handling
 -----------------------
-The raw secret is kept out of logs by going through ``stripe.Webhook.construct_event`` directly —
+The raw secret is kept out of logs by going through ``stripe.Webhook.construct_event`` directly;
 on a verification failure we surface a structured 400 with no payload echo. The secret never
 appears in a log line, and we never persist anything Stripe sent to disk verbatim.
 """
@@ -49,7 +49,7 @@ from tally.hmac_keys import HmacKeyRegistry
 logger = logging.getLogger("tally.gateway.stripe")
 
 
-# Event types we map. Anything outside this set is ack'd 200 and ignored — Stripe ships hundreds of
+# Event types we map. Anything outside this set is ack'd 200 and ignored; Stripe ships hundreds of
 # event types and we don't want a noisy 400 if a tenant has unrelated webhooks pointing at us.
 SUPPORTED_STRIPE_EVENTS: frozenset[str] = frozenset(
     {
@@ -160,7 +160,7 @@ def map_stripe_event(event: dict[str, Any]) -> StripeEventMapped | None:
         )
     else:  # customer.subscription.deleted
         value = 0
-        # Subscription objects don't carry email — the tenant connects via customer_id only.
+        # Subscription objects don't carry email; the tenant connects via customer_id only.
         email = None
 
     return StripeEventMapped(
@@ -189,7 +189,7 @@ def hash_customer_email(
     try:
         registry.provision(tenant_id)
     except ValueError:
-        # Empty tenant id — caller should have caught this; treat as un-hashable.
+        # Empty tenant id: caller should have caught this; treat as un-hashable.
         return None
     stamped = registry.hash(tenant_id, email.strip().lower())
     return stamped.value, stamped.key_version
@@ -218,7 +218,7 @@ def hash_stripe_customer(
 
 # --- signature verification (Stripe's scheme, no SDK dependency) -------------------------------
 #
-# We could ``import stripe`` and call ``stripe.Webhook.construct_event`` — but that pulls a large
+# We could ``import stripe`` and call ``stripe.Webhook.construct_event``, but that pulls a large
 # SDK whose only use-case here is one HMAC compare. Stripe's signing scheme is documented:
 # https://stripe.com/docs/webhooks#verify-manually. The header looks like::
 #
@@ -262,7 +262,7 @@ def verify_stripe_signature(
 ) -> None:
     """Verify ``Stripe-Signature`` against ``payload`` using ``secret``.
 
-    Raises :class:`StripeSignatureError` on any failure — caller maps that to HTTP 400. Constant-
+    Raises :class:`StripeSignatureError` on any failure; caller maps that to HTTP 400. Constant-
     time comparison so a wrong secret can't be timing-distinguished from a malformed header.
     """
     if not header:

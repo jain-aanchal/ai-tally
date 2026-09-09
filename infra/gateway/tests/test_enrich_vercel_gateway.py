@@ -3,7 +3,7 @@
 
 A call routed through the Vercel AI Gateway is resolved SDK-side to its TRUE upstream
 ``(provider, model)`` (see :mod:`tally.vercel_gateway`), so by the time the span reaches the
-gateway it carries ``gen_ai.system="openai"`` / ``gen_ai.request.model="gpt-4o-mini"`` — and
+gateway it carries ``gen_ai.system="openai"`` / ``gen_ai.request.model="gpt-4o-mini"``, and
 ``enrich_cost`` prices it straight from the catalog with no special-casing, exactly like a
 direct SDK call (the CTO-149 / CTO-157 pattern). An unresolved upstream carries
 ``gen_ai.system="unknown"``, which the catalog can't price → ``catalog_miss`` → cost null.
@@ -72,7 +72,7 @@ def test_enriched_gateway_span_maps_to_row_with_true_upstream() -> None:
     res = enrich_cost(_span_from_gateway(_GATEWAY_OPENAI_RESPONSE), seed_catalog(), at=AT)
     row = span_to_row(res.attributes, tenant_id="tn-1", effective_ts_ns=1_700_000_000_000_000_000)
     by_col = dict(zip(COLUMNS, row, strict=True))
-    # True upstream lands in the typed columns — NOT "vercel".
+    # True upstream lands in the typed columns, NOT "vercel".
     assert by_col["GenAiSystem"] == "openai"
     assert by_col["GenAiRequestModel"] == "gpt-4o-mini"
     assert by_col["EstimatedCost"] > 0

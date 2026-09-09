@@ -10,7 +10,7 @@
 //     intervalMs, so there's no double-render storm on mount.
 //   - Tab-visibility-aware: when the tab is hidden we pause the interval and cancel any in-flight
 //     request. On focus we fetch once immediately and resume the interval.
-//   - On error, we KEEP the last good data — never let a transient 5xx blank a page. The error
+//   - On error, we KEEP the last good data; never let a transient 5xx blank a page. The error
 //     is surfaced via the returned `error` field for callers that want to badge it.
 //   - AbortController per request; cancels in-flight on unmount or visibility change.
 //   - Cadence is read from NEXT_PUBLIC_TALLY_DASHBOARD_REFRESH_MS (default 5000). `0` disables.

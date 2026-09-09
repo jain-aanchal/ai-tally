@@ -5,9 +5,9 @@ import { controlPlaneHeaders, resolveTenantId } from "./getTenant";
 // Two gateway endpoints, one module, because they answer the two halves of the same question "which
 // customer is this row?":
 //
-//   * B7 `/v1/tenant/account-labels` — the optional human-readable name for a hash. Labels live in
+//   * B7 `/v1/tenant/account-labels`: the optional human-readable name for a hash. Labels live in
 //     Postgres and are joined at render time, so ClickHouse never holds a customer name.
-//   * B6 `/v1/tenant/account-lookup` — plaintext account id to hash, the forward direction of a
+//   * B6 `/v1/tenant/account-lookup`: plaintext account id to hash, the forward direction of a
 //     one-way function. Without it an UNLABELLED account cannot be found at all and the tab is a
 //     list of opaque hex.
 //

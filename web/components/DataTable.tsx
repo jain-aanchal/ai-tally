@@ -240,7 +240,7 @@ export function DataTable<Row>({
       {showPager ? (
         <div className="mt-3 flex items-center justify-between gap-3 text-xs text-muted">
           <span className="tabular-nums">
-            {firstShown}–{lastShown} of {sorted.length}
+            {firstShown}-{lastShown} of {sorted.length}
           </span>
           <div className="flex items-center gap-2">
             <PagerButton disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>

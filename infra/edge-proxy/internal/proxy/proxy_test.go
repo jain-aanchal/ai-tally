@@ -43,7 +43,7 @@ func (s *recordingSink) count() int {
 // emits a TraceRecord *after* its rp.ServeHTTP returns; the HTTP client's Do() can return as
 // soon as the response body is streamed through, which is sometimes before the server-side
 // goroutine reaches sink.Record. Under -race the scheduler makes this gap observable. Polling
-// closes the window without weakening any assertion — a real regression still wouldn't reach
+// closes the window without weakening any assertion; a real regression still wouldn't reach
 // the count in 2s.
 func (s *recordingSink) waitFor(t *testing.T, want int) {
 	t.Helper()
@@ -270,7 +270,7 @@ func TestLargeBodyForwardedByteForByte(t *testing.T) {
 }
 
 // TestStreamingPassThrough verifies SSE-style chunked responses reach the client incrementally and
-// unmodified — the proxy must not buffer the whole stream before flushing.
+// unmodified; the proxy must not buffer the whole stream before flushing.
 func TestStreamingPassThrough(t *testing.T) {
 	chunks := []string{
 		"data: {\"delta\":\"Hel\"}\n\n",
@@ -327,7 +327,7 @@ func TestStreamingPassThrough(t *testing.T) {
 
 // TestFeatureTagHeaderRecordedAndStripped is CTO-104's structural guarantee: a per-request
 // feature tag arriving on X-Tally-Feature-Tag is captured on the TraceRecord and stripped from
-// the upstream-bound request — mirroring the tenant-header contract.
+// the upstream-bound request, mirroring the tenant-header contract.
 func TestFeatureTagHeaderRecordedAndStripped(t *testing.T) {
 	var sawFeatureHeader bool
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -355,7 +355,7 @@ func TestFeatureTagHeaderRecordedAndStripped(t *testing.T) {
 }
 
 // TestFeatureTagHeaderAbsent: when the caller omits the header, FeatureTag is empty and the
-// request still succeeds — feature tagging is purely opt-in, never required.
+// request still succeeds; feature tagging is purely opt-in, never required.
 func TestFeatureTagHeaderAbsent(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

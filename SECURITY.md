@@ -22,13 +22,13 @@ any public disclosure.
 ## Scope and handling
 
 ai-tally handles potentially sensitive telemetry. A few security invariants the project
-holds itself to — issues that violate any of these are in scope:
+holds itself to. Issues that violate any of these are in scope:
 
 - **Secrets are never persisted in plaintext.** Customer/provider API keys are held in
   memory only and never logged. Stored credentials are KMS references; API keys are stored
   as SHA-256 hashes only.
 - **Payloads are redacted/PII-rejected at ingest** per the configured per-tenant policy.
-- **Tenant isolation** — no query path should let one tenant read another's data.
+- **Tenant isolation**: no query path should let one tenant read another's data.
 
 ## Supported versions
 

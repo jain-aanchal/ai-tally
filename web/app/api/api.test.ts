@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Route-handler smoke tests — call the GET functions directly (no fetch round-trip).
+// Route-handler smoke tests: call the GET functions directly (no fetch round-trip).
 
 import { describe, expect, it } from "vitest";
 
@@ -46,7 +46,7 @@ describe("api routes", () => {
     expect(body.agents.length).toBeGreaterThan(0);
     expect(body.runs.length).toBeGreaterThan(0);
     // No reconciler gateway runs in CI, so the route applies honest-null (renders `—`) rather than
-    // the old hardcoded constant (23). Real value or null — never a fabricated number.
+    // the old hardcoded constant (23). Real value or null, never a fabricated number.
     expect(body.reconcilerLastRunMinutesAgo === null || typeof body.reconcilerLastRunMinutesAgo === "number").toBe(true);
     expect(body.reconcilerLastRunMinutesAgo).not.toBe(23);
   });
@@ -73,13 +73,13 @@ describe("api routes", () => {
     expect(body.workload).toBeTypeOf("string");
     expect(body.candidates.length).toBeGreaterThan(0);
     // CTO-114: with no eval pass having run (gateway unreachable in tests), every
-    // qualityScore must be null — the route MUST NOT fabricate a number.
+    // qualityScore must be null; the route MUST NOT fabricate a number.
     expect(body.current.qualityScore).toBeNull();
     for (const c of body.candidates) {
       expect(c.qualityScore).toBeNull();
       expect(c.qualityCi).toBeUndefined();
     }
-    // CTO-115: shape check — fields exist; live path returns numbers (n>=50) or null (n<50);
+    // CTO-115: shape check: fields exist; live path returns numbers (n>=50) or null (n<50);
     // mock-fallback returns numbers. Route.test.ts covers both branches explicitly.
     expect("latencyP95Ms" in body.current).toBe(true);
     expect("errorRate" in body.current).toBe(true);

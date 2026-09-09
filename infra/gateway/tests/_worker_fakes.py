@@ -1,6 +1,6 @@
 """Shared in-memory fakes for the CTO-127 ingest-worker tests.
 
-No Postgres, no ClickHouse, no network — every dependency the workers take is stubbed here so the
+No Postgres, no ClickHouse, no network: every dependency the workers take is stubbed here so the
 worker logic (mapping, record_run bookkeeping, honest failure handling) is exercised in isolation.
 """
 
@@ -37,7 +37,7 @@ class FakeResolver:
 
 
 class FakeHttp:
-    """Injectable HTTP client. Returns ``payload`` or raises ``error`` — never touches a socket."""
+    """Injectable HTTP client. Returns ``payload`` or raises ``error``, never touches a socket."""
 
     def __init__(self, payload: Any = None, error: Exception | None = None) -> None:
         self._payload = payload
@@ -70,7 +70,7 @@ class FakeCHStore:
 class FakeIntegrations:
     """Captures ``record_run`` calls; can be told to raise to test best-effort swallowing.
 
-    Applies the real :func:`scrub_error_message` so the recorded error mirrors production — but the
+    Applies the real :func:`scrub_error_message` so the recorded error mirrors production, but the
     worker already scrubs before calling, so this is just a second (idempotent) pass.
     """
 

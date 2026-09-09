@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CTO-142 / CTO-141 — record_vector_call lands spans in the Vector cost-layer bucket.
+"""CTO-142 / CTO-141: record_vector_call lands spans in the Vector cost-layer bucket.
 
 Default vector pricing now resolves from the versioned price catalog (CTO-141) under
 ``PriceType.VECTOR_CALL``, not the removed inline ``_VECTOR_PRICING`` dict.

@@ -16,7 +16,7 @@ the override:
    system-prompt field to the override text.
 
 The mock candidate client reads ``input_tokens``/``output_tokens`` straight off the envelope,
-so the rewritten count flows into the executor's pricing unchanged — no new mock path. A real
+so the rewritten count flows into the executor's pricing unchanged, no new mock path. A real
 provider client would re-tokenize the actual rewritten prompt; the 4-chars/token estimate is
 the honest v1 approximation and is documented as such in the projection diagnostics.
 """
@@ -32,7 +32,7 @@ _SYSTEM_PROMPT_KEYS = ("system_prompt", "system")
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate at 4 chars/token — matches the rest of the gateway's heuristics."""
+    """Rough token estimate at 4 chars/token, matches the rest of the gateway's heuristics."""
     if not text:
         return 0
     return len(text) // CHARS_PER_TOKEN

@@ -3,9 +3,9 @@
 // ClickHouse query (`queryCostExplore` in lib/clickhouse.ts) and the /api/explore route.
 //
 // The query itself is a thin SQL shell around these helpers: ClickHouse returns raw (day, group,
-// cost) rows, and everything else — capping the group set so a high-cardinality dimension cannot
+// cost) rows, and everything else (capping the group set so a high-cardinality dimension cannot
 // explode the payload, folding the long tail into a single honest "other" bucket, and pivoting the
-// flat rows into one point per calendar day — happens here, where it is unit-testable without a
+// flat rows into one point per calendar day) happens here, where it is unit-testable without a
 // database.
 //
 // The day list is NEVER built in this file. It is threaded in from the caller, which derives it from

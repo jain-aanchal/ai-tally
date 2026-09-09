@@ -45,7 +45,7 @@ def main() -> None:
 
     # Split the run's cost across `turns` synthetic spans so the agent-run view
     # shows multi-step traces. Each span shares the same TraceId so they roll
-    # up as one run. Tokens are rough placeholders — the gateway recomputes
+    # up as one run. Tokens are rough placeholders; the gateway recomputes
     # authoritative cost from the catalog using its own rate table.
     spans = []
     steps = max(1, args.turns)
