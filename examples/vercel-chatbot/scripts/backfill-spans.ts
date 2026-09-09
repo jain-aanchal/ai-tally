@@ -172,7 +172,7 @@ function parseArgs(argv: string[]): Args {
   return out;
 }
 
-// Mulberry32 — same deterministic PRNG the live driver uses.
+// Mulberry32: the same deterministic PRNG the live driver uses.
 function makeRng(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
@@ -267,7 +267,7 @@ function fmtUsd(micro: bigint): string {
 // report an expectation the ClickHouse total can be checked against.
 // ---------------------------------------------------------------------------
 
-// Feature mix — share of the LLM-layer spend — plus the agent (ServiceName) that runs it. Distinct
+// Feature mix (share of the LLM-layer spend) plus the agent (ServiceName) that runs it. Distinct
 // agents matter: /agents groups by ServiceName, and the waste detectors scope a finding to a
 // feature when tagged and to its agent otherwise, so a single ServiceName would collapse the whole
 // corpus into one row and prove nothing.
@@ -324,7 +324,7 @@ const EMBED_MODELS: { model: string; microPerMtok: bigint }[] = [
   { model: "text-embedding-3-large", microPerMtok: 130_000n }, // $0.13 / Mtok
 ];
 
-// Per-call tool rates — _TOOL_SEEDS in the seed catalog, in micro-USD per call.
+// Per-call tool rates, _TOOL_SEEDS in the seed catalog, in micro-USD per call.
 const TOOLS: { provider: string; name: string; microPerCall: bigint }[] = [
   { provider: "tavily", name: "search", microPerCall: 10_000n },
   { provider: "serpapi", name: "search", microPerCall: 15_000n },
@@ -334,7 +334,7 @@ const TOOLS: { provider: string; name: string; microPerCall: bigint }[] = [
   { provider: "openai", name: "code_interpreter", microPerCall: 30_000n },
 ];
 
-// Per-query vector rates — _VECTOR_SEEDS, in micro-USD per call. This is the SERVING portion only:
+// Per-query vector rates, _VECTOR_SEEDS, in micro-USD per call. This is the SERVING portion only:
 // the deployed-index node-hours that dominate a real vector bill are a COMPUTE cost by design (see
 // the cost-split note on _VECTOR_SEEDS in pricing.py), and are carried by the compute rows below.
 // So the Vector layer here is honestly small; it is not padded to look like the mock's 13%.
@@ -947,13 +947,89 @@ const EVENTS_PER_BATCH = 500;
 const RETRY_MAX_ATTEMPTS = 60;
 const DEFAULT_RETRY_AFTER_MS = 250;
 const MAX_RETRY_WAIT_MS = 5_000;
+const RETRY_JITTER = 0.25; // +/- fraction, matching the SDK's BackoffPolicy
 
+/**
+ * Consecutive shed batches that end the run.
+ *
+ * A bounded PER-BATCH budget is not a bound on the run. Every batch spends its own 61 attempts
+ * independently, and with the waits capped at 5s that is ~4.7 minutes each, so against a gateway
+ * that is simply gone a 30-day corpus (~1024 span batches) would grind for roughly three days
+ * before printing INCOMPLETE. Bounded budget, unbounded run (#324 review).
+ *
+ * 2, deliberately. Spending even ONE full budget already means ~4.7 minutes of unbroken failure,
+ * which is far longer than the load spike that shed-and-count exists to ride out, so the marginal
+ * news in a second exhausted budget is small: one shed batch is tolerated and the run continues
+ * (that is the case #315 added, an 88%-loaded run should not die for 500 spans), two in a row is a
+ * gateway that is not coming back inside this run. Any delivered batch resets the count. This
+ * bounds the worst case at ~9.5 minutes whatever the corpus size, and being wrong is cheap: a
+ * re-run at the same --seed is idempotent and refills the gap.
+ */
+const MAX_CONSECUTIVE_SHED_BATCHES = 2;
+
+/**
+ * Rows this run metered and could not ship. Shed-and-COUNT is the terminal case of the retry loop
+ * (#315): a bounded budget can be spent, and when it is, the run says so in numbers rather than
+ * reporting a clean finish over a hole in the data. `consecutive` drives the circuit breaker above.
+ */
+const shed = { spans: 0, events: 0, batches: 0, consecutive: 0 };
+
+/**
+ * What the gateway asked us to wait, in ms, or null when it named nothing.
+ *
+ * `Retry-After` (delay-seconds) is the header form the rate limiter and the overload shed both send
+ * (gateway/app.py). The body states it at the top level on a 429 and under `server_hints` on a 503.
+ * A hinted 0 is a REAL value: the overload shed sends `retry_after_ms: 0` meaning "retry, we have
+ * no specific delay for you", which is not licence to hammer a gateway that is already shedding, so
+ * the caller answers a 0 with its own backoff. A malformed header or body yields null the same way.
+ */
+function hintedWaitMs(res: Response | null, text: string): number | null {
+  const header = res?.headers.get("retry-after");
+  if (header) {
+    const secs = Number.parseInt(header.trim(), 10);
+    if (Number.isFinite(secs) && secs >= 0) return secs * 1000;
+  }
+  try {
+    const parsed = JSON.parse(text) as {
+      retry_after_ms?: number;
+      server_hints?: { retry_after_ms?: number };
+    };
+    for (const v of [parsed.retry_after_ms, parsed.server_hints?.retry_after_ms]) {
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+    }
+  } catch {
+    // body was not the shape we expected; it carries no hint
+  }
+  return null;
+}
+
+/**
+ * The gateway's own wait when it named a positive one, clamped, else capped exponential backoff.
+ *
+ * The fallback jitters +/- 25%, which is what the SDK's `BackoffPolicy` does and what "the backoff
+ * is mirrored" has to mean to be true (#324 review). A hinted wait is used as stated, unjittered:
+ * the gateway named that number, and both the SDK and the proxy honour it as named.
+ */
+function retryWaitMs(attempt: number, hinted: number | null): number {
+  if (hinted !== null && hinted > 0) return Math.min(hinted, MAX_RETRY_WAIT_MS);
+  const raw = Math.min(DEFAULT_RETRY_AFTER_MS * 2 ** Math.min(attempt, 5), MAX_RETRY_WAIT_MS);
+  return Math.max(0, raw + raw * RETRY_JITTER * (Math.random() * 2 - 1));
+}
+
+/**
+ * POSTs one batch. Returns whether it was actually DELIVERED, so the caller counts only what
+ * shipped: a shed batch used to be counted into the running `posted` total, which printed a tick
+ * over a hole and left the honest number to the final summary (#324 review, CLAUDE.md).
+ *
+ * Throws when the circuit breaker trips (MAX_CONSECUTIVE_SHED_BATCHES) or on a non-retryable
+ * status; both end the run.
+ */
 async function postBatch(
   args: Args,
   n: number,
   spans: Span[],
   events: Record<string, unknown>[],
-): Promise<void> {
+): Promise<boolean> {
   const batch = {
     tenant_id: args.tenant,
     sdk_version: "vercel-chatbot-backfill/0.2",
@@ -961,43 +1037,79 @@ async function postBatch(
     resource_spans: spans,
     business_events: events,
   };
-  if (args.dryRun) return;
+  if (args.dryRun) return true;
   const body = JSON.stringify(batch);
   // A 30-day corpus is ~500k spans, which is far more than a flat-out loop can push past the
   // gateway's two load guards: the per-tenant rate limit (429, CTO-33) and backpressure shedding
   // (503 `status: retry`, CTO-36). Both are the gateway working as designed and both say "come
-  // back shortly", so honour them rather than failing a half-loaded backfill. Re-posting the same
-  // batch_id is safe by construction: the (tenant_id, batch_id) dedup means a retry, or a whole
-  // re-run after an abort, can never double-count.
+  // back shortly", so honour them rather than failing a half-loaded backfill: this run died at
+  // 450,000 of 512,056 spans on a 503 it treated as fatal (#315).
+  //
+  // `body` is serialized ONCE, above, and every attempt resends those same bytes. That is what
+  // makes a resend a replay rather than a duplicate: batch_id is stable, so the gateway's
+  // (tenant_id, batch_id) dedup absorbs it. A retry that rebuilt the payload would instead write
+  // duplicate spans, which permanently pollute the SummingMergeTree rollups (#311). The same
+  // property is why a whole re-run at the same --seed is idempotent.
+  //
+  // The policy mirrors the edge proxy (infra/edge-proxy/internal/telemetry/telemetry.go): retry a
+  // transport error, a 429 or any 5xx; honour the gateway's stated wait, clamped; bound the
+  // attempts; then shed and COUNT. The budget is far longer than the proxy's four attempts because
+  // this is a one-shot corpus load with no hot path behind it, and riding out a minute of shedding
+  // is worth more here than failing fast. Where the two policies deliberately differ is tabulated
+  // in the sdk/python/src/tally/transport.py module docstring, which is the authoritative list.
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(args.gatewayUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    });
-    if (res.ok) return;
-    const text = await res.text();
-    const retryable = res.status === 429 || res.status === 503;
-    if (retryable && attempt < RETRY_MAX_ATTEMPTS) {
-      // The gateway states its own wait, at the top level (429) or under server_hints (503). A
-      // hinted 0 means "no specific delay", so fall back to a small backoff rather than spinning.
-      let waitMs = 0;
-      try {
-        const parsed = JSON.parse(text) as {
-          retry_after_ms?: number;
-          server_hints?: { retry_after_ms?: number };
-        };
-        waitMs = parsed.retry_after_ms ?? parsed.server_hints?.retry_after_ms ?? 0;
-      } catch {
-        // body was not the shape we expected; fall through to the backoff below
+    let res: Response | null = null;
+    let text = "";
+    let why = "";
+    try {
+      res = await fetch(args.gatewayUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      if (res.ok) {
+        shed.consecutive = 0; // a delivery means the gateway is answering; re-arm the breaker
+        return true;
       }
-      if (!(waitMs > 0)) {
-        waitMs = Math.min(DEFAULT_RETRY_AFTER_MS * 2 ** Math.min(attempt, 5), MAX_RETRY_WAIT_MS);
-      }
-      await new Promise((r) => setTimeout(r, waitMs + 25));
-      continue;
+      text = await res.text();
+      why = `${res.status}: ${text}`;
+    } catch (err) {
+      // A transport failure is the most retryable failure there is: nothing says the gateway even
+      // saw the batch, and the stable batch_id makes a blind resend safe.
+      why = `transport error: ${err instanceof Error ? err.message : String(err)}`;
     }
-    throw new Error(`POST ${args.gatewayUrl} ${res.status}: ${text}`);
+    // Backpressure and server faults are transient by definition. Every other status is the gateway
+    // saying this batch (or this configuration) is wrong, and resending identical bytes would only
+    // buy a second refusal, so it aborts the run: unlike the proxy, a CLI has an operator who can
+    // fix the credential or the tenant and re-run, and every later batch would fail identically.
+    const retryable = res === null || res.status === 429 || res.status >= 500;
+    if (!retryable) {
+      throw new Error(`POST ${args.gatewayUrl} ${why}`);
+    }
+    if (attempt >= RETRY_MAX_ATTEMPTS) {
+      shed.spans += spans.length;
+      shed.events += events.length;
+      shed.batches++;
+      shed.consecutive++;
+      console.warn(
+        `  ! batch ${n} shed after ${attempt + 1} attempts (${spans.length} spans, ` +
+          `${events.length} events lost) - last failure ${why}`,
+      );
+      if (shed.consecutive >= MAX_CONSECUTIVE_SHED_BATCHES) {
+        // The circuit breaker. Each batch gets its own budget, so without this the run keeps
+        // paying ~4.7 minutes per batch against a gateway that is gone (#324 review). Name the
+        // cause: an operator staring at this needs to know it is the gateway, not the corpus.
+        throw new Error(
+          `aborting after ${shed.consecutive} consecutive shed batches: the ingest endpoint ` +
+            `${args.gatewayUrl} is not accepting batches (last failure ${why}). ` +
+            `Shed ${shed.spans} spans and ${shed.events} events in ${shed.batches} batch(es) so ` +
+            `far. Bring the stack up (cd infra && make up) and re-run at --seed ${args.seed}: it ` +
+            "is idempotent, so nothing already loaded is duplicated.",
+        );
+      }
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, retryWaitMs(attempt, hintedWaitMs(res, text)) + 25));
   }
 }
 
@@ -1008,7 +1120,7 @@ async function main(): Promise<void> {
       `(LLM target $${args.targetUsd.toLocaleString("en-US")}, seed=${args.seed}, tenant=${args.tenant})…`,
   );
   console.log(
-    "  NOTE: synthetic-seed data — backdated spans, no LLM calls, $0 API spend.",
+    "  NOTE: synthetic-seed data: backdated spans, no LLM calls, $0 API spend.",
   );
 
   const accounts = await resolveAccounts(args);
@@ -1043,8 +1155,10 @@ async function main(): Promise<void> {
   let posted = 0;
   for (let i = 0; i < gen.spans.length; i += SPANS_PER_BATCH) {
     const chunk = gen.spans.slice(i, i + SPANS_PER_BATCH);
-    await postBatch(args, batchN++, chunk, []);
-    posted += chunk.length;
+    // Only what actually shipped. Counting a shed batch here reported undelivered spans as posted
+    // and left the truth to the final summary, which is the tick over a hole this whole path
+    // exists to remove (#324 review, CLAUDE.md honest under uncertainty).
+    if (await postBatch(args, batchN++, chunk, [])) posted += chunk.length;
     if (batchN % 25 === 0) {
       console.log(`  · posted ${posted}/${gen.spans.length} spans`);
     }
@@ -1055,9 +1169,24 @@ async function main(): Promise<void> {
   }
 
   console.log("");
+  if (shed.batches > 0) {
+    // Honest under uncertainty (CLAUDE.md): a run that lost rows says how many and exits non-zero,
+    // rather than printing a tick over a hole. Re-running at the same --seed is safe and refills it.
+    console.error(
+      `! Backfill INCOMPLETE: ${shed.spans} spans and ${shed.events} events in ${shed.batches} ` +
+        `batch(es) were shed after ${RETRY_MAX_ATTEMPTS + 1} failed attempts each. ` +
+        // `posted` is the same running total the progress lines printed, not a second computation
+        // of it, so the two cannot disagree (#324 review).
+        `Delivered ${posted}/${gen.spans.length} spans and ` +
+        `${gen.events.length - shed.events}/${gen.events.length} events in ${batchN} batches. ` +
+        `Re-run at --seed ${args.seed} to fill the gap: it is idempotent.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   console.log(
     `✓ Backfill ${args.dryRun ? "(dry-run) " : ""}done. ` +
-      `${gen.spans.length} spans + ${gen.events.length} events in ${batchN} batches. ` +
+      `${posted} spans + ${gen.events.length} events in ${batchN} batches. ` +
       `Re-run at --seed ${args.seed} is idempotent.`,
   );
 }
