@@ -5,7 +5,7 @@
   "cpu": "512",
   "memory": "1024",
   "runtimePlatform": {
-    "cpuArchitecture": "X86_64",
+    "cpuArchitecture": "ARM64",
     "operatingSystemFamily": "LINUX"
   },
   "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-ecs-execution",
@@ -25,7 +25,9 @@
         { "name": "TALLY_CLICKHOUSE_USER", "value": "tally" },
         { "name": "TALLY_REQUIRE_API_KEY", "value": "true" },
         { "name": "AWS_REGION", "value": "REGION" },
-        { "name": "TALLY_REPLAY_BLOB_BACKEND", "value": "memory" }
+        { "name": "TALLY_REPLAY_BLOB_BACKEND", "value": "s3" },
+        { "name": "TALLY_REPLAY_S3_BUCKET", "value": "REPLACE_REPLAY_BUCKET" },
+        { "name": "TALLY_REPLAY_S3_REGION", "value": "REGION" }
       ],
       "secrets": [
         { "name": "TALLY_POSTGRES_DSN", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:ai-tally-postgres-dsn" },
@@ -47,7 +49,7 @@
           "awslogs-group": "/ecs/ai-tally-gateway",
           "awslogs-region": "REGION",
           "awslogs-stream-prefix": "gateway",
-          "awslogs-create-group": "true"
+          "awslogs-create-group": "false"
         }
       }
     }

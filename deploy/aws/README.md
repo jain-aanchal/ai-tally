@@ -32,13 +32,17 @@ deploy/aws/
 ├── ecs/                            PRIMARY — ECS-on-Fargate task/service definitions
 │   ├── gateway.taskdef.json        gateway task definition (Secrets Manager injection, task role)
 │   ├── web.taskdef.json            web task definition
+│   ├── edge-proxy.taskdef.json     edge-proxy task definition (no container health check, see §7A)
 │   ├── gateway.service.json        gateway ECS service (Fargate, ALB target group)
 │   ├── web.service.json            web ECS service
+│   ├── edge-proxy.service.json     edge-proxy ECS service (two warm tasks, never scales to zero)
 │   └── iam/
 │       ├── task-role-policy.json          workload identity: S3 replay + Cost Explorer + Bedrock (+Secrets)
 │       ├── execution-role-policy.json     ECS execution role: ECR pull + logs + secret injection
 │       ├── ecs-tasks-trust-policy.json    trust policy for the ECS task/execution roles
-│       └── irsa-trust-policy.json         trust policy for the EKS IRSA role (OIDC)
+│       ├── irsa-trust-policy.json         trust policy for the EKS IRSA role (OIDC)
+│       ├── github-actions-oidc-trust-policy.json  trust policy for the CI image-push role (§1)
+│       └── github-actions-ecr-policy.json         push rights on the three ECR repositories (§1)
 └── helm/ai-tally-eks/              SECONDARY — EKS Helm chart (gateway + web + optional ClickHouse)
     ├── Chart.yaml
     ├── values.yaml                 all knobs, documented
@@ -96,21 +100,111 @@ export ECR=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com
 export IMAGE_TAG=1.0.0                         # or a git sha
 ```
 
-## 1. ECR — build & push images
+## 1. ECR and the images
 
-The gateway build context is the **repo root** (its Dockerfile COPYs both the gateway and the SDK it
-depends on); the web build context is `web/`.
+CI builds all three images and publishes two of them (CTO-334), so the ordinary path is to create the
+repositories and the push role once and then never build the gateway or the proxy by hand again.
+
+**The web image is the exception and you build it yourself.** Clerk's `NEXT_PUBLIC_` publishable key
+is inlined into the client bundle at build time, so a web image built without one can never sign
+anybody in, and one built with yours belongs to your deployment and has no business in a shared
+registry. CI builds it on every publish run purely to catch the Dockerfile rotting, and pushes it
+nowhere. If you are using `ecs/web.taskdef.json` at all (the dashboard's supported home is Vercel,
+see `deploy/vercel/README.md`), see "Building by hand" below.
+
+The images are **ARM64** for ECS, because Fargate on ARM64 is cheaper per vCPU-hour and the edge
+proxy is deliberately kept warm. All three task definitions under `ecs/` set
+`runtimePlatform.cpuArchitecture: ARM64` to match; changing one without the other gives you tasks
+that never start. The edge-proxy image is additionally published for amd64 for the Helm chart's
+audience.
 
 ```bash
-aws ecr create-repository --repository-name ai-tally/gateway --region "$REGION"
-aws ecr create-repository --repository-name ai-tally/web --region "$REGION"
+for repo in gateway web edge-proxy; do
+  aws ecr create-repository --repository-name "ai-tally/$repo" --region "$REGION"
+done
+```
+
+### The CI push role (OIDC, no access keys)
+
+The `images` job in `.github/workflows/ci.yml` assumes a role through GitHub's OIDC provider. No
+long-lived AWS access key is created, stored, or accepted; the job has no access-key fallback and is
+supposed to have none. Create the provider and the role once:
+
+```bash
+# One OIDC provider per account. Skip if `aws iam list-open-id-connect-providers` already lists it.
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com
+
+# The trust policy restricts the role to this repository's main branch and its vX.Y.Z tags, so a
+# fork or a pull-request run cannot assume it. Substitute ACCOUNT before applying.
+sed "s/ACCOUNT/$ACCOUNT/g" deploy/aws/ecs/iam/github-actions-oidc-trust-policy.json \
+  > /tmp/gha-trust.json
+aws iam create-role --role-name ai-tally-ci-ecr-push \
+  --assume-role-policy-document file:///tmp/gha-trust.json
+
+# Push rights on exactly the three repositories, and nothing else in the account.
+sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
+  deploy/aws/ecs/iam/github-actions-ecr-policy.json > /tmp/gha-ecr.json
+aws iam put-role-policy --role-name ai-tally-ci-ecr-push \
+  --policy-name ai-tally-ci-ecr-push --policy-document file:///tmp/gha-ecr.json
+```
+
+Then set three **repository variables** (Settings → Secrets and variables → Actions → Variables).
+They are variables and not secrets on purpose: a role ARN and a registry hostname are not
+credentials, and leaving them readable makes it auditable which role CI can assume.
+
+| Variable | Value |
+|---|---|
+| `AWS_ECR_ROLE_ARN` | `arn:aws:iam::$ACCOUNT:role/ai-tally-ci-ecr-push` |
+| `AWS_ECR_REGISTRY` | `$ACCOUNT.dkr.ecr.$REGION.amazonaws.com` |
+| `AWS_REGION` | `$REGION` |
+
+While `AWS_ECR_ROLE_ARN` is unset the job still publishes to GHCR and prints a notice saying the ECR
+half was skipped, so CI is green from the first merge and gains the ECR push the moment the role
+exists. Re-run the job for an already-merged commit with **Actions → CI → Run workflow** rather than
+pushing an empty commit.
+
+### Tags
+
+Every image carries the **commit SHA**, which is the tag a task definition should pin: it is the only
+one that cannot be moved, and it is what makes a running container traceable back to a commit. On a
+merge to `main` the image is additionally tagged `main` (moving, for charts and local pulls), and on
+a `vX.Y.Z` git tag it is additionally tagged `X.Y.Z`. There is no `latest`.
+
+```bash
+export IMAGE_TAG=$(git rev-parse HEAD)     # what the task definitions below should reference
+```
+
+### Building by hand
+
+Required for the web tier, optional for the other two. The gateway build context is the **repo root**
+(its Dockerfile COPYs both the gateway and the SDK it depends on); the web context is `web/`; the
+edge-proxy context is `infra/edge-proxy/`. Pass `--platform linux/arm64` or the task will not start
+on the ARM64 platform the task definitions pin.
+
+```bash
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR"
 
-docker build -t "$ECR/ai-tally/gateway:$IMAGE_TAG" -f infra/gateway/Dockerfile .
-docker build -t "$ECR/ai-tally/web:$IMAGE_TAG" web/
-docker push "$ECR/ai-tally/gateway:$IMAGE_TAG"
-docker push "$ECR/ai-tally/web:$IMAGE_TAG"
+# The web image, with YOUR Clerk publishable key baked in. Without a key here `next build` fails
+# prerendering /_not-found; with the TALLY_DEV_TENANT build arg instead it builds but ships an
+# unauthenticated dashboard, which is only ever right for a demo. Push it to a repository only you
+# pull from.
+docker buildx build --platform linux/arm64 --push \
+  --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_... \
+  -t "$ECR/ai-tally/web:$IMAGE_TAG" web/
+
+# The two CI already publishes, if you would rather not wait for a merge.
+docker buildx build --platform linux/arm64 --push \
+  -t "$ECR/ai-tally/gateway:$IMAGE_TAG" -f infra/gateway/Dockerfile .
+docker buildx build --platform linux/amd64,linux/arm64 --push \
+  -t "$ECR/ai-tally/edge-proxy:$IMAGE_TAG" infra/edge-proxy/
 ```
+
+> `web/Dockerfile` does not declare a `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` build arg today, so that
+> first command needs one added. It is left out of this change on purpose: `web/app/layout.tsx` and
+> the `TALLY_DEV_TENANT` guard around it are owned by another in-flight PR, and the web tier is not
+> part of the bundle. Track it with the Vercel path, which is where the dashboard actually ships.
 
 ## 2. Networking (shared)
 
@@ -281,9 +375,19 @@ web pointed at it.
 ```bash
 aws ecs create-cluster --cluster-name ai-tally
 
+# Log groups, WITH A RETENTION. The task definitions set `awslogs-create-group: false` on purpose:
+# the awslogs driver has no retention option, so a group it auto-creates keeps every line forever at
+# full price and nobody notices. Create the groups yourself and set a retention once.
+for g in gateway web edge-proxy; do
+  aws logs create-log-group --log-group-name "/ecs/ai-tally-$g" --region "$REGION"
+  aws logs put-retention-policy --log-group-name "/ecs/ai-tally-$g" \
+    --retention-in-days 30 --region "$REGION"
+done
+
 # Substitute placeholders and register the gateway task def:
 sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
     -e "s/REPLACE_CLICKHOUSE_HOST/YOUR_CLICKHOUSE_HOST/g" \
+    -e "s/REPLACE_REPLAY_BUCKET/$ACCOUNT-ai-tally-replay/g" \
     deploy/aws/ecs/gateway.taskdef.json > /tmp/gateway.taskdef.json
 aws ecs register-task-definition --cli-input-json file:///tmp/gateway.taskdef.json
 
@@ -299,15 +403,53 @@ aws ecs register-task-definition --cli-input-json file:///tmp/web.taskdef.json
 aws ecs create-service --cli-input-json file://deploy/aws/ecs/web.service.json
 ```
 
+Then the edge proxy (CTO-339). It sits in the customer's LLM request path, so it runs on its own
+listener rule, at two tasks minimum, and never scales to zero: its outage is an outage of someone
+else's product, unlike the gateway (whose SDK buffers and retries) or the dashboard (whose outage
+loses nothing).
+
+```bash
+sed -e "s/ACCOUNT/$ACCOUNT/g" -e "s/REGION/$REGION/g" \
+    -e "s#REPLACE_GATEWAY_URL#https://ingest.YOUR_DOMAIN#g" \
+    deploy/aws/ecs/edge-proxy.taskdef.json > /tmp/edge-proxy.taskdef.json
+aws ecs register-task-definition --cli-input-json file:///tmp/edge-proxy.taskdef.json
+aws ecs create-service --cli-input-json file://deploy/aws/ecs/edge-proxy.service.json
+```
+
 Notes on the task defs:
 - **Secrets** are injected from Secrets Manager by Fargate at task start via `secrets[].valueFrom`
   (a secret ARN) — the value never appears in the file or in the registered task def. The **execution
   role** must be able to read them (`execution-role-policy.json`).
 - Provider-key secret entries are optional — delete them from `gateway.taskdef.json` if you did not
   create those secrets (or if you use Bedrock via the task role instead).
+- **All three pin `cpuArchitecture: ARM64`.** Push ARM64 images (step 1) or every task fails to
+  start with an image-manifest error.
+- **The edge proxy has no container `healthCheck`, deliberately.** Its image is `FROM scratch`: the
+  static binary and the CA roots, and nothing else. There is no `/bin/sh` for `CMD-SHELL` and no
+  `curl`, `wget` or `python` for `CMD`, so any container health check copied from
+  `gateway.taskdef.json` fails on every attempt, the task is killed as unhealthy, and the service
+  cycles forever with nothing in the logs that names the cause. Liveness is the ALB target group's
+  job instead, against `GET /healthz` on 8088, which
+  `infra/edge-proxy/cmd/edge-proxy/main.go` serves as a plain `200 ok`. The same note is carried in
+  the task definition's `dockerLabels` so it is visible in the file being edited.
 - Fronting is an **ALB**: create a target group per tier (`ai-tally-gateway` on 8080, `ai-tally-web`
-  on 3000, health-check paths `/healthz` and `/`), an HTTPS listener, and put the target-group ARNs
-  into the `*.service.json` files. For internal-only, use an internal ALB.
+  on 3000, `ai-tally-edge-proxy` on 8088; health-check paths `/healthz`, `/` and `/healthz`), an
+  HTTPS listener, and put the target-group ARNs into the `*.service.json` files. For internal-only,
+  use an internal ALB. Keep the proxy on its own host-based rule
+  (`llm.<domain>`, separate from `ingest.<domain>`): it forwards to provider APIs with real keys and
+  should never share a rule with ingest.
+
+```bash
+# The proxy's health check is shallow and fast on purpose, so a bad task drains quickly out of a
+# path that is somebody's production LLM traffic.
+aws elbv2 create-target-group \
+  --name ai-tally-edge-proxy --protocol HTTP --port 8088 \
+  --vpc-id vpc-YOURS --target-type ip \
+  --health-check-protocol HTTP --health-check-path /healthz \
+  --health-check-interval-seconds 10 --health-check-timeout-seconds 5 \
+  --healthy-threshold-count 2 --unhealthy-threshold-count 2 \
+  --matcher HttpCode=200
+```
 
 ### Option B — EKS (Helm)
 
@@ -343,6 +485,7 @@ set `serviceAccount.create=false` so Helm reuses it.
 ```bash
 # ECS (behind the ALB):
 curl -s "https://YOUR_GATEWAY_ALB/healthz"          # {"status":"ok"}
+curl -s "https://llm.YOUR_DOMAIN/healthz"           # ok      (the edge proxy, plain text)
 
 # EKS:
 kubectl -n ai-tally port-forward svc/ai-tally-gateway 8080:8080 &
@@ -394,10 +537,10 @@ stops the deployment dead, on purpose:
 
 ```bash
 # ECS
-aws ecs update-service --cluster ai-tally --service ai-tally-web --desired-count 0
-aws ecs update-service --cluster ai-tally --service ai-tally-gateway --desired-count 0
-aws ecs delete-service --cluster ai-tally --service ai-tally-web --force
-aws ecs delete-service --cluster ai-tally --service ai-tally-gateway --force
+for s in ai-tally-web ai-tally-gateway ai-tally-edge-proxy; do
+  aws ecs update-service --cluster ai-tally --service "$s" --desired-count 0
+  aws ecs delete-service --cluster ai-tally --service "$s" --force
+done
 aws ecs delete-cluster --cluster ai-tally
 
 # EKS
@@ -407,11 +550,18 @@ eksctl delete cluster --name ai-tally --region "$REGION"
 # Shared backing stores + identity (irreversible — deletes data):
 aws rds delete-db-instance --db-instance-identifier ai-tally-pg --skip-final-snapshot
 aws s3 rb "s3://$ACCOUNT-ai-tally-replay" --force
-for s in ai-tally-postgres-dsn ai-tally-clickhouse-password ai-tally-openai-api-key ai-tally-anthropic-api-key; do
+for s in ai-tally-postgres-dsn ai-tally-clickhouse-password ai-tally-gateway-service-token \
+         ai-tally-openai-api-key ai-tally-anthropic-api-key; do
   aws secretsmanager delete-secret --secret-id "$s" --force-delete-without-recovery
 done
 aws iam delete-role --role-name ai-tally-workload
 aws iam delete-role --role-name ai-tally-ecs-execution
+# CI push role (§1). Unset AWS_ECR_ROLE_ARN in the repository variables too, or CI fails on assume.
+aws iam delete-role-policy --role-name ai-tally-ci-ecr-push --policy-name ai-tally-ci-ecr-push
+aws iam delete-role --role-name ai-tally-ci-ecr-push
+for g in gateway web edge-proxy; do
+  aws logs delete-log-group --log-group-name "/ecs/ai-tally-$g"
+done
 # (detach/delete the ai-tally-workload policy and any ECR repos / ALB / target groups you created.)
 ```
 
@@ -422,10 +572,6 @@ aws iam delete-role --role-name ai-tally-ecs-execution
 - **Terraform/CloudFormation IaC** — this ticket ships ECS task defs + a Helm chart + `aws` CLI docs
   for v1; codify the account bootstrap (VPC, RDS, ClickHouse, Secrets Manager, IAM, ALB) as IaC in a
   follow-up.
-- **S3 replay wiring** — the bucket + IAM are provisioned here and the gateway exposes
-  `TALLY_REPLAY_BLOB_BACKEND`/`TALLY_REPLAY_S3_BUCKET` knobs, but an S3 replay blob-store backend
-  itself (the AWS analog of the GCS backend added under CTO-152) is a follow-up; today the supported
-  backends are `memory` and `gcs`.
 - **In-cluster ClickHouse DDL bootstrap (EKS)** — the StatefulSet path expects you to mount
   `db/clickhouse` as an initdb ConfigMap; a chart hook to build/apply it automatically is a follow-up.
 - **ALB Ingress / TLS + custom domain** — the ECS services expect an ALB target group you create; the

@@ -5,7 +5,7 @@
   "cpu": "512",
   "memory": "1024",
   "runtimePlatform": {
-    "cpuArchitecture": "X86_64",
+    "cpuArchitecture": "ARM64",
     "operatingSystemFamily": "LINUX"
   },
   "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ai-tally-ecs-execution",
@@ -44,7 +44,7 @@
           "awslogs-group": "/ecs/ai-tally-web",
           "awslogs-region": "REGION",
           "awslogs-stream-prefix": "web",
-          "awslogs-create-group": "true"
+          "awslogs-create-group": "false"
         }
       }
     }

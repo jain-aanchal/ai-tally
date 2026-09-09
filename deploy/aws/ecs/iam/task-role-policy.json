@@ -43,6 +43,7 @@
       "Resource": [
         "arn:aws:secretsmanager:*:*:secret:ai-tally-postgres-dsn*",
         "arn:aws:secretsmanager:*:*:secret:ai-tally-clickhouse-password*",
+        "arn:aws:secretsmanager:*:*:secret:ai-tally-gateway-service-token*",
         "arn:aws:secretsmanager:*:*:secret:ai-tally-openai-api-key*",
         "arn:aws:secretsmanager:*:*:secret:ai-tally-anthropic-api-key*"
       ]

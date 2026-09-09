@@ -5,10 +5,17 @@
 replicaCount: 2
 
 image:
+  # Published by the `images` job in .github/workflows/ci.yml on every merge to main (CTO-334).
+  # Before that job existed this default pointed at a registry nothing in the repo pushed to, so a
+  # `helm install` with defaults pulled an image that had never been built. Multi-arch: linux/amd64
+  # and linux/arm64.
   repository: ghcr.io/jain-aanchal/ai-tally-edge-proxy
   pullPolicy: IfNotPresent
-  # Defaults to .Chart.AppVersion when empty.
-  tag: ""
+  # `main` is the moving tag CI publishes on each merge, so the chart works out of the box. It moves,
+  # which is exactly wrong for production: pin the commit SHA (CI tags every image with it) or a
+  # release `X.Y.Z` there. Set to "" to fall back to .Chart.AppVersion, which only resolves once a
+  # matching vX.Y.Z tag has been pushed.
+  tag: "main"
 
 imagePullSecrets: []
 nameOverride: ""

@@ -18,7 +18,13 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 # Only the manifests, so this layer is reused whenever source (but not deps) changes.
-COPY package.json package-lock.json ./
+#
+# .npmrc belongs here too (CTO-334). It carries legacy-peer-deps=true, which the repo needs because
+# @clerk/nextjs pins its React peer above the exact react 19.0.0 the app is built against. Without it
+# `npm ci` dies with ERESOLVE and the image cannot be built at all. That went unnoticed until CI
+# started building this image, because the `web` CI job runs npm ci in the checkout, where .npmrc is
+# simply present.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 # ---- builder ------------------------------------------------------------------------------------
@@ -26,6 +32,21 @@ FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PRIVATE_STANDALONE=true
+
+# `next build` statically prerenders /_not-found, which evaluates app/layout.tsx, which mounts
+# ClerkProvider and throws "Missing publishableKey" unless it is in the dev escape hatch. So the
+# build needs one of the two, and this ARG supplies the second, exactly as the `web` job in
+# .github/workflows/ci.yml does for its own `npm run build` (CTO-334).
+#
+# It is a BUILD arg and nothing more: this stage is discarded, the runner stage below sets its own
+# environment, and deploy/aws/ecs/web.taskdef.json sets TALLY_DEV_TENANT to "" at runtime. It does
+# leave the prerendered 404 page rendered in escape-hatch form, which is why CI builds this image but
+# does not publish it. See deploy/aws/README.md section 1 for the real constraint: Clerk's
+# NEXT_PUBLIC_ publishable key is inlined at build time, so a web image is per-deployment and cannot
+# be a tenant-neutral registry artifact.
+ARG TALLY_DEV_TENANT=""
+ENV TALLY_DEV_TENANT=${TALLY_DEV_TENANT}
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
