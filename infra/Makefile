@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
+.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-apply-retention ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -104,6 +104,29 @@ ch-migrate-otel-engine: ## One-shot: move an EXISTING otel_spans to ReplacingMer
 	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
 	  -q "SELECT count() AS rows, uniqExact(TenantId, TraceId, SpanId) AS spans FROM otel_spans"
 	@echo "The pre-migration table is kept as otel_spans_cto245. Drop it once you are satisfied."
+
+ch-apply-retention: ## One-shot: apply the derived-table retention TTLs to an EXISTING stack (CTO-338)
+	@# Deliberately NOT part of ch-migrate, and the reason is specific rather than cautious. Every
+	@# other statement in db/clickhouse is metadata-only and safe to replay against a populated
+	@# database, which is the property that makes ch-migrate runnable any time. A TTL is not: adding
+	@# one to a table that already holds data deletes everything past the horizon, because ClickHouse
+	@# defaults materialize_ttl_after_modify to 1. The script sets it to 0 so the ALTERs record the
+	@# policy WITHOUT deleting anything, and expiry then happens lazily as merges reach old parts, or
+	@# on a partition you choose with MATERIALIZE TTL IN PARTITION.
+	@#
+	@# Fresh databases do not need this at all: the TTLs are in the CREATE TABLE statements.
+	@#
+	@# READ THE HEADER OF THE SCRIPT BEFORE RUNNING IT. It opens with a read-only count of how many
+	@# rows sit past each proposed horizon, which is the number to look at before deciding.
+	@echo "Rows past each proposed horizon BEFORE (nothing is deleted by this target):"
+	@$(COMPOSE) exec -T clickhouse clickhouse-client -u tally --password tally -d default \
+	  --multiquery < ../db/clickhouse/migrations/derived_table_retention.sql
+	@echo ""
+	@echo "The TTLs are now RECORDED. Nothing has been expired yet: the ALTERs ran with"
+	@echo "materialize_ttl_after_modify = 0, so existing parts keep their rows until a merge"
+	@echo "rewrites them. To enforce a partition deliberately:"
+	@echo "  ALTER TABLE <table> MATERIALIZE TTL IN PARTITION <id>;"
+	@echo "Do not run a bare MATERIALIZE TTL on a large table; it does the whole thing at once."
 
 ch-rollup-check: ## Report rollup spend inflated by duplicated spans, per rollup and tenant (CTO-311)
 	@# READ-ONLY. The three materialized views sum spans into SummingMergeTree targets at INSERT

@@ -1033,6 +1033,7 @@ Knobs:
 | `make chatbot-demo-realistic` | Live ~5000-session run over ~10 min, real LLM spend capped ~$10 |
 | `make chatbot-demo-backfill` | `$0` 30-day backfill of synthetic backdated spans (no LLM calls, no API keys) |
 | `make chatbot-demo-stop` | Kill the background chatbot dev server started by `chatbot-demo` |
+| `make ch-apply-retention` | Record the derived-table retention TTLs on an **existing** stack (one-shot, deletes nothing on its own, CTO-338) |
 | `make ch-rollup-check` | Report rollup spend inflated by duplicated spans, per rollup and tenant (read-only, CTO-311) |
 | `make ch-rollup-rebuild` | Rebuild the rollup targets from the deduplicated raw spans (one-shot, quiesce ingest, CTO-311) |
 | `make ch-priced-zero-check` | Report historical spans stored as a priced `$0` that was never measured (read-only, CTO-313) |
@@ -1041,6 +1042,99 @@ Knobs:
 | `make ch` / `make psql` | ClickHouse / Postgres SQL shell |
 | `make down` | Stop the stack (keep data volumes) |
 | `make nuke` | Stop **and wipe** volumes (DDL re-applies on next `up`) |
+
+## Data retention
+
+`otel_spans` has always been tiered and expired: hot SSD, warm at 7 days, cold at 30, raw row
+dropped at 90 (CTO-29). Nothing **derived** from it was, which is how the three largest tables in
+the database ended up being derived tables, each of them bigger than the raw spans they came from.
+Measured on a 1.54M-span local stack, before this change:
+
+| table | rows | on disk | had a TTL? |
+|---|---|---|---|
+| `last_touch_index` | 801,288 | 89.32 MiB | no |
+| `business_events` | 687,401 | 69.34 MiB | no |
+| `replay_samples` | 903,081 | 53.82 MiB | no |
+| `otel_spans` | 1,542,996 | 48.97 MiB | **yes** |
+| `hourly_feature_rollup` | 48,838 | 9.63 MiB | no |
+| `attribution_records` | 94,996 | 7.67 MiB | no |
+| `daily_feature_rollup` | 2,405 | 6.83 MiB | no |
+| `daily_account_rollup` | 7,479 | 1.49 MiB | no |
+
+### The policy
+
+Defined once, in `tally.storage_tiering` (`DERIVED_TABLE_RETENTION`), the same module that
+generates the raw-span TTL. Each table declares its TTL inline in its `CREATE TABLE`, and
+`sdk/python/tests/test_derived_retention_ddl.py` fails if a DDL file and the module disagree.
+
+| table | keep for | on column | why this number |
+|---|---|---|---|
+| `daily_feature_rollup` | **7 years** | `Day` | Past the 90-day raw horizon this is the **only** record that the spend happened at all. Its TTL is the moment spend history stops existing anywhere in the system, which is why the CTO-311 rebuild carries such grains through labelled `not_derivable` rather than recomputing them. 7 years is the ordinary books-and-records horizon; an aggregate this small makes it near-free. |
+| `daily_account_rollup` | **7 years** | `Day` | Same standing for the per-customer question. Margin per customer is unanswerable for a period whose account rollup is gone, and nothing can reconstruct it once the spans are dropped. |
+| `business_events` (row) | **7 years** | `OccurredAt` | Inbound customer revenue, not derived from anything we hold. Revenue and ROI are read over windows reaching into the past (the dashboard clamps to 366 days, and the attribution-rate KPI is unbounded), so a shorter horizon would make a figure a customer already read get **smaller** on a later load with nothing on screen saying why. Finance-adjacent data gets a retention floor, not a ceiling. |
+| `attribution_records` | **7 years** | `AttributedTraceTs` | Pinned **equal** to `business_events`, in both directions. Shorter and attributed revenue reads back as unattributed, flipping a reported margin; longer and an attribution outlives the event it explains. |
+| `hourly_feature_rollup` | **13 months** | `Hour` | A resolution tier over money the daily rollup already holds, at 20x the row count. Expiring it costs intraday shape for old periods, never a total. 13 months so the same month is still comparable against itself a year earlier. |
+| `identity_graph` | **13 months** | `ObservedAt` | Stitching substrate, and hashed personal data. Once `attribution_records` is written the edge has done its job and the answer survives without it, so the shorter horizon is the privacy-preferable one too. |
+| `unattributed_events` | **13 months** | `OccurredAt` | The reconciler's re-check queue, not a record of money. An event still unattributed after 13 months will not become attributed, and the revenue itself stays in `business_events` regardless. |
+| `eval_runs` | **13 months** | `JudgedAt` | Judge verdicts carry no bodies and are the evidence for a quality claim `/compare` already showed someone. They deliberately outlive the 30-day corpus they graded. |
+| `last_touch_index` | **90 days** (= the raw-span horizon) | `UpdatedAt` | The largest table in the database, and an index rather than a record: every row points at one `otel_spans` row, so keeping it longer than the spans buys dangling pointers. The stitcher reads at most `2 x lookback` back (60 days at the default), so 90 leaves a month of headroom. |
+| `business_events.RawPayload` | **90 days** (column TTL) | `OccurredAt` | A **column** TTL: the column resets to `''` and the row survives. This is what makes the 7-year row horizon affordable. The verbatim webhook body is the bulk of the table's 69 MiB and plays the same role for a value event that a raw span plays for a cost: the artifact you debug a mapping against, not the record. Also unmapped third-party text, so expiring it shrinks the PII surface. |
+| `replay_samples` | **30 days** | `CapturedAt` | **Not a new decision.** `tenant_replay_config.retention_days` already defaults to 30, is described as capping how long captured payloads live, and is quoted back to the tenant in the opt-in consent text. ClickHouse simply never enforced it. The table had grown to 903k rows while the gateway only ever reads the newest 5,000 of them, once, at boot. |
+| `replay_runs` | **30 days** | `RanAt` | Holds `ResponseText`, a real model response body under the CTO-125 carve-out to the no-bodies invariant. A body kept past the horizon the tenant consented to is that carve-out quietly widening itself. Must never exceed `replay_samples`. |
+
+Relationships between these numbers (`last_touch_index` = raw horizon; `attribution_records` =
+`business_events`; every rollup > raw horizon; revenue >> the longest dashboard window; `replay_runs`
+<= `replay_samples`) are asserted in `storage_tiering._validate_retention_ladder()`, so they cannot
+be edited apart.
+
+Per-tenant overrides use the same `multiIf` mechanism as raw spans. Generate, never hand-write:
+
+```python
+from tally.storage_tiering import retention_for
+print(retention_for("replay_samples").render_alter({"<tenant-uuid>": 90}))
+```
+
+### Applying it to a stack that already has data
+
+**A fresh database needs nothing.** The TTLs are in the `CREATE TABLE` statements, so `make nuke`
+plus `make up` gets them, and rows are expired as they are inserted.
+
+**An existing database is a different operation, and it is not free.** ClickHouse defaults
+`materialize_ttl_after_modify` to **1**, which means a plain `ALTER TABLE ... MODIFY TTL` does not
+merely record the rule: it immediately launches a mutation that materializes the TTL over every
+existing part. On a populated table that is a mass delete of everything already past the horizon,
+with no confirmation and no dry run. That is why this is **not** part of `make ch-migrate`, which
+must stay cheap and replayable, and lives beside `ch-migrate-otel-engine` instead:
+
+```bash
+cd infra && make ch-apply-retention
+```
+
+`db/clickhouse/migrations/derived_table_retention.sql` sets `materialize_ttl_after_modify = 0`
+first, so every `ALTER` is metadata-only: the policy is recorded and applies to new parts, existing
+parts keep their rows until a normal background merge rewrites them, and **nothing is deleted at
+the moment you run it**. The script opens with a read-only count of how many rows sit past each
+proposed horizon; read that before deciding anything.
+
+To enforce it deliberately rather than waiting for merges, do one partition at a time at a quiet
+hour, watching `system.mutations` in between:
+
+```sql
+ALTER TABLE daily_feature_rollup MATERIALIZE TTL IN PARTITION '202601';
+```
+
+Do **not** run a bare `ALTER TABLE ... MATERIALIZE TTL`; that does the whole table at once and is
+exactly what the setting above exists to avoid. `last_touch_index` and `unattributed_events` have no
+`PARTITION BY`, so they cannot be staged that way and expiry there rewrites whole parts rather than
+dropping partitions. `last_touch_index` is also the largest table involved, so schedule it with the
+most care. Skipping the enforcement step entirely is a legitimate choice: the policy still governs
+new data and old rows drain away as merges reach them, just less predictably.
+
+One interaction to know about: `make ch-rollup-rebuild` builds its shadow rollups with
+`CREATE TABLE ... AS`, which copies columns, engine, partitioning and skipping indexes but **not**
+the TTL. That is the CTO-245 lesson, and adding rollup TTLs is what made it bite. The rebuild now
+re-applies each rollup's TTL to its shadow table before its engine-clause guard runs; do not remove
+that, or a rebuild would silently return all three rollups to unbounded growth.
 
 ## Tear down
 

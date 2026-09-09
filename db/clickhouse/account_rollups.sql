@@ -69,7 +69,13 @@ PARTITION BY toYYYYMM(Day)
 -- to see last onto the summed total — silently destroying the per-layer split this table carries
 -- them for. Appending them keeps the prefix, and therefore the fast path, exactly as intended
 -- while making the grain of a row honest: one row per account per day per feature per operation.
-ORDER BY (TenantId, AccountIdHash, Day, FeatureTag, GenAiOperation);
+ORDER BY (TenantId, AccountIdHash, Day, FeatureTag, GenAiOperation)
+-- Retention (CTO-338): BOOK OF RECORD, 7 years, same standing as daily_feature_rollup and for the
+-- same reason. The comment above says this table "outlives raw retention ... with no such TTL";
+-- that was true and it was also unbounded growth. It now outlives raw retention by a stated 7
+-- years instead of by omission. Margin per customer is not answerable for a period whose account
+-- rollup is gone, and nothing else in the database can reconstruct it once the spans are dropped.
+TTL toDateTime(Day) + INTERVAL 2555 DAY DELETE;
 
 -- CTO-244 migration for an EXISTING deployment. The CREATE TABLE above is IF NOT EXISTS and so is
 -- a no-op on a live stack; add the coverage counter explicitly. `AFTER SpanCount` keeps the
