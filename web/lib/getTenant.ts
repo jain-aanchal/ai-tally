@@ -97,6 +97,9 @@ async function resolveOrgToTenant(orgId: string): Promise<{ tenantId: string; pl
     `${GATEWAY_URL}/v1/tenant/by-clerk-org/${encodeURIComponent(orgId)}`,
     { headers: serviceTokenHeader(), cache: "no-store", signal: AbortSignal.timeout(2000) },
   );
+  if (res.status === 404) {
+    throw new TenantNotProvisionedError(orgId);
+  }
   if (!res.ok) {
     throw new Error(`by-clerk-org resolve failed: HTTP ${res.status}`);
   }
@@ -104,6 +107,27 @@ async function resolveOrgToTenant(orgId: string): Promise<{ tenantId: string; pl
   const resolved = { tenantId: body.tenant_id, plan: body.plan };
   _orgCache.set(orgId, { ...resolved, at: Date.now() });
   return resolved;
+}
+
+/**
+ * The org exists on the Clerk session but has no tenant behind it yet (#358).
+ *
+ * This is the provisioning race, and it is a DIFFERENT fact from every other resolution failure.
+ * `organization.created` is delivered asynchronously while the post-signup redirect is immediate,
+ * so a browser that beats the webhook asks for an org the gateway has never heard of and gets the
+ * deliberate 404 from `/v1/tenant/by-clerk-org/{orgId}` (there is no silent fallback, correctly).
+ * That 404 is transient and self-heals on the next attempt.
+ *
+ * Any OTHER status is not the race: a 503 from the HMAC key provider means provisioning is failing,
+ * not that it has not happened yet, and the two must not be presented to a customer as the same
+ * thing. So only the 404 gets this type; everything else stays a generic Error and reaches the
+ * error boundary.
+ */
+export class TenantNotProvisionedError extends Error {
+  constructor(readonly orgId: string) {
+    super(`no tenant provisioned for org ${orgId}`);
+    this.name = "TenantNotProvisionedError";
+  }
 }
 
 /**
