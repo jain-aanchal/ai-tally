@@ -59,5 +59,10 @@ export const config = {
   matcher: [
     "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
     "/(api|trpc)(.*)",
+    // Clerk's auto-proxy path. The first pattern above excludes anything containing a dot, and it
+    // is a negative lookahead on the whole path, so a proxied request is not reliably matched by
+    // it. Clerk documents this entry explicitly, after the API matcher, and without it those
+    // requests bypass clerkMiddleware entirely.
+    "/__clerk/:path*",
   ],
 };
