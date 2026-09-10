@@ -68,7 +68,8 @@ module "data" {
   db_multi_az            = var.db_multi_az
   db_deletion_protection = var.db_deletion_protection
 
-  tags = local.tags
+  tags               = local.tags
+  log_retention_days = var.log_retention_days
 }
 
 module "iam" {

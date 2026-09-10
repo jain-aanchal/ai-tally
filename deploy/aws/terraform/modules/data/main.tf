@@ -255,7 +255,7 @@ resource "aws_db_parameter_group" "this" {
 # retention means RDS finds one and uses it.
 resource "aws_cloudwatch_log_group" "postgresql" {
   name              = "/aws/rds/instance/${var.name_prefix}-pg/postgresql"
-  retention_in_days = var.db_log_retention_days
+  retention_in_days = var.log_retention_days
   tags              = var.tags
 }
 
