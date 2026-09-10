@@ -29,6 +29,20 @@
       "Resource": "arn:aws:secretsmanager:*:*:secret:ai-tally/tenant-hmac/*"
     },
     {
+      "Sid": "ReplayBucketKmsUse",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "arn:aws:kms:__REGION__:__ACCOUNT__:key/__KMS_KEY_ID__",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "s3.__REGION__.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "SecretsManagerKmsUse",
       "Effect": "Allow",
       "Action": [

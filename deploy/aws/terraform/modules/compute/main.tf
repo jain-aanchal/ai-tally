@@ -51,10 +51,11 @@ resource "aws_cloudwatch_log_group" "edge_proxy" {
 # TLS
 # ---------------------------------------------------------------------------------------------
 
-# Bring your own certificate, or have Terraform request one and validate it through a Route 53 zone
-# in the same account. The scope doc lists DNS outside the account as a normal case, and an ACM
-# certificate that never validates makes an apply hang for the full validation timeout with no
-# useful message, so the two paths are separated rather than guessed at.
+# Exactly two paths, and both of them terminate. Either the zone is in this account and Terraform
+# requests the certificate and writes the validation records itself, or the certificate already
+# exists and validated somewhere else and you pass its ARN. The scope doc lists DNS outside the
+# account as a normal case; that case is the second path. See the precondition below for the third
+# arrangement this module used to offer and why it could not work.
 resource "aws_acm_certificate" "this" {
   count = var.acm_certificate_arn == "" ? 1 : 0
 
@@ -66,11 +67,27 @@ resource "aws_acm_certificate" "this" {
 
   lifecycle {
     create_before_destroy = true
+
+    # THE THIRD PATH DOES NOT WORK, so it fails at plan instead of at the listener (CTO-361).
+    #
+    # "Terraform requests the certificate AND the DNS zone is somewhere else" used to be offered:
+    # apply, read `certificate_validation_records`, create the CNAMEs by hand. It cannot work in
+    # that order. A certificate stays PENDING_VALIDATION until the records exist, ELB refuses to
+    # attach one that is not ISSUED, so `aws_lb_listener.https` fails the apply, and a failed apply
+    # writes no outputs, so the records the operator was told to read are not there to read. What
+    # they get is a VPC, a NAT gateway, an RDS instance, an ALB with no listener and no next step.
+    #
+    # Two paths remain, and both work: hand Terraform a Route 53 zone in this account, or request
+    # and validate the certificate out of band and hand over the ARN.
+    precondition {
+      condition     = var.route53_zone_id != ""
+      error_message = "acm_certificate_arn is empty, so Terraform would request a certificate, but route53_zone_id is empty too, so nothing would ever validate it and the HTTPS listener would fail the apply. Either set route53_zone_id to a hosted zone in this account, or request the certificate yourself and pass acm_certificate_arn:\n\n  aws acm request-certificate --domain-name <ingest-hostname> --subject-alternative-names <llm-hostname> --validation-method DNS --region <region>\n  aws acm describe-certificate --certificate-arn <arn> --region <region> --query 'Certificate.DomainValidationOptions'\n\nCreate those CNAMEs in whatever zone holds the domain, wait for Status ISSUED, then set acm_certificate_arn."
+    }
   }
 }
 
 resource "aws_route53_record" "certificate_validation" {
-  for_each = var.acm_certificate_arn == "" && var.route53_zone_id != "" ? {
+  for_each = var.acm_certificate_arn == "" ? {
     for option in aws_acm_certificate.this[0].domain_validation_options :
     option.domain_name => {
       name   = option.resource_record_name
@@ -88,7 +105,7 @@ resource "aws_route53_record" "certificate_validation" {
 }
 
 resource "aws_acm_certificate_validation" "this" {
-  count = var.acm_certificate_arn == "" && var.route53_zone_id != "" ? 1 : 0
+  count = var.acm_certificate_arn == "" ? 1 : 0
 
   certificate_arn         = aws_acm_certificate.this[0].arn
   validation_record_fqdns = [for record in aws_route53_record.certificate_validation : record.fqdn]

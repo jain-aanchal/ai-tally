@@ -99,6 +99,12 @@ variable "replay_bucket_name" {
   type        = string
 }
 
+variable "replay_prefix" {
+  description = "Key prefix the gateway writes replay bodies under. One variable feeds both TALLY_REPLAY_S3_PREFIX and the bucket lifecycle filter: they used to be set independently, the gateway's default was the empty string, and nothing the gateway wrote ever matched the rule that was supposed to expire it."
+  type        = string
+  default     = "replay/"
+}
+
 variable "replay_expiry_days" {
   type    = number
   default = 30
@@ -200,6 +206,12 @@ variable "edge_proxy_image" {
 variable "clickhouse_host" {
   description = "ClickHouse Cloud hostname. Created by hand: see the README's prerequisites, and note it must be publicly reachable because Vercel functions egress from the public internet."
   type        = string
+}
+
+variable "clickhouse_port" {
+  description = "TALLY_CLICKHOUSE_PORT. 8443 is ClickHouse Cloud's only HTTP port and is what makes the gateway's client speak TLS; 8123 is the compose stack's plaintext port and reaches nothing in Cloud."
+  type        = number
+  default     = 8443
 }
 
 variable "tally_env" {

@@ -148,3 +148,11 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+# Retention for the RDS postgresql log group this module creates. Shares the root's single
+# log_retention_days knob with the compute module rather than adding a second one: both exist for
+# the same reason, which is that a group created implicitly by AWS keeps every line forever.
+variable "log_retention_days" {
+  type    = number
+  default = 30
+}
