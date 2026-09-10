@@ -16,6 +16,8 @@ import {
   parseFilters,
 } from "@/lib/attribution";
 import { queryAttribution } from "@/lib/clickhouse";
+import { type SourceState, readState } from "@/lib/dataState";
+import { sampleDataAllowed } from "@/lib/mock";
 // The design-foundation FilterBar (CTO-221) writes range/from/to and a `feature` multi-select into
 // the same query string. Reading it here (CTO-223) lets the time range and feature filter drive the
 // live attribution report, while the attribution-specific tag/provider/outcome params keep working.
@@ -32,11 +34,29 @@ export async function GET(req: Request): Promise<NextResponse> {
     windowDays: rangeDays(dashboard.range),
     features: dashboard.filters.feature,
   });
-  // Fall back to the mock report when the query failed (null) OR when there's
-  // no chatbot-demo data yet (live but empty). Mirrors the pattern used by
-  // /api/agents and /api/cost — and keeps the demo's attribution view useful
-  // before the user runs `make chatbot-demo` for the first time.
+  // #364: the mock report used to answer BOTH "the query failed" and "the query ran and this
+  // tenant has no sessions yet". The second is every tenant before its first trace, and it was
+  // being shown 5,300 sessions and two providers in production as its own attribution. The demo's
+  // pre-`make chatbot-demo` convenience is preserved where it belongs, behind an explicit demo
+  // build with no real tenant resolved.
+  if (sampleDataAllowed()) {
+    const sample = mockReport(filters);
+    return NextResponse.json({ ...sample, state: "sample" } satisfies AttributionResponse);
+  }
+  const state = readState(live, (r) => r.perProvider.length === 0);
+  // An empty report is the real, correct shape for a tenant with no sessions: no providers, no
+  // totals to divide, an empty daily series. It is built here rather than by nulling fields on the
+  // live report so `perProvider.length === 0` stays the single thing the page tests.
   const report: AttributionReport =
-    live && live.perProvider.length > 0 ? live : mockReport(filters);
-  return NextResponse.json(report);
+    live ?? {
+      filters,
+      perProvider: [],
+      totals: { sessions: 0, conversions: 0, costMicroUsd: 0, costPerConversionMicroUsd: null },
+      dailyByProvider: [],
+      isMock: false,
+    };
+  return NextResponse.json({ ...report, state } satisfies AttributionResponse);
 }
+
+/** The report plus which of the four states produced it. See lib/dataState.ts. */
+export type AttributionResponse = AttributionReport & { state: SourceState };

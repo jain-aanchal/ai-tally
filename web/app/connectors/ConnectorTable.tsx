@@ -57,9 +57,16 @@ export function ConnectorTable({
   rows,
   enabledLayers,
   configs,
+  activityUnavailable = false,
 }: {
   rows: readonly ConnectorStatus[];
   enabledLayers: readonly string[];
+  /**
+   * #364 review: whether the per-source record counts could be read at all. Without it a zero
+   * count and an unreadable count render the same blank, and the row then contradicts the banner
+   * the page shows above it.
+   */
+  activityUnavailable?: boolean;
   /**
    * Flat list rather than the Map the page used to build. The page is a server component, so this
    * crosses the serialization boundary and a plain array is the least surprising thing to send.
@@ -103,8 +110,15 @@ export function ConnectorTable({
             r.records.toLocaleString()
           ) : (
             // Zero records is exactly how "connected" is decided, so an empty count is never a
-            // real zero: the source has not delivered anything we can count yet.
-            <Blank reason="this source has not delivered any records in the last 30 days" />
+            // real zero. #364 review: which blank it is depends on whether the counts could be
+            // read at all. Without that, this row contradicts the banner the page shows above it.
+            <Blank
+              reason={
+                activityUnavailable
+                  ? "the record counts could not be read, so this source's activity is unknown rather than zero"
+                  : "this source has not delivered any records in the last 30 days"
+              }
+            />
           ),
       },
       {
@@ -155,7 +169,10 @@ export function ConnectorTable({
         },
       },
     ],
-    [configByConnector, enabledLayers],
+    // activityUnavailable is read inside the records column's render, so it belongs here. Without
+    // it the memo keeps the reason string from the render it was first built in, and a source that
+    // became unreadable would go on claiming it delivered no records.
+    [configByConnector, enabledLayers, activityUnavailable],
   );
 
   return (

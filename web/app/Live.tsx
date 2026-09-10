@@ -27,10 +27,13 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 import { Card } from "@/components/Card";
 import {
+  NoDataYet,
   PartialDataBanner,
+  SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
@@ -43,7 +46,13 @@ import { isDemoMode } from "@/lib/demoMode";
 import type { ProviderAttribution } from "@/lib/attribution";
 import type { BurndownSection, ForecastPayload } from "@/lib/burndown";
 import { LAYERS, type Layer } from "@/lib/cost";
-import { allZero, asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
+import {
+  asOfLabel,
+  deriveDataState,
+  relativeAge,
+  type SourceState,
+  zeroEnabledLayers,
+} from "@/lib/dataState";
 import { rangeDays } from "@/lib/filters";
 import type { FeatureRoi, SpendSummary } from "@/lib/types";
 import { formatUSD, type MicroUSD } from "@/lib/types";
@@ -51,10 +60,19 @@ import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 export interface HomePayload {
-  spend: SpendSummary;
+  /**
+   * null when the telemetry source could not be read (#364). A zero-filled summary is what an
+   * empty tenant's window genuinely aggregates to, so the object's shape cannot carry "we do not
+   * know"; `sources.spend` is what separates unknown from empty from real.
+   */
+  spend: SpendSummary | null;
   roi: FeatureRoi[];
   perProviderConversion: ProviderAttribution[];
+  sources: { spend: SourceState; roi: SourceState; dq: SourceState; attribution: SourceState };
 }
+
+const SPEND_UNAVAILABLE =
+  "The telemetry store could not be read for this workspace.";
 
 export function HomeLive({
   initialData,
@@ -77,7 +95,7 @@ export function HomeLive({
   const windowDays = rangeDays(filterState.range);
   const endpoint = queryString ? `/api/home?${queryString}` : "/api/home";
   const { data, updatedAt } = useLivePoll<HomePayload>(endpoint, initialData);
-  const { spend: s, roi, perProviderConversion } = data;
+  const { spend, roi, perProviderConversion, sources } = data;
 
   const featureFilter = filterState.filters.feature;
   const providerFilter = filterState.filters.provider;
@@ -92,13 +110,66 @@ export function HomeLive({
       ? perProviderConversion.filter((p) => providerFilter.includes(p.provider))
       : perProviderConversion;
 
+  // One header for all four states: the page keeps its title, live indicator and filter bar whether
+  // or not there are figures under it. `badge` is the freshness badge, which only a real read earns.
+  const header = (badge?: ReactNode) => (
+    <PageHeader
+      title="Home"
+      subtitle={isDemoMode() ? undefined : "What your AI costs, and whether it pays for itself"}
+      actions={
+        <>
+          <LiveIndicator updatedAt={updatedAt} />
+          {badge}
+        </>
+      }
+      toolbar={
+        <FilterBar options={{ feature: featureOptions, provider: providerOptions }} hideGroupBy />
+      }
+    />
+  );
+
+  // #364. Three states, three answers, and the first two never render a figure.
+  //
+  //   unavailable - the read failed. We do not know this tenant's spend, so nothing is claimed.
+  //   empty       - the read succeeded over zero spans. We DO know: nothing has arrived. The zeros
+  //                 the aggregate produces are the absence of data, not a measurement of it, and a
+  //                 confident "$0.00 spend, 0% hidden cost" next to somebody else's ROI table is
+  //                 how a customer who has run nothing was told research_agent pays back in 7 days.
+  //
+  // The FilterBar comes off the payload's own rows, so it is empty in both cases and the header
+  // still renders: the page keeps its identity and its navigation while stating what it lacks.
+  if (spend === null || sources.spend === "unavailable") {
+    return (
+      <div className="space-y-6">
+        {header()}
+        <SourceUnavailable reason={SPEND_UNAVAILABLE} />
+      </div>
+    );
+  }
+  if (sources.spend === "empty") {
+    return (
+      <div className="space-y-6">
+        {header()}
+        {/* `onboarding={false}` because SetupCallout (#358) sits directly above this on Home and
+            already carries the setup link off the first-event probe, which is a better signal than
+            an empty window: it knows whether a span has EVER landed, not just within the range.
+            Two "Finish setup" buttons in one viewport read as a broken page, not a clearer one. */}
+        <NoDataYet
+          what="AI spend"
+          detail={`No spans have been received for this workspace in the last ${windowDays} days.`}
+          onboarding={false}
+        />
+      </div>
+    );
+  }
+  const s = spend;
+
   // Hidden cost is every non-LLM layer: the "all-in" story the tile makes explicit. The percentage
   // and its zero-when-empty behaviour are carried over verbatim (CTO-222 keeps the meaning as-is).
   const hidden =
     s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
 
-  const layers: Record<string, number> = { ...s.byLayer };
   const layerTotals = LAYERS.reduce<Record<Layer, number>>(
     (acc, l) => {
       acc[l] = s.byLayer[l];
@@ -107,8 +178,12 @@ export function HomeLive({
     { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
   );
   const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
+  // #364: `isEmpty` is gone from this derivation. Emptiness is now decided by the READ, above, and
+  // an all-zero window is no longer evidence for it: a tenant whose spend genuinely rounds to zero
+  // across every layer is not the same tenant as one that has sent nothing, and only the span count
+  // tells them apart. What is left here is staleness and partial connector coverage.
   const state = deriveDataState({
-    isEmpty: s.totalMicroUsd === 0 && allZero(layers),
+    isEmpty: false,
     isPartial: trippedLayers.length > 0,
     reconciledThrough: s.reconciledThrough,
   });
@@ -162,6 +237,14 @@ export function HomeLive({
       <MonthlyForecastCard forecast={forecast} priorMonthMicroUsd={priorMonthMicroUsd} />
 
       <Card title="ROI snapshot">
+        {/* #364 review: an unreadable ROI source rendered as an empty table with no header row
+            explaining itself, which reads as "no features have ROI" rather than "we could not
+            look". Say which it is before drawing the table. */}
+        {sources.roi === "unavailable" && (
+          <p className="mb-2 text-sm text-muted">
+            ROI could not be read, so this is unknown rather than empty.
+          </p>
+        )}
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-muted">
             <tr>
@@ -199,7 +282,15 @@ export function HomeLive({
       </Card>
 
       <Card title="Per-provider · conversion">
-        {perProviderConversion.length === 0 ? (
+        {/* #364 review: an empty array and a read that failed are different facts, and asserting
+            "no sessions yet" over an unreadable source is the same collapse this change removes
+            from the API. `sources.attribution` is what separates them. */}
+        {sources.attribution === "unavailable" ? (
+          <p className="text-sm text-muted">
+            Conversion data could not be read, so this is unknown rather than empty. It is not a
+            statement that no sessions exist.
+          </p>
+        ) : perProviderConversion.length === 0 ? (
           <p className="text-sm text-muted">
             No sessions yet: drive traffic to populate (link out from{" "}
             <a className="text-good underline" href="/attribution">
@@ -254,32 +345,24 @@ export function HomeLive({
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Home"
-        subtitle={isDemoMode() ? undefined : "What your AI costs, and whether it pays for itself"}
-        actions={
-          <>
-            <LiveIndicator updatedAt={updatedAt} />
-            {state !== "empty" && asOf && (
-              <StaleBadge
-                asOf={asOf}
-                age={relativeAge(s.reconciledThrough)}
-                stale={state === "stale"}
-              />
-            )}
-          </>
-        }
-        toolbar={
-          <FilterBar
-            options={{ feature: featureOptions, provider: providerOptions }}
-            hideGroupBy
+      {header(
+        asOf ? (
+          <StaleBadge
+            asOf={asOf}
+            age={relativeAge(s.reconciledThrough)}
+            stale={state === "stale"}
           />
-        }
-      />
+        ) : undefined,
+      )}
 
       {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
-      {state === "empty" ? (
+      {/* #364: the SAMPLE DATA wrapper is now reachable ONLY from `sources.spend === "sample"`,
+          which `sampleDataAllowed()` grants to a demo build with no Clerk organization behind it.
+          It used to wrap the empty state, which is how fixture figures reached real tenants: the
+          label was there, and it still said research_agent pays back in 7 days to a customer who
+          has never run one. */}
+      {sources.spend === "sample" ? (
         <SyntheticPreviewBanner workflow="Home">{body}</SyntheticPreviewBanner>
       ) : (
         body

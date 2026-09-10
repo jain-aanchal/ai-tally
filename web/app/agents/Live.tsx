@@ -23,7 +23,9 @@ import { Suspense } from "react";
 
 import { Card } from "@/components/Card";
 import {
+  NoDataYet,
   PartialDataBanner,
+  SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
@@ -40,6 +42,7 @@ import {
   boundaryFromMinutesAgo,
   deriveDataState,
   relativeAge,
+  type SourceState,
 } from "@/lib/dataState";
 import { formatUSD, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
@@ -76,6 +79,7 @@ export interface AgentsPayload {
   // Real reconciler last-run in minutes (CTO-169), or null when the reconciler has never run /
   // the source is unavailable, rendered as `—` (no freshness badge) rather than a fake number.
   reconcilerLastRunMinutesAgo: number | null;
+  sources: { agents: SourceState; runs: SourceState };
 }
 
 /** Max of a money field, or null when there is nothing to reduce (honest blank, never 0). */
@@ -102,14 +106,15 @@ export function AgentsLive({
   const { queryString } = useFilters();
   const endpoint = queryString ? `/api/agents?${queryString}` : "/api/agents";
   const { data, updatedAt } = useLivePoll<AgentsPayload>(endpoint, initialData);
-  const { agents, runs, reconcilerLastRunMinutesAgo } = data;
+  const { agents, runs, reconcilerLastRunMinutesAgo, sources } = data;
 
   const reconciledThrough = boundaryFromMinutesAgo(reconcilerLastRunMinutesAgo);
-  const noAgents = agents.length === 0 || agents.every((a) => a.costPerDayMicroUsd === 0);
   const someEmptyAgents =
     agents.some((a) => a.runsPerDay === 0) && agents.some((a) => a.runsPerDay > 0);
+  // #364: emptiness comes from the READ, not from "every agent costs zero per day". An agent roster
+  // that genuinely rounds to zero is not the same fact as a roster nobody has populated yet.
   const state = deriveDataState({
-    isEmpty: noAgents,
+    isEmpty: false,
     isPartial: someEmptyAgents,
     reconciledThrough,
   });
@@ -260,7 +265,7 @@ export function AgentsLive({
         actions={
           <>
             <LiveIndicator updatedAt={updatedAt} />
-            {state !== "empty" && asOf && (
+            {asOf && (
               <StaleBadge asOf={asOf} age={relativeAge(reconciledThrough)} stale={state === "stale"} />
             )}
           </>
@@ -278,7 +283,15 @@ export function AgentsLive({
 
       {state === "partial" && <PartialDataBanner missing="telemetry for some agents" />}
 
-      {state === "empty" ? (
+      {/* #364: unavailable, empty and sample are three answers, and only the last renders figures. */}
+      {sources.agents === "unavailable" ? (
+        <SourceUnavailable reason="The telemetry store could not be read for this workspace." />
+      ) : sources.agents === "empty" ? (
+        <NoDataYet
+          what="agent runs"
+          detail="No agent spans have been recorded for this workspace."
+        />
+      ) : sources.agents === "sample" ? (
         <SyntheticPreviewBanner workflow="Agents">{body}</SyntheticPreviewBanner>
       ) : (
         body

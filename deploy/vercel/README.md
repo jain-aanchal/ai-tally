@@ -58,7 +58,8 @@ The dashboard's Route Handlers run on the Node.js runtime and read two backing s
 
 Add these under **Project Settings → Environment Variables**. Set them for **Production** and
 **Preview** (and **Development** if you use `vercel dev`). Every default below is the app's built-in
-fallback — the dashboard boots without any of them (it just renders the mock/`—` state, see §4).
+fallback: the dashboard boots without any of them, and says on every page that it could not read the
+stores rather than painting a number (see §4).
 
 **Backing-store config (server-side, never exposed to the browser):**
 
@@ -123,8 +124,10 @@ a token that differs between the two 401s every control-plane call and reaches a
 a broken dashboard with nothing naming the cause.
 
 It needs no AWS credentials and never prints a secret value; secrets are compared and reported by
-SHA-256 prefix and length. It exits non-zero and says what to fix. Read §4 below before dismissing
-the ClickHouse URL check: an unreachable ClickHouse does not error, it paints mock data.
+SHA-256 prefix and length. It exits non-zero and says what to fix. Do not dismiss the ClickHouse URL
+check: an unreachable ClickHouse does not error, it renders a dashboard that says it has no answer
+(§4). That is honest, and it is also useless to a customer, so the check is the thing that catches
+it before they do.
 
 ## 3. Deploy
 
@@ -151,24 +154,40 @@ backing stores must be reachable from Vercel:
 - Provisioning those stores is **out of scope** (see the [GCP](../gcp/README.md) deploy).
 
 **Fail-soft (no crash when unreachable).** The dashboard is designed to render cleanly even when the
-stores can't be reached — this is intentional, not a bug:
+stores can't be reached. What it renders is a statement that it could not read them, never a figure:
 
 - Every ClickHouse query goes through `tryLive()` in `web/lib/clickhouse.ts`, which catches any error
-  (connection refused, timeout, DNS) and returns `null`. The Route Handlers then fall back to the
-  typed mock in `web/lib/mock.ts` (`live ?? mock`), and honest-null fields render as `—` in the UI.
-- Every gateway helper (reconciliation / integrations / guardrails / replay) does the same: a 2s
-  timeout, non-2xx, or unreachable host returns `null`, and the route falls back to its static mock.
+  (connection refused, timeout, DNS) and returns `null`. Each Route Handler classifies that with
+  `readState()` (`web/lib/dataState.ts`) as **unavailable**, and the page renders "Source
+  unavailable" with the reason. Honest-null fields still render as `—`.
+- A read that SUCCEEDS and finds nothing is a different answer: **empty**, which the page renders as
+  "No … yet" pointing at `/onboarding`. This is the normal state of a workspace that has not sent
+  its first span, and it is a fact the product knows, not an outage.
+- Every gateway helper (reconciliation / integrations / guardrails / replay) makes the same
+  distinction: a 2s timeout, non-2xx, or unreachable host is unavailable; an empty, well-formed
+  answer is empty.
 
-So a fresh Vercel deploy with **no env vars set** still boots and paints the whole dashboard against
-mock data — nothing throws, no page 500s. As you wire real, reachable env values in §2, the pages
-switch to live data. This is the same fail-soft path exercised by `web/`'s test suite and by a fresh
-`npm run dev`, so "stores unreachable from Vercel" degrades to the exact mock/`—` state by design.
+So a fresh Vercel deploy with **no env vars set** still boots, and no page 500s. It does not paint
+numbers. Until #364, an unreachable store was answered with `web/lib/mock.ts` on nine paths across
+six routes, which was a reasonable demo affordance for an unconfigured deploy and precisely the wrong
+answer once a real customer signed in: a workspace with zero spans was shown a `research_agent` it
+had never run, paying back in 7 days, as its own data.
+
+**The fixtures still exist, and they are now unreachable on the product path.** `sampleDataAllowed()`
+in `web/lib/mock.ts` serves them only when BOTH `NEXT_PUBLIC_DEMO_MODE=1` and `TALLY_DEV_TENANT` are
+set. The second is the dev escape hatch, and it is the only way the dashboard serves a tenant with no
+Clerk organization resolved (`web/lib/getTenant.ts`), so "a real tenant is signed in" and "fixtures
+render" are mutually exclusive by construction. A production build refuses to boot on that hatch
+alone (CTO-268, `web/instrumentation.ts`), which closes it a second time. Where fixtures do render
+they stay behind the SAMPLE DATA banner. The synthetic-data demo kit in `deploy/demo/` is the
+supported way to show a populated dashboard with no real stores behind it.
 
 ## 5. Preview deploys
 
 Every pull request gets an automatic **Preview Deployment** at a unique URL. Previews use the
-**Preview**-scoped Environment Variables from §2 — point them at a **staging** ClickHouse/gateway (or
-leave them unset to preview against mock data). Never point Preview at production credentials.
+**Preview**-scoped Environment Variables from §2: point them at a **staging** ClickHouse/gateway.
+Leaving them unset previews the "source unavailable" state, not a populated dashboard; for that, use
+the `deploy/demo/` kit. Never point Preview at production credentials.
 `web/vercel.json` sets `git.deploymentEnabled.main = true`; PR previews remain on by default.
 
 ---
@@ -179,6 +198,6 @@ leave them unset to preview against mock data). Never point Preview at productio
 - [ ] Project imported, **Root Directory = `web/`**.
 - [ ] Node.js Version = **22.x** (Project Settings).
 - [ ] Env vars set for Production + Preview; ClickHouse password marked **Sensitive**.
-- [ ] `TALLY_CLICKHOUSE_URL` / `TALLY_GATEWAY_URL` point at **publicly reachable** HTTPS endpoints
-      (or left unset to run on mock data).
-- [ ] Deploy is green; pages render (live where reachable, `—`/mock otherwise).
+- [ ] `TALLY_CLICKHOUSE_URL` / `TALLY_GATEWAY_URL` point at **publicly reachable** HTTPS endpoints.
+      Unset is not a demo mode: every page will say the source is unavailable.
+- [ ] Deploy is green; pages render (live where reachable, "Source unavailable" / `—` otherwise).

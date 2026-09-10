@@ -27,7 +27,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  NoDataYet,
   PartialDataBanner,
+  SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
@@ -53,7 +55,13 @@ import {
   reconciledTotal,
   totalRange,
 } from "@/lib/cost";
-import { asOfLabel, deriveDataState, relativeAge, zeroEnabledLayers } from "@/lib/dataState";
+import {
+  asOfLabel,
+  deriveDataState,
+  relativeAge,
+  type SourceState,
+  zeroEnabledLayers,
+} from "@/lib/dataState";
 import { isDemoMode } from "@/lib/demoMode";
 import type {
   CostSliceTotals,
@@ -81,10 +89,19 @@ import { BudgetVsActualCard } from "./BudgetVsActualCard";
 import { BurndownCard, type CostBudgetPayload } from "./BurndownCard";
 
 export interface CostPayload {
-  series: CostSeries;
+  /**
+   * null when ClickHouse could not be read (#364). An empty window still comes back as a full
+   * 30-point series of zeros, so the shape cannot distinguish "no spend" from "no answer";
+   * `sources.series` is what does.
+   */
+  series: CostSeries | null;
   featureRows: FeatureCostRow[];
   alerts: HiddenCostAlert[];
+  sources: { series: SourceState; featureRows: SourceState; alerts: SourceState };
 }
+
+/** The shape the derivations below reduce over when there is no series to reduce. */
+const NO_SERIES: CostSeries = { reconciledThrough: "1970-01-01", days: [] };
 
 function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
@@ -142,7 +159,12 @@ export function CostLive({
   const endpoint = queryString ? `/api/cost?${queryString}` : "/api/cost";
   const windowDays = rangeDays(filterState.range);
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
-  const { series: costSeries, featureRows, alerts: hiddenCostAlerts } = data;
+  const { featureRows, alerts: hiddenCostAlerts, sources } = data;
+  // #364: the derivations below all reduce over the series, and every one of them produces a
+  // confident zero from an absent one. They still run (the hooks under them must not be skipped)
+  // but nothing they produce is rendered unless `sources.series` says there was a real read; see
+  // the guards above the return.
+  const costSeries: CostSeries = data.series ?? NO_SERIES;
 
   // The default slice keeps the shipped per-layer chart + tile numbers where /api/explore is idle or
   // unreachable; every slice still fetches /api/explore for the filter-aware totals and breakdown.
@@ -211,9 +233,17 @@ export function CostLive({
     acc[l] = sumLayer(featureRows, l);
     return acc;
   }, zeroLayerRecord());
-  const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
+  // #364 review: a layer reads zero either because it genuinely cost nothing or because the
+  // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
+  // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
+  // unreadable source is the same collapse this change removes from the API.
+  const trippedLayers =
+    sources.featureRows === "unavailable" ? [] : zeroEnabledLayers(layerTotals, enabledLayers);
+  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
+  // and a window nothing was recorded in are different facts, and the read is what tells them
+  // apart. This derivation is left with staleness and partial connector coverage.
   const state = deriveDataState({
-    isEmpty: total === 0,
+    isEmpty: false,
     isPartial: trippedLayers.length > 0,
     reconciledThrough: costSeries.reconciledThrough,
   });
@@ -500,33 +530,74 @@ export function CostLive({
     </div>
   );
 
+  const header = (
+    <PageHeader
+      title="Cost Explorer"
+      subtitle="Where the spend goes, by layer and by feature"
+      actions={
+        <>
+          <LiveIndicator updatedAt={updatedAt} />
+          {asOf && (
+            <StaleBadge
+              asOf={asOf}
+              age={relativeAge(costSeries.reconciledThrough)}
+              stale={state === "stale"}
+            />
+          )}
+        </>
+      }
+      toolbar={
+        <FilterBar
+          options={{ feature: featureOptions, layer: layerOptions, agent: agentOptions }}
+        />
+      }
+    />
+  );
+
+  // #364. The read failed: say so, and draw no chart. The stacked chart over a null series was a
+  // flat run of zero days, which is a picture of a month with no spend, not a picture of a month we
+  // could not read.
+  if (sources.series === "unavailable") {
+    return (
+      <div className="space-y-6">
+        {header}
+        <SourceUnavailable reason="The telemetry store could not be read for this workspace." />
+      </div>
+    );
+  }
+  // The read succeeded over nothing. A ?tag= filter that matched nothing is a different sentence
+  // from a workspace that has sent nothing, and only the second one is an onboarding problem.
+  if (sources.series === "empty") {
+    return (
+      <div className="space-y-6">
+        {header}
+        <NoDataYet
+          what={tag ? `spend for ${tag}` : "AI spend"}
+          // #364 review: this state is reached when every day in the window is zero across every
+          // layer, which is a statement about COST, not about spans. A window whose spans were all
+          // unpriced reaches it too, and claiming "no spans have been recorded" there is the same
+          // inference this change removes from Home, which uses a real span count.
+          detail={
+            tag
+              ? `No cost was recorded for ${tag} in the last ${windowDays} days.`
+              : `No cost has been recorded for this workspace in the last ${windowDays} days. Spans that arrived but could not be priced show as unpriced rather than as spend.`
+          }
+          onboarding={!tag}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Cost Explorer"
-        subtitle="Where the spend goes, by layer and by feature"
-        actions={
-          <>
-            <LiveIndicator updatedAt={updatedAt} />
-            {state !== "empty" && asOf && (
-              <StaleBadge
-                asOf={asOf}
-                age={relativeAge(costSeries.reconciledThrough)}
-                stale={state === "stale"}
-              />
-            )}
-          </>
-        }
-        toolbar={
-          <FilterBar
-            options={{ feature: featureOptions, layer: layerOptions, agent: agentOptions }}
-          />
-        }
-      />
+      {header}
 
       {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
-      {state === "empty" ? (
+      {/* #364: reachable only from `sources.series === "sample"`, which a demo build with no Clerk
+          organization behind it earns. It used to wrap the EMPTY state, so a real tenant's first
+          visit was a labelled tour of another company's spend. */}
+      {sources.series === "sample" ? (
         <SyntheticPreviewBanner workflow="Cost">{body}</SyntheticPreviewBanner>
       ) : (
         body

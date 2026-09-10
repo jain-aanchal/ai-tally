@@ -17,7 +17,11 @@
 import { useMemo } from "react";
 
 import { Card } from "@/components/Card";
-import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import {
+  NoDataYet,
+  SourceUnavailable,
+  SyntheticPreviewBanner,
+} from "@/components/DataStateBanner";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { Money, Pct } from "@/components/HonestValue";
@@ -26,6 +30,7 @@ import { LiveIndicator } from "@/components/LiveIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import { type AttributionReport, type ProviderAttribution, systemKind } from "@/lib/attribution";
+import type { SourceState } from "@/lib/dataState";
 import { useLivePoll } from "@/lib/useLivePoll";
 
 /**
@@ -51,6 +56,9 @@ const PROVIDER_OPTIONS: FilterOption[] = [
   { value: "anthropic", label: "Anthropic" },
 ];
 
+/** The report plus which of the four source states produced it (see lib/dataState.ts). */
+export type AttributionPayload = AttributionReport & { state: SourceState };
+
 export function AttributionLive({
   endpoint,
   initialData,
@@ -58,12 +66,12 @@ export function AttributionLive({
   featureTags,
 }: {
   endpoint: string;
-  initialData: AttributionReport;
+  initialData: AttributionPayload;
   outcome: string;
   /** Feature tags in the window, for the FilterBar's feature filter. Empty renders no such control. */
   featureTags: string[];
 }) {
-  const { data: report, updatedAt } = useLivePoll<AttributionReport>(endpoint, initialData);
+  const { data: report, updatedAt } = useLivePoll<AttributionPayload>(endpoint, initialData);
 
   // Columns close over `outcome`, which comes from the URL filters, so they are rebuilt only when
   // the filter changes rather than on every poll tick.
@@ -257,7 +265,17 @@ export function AttributionLive({
         actions={<LiveIndicator updatedAt={updatedAt} />}
         toolbar={<FilterBar hideGroupBy options={{ provider: PROVIDER_OPTIONS, feature: featureTags.map((f) => ({ value: f })) }} />}
       />
-      {report.isMock ? (
+      {/* #364. `state` replaces the old `isMock ? preview : body` pair, which had no way to say
+          "the tenant has no sessions yet" other than by showing the fixture's 5,300 of them behind
+          a label. Unavailable and empty are now separate answers, and neither renders a figure. */}
+      {report.state === "unavailable" ? (
+        <SourceUnavailable reason="The telemetry store could not be read for this workspace." />
+      ) : report.state === "empty" ? (
+        <NoDataYet
+          what={`attributed ${outcome} sessions`}
+          detail="No sessions have been joined to cost spans for this workspace."
+        />
+      ) : report.state === "sample" ? (
         <SyntheticPreviewBanner workflow="Attribution">{body}</SyntheticPreviewBanner>
       ) : (
         body

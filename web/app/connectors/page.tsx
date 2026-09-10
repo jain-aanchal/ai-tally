@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Card } from "@/components/Card";
 import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import { Blank } from "@/components/HonestValue";
 import { PageHeader } from "@/components/PageHeader";
 import { apiGet } from "@/lib/api";
 import {
@@ -12,6 +13,7 @@ import {
 } from "@/lib/connectors";
 import { queryCostConnectorConfigs } from "@/lib/costConnectors";
 import { queryRevenueUploads } from "@/lib/revenueUpload";
+import type { SourceState } from "@/lib/dataState";
 import { queryEnabledConnectors } from "@/lib/tenant";
 import { ConnectorTable } from "./ConnectorTable";
 import { RevenueUpload } from "./RevenueUpload";
@@ -19,6 +21,8 @@ import { RevenueUpload } from "./RevenueUpload";
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
   live: boolean;
+  /** Which of the four source states produced the per-connector record counts (#364). */
+  activity: SourceState;
 }
 
 const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] = [
@@ -30,7 +34,7 @@ const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] 
 ];
 
 export default async function ConnectorsPage() {
-  const [{ connectors, live }, enabledLayers, costConfigs, revenueUploads] = await Promise.all([
+  const [{ connectors, activity }, enabledLayers, costConfigs, revenueUploads] = await Promise.all([
     apiGet<ConnectorsPayload>("/api/connectors"),
     queryEnabledConnectors(),
     queryCostConnectorConfigs(),
@@ -55,7 +59,12 @@ export default async function ConnectorsPage() {
         return (
           <Card key={s.category} title={`${s.title}: ${n}/${live} connected${suffix}`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
-            <ConnectorTable rows={rows} enabledLayers={enabledLayers} configs={configs} />
+            <ConnectorTable
+              rows={rows}
+              enabledLayers={enabledLayers}
+              configs={configs}
+              activityUnavailable={activity === "unavailable"}
+            />
           </Card>
         );
       })}
@@ -79,13 +88,33 @@ export default async function ConnectorsPage() {
         }
         actions={
           <span className="rounded-full border border-edge bg-panel px-3 py-1 text-sm text-muted">
-            {connected} of {totalLive} sources connected
+            {/* #364 review: "connected" is derived from record counts, so when those could not be
+                read this is not a measurement. Printing "0 of 6 connected" over an unreadable
+                source states as fact the very thing the banner below calls unknown. */}
+            {activity === "unavailable"
+              ? `${totalLive} sources · connection unknown`
+              : `${connected} of ${totalLive} sources connected`}
             {totalSoon > 0 ? ` · ${totalSoon} coming soon` : ""}
           </span>
         }
       />
 
-      {live ? body : <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>}
+      {/* #364. The activity read decides how the catalog is captioned, and only a demo build ever
+          gets the fixture's 4,120 llm_proxy records. An unreadable source says so above the rows
+          rather than dressing "Not connected" up as a measurement; a source that answered with no
+          records IS the measurement, and every row correctly reads "Not connected". */}
+      {activity === "unavailable" && (
+        <p className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn">
+          <Blank reason="the telemetry store could not be read, so no record counts were returned" />{" "}
+          Per-source record counts could not be read. The rows below show the catalog and its
+          configuration; their activity is unknown, not zero.
+        </p>
+      )}
+      {activity === "sample" ? (
+        <SyntheticPreviewBanner workflow="Connectors">{body}</SyntheticPreviewBanner>
+      ) : (
+        body
+      )}
 
       {/*
         Revenue is the other half of margin, and for plenty of B2B companies it has no API worth

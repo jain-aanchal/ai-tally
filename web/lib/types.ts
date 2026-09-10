@@ -80,7 +80,16 @@ export interface FeatureRoi {
 }
 
 export interface DataQuality {
-  attributionRate: number; // 0..1
-  contextDropCount: number;
-  estimateCalibration: number; // fractional error, e.g. 0.021 = 2.1%
+  /**
+   * 0..1, or null when there is nothing to rate (#364).
+   *
+   * The live read used to answer "no business events at all" with a vacuous 1.0, i.e. a confident
+   * 100% attribution for a tenant that has attributed nothing. A rate over an empty population is
+   * not a rate.
+   */
+  attributionRate: number | null; // 0..1
+  /** null when no source measures this. It was a hardcoded 0, which claimed zero drops. */
+  contextDropCount: number | null;
+  /** Fractional error, e.g. 0.021 = 2.1%. null when nothing has reconciled to calibrate against. */
+  estimateCalibration: number | null;
 }

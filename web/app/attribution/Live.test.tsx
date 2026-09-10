@@ -8,8 +8,8 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { AttributionLive } from "./Live";
-import { buildProviderRow, type AttributionReport } from "@/lib/attribution";
+import { AttributionLive, type AttributionPayload } from "./Live";
+import { buildProviderRow } from "@/lib/attribution";
 
 // The page's FilterBar drives the URL, so give it a router the way components/FilterBar.test.tsx does.
 vi.mock("next/navigation", () => ({
@@ -22,7 +22,7 @@ vi.mock("@/lib/useLivePoll", () => ({
   useLivePoll: (_endpoint: string, initial: unknown) => ({ data: initial, updatedAt: new Date() }),
 }));
 
-function report(): AttributionReport {
+function report(): AttributionPayload {
   const perProvider = [
     buildProviderRow("anthropic", 100, 20, 5_000_000),
     buildProviderRow("pinecone", 100, 20, 400_000),
@@ -37,18 +37,32 @@ function report(): AttributionReport {
       costPerConversionMicroUsd: 135_000,
     },
     isMock: false,
+    // #364: these rows are real, so the payload says so. The table below only renders at all under
+    // `state: "live"` (or the labelled `"sample"`), which is what keeps fixtures off a real tenant.
+    state: "live",
   };
 }
 
-function renderLive() {
+function renderLive(data: AttributionPayload = report()) {
   return render(
     <AttributionLive
       endpoint="/api/attribution"
-      initialData={report()}
+      initialData={data}
       outcome="conversion"
       featureTags={[]}
     />,
   );
+}
+
+/** The shape a tenant with no joined sessions genuinely gets back. */
+function emptyReport(state: AttributionPayload["state"]): AttributionPayload {
+  return {
+    filters: { tag: null, provider: null, outcome: null },
+    perProvider: [],
+    totals: { sessions: 0, conversions: 0, costMicroUsd: 0, costPerConversionMicroUsd: null },
+    isMock: false,
+    state,
+  };
 }
 
 describe("attribution breakdown dimension", () => {
@@ -78,5 +92,37 @@ describe("attribution breakdown dimension", () => {
     renderLive();
     expect(screen.getByText("Total cost")).toBeTruthy();
     expect(screen.queryByText("LLM cost")).toBeNull();
+  });
+});
+
+// #364. The old page had one branch (`isMock ? preview : body`) and so had no way to say "this
+// workspace has no sessions yet" other than by drawing the fixture's 5,300 of them behind a label.
+describe("attribution source states (#364)", () => {
+  it("says the source could not be read, and claims nothing about whether data exists", () => {
+    renderLive(emptyReport("unavailable"));
+    expect(screen.getByText(/Source unavailable/i)).toBeTruthy();
+    expect(screen.getByText(/This is not a statement that there is no data/i)).toBeTruthy();
+    expect(screen.queryByText("anthropic")).toBeNull();
+  });
+
+  it("says there are no attributed sessions yet when the read succeeded over nothing", () => {
+    renderLive(emptyReport("empty"));
+    expect(screen.getByText(/No attributed conversion sessions yet/i)).toBeTruthy();
+    expect(screen.queryByText(/Source unavailable/i)).toBeNull();
+    // Never a 0% conversion rate or a $0.00 per conversion: no session was measured to divide by.
+    expect(screen.queryByText("0.0%")).toBeNull();
+  });
+
+  it("draws the rows, with no sample banner, when they are real", () => {
+    renderLive();
+    expect(screen.getByText("anthropic")).toBeTruthy();
+    expect(screen.queryByText(/SAMPLE DATA/i)).toBeNull();
+    expect(screen.queryByText(/Source unavailable/i)).toBeNull();
+    expect(screen.queryByText(/No attributed/i)).toBeNull();
+  });
+
+  it("labels the fixture report as sample data on the demo-only path", () => {
+    renderLive({ ...report(), isMock: true, state: "sample" });
+    expect(screen.getByText(/SAMPLE DATA/i)).toBeTruthy();
   });
 });

@@ -144,3 +144,44 @@ export function zeroEnabledLayers<L extends string>(
 ): L[] {
   return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
 }
+
+// --- Source state: unavailable vs empty vs live (#364) -------------------------------------------
+//
+// The three states below used to be two. Every route wrote `live ?? mock` or
+// `live && live.length > 0 ? live : mock`, which folds "the query threw" and "the query answered,
+// there are no rows" onto the same branch and answers both with fixture numbers. A brand new tenant
+// with zero spans is the second case, and it was being shown another company's ROI table as its own.
+//
+// They are different facts and only one of them is unknown:
+//
+//   unavailable - ClickHouse or the gateway could not be read. We do not know the answer. This is
+//                 the honest-blank case: say so, and render no figure.
+//   empty       - the read succeeded and returned no rows. We DO know the answer: nothing has
+//                 arrived yet. This is the normal state of every new customer, and it deserves a
+//                 real empty state pointing at onboarding, never a blank and never a fabricated 0.
+//   live        - real rows.
+//   sample      - fixture data, which `sampleDataAllowed()` in lib/mock.ts permits only for a demo
+//                 build with no real tenant behind it. Always rendered behind the SAMPLE DATA
+//                 banner, never reachable while a Clerk organization is resolved.
+//
+// This is the same three-way split `SetupCallout` already makes over the first-event probe (#358),
+// applied to every read the dashboards do rather than to one existence check.
+
+export type SourceState = "live" | "empty" | "unavailable" | "sample";
+
+/** The three states a real read can produce. `sample` is a deployment choice, not a read result. */
+export type ReadState = Exclude<SourceState, "sample">;
+
+/**
+ * Classify a `tryLive`-shaped result. `null` is the source failing, which is the only unknown here;
+ * anything else is an answer, and `isEmpty` decides whether that answer is "no data yet".
+ *
+ * `isEmpty` is a predicate rather than a length check because emptiness is not the same fact on
+ * every surface: a row list is empty when it has no rows, but a spend summary always comes back as
+ * an object and is empty when it covered no spans (its zeros are then the absence of data, not a
+ * measurement of it).
+ */
+export function readState<T>(value: T | null, isEmpty: (v: T) => boolean): ReadState {
+  if (value === null) return "unavailable";
+  return isEmpty(value) ? "empty" : "live";
+}
