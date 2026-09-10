@@ -34,7 +34,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     windowDays: rangeDays(dashboard.range),
     features: dashboard.filters.feature,
   });
-  // #363: the mock report used to answer BOTH "the query failed" and "the query ran and this
+  // #364: the mock report used to answer BOTH "the query failed" and "the query ran and this
   // tenant has no sessions yet". The second is every tenant before its first trace, and it was
   // being shown 5,300 sessions and two providers in production as its own attribution. The demo's
   // pre-`make chatbot-demo` convenience is preserved where it belongs, behind an explicit demo

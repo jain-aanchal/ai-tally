@@ -37,7 +37,7 @@ export interface CostResponse {
 }
 
 /**
- * A cost series is empty when every day in the window is zero across every layer (#363).
+ * A cost series is empty when every day in the window is zero across every layer (#364).
  *
  * The query always returns one point per calendar day, gaps filled with zero layers, so an empty
  * tenant gets a full 30-point series of confident zeros rather than an empty array. The shape says
@@ -63,7 +63,7 @@ export async function GET(req: Request) {
     queryHiddenCostAlerts({ tag }),
   ]);
 
-  // #363: the canned series / feature rows / alerts are a demo build's fixtures now, and nothing
+  // #364: the canned series / feature rows / alerts are a demo build's fixtures now, and nothing
   // else. They used to answer BOTH "ClickHouse is down" and "this tenant has no spend yet", and the
   // second is every new customer. The ?tag= guard that used to be the only protection here is gone
   // because it is no longer the thing standing between a real tenant and fixture numbers.

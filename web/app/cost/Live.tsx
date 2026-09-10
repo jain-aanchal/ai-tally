@@ -90,7 +90,7 @@ import { BurndownCard, type CostBudgetPayload } from "./BurndownCard";
 
 export interface CostPayload {
   /**
-   * null when ClickHouse could not be read (#363). An empty window still comes back as a full
+   * null when ClickHouse could not be read (#364). An empty window still comes back as a full
    * 30-point series of zeros, so the shape cannot distinguish "no spend" from "no answer";
    * `sources.series` is what does.
    */
@@ -160,7 +160,7 @@ export function CostLive({
   const windowDays = rangeDays(filterState.range);
   const { data, updatedAt } = useLivePoll<CostPayload>(endpoint, initialData);
   const { featureRows, alerts: hiddenCostAlerts, sources } = data;
-  // #363: the derivations below all reduce over the series, and every one of them produces a
+  // #364: the derivations below all reduce over the series, and every one of them produces a
   // confident zero from an absent one. They still run (the hooks under them must not be skipped)
   // but nothing they produce is rendered unless `sources.series` says there was a real read; see
   // the guards above the return.
@@ -234,7 +234,7 @@ export function CostLive({
     return acc;
   }, zeroLayerRecord());
   const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
-  // #363: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
+  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
   // and a window nothing was recorded in are different facts, and the read is what tells them
   // apart. This derivation is left with staleness and partial connector coverage.
   const state = deriveDataState({
@@ -549,7 +549,7 @@ export function CostLive({
     />
   );
 
-  // #363. The read failed: say so, and draw no chart. The stacked chart over a null series was a
+  // #364. The read failed: say so, and draw no chart. The stacked chart over a null series was a
   // flat run of zero days, which is a picture of a month with no spend, not a picture of a month we
   // could not read.
   if (sources.series === "unavailable") {
@@ -585,7 +585,7 @@ export function CostLive({
 
       {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
-      {/* #363: reachable only from `sources.series === "sample"`, which a demo build with no Clerk
+      {/* #364: reachable only from `sources.series === "sample"`, which a demo build with no Clerk
           organization behind it earns. It used to wrap the EMPTY state, so a real tenant's first
           visit was a labelled tour of another company's spend. */}
       {sources.series === "sample" ? (

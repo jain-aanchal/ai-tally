@@ -14,7 +14,7 @@ import type { DataQuality, FeatureRoi, SpendSummary } from "@/lib/types";
 import type { ProviderAttribution } from "@/lib/attribution";
 
 // Read live data per request (never statically cached). A read that fails says so; it is not
-// answered with fixture numbers (#363).
+// answered with fixture numbers (#364).
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 

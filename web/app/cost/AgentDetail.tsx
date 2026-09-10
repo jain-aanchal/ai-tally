@@ -79,7 +79,7 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
     );
   }
 
-  // #363: the route now answers 200 with an empty roster when the READ failed too, so a landed
+  // #364: the route now answers 200 with an empty roster when the READ failed too, so a landed
   // fetch is no longer proof that we have an answer. Without this the branch below would report
   // "no runs for this agent" on the strength of a ClickHouse outage.
   if (status === "unavailable" || data === null || data.sources.agents === "unavailable") {

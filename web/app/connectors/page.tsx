@@ -21,7 +21,7 @@ import { RevenueUpload } from "./RevenueUpload";
 interface ConnectorsPayload {
   connectors: ConnectorStatus[];
   live: boolean;
-  /** Which of the four source states produced the per-connector record counts (#363). */
+  /** Which of the four source states produced the per-connector record counts (#364). */
   activity: SourceState;
 }
 
@@ -89,7 +89,7 @@ export default async function ConnectorsPage() {
         }
       />
 
-      {/* #363. The activity read decides how the catalog is captioned, and only a demo build ever
+      {/* #364. The activity read decides how the catalog is captioned, and only a demo build ever
           gets the fixture's 4,120 llm_proxy records. An unreadable source says so above the rows
           rather than dressing "Not connected" up as a measurement; a source that answered with no
           records IS the measurement, and every row correctly reads "Not connected". */}

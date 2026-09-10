@@ -39,7 +39,7 @@ import { FeatureValueEvents } from "../features/FeatureValueEvents";
 
 interface FeaturesDetailPayload {
   features: FeatureEconomics[];
-  /** null when the reconciler status could not be read, or has never run (#363). */
+  /** null when the reconciler status could not be read, or has never run (#364). */
   diagnostics: AttributionDiagnostics | null;
   sources: { features: SourceState; diagnostics: SourceState };
 }
@@ -83,7 +83,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
     );
   }
 
-  // #363: the route answers 200 with an empty roster when the read FAILED as well as when there is
+  // #364: the route answers 200 with an empty roster when the read FAILED as well as when there is
   // genuinely nothing, so the fetch succeeding is no longer enough to know we have an answer. The
   // payload's own state is what decides, and an unreadable source reads the same here as a fetch
   // that never landed.
@@ -173,7 +173,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
 
           <div>
             <h3 className="mb-2 text-xs uppercase text-muted">Tenant-wide</h3>
-            {/* #363: these three used to be filled from a fixture whenever the reconciler status
+            {/* #364: these three used to be filled from a fixture whenever the reconciler status
                 could not be read OR had never run, so a workspace that has never reconciled was
                 told 180 late events and a 4.2h median lag. The two cases are now separate, and
                 neither of them is a number. */}

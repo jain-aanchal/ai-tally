@@ -55,7 +55,7 @@ export function SyntheticPreviewBanner({
 }
 
 /**
- * "The read succeeded and there is nothing yet" (#363).
+ * "The read succeeded and there is nothing yet" (#364).
  *
  * This is the state every new customer is in, and it is a real answer rather than an unknown one,
  * so it is neither a blank nor a preview of somebody else's numbers. It says what has not arrived
@@ -102,7 +102,7 @@ export function NoDataYet({
 }
 
 /**
- * "We could not read the source, so we do not know" (#363).
+ * "We could not read the source, so we do not know" (#364).
  *
  * The counterpart to {@link NoDataYet}, and deliberately worded so the two can never be mistaken
  * for each other: this one makes no claim about whether data exists. The reason travels with it for

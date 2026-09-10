@@ -265,7 +265,7 @@ export function AttributionLive({
         actions={<LiveIndicator updatedAt={updatedAt} />}
         toolbar={<FilterBar hideGroupBy options={{ provider: PROVIDER_OPTIONS, feature: featureTags.map((f) => ({ value: f })) }} />}
       />
-      {/* #363. `state` replaces the old `isMock ? preview : body` pair, which had no way to say
+      {/* #364. `state` replaces the old `isMock ? preview : body` pair, which had no way to say
           "the tenant has no sessions yet" other than by showing the fixture's 5,300 of them behind
           a label. Unavailable and empty are now separate answers, and neither renders a figure. */}
       {report.state === "unavailable" ? (

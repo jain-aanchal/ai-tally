@@ -61,7 +61,7 @@ import { useLivePoll } from "@/lib/useLivePoll";
 
 export interface HomePayload {
   /**
-   * null when the telemetry source could not be read (#363). A zero-filled summary is what an
+   * null when the telemetry source could not be read (#364). A zero-filled summary is what an
    * empty tenant's window genuinely aggregates to, so the object's shape cannot carry "we do not
    * know"; `sources.spend` is what separates unknown from empty from real.
    */
@@ -178,7 +178,7 @@ export function HomeLive({
     { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
   );
   const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
-  // #363: `isEmpty` is gone from this derivation. Emptiness is now decided by the READ, above, and
+  // #364: `isEmpty` is gone from this derivation. Emptiness is now decided by the READ, above, and
   // an all-zero window is no longer evidence for it: a tenant whose spend genuinely rounds to zero
   // across every layer is not the same tenant as one that has sent nothing, and only the span count
   // tells them apart. What is left here is staleness and partial connector coverage.
@@ -341,7 +341,7 @@ export function HomeLive({
 
       {state === "partial" && <PartialDataBanner trippedLayers={trippedLayers} />}
 
-      {/* #363: the SAMPLE DATA wrapper is now reachable ONLY from `sources.spend === "sample"`,
+      {/* #364: the SAMPLE DATA wrapper is now reachable ONLY from `sources.spend === "sample"`,
           which `sampleDataAllowed()` grants to a demo build with no Clerk organization behind it.
           It used to wrap the empty state, which is how fixture figures reached real tenants: the
           label was there, and it still said research_agent pays back in 7 days to a customer who

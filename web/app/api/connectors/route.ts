@@ -26,7 +26,7 @@ export async function GET() {
   // the UI render them as "Not connected" (no rows → no fabricated stats).
   const integrationsLive = integrations !== null && integrations.length > 0;
 
-  // #363: `activity ?? mockActivity` put 4,120 LLM-proxy records and 86 Stripe records with May
+  // #364: `activity ?? mockActivity` put 4,120 LLM-proxy records and 86 Stripe records with May
   // timestamps on a tenant that has connected nothing, and did it on the page whose entire job is
   // to tell you what you have connected. A source we cannot read is reported as unreadable; a
   // source with no records is reported as not connected. Neither is a reason to invent records.

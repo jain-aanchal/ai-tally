@@ -10,7 +10,7 @@ import { isDemoMode } from "./demoMode";
 import type { CostOutlier, DataQuality, FeatureRoi, SpendSummary } from "./types";
 
 /**
- * The one gate every fixture fallback in `app/api/**` passes through (#363).
+ * The one gate every fixture fallback in `app/api/**` passes through (#364).
  *
  * Fixtures used to be the answer to "the read failed" AND to "the read came back empty", so a real
  * signed-in customer with zero spans was shown this file's storyline as their own numbers: a

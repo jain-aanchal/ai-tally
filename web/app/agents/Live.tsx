@@ -111,7 +111,7 @@ export function AgentsLive({
   const reconciledThrough = boundaryFromMinutesAgo(reconcilerLastRunMinutesAgo);
   const someEmptyAgents =
     agents.some((a) => a.runsPerDay === 0) && agents.some((a) => a.runsPerDay > 0);
-  // #363: emptiness comes from the READ, not from "every agent costs zero per day". An agent roster
+  // #364: emptiness comes from the READ, not from "every agent costs zero per day". An agent roster
   // that genuinely rounds to zero is not the same fact as a roster nobody has populated yet.
   const state = deriveDataState({
     isEmpty: false,
@@ -283,7 +283,7 @@ export function AgentsLive({
 
       {state === "partial" && <PartialDataBanner missing="telemetry for some agents" />}
 
-      {/* #363: unavailable, empty and sample are three answers, and only the last renders figures. */}
+      {/* #364: unavailable, empty and sample are three answers, and only the last renders figures. */}
       {sources.agents === "unavailable" ? (
         <SourceUnavailable reason="The telemetry store could not be read for this workspace." />
       ) : sources.agents === "empty" ? (

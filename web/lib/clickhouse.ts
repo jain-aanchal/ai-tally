@@ -461,11 +461,11 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
     const attributed = parseInt(out[0]?.attributed ?? "0", 10);
     const total = parseInt(out[0]?.total ?? "0", 10);
     return {
-      // #363: no business events used to mean a vacuous 1.0, which a caller cannot tell apart from
+      // #364: no business events used to mean a vacuous 1.0, which a caller cannot tell apart from
       // a tenant whose every event really did attribute. Null is the only honest answer over an
       // empty population, and it is also how the route recognises the empty state as empty.
       attributionRate: total > 0 ? attributed / total : null,
-      // #363: both were hardcoded zeros. Nothing measures a context drop or an estimate-versus
+      // #364: both were hardcoded zeros. Nothing measures a context drop or an estimate-versus
       // -invoice calibration on this path, so a 0 here asserted "no drops" and "perfectly
       // calibrated" on no evidence. The /data-quality report is the surface that measures its own.
       contextDropCount: null,
@@ -2014,7 +2014,7 @@ async function fetchLatestReconciliationRun(): Promise<ReconciliationRun | null>
 }
 
 /**
- * The boxed form of {@link fetchLatestReconciliationRun}, keeping the two nulls apart (#363).
+ * The boxed form of {@link fetchLatestReconciliationRun}, keeping the two nulls apart (#364).
  *
  * "The gateway could not be read" and "the gateway answered, this tenant has never run the
  * reconciler" both used to collapse to `null`, and a caller reading that null had no way to choose
@@ -2065,7 +2065,7 @@ export async function queryReconcilerLastRun(): Promise<number | null> {
  * convert to the page's units (hours / minutes-ago). Reads the same real source as
  * {@link queryReconcilerLastRun} so the freshness signal agrees across surfaces.
  *
- * Three states, not two (#363). `unavailable` is the gateway failing, which is genuinely unknown;
+ * Three states, not two (#364). `unavailable` is the gateway failing, which is genuinely unknown;
  * `empty` is the gateway reporting that this tenant has never run the reconciler, which is a real
  * answer and the normal state of a tenant that has not sent anything yet. The /api/features route
  * renders a different thing for each, and used to render fixture diagnostics for both.

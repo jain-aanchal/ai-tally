@@ -16,7 +16,7 @@ import { type SourceState, readState } from "@/lib/dataState";
 import { sampleDataAllowed } from "@/lib/mock";
 
 // Read live data per request (never statically cached). A read that fails says so; it is not
-// answered with fixture numbers (#363).
+// answered with fixture numbers (#364).
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -40,7 +40,7 @@ export async function GET() {
   const overlay = (rows: FeatureEconomics[]) =>
     rows.map((f) => (configured.has(f.feature) ? { ...f, valueEvent: configured.get(f.feature)! } : f));
 
-  // #363: the fixture feature roster is a demo build's. It used to stand in whenever the live read
+  // #364: the fixture feature roster is a demo build's. It used to stand in whenever the live read
   // came back empty, so a tenant with no features yet saw five priced features with margins as
   // their own, on Home and in the Cost explorer's feature detail alike.
   if (sampleDataAllowed()) {

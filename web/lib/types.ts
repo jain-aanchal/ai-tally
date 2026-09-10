@@ -81,7 +81,7 @@ export interface FeatureRoi {
 
 export interface DataQuality {
   /**
-   * 0..1, or null when there is nothing to rate (#363).
+   * 0..1, or null when there is nothing to rate (#364).
    *
    * The live read used to answer "no business events at all" with a vacuous 1.0, i.e. a confident
    * 100% attribution for a tenant that has attributed nothing. A rate over an empty population is

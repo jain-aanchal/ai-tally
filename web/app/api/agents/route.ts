@@ -8,7 +8,7 @@ import { parseFilters, rangeDays } from "@/lib/filters";
 import { sampleDataAllowed } from "@/lib/mock";
 
 // Read live data per request (never statically cached). A read that fails says so; it is not
-// answered with fixture numbers (#363).
+// answered with fixture numbers (#364).
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -40,7 +40,7 @@ export async function GET(req: Request) {
     queryReconcilerLastRun(),
   ]);
 
-  // #363: the fixture roster is a demo build's, and only a demo build's. It used to fill in for
+  // #364: the fixture roster is a demo build's, and only a demo build's. It used to fill in for
   // BOTH an unreachable ClickHouse and a tenant with no agents yet, which meant a new customer's
   // Cost explorer listed agents they have never run. The old `hasFilter` guard only ever covered
   // the filtered views; the unfiltered one, which is the one every new tenant lands on, was the
