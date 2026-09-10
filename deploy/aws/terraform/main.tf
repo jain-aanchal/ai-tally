@@ -58,6 +58,7 @@ module "data" {
 
   create_kms_key              = var.create_kms_key
   replay_bucket_name          = var.replay_bucket_name
+  replay_prefix               = var.replay_prefix
   replay_expiry_days          = var.replay_expiry_days
   create_provider_key_secrets = var.create_provider_key_secrets
 
@@ -102,14 +103,22 @@ module "compute" {
   workload_role_arn  = module.iam.workload_role_arn
   execution_role_arn = module.iam.execution_role_arn
 
-  secret_arns            = module.data.secret_arns
-  replay_bucket_name     = module.data.replay_bucket_name
-  kms_key_id             = module.data.kms_key_id
-  db_instance_identifier = "${var.name_prefix}-pg"
+  secret_arns        = module.data.secret_arns
+  replay_bucket_name = module.data.replay_bucket_name
+  # Same variable the bucket lifecycle rule filters on. Passing it twice from one place is what
+  # keeps TALLY_REPLAY_S3_PREFIX and the expiry rule pointed at the same keys.
+  replay_prefix = var.replay_prefix
+  kms_key_id    = module.data.kms_key_id
+  # From the data module's output, not a string rebuilt from name_prefix. The RDS alarms take this
+  # as a CloudWatch dimension, and CloudWatch validates nothing: a rebuilt string gives compute no
+  # dependency edge on RDS, so the alarms could be created first and would then sit forever on an
+  # instance identifier that did not exist yet, reporting nothing and looking like coverage.
+  db_instance_identifier = module.data.db_instance_identifier
 
   gateway_image    = var.gateway_image
   edge_proxy_image = var.edge_proxy_image
   clickhouse_host  = var.clickhouse_host
+  clickhouse_port  = var.clickhouse_port
 
   tally_env            = var.tally_env
   hmac_key_provider    = var.hmac_key_provider

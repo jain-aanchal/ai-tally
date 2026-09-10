@@ -17,15 +17,23 @@ data "aws_caller_identity" "current" {}
 
 locals {
   # The IAM documents live in deploy/aws/ecs/iam/ and are the reviewed artifact. They carry
-  # `ACCOUNT` / `REGION` placeholders rather than Terraform interpolation, so they are read and
-  # substituted rather than templated. Duplicating them in HCL would create two sources of truth
+  # `__ACCOUNT__` / `__REGION__` placeholders rather than Terraform interpolation, so they are read
+  # and substituted rather than templated. Duplicating them in HCL would create two sources of truth
   # that drift; this way a change to the JSON is picked up on the next plan.
+  #
+  # THE DELIMITERS ARE LOAD-BEARING, and this module used to get them wrong (CTO-361). CTO-360
+  # renamed the placeholders from the bare words `ACCOUNT` and `REGION` to `__ACCOUNT__` and
+  # `__REGION__` and updated modules/iam and modules/compute, but not this file. A bare
+  # `replace(..., "ACCOUNT", "123456789012")` also rewrites the INSIDE of `__ACCOUNT__`, producing
+  # `arn:aws:iam::__123456789012__:oidc-provider/...`, and IAM rejects that with
+  # MalformedPolicyDocument. That is step 1 of the first apply, so it failed before anything else
+  # could: the state bucket was created and the CI role was not.
   iam_dir = "${path.module}/../../ecs/iam"
 
   ci_trust_policy = replace(
     replace(
       file("${local.iam_dir}/github-actions-oidc-trust-policy.json"),
-      "ACCOUNT", data.aws_caller_identity.current.account_id
+      "__ACCOUNT__", data.aws_caller_identity.current.account_id
     ),
     "jain-aanchal/ai-tally", var.github_repository
   )
@@ -33,9 +41,9 @@ locals {
   ci_ecr_policy = replace(
     replace(
       file("${local.iam_dir}/github-actions-ecr-policy.json"),
-      "ACCOUNT", data.aws_caller_identity.current.account_id
+      "__ACCOUNT__", data.aws_caller_identity.current.account_id
     ),
-    "REGION", var.aws_region
+    "__REGION__", var.aws_region
   )
 }
 
@@ -157,6 +165,16 @@ resource "aws_iam_role" "ci_ecr_push" {
   # The trust policy names the OIDC provider by ARN, so the provider has to exist first. Terraform
   # cannot see that dependency through a string, hence the explicit edge.
   depends_on = [aws_iam_openid_connect_provider.github]
+
+  lifecycle {
+    # A placeholder that survived substitution produces a syntactically valid ARN that names
+    # nothing, and IAM answers with MalformedPolicyDocument or, worse, accepts it. Refusing at plan
+    # time is how the CTO-361 delimiter mismatch above stops being findable only by applying.
+    precondition {
+      condition     = !can(regex("__[A-Z_]+__", local.ci_trust_policy)) && !can(regex("__[A-Z_]+__", local.ci_ecr_policy))
+      error_message = "An __UPPERCASE__ placeholder survived substitution in deploy/aws/ecs/iam/github-actions-*.json. Every placeholder that appears in those files needs a matching replace() in bootstrap/main.tf."
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "ci_ecr_push" {

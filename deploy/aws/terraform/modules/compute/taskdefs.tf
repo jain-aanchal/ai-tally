@@ -66,11 +66,19 @@ locals {
   #   credentials-by-reference forbids on a multi-tenant instance.
   # TALLY_CORS_ALLOWED_ORIGINS is an explicit allowlist. A wildcard is refused at boot, and unset
   #   admits nobody in a deployment, so this fails closed either way.
+  # TALLY_REPLAY_S3_PREFIX is here for a fourth reason, and it is a bill rather than a boot (CTO-361).
+  #   The gateway's default prefix is the empty string, so with the variable unset the replay store
+  #   writes bodies at the ROOT of the bucket. The data module's lifecycle rule filters on
+  #   `replay/`. Nothing matched, nothing expired, and the module's own comment claimed that rule
+  #   was the only thing standing between a sampled corpus and an unbounded GB-month meter. It is
+  #   passed from the same variable the lifecycle filter uses so the two cannot drift again.
   gateway_managed_environment = merge(
     {
       TALLY_ENV                  = var.tally_env
       TALLY_HMAC_KEY_PROVIDER    = var.hmac_key_provider
       TALLY_CORS_ALLOWED_ORIGINS = join(",", var.cors_allowed_origins)
+      TALLY_REPLAY_S3_PREFIX     = var.replay_prefix
+      TALLY_CLICKHOUSE_PORT      = tostring(var.clickhouse_port)
     },
     # Optional, and only meaningful with a customer-managed key: it encrypts the per-tenant HMAC
     # secrets the application mints. Terraform does not create those secrets (see modules/data).

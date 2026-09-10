@@ -44,6 +44,17 @@
       ]
     },
     {
+      "Sid": "EcrPullKmsDecrypt",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:__REGION__:__ACCOUNT__:key/__KMS_KEY_ID__",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ecr.__REGION__.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "SecretsInjectionKmsDecrypt",
       "Effect": "Allow",
       "Action": "kms:Decrypt",

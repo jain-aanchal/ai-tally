@@ -23,6 +23,11 @@ output "replay_bucket_arn" {
   value = aws_s3_bucket.replay.arn
 }
 
+output "db_instance_identifier" {
+  description = "Taken from the resource, not rebuilt from name_prefix, so consumers get a real dependency edge on the instance existing."
+  value       = aws_db_instance.this.identifier
+}
+
 output "db_endpoint" {
   value = aws_db_instance.this.endpoint
 }
