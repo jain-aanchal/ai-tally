@@ -226,8 +226,15 @@ resource "aws_db_subnet_group" "this" {
 }
 
 resource "aws_db_parameter_group" "this" {
-  name   = "${var.name_prefix}-postgres${split(".", var.db_engine_version)[0]}"
-  family = "postgres${split(".", var.db_engine_version)[0]}"
+  # name_prefix, not name, and the pairing with create_before_destroy below is the whole reason
+  # (CTO-361). A major engine upgrade changes `family`, which forces replacement. With a fixed name
+  # and create_before_destroy, Terraform tries to CREATE the replacement before destroying the
+  # original, both want the same name, and RDS answers DBParameterGroupAlreadyExists. The apply
+  # then stops with a live database attached to a parameter group it is trying to replace, which is
+  # the worst kind of stuck. name_prefix lets the new one exist alongside the old for the seconds
+  # it takes to move the instance over.
+  name_prefix = "${var.name_prefix}-postgres${split(".", var.db_engine_version)[0]}-"
+  family      = "postgres${split(".", var.db_engine_version)[0]}"
 
   # The gateway's asyncpg pool speaks TLS already; this makes it non-optional at the server.
   parameter {
@@ -240,6 +247,16 @@ resource "aws_db_parameter_group" "this" {
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# The same argument the compute module makes about the awslogs driver, applied to RDS.
+# `enabled_cloudwatch_logs_exports` makes RDS create /aws/rds/instance/<id>/postgresql itself, with
+# no retention, so it keeps every line forever at full price. Creating the group first with a
+# retention means RDS finds one and uses it.
+resource "aws_cloudwatch_log_group" "postgresql" {
+  name              = "/aws/rds/instance/${var.name_prefix}-pg/postgresql"
+  retention_in_days = var.log_retention_days
+  tags              = var.tags
 }
 
 resource "aws_db_instance" "this" {
@@ -284,6 +301,10 @@ resource "aws_db_instance" "this" {
   ]
 
   tags = var.tags
+
+  # RDS creates the export log group on its own if it is not there, without a retention. Terraform
+  # cannot see that through a string, so the edge is explicit.
+  depends_on = [aws_cloudwatch_log_group.postgresql]
 }
 
 # ---------------------------------------------------------------------------------------------

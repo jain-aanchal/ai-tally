@@ -30,6 +30,18 @@ variable "drop_task_policy_sids" {
   default     = ["BedrockInvoke"]
 }
 
+variable "create_service_linked_roles" {
+  description = "Create AWSServiceRoleForECS and AWSServiceRoleForElasticLoadBalancing. True only for an account that has never used ECS or ELB; creating one that exists is an error. Check with: aws iam get-role --role-name AWSServiceRoleForECS"
+  type        = bool
+  default     = false
+}
+
+variable "drop_execution_policy_sids" {
+  description = "Statement Sids to remove from execution-role-policy.json. EcrPullKmsDecrypt is the candidate: it is insurance against ECR's customer-managed-key path needing a caller grant, and once a pull is known to work without it, dropping it is correct."
+  type        = list(string)
+  default     = []
+}
+
 variable "enable_ecs_exec" {
   description = "Grant the ssmmessages actions ECS Exec needs. gateway.service.json sets enableExecuteCommand: true."
   type        = bool

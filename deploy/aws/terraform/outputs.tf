@@ -58,9 +58,9 @@ output "edge_proxy_url" {
   value = module.compute.edge_proxy_url
 }
 
-output "certificate_validation_records" {
-  description = "Non-empty only when Terraform requested a certificate and DNS lives outside this account. Create them or the HTTPS listener never comes up."
-  value       = module.compute.certificate_validation_records
+output "certificate_arn" {
+  description = "The certificate the HTTPS listener uses, whether Terraform requested it or it was passed in as acm_certificate_arn."
+  value       = module.compute.certificate_arn
 }
 
 output "cluster_name" {

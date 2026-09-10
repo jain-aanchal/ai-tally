@@ -103,6 +103,25 @@ variable "clickhouse_host" {
   type        = string
 }
 
+variable "clickhouse_port" {
+  description = <<-EOT
+    TALLY_CLICKHOUSE_PORT. 8443 because that is the only HTTP port ClickHouse Cloud serves, and
+    because the gateway's clickhouse-connect client infers TLS from the port: 8443 and 443 mean
+    https, anything else means plaintext http. gateway.taskdef.json used to say 8123, which is the
+    compose stack's plaintext port, so a deployment pointed at ClickHouse Cloud opened a cleartext
+    connection to a port nothing listens on and every insert failed with a connection error. Set
+    8123 only for a self-hosted ClickHouse reachable in the clear inside the VPC.
+  EOT
+  type        = number
+  default     = 8443
+}
+
+variable "replay_prefix" {
+  description = "TALLY_REPLAY_S3_PREFIX. Must match the data module's replay_prefix: that is what the bucket lifecycle rule filters on, and a mismatch means replay bodies never expire."
+  type        = string
+  default     = "replay/"
+}
+
 variable "tally_env" {
   description = "TALLY_ENV. `production` makes the gateway refuse to boot with authentication off."
   type        = string
