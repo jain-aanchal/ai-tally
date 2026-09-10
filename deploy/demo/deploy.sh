@@ -49,7 +49,19 @@ source "${SCRIPT_DIR}/lib-tenant.sh"
 require_service_token_if_auth_on
 warn_backfill_unsupported_if_auth_on
 
-echo "==> Building images and starting the stack"
+# CTO-367: pick the Caddy site file before anything starts. `basic` keeps the HTTP basic-auth block
+# this kit has always had; `clerk` mounts a file without one, because Clerk's redirects and its
+# organization.created webhook cannot pass a basic-auth challenge, and the webhook fails silently
+# when they try: Clerk gets a 401, no tenant is provisioned, and the user waits on a workspace that
+# never appears. Exported so Compose interpolates it into the caddy volume mount.
+if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
+  export CADDY_SITE_FILE=Caddyfile.clerk
+else
+  export CADDY_SITE_FILE=Caddyfile
+  : "${BASIC_AUTH_USER:?AUTH_MODE=basic needs BASIC_AUTH_USER in .env}"
+  : "${BASIC_AUTH_HASH:?AUTH_MODE=basic needs BASIC_AUTH_HASH in .env (docker run --rm caddy:2 caddy hash-password --plaintext '...')}"
+fi
+echo "==> Building images and starting the stack (auth mode: ${AUTH_MODE:-basic})"
 "${COMPOSE[@]}" up -d --build
 
 # --- Wait for the gateway to be healthy before seeding ------------------------------------------
@@ -86,8 +98,33 @@ make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${R
 echo "==> Resolving the demo tenant UUID"
 TENANT_UUID="$(resolve_tenant_uuid)"
 echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
-echo "==> Pointing the dashboard at it (auth OFF: synthetic demo data behind Caddy basic auth)"
-pin_dashboard_tenant "${TENANT_UUID}"
+
+# CTO-367: two mutually exclusive modes, and the whole point is that they cannot overlap.
+#
+#   basic (default)  The synthetic-data demo this kit was written for. TALLY_DEV_TENANT pins the
+#                    tenant, which turns the dashboard's own authentication off completely, and
+#                    Caddy basic-auth is the only thing in front of it.
+#   clerk            A real instance. TALLY_DEV_TENANT stays UNSET so Clerk resolves the tenant from
+#                    the signed-in organization, and Caddy is TLS only.
+#
+# Setting TALLY_DEV_TENANT in clerk mode would silently disable auth on an instance the operator
+# believes is protected, so the modes are exclusive here rather than additive.
+if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
+  : "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?AUTH_MODE=clerk needs NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY in .env (Clerk dashboard, API Keys)}"
+  : "${CLERK_SECRET_KEY:?AUTH_MODE=clerk needs CLERK_SECRET_KEY in .env (Clerk dashboard, API Keys)}"
+  echo "==> Auth mode: CLERK. The dashboard requires sign-in; TALLY_DEV_TENANT stays unset."
+  if [ -z "${CLERK_WEBHOOK_SIGNING_SECRET:-}" ]; then
+    echo "    NOTE: CLERK_WEBHOOK_SIGNING_SECRET is unset. Sign-in will work, but organization.created"
+    echo "          cannot be verified, so no tenant is ever provisioned and a new user lands on the"
+    echo "          'setting up your workspace' screen forever. Add the webhook in Clerk once this"
+    echo "          deployment has a URL, then re-run with the whsec_ value set."
+  fi
+  echo "    Demo tenant ${TENANT_UUID} exists and holds the seeded data. To put a Clerk"
+  echo "    organization in front of it, run gateway.adopt_org after signing in (docs/runbook-tenants.md)."
+else
+  echo "==> Auth mode: BASIC. Pointing the dashboard at the demo tenant (dashboard auth OFF, Caddy basic-auth in front)"
+  pin_dashboard_tenant "${TENANT_UUID}"
+fi
 
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # The `make chatbot-demo-backfill` target runs on the HOST and POSTs to localhost:8080 - neither

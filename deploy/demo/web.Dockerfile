@@ -22,7 +22,11 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 # Only the manifests, so this layer is reused whenever source (but not deps) changes.
-COPY web/package.json web/package-lock.json ./
+# CTO-367: .npmrc carries legacy-peer-deps=true, which @clerk/nextjs's React peer pin needs. Without
+# it `npm ci` dies with ERESOLVE and this image cannot be built at all. The same omission was fixed
+# in web/Dockerfile (#351); it went unnoticed in both because CI runs npm ci in the checkout, where
+# .npmrc is present.
+COPY web/package.json web/package-lock.json web/.npmrc ./
 RUN npm ci
 
 # ---- builder ------------------------------------------------------------------------------------
@@ -32,6 +36,12 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PRIVATE_STANDALONE=true
 COPY --from=deps /app/node_modules ./node_modules
 COPY web/ .
+# CTO-367: Clerk's publishable key is inlined into the client bundle by `next build`, so it has to be
+# present AT BUILD TIME, not merely in the container's environment. Passing it as a runtime env var
+# alone produces an image that can never sign anyone in. Empty in the basic-auth demo mode, where
+# TALLY_DEV_TENANT turns Clerk off entirely and no provider is mounted.
+ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=""
+ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
 RUN npm run build
 
 # ---- runner -------------------------------------------------------------------------------------

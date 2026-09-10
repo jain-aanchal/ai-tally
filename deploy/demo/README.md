@@ -28,6 +28,59 @@ keep talking to each other over the compose network but are not reachable from t
 | `reseed.sh` | Reset + re-seed the synthetic data (run nightly via cron). |
 | `lib-tenant.sh` | Sourced by both scripts: tenant-UUID resolution and the service-token preflight. |
 
+## Two modes: `basic` and `clerk`
+
+This kit was written to host a synthetic-data demo, and that is still the default. CTO-367 adds a
+second shape for a real instance. They are mutually exclusive, chosen by `AUTH_MODE` in `.env`.
+
+| | `basic` (default) | `clerk` |
+|---|---|---|
+| Dashboard auth | **off** (`TALLY_DEV_TENANT` pins the tenant) | real Clerk sign-in |
+| What guards it | Caddy HTTP basic-auth | Clerk; Caddy is TLS only |
+| Tenant | the seeded demo tenant | resolved from the signed-in organization |
+| Data | synthetic backfill | whatever the tenant has |
+| `.env` needs | `BASIC_AUTH_USER`, `BASIC_AUTH_HASH` | the four Clerk values |
+
+The exclusivity is the point rather than a convenience. `TALLY_DEV_TENANT` does not only pin a
+tenant, it turns the dashboard's authentication off completely, so setting it in `clerk` mode would
+leave an instance you believe is protected serving every number to anyone who reaches the URL.
+`deploy.sh` sets one or the other, never both.
+
+### Why `clerk` mode drops basic-auth rather than keeping both
+
+Clerk's flows are redirects: its hosted sign-in page, the OAuth round trip to your identity
+provider, and the `organization.created` webhook Clerk POSTs to `/api/webhooks/clerk`. A basic-auth
+challenge in front of those either breaks them or asks the user for two unrelated credentials.
+
+The webhook is the one that fails quietly. Clerk gets a 401, retries, gives up. No tenant is ever
+provisioned, and the symptom is a signed-in user whose workspace never appears, which reads as a
+broken product rather than a misconfigured proxy.
+
+### Running in `clerk` mode
+
+1. Create a **production** Clerk instance (development instances only work against `localhost`),
+   verify its DNS, and supply your own Google OAuth credentials if you want social sign-in.
+   Production instances do not get Clerk's shared ones.
+2. Put `AUTH_MODE=clerk`, the publishable key, the secret key and `GATEWAY_SERVICE_TOKEN` in `.env`.
+3. Run `./deploy.sh`. It will warn that the webhook secret is missing, which is expected: the
+   endpoint cannot exist until this deployment has a URL.
+4. In Clerk, add a webhook at `https://${DOMAIN}/api/webhooks/clerk` subscribed to
+   `organization.created` only. Put the `whsec_` value in `.env` as
+   `CLERK_WEBHOOK_SIGNING_SECRET` and re-run `./deploy.sh`.
+5. Sign up, create an organization, and you get a fresh empty tenant. To put that organization in
+   front of the seeded demo corpus instead, use `gateway.adopt_org`; see
+   [docs/runbook-tenants.md](../../docs/runbook-tenants.md).
+
+Run `make prod-preflight` from `infra/` before step 3. It checks both sides of the configuration and
+names the symptom each missing value produces.
+
+### What this kit is not
+
+One VM, one disk, no replicas and no managed backups. That is a reasonable first production instance
+and a poor long-term one. The retention policy applied by `make ch-apply-retention` is the only data
+lifecycle here, so put a snapshot schedule on the volume. `deploy/aws/terraform/` is the managed
+alternative when you outgrow this.
+
 ## Operator runbook
 
 ### 1. Provision a VM
