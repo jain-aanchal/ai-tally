@@ -128,7 +128,7 @@ export function HomeLive({
     />
   );
 
-  // #363. Three states, three answers, and the first two never render a figure.
+  // #364. Three states, three answers, and the first two never render a figure.
   //
   //   unavailable - the read failed. We do not know this tenant's spend, so nothing is claimed.
   //   empty       - the read succeeded over zero spans. We DO know: nothing has arrived. The zeros
@@ -150,9 +150,14 @@ export function HomeLive({
     return (
       <div className="space-y-6">
         {header()}
+        {/* `onboarding={false}` because SetupCallout (#358) sits directly above this on Home and
+            already carries the setup link off the first-event probe, which is a better signal than
+            an empty window: it knows whether a span has EVER landed, not just within the range.
+            Two "Finish setup" buttons in one viewport read as a broken page, not a clearer one. */}
         <NoDataYet
           what="AI spend"
           detail={`No spans have been received for this workspace in the last ${windowDays} days.`}
+          onboarding={false}
         />
       </div>
     );
@@ -165,7 +170,6 @@ export function HomeLive({
     s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
   const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
 
-  const layers: Record<string, number> = { ...s.byLayer };
   const layerTotals = LAYERS.reduce<Record<Layer, number>>(
     (acc, l) => {
       acc[l] = s.byLayer[l];

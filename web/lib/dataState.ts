@@ -134,7 +134,18 @@ export function someZero(values: Record<string, number>): boolean {
  * the banner for vector/tools/etc., because they were never expected to fire. With the empty
  * input (no enabled connectors declared) we return [], i.e. nothing partial, by design.
  */
-// --- Source state: unavailable vs empty vs live (#363) -------------------------------------------
+export function zeroEnabledLayers<L extends string>(
+  // Keys are decoupled from L: byLayer carries every layer the system knows
+  // about (LLM/vector/tools/…); `enabled` is just the subset we're checking.
+  // Without the widening the call site would have to narrow byLayer to the
+  // exact enabled set, which is the opposite of how the data flows.
+  byLayer: Readonly<Record<string, number>>,
+  enabled: readonly L[],
+): L[] {
+  return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
+}
+
+// --- Source state: unavailable vs empty vs live (#364) -------------------------------------------
 //
 // The three states below used to be two. Every route wrote `live ?? mock` or
 // `live && live.length > 0 ? live : mock`, which folds "the query threw" and "the query answered,
@@ -144,7 +155,7 @@ export function someZero(values: Record<string, number>): boolean {
 // They are different facts and only one of them is unknown:
 //
 //   unavailable - ClickHouse or the gateway could not be read. We do not know the answer. This is
-//                 the honest-blank case: render the blank with its reason (components/HonestValue).
+//                 the honest-blank case: say so, and render no figure.
 //   empty       - the read succeeded and returned no rows. We DO know the answer: nothing has
 //                 arrived yet. This is the normal state of every new customer, and it deserves a
 //                 real empty state pointing at onboarding, never a blank and never a fabricated 0.
@@ -152,6 +163,9 @@ export function someZero(values: Record<string, number>): boolean {
 //   sample      - fixture data, which `sampleDataAllowed()` in lib/mock.ts permits only for a demo
 //                 build with no real tenant behind it. Always rendered behind the SAMPLE DATA
 //                 banner, never reachable while a Clerk organization is resolved.
+//
+// This is the same three-way split `SetupCallout` already makes over the first-event probe (#358),
+// applied to every read the dashboards do rather than to one existence check.
 
 export type SourceState = "live" | "empty" | "unavailable" | "sample";
 
@@ -170,20 +184,4 @@ export type ReadState = Exclude<SourceState, "sample">;
 export function readState<T>(value: T | null, isEmpty: (v: T) => boolean): ReadState {
   if (value === null) return "unavailable";
   return isEmpty(value) ? "empty" : "live";
-}
-
-/** True when a surface may render figures: only `live`, and `sample`, which is labelled as such. */
-export function hasFigures(state: SourceState): boolean {
-  return state === "live" || state === "sample";
-}
-
-export function zeroEnabledLayers<L extends string>(
-  // Keys are decoupled from L: byLayer carries every layer the system knows
-  // about (LLM/vector/tools/…); `enabled` is just the subset we're checking.
-  // Without the widening the call site would have to narrow byLayer to the
-  // exact enabled set, which is the opposite of how the data flows.
-  byLayer: Readonly<Record<string, number>>,
-  enabled: readonly L[],
-): L[] {
-  return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
 }

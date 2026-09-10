@@ -113,7 +113,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
   }
 
   // Features has no reconciliation date; the reconciler's last-run minutes is its freshness signal,
-  // rendered exactly as the /features view did. #363: with no reconciler run, or none we could
+  // rendered exactly as the /features view did. #364: with no reconciler run, or none we could
   // read, there is no boundary to render, so the badge is omitted rather than anchored on now().
   const lastRunMinutesAgo = data.diagnostics?.reconcilerLastRunMinutesAgo ?? null;
   const reconciledThrough =
@@ -131,11 +131,11 @@ export function FeatureDetail({ feature }: { feature: string }) {
 
   return (
     <div className="space-y-6">
-      {asOf && (
+      {reconciledThrough !== null && asOf !== null && (
         <div className="flex justify-end">
           <StaleBadge
             asOf={asOf}
-            age={relativeAge(reconciledThrough!)}
+            age={relativeAge(reconciledThrough)}
             stale={dataState === "stale"}
           />
         </div>
