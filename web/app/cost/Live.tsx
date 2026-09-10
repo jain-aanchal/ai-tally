@@ -233,7 +233,12 @@ export function CostLive({
     acc[l] = sumLayer(featureRows, l);
     return acc;
   }, zeroLayerRecord());
-  const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
+  // #364 review: a layer reads zero either because it genuinely cost nothing or because the
+  // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
+  // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
+  // unreadable source is the same collapse this change removes from the API.
+  const trippedLayers =
+    sources.featureRows === "unavailable" ? [] : zeroEnabledLayers(layerTotals, enabledLayers);
   // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
   // and a window nothing was recorded in are different facts, and the read is what tells them
   // apart. This derivation is left with staleness and partial connector coverage.
@@ -568,10 +573,14 @@ export function CostLive({
         {header}
         <NoDataYet
           what={tag ? `spend for ${tag}` : "AI spend"}
+          // #364 review: this state is reached when every day in the window is zero across every
+          // layer, which is a statement about COST, not about spans. A window whose spans were all
+          // unpriced reaches it too, and claiming "no spans have been recorded" there is the same
+          // inference this change removes from Home, which uses a real span count.
           detail={
             tag
-              ? `No spans tagged ${tag} were recorded in the last ${windowDays} days.`
-              : `No spans have been recorded for this workspace in the last ${windowDays} days.`
+              ? `No cost was recorded for ${tag} in the last ${windowDays} days.`
+              : `No cost has been recorded for this workspace in the last ${windowDays} days. Spans that arrived but could not be priced show as unpriced rather than as spend.`
           }
           onboarding={!tag}
         />

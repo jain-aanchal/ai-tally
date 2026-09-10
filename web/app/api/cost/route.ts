@@ -67,7 +67,10 @@ export async function GET(req: Request) {
   // else. They used to answer BOTH "ClickHouse is down" and "this tenant has no spend yet", and the
   // second is every new customer. The ?tag= guard that used to be the only protection here is gone
   // because it is no longer the thing standing between a real tenant and fixture numbers.
-  if (sampleDataAllowed()) {
+  // #364 review: fixtures are never filter-scoped, so answering a FILTERED request with the
+  // unfiltered canned series makes the filter look broken in a demo build. The agents route already
+  // guards this way and has a test for it; matching it keeps the two routes telling one story.
+  if (sampleDataAllowed() && !tag) {
     return NextResponse.json({
       series: costSeries,
       featureRows,

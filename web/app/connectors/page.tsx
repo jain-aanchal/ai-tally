@@ -59,7 +59,12 @@ export default async function ConnectorsPage() {
         return (
           <Card key={s.category} title={`${s.title}: ${n}/${live} connected${suffix}`}>
             <p className="mb-3 max-w-prose text-xs text-muted">{s.blurb}</p>
-            <ConnectorTable rows={rows} enabledLayers={enabledLayers} configs={configs} />
+            <ConnectorTable
+              rows={rows}
+              enabledLayers={enabledLayers}
+              configs={configs}
+              activityUnavailable={activity === "unavailable"}
+            />
           </Card>
         );
       })}
@@ -83,7 +88,12 @@ export default async function ConnectorsPage() {
         }
         actions={
           <span className="rounded-full border border-edge bg-panel px-3 py-1 text-sm text-muted">
-            {connected} of {totalLive} sources connected
+            {/* #364 review: "connected" is derived from record counts, so when those could not be
+                read this is not a measurement. Printing "0 of 6 connected" over an unreadable
+                source states as fact the very thing the banner below calls unknown. */}
+            {activity === "unavailable"
+              ? `${totalLive} sources · connection unknown`
+              : `${connected} of ${totalLive} sources connected`}
             {totalSoon > 0 ? ` · ${totalSoon} coming soon` : ""}
           </span>
         }

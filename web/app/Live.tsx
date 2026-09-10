@@ -237,6 +237,14 @@ export function HomeLive({
       <MonthlyForecastCard forecast={forecast} priorMonthMicroUsd={priorMonthMicroUsd} />
 
       <Card title="ROI snapshot">
+        {/* #364 review: an unreadable ROI source rendered as an empty table with no header row
+            explaining itself, which reads as "no features have ROI" rather than "we could not
+            look". Say which it is before drawing the table. */}
+        {sources.roi === "unavailable" && (
+          <p className="mb-2 text-sm text-muted">
+            ROI could not be read, so this is unknown rather than empty.
+          </p>
+        )}
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-muted">
             <tr>
@@ -274,7 +282,15 @@ export function HomeLive({
       </Card>
 
       <Card title="Per-provider · conversion">
-        {perProviderConversion.length === 0 ? (
+        {/* #364 review: an empty array and a read that failed are different facts, and asserting
+            "no sessions yet" over an unreadable source is the same collapse this change removes
+            from the API. `sources.attribution` is what separates them. */}
+        {sources.attribution === "unavailable" ? (
+          <p className="text-sm text-muted">
+            Conversion data could not be read, so this is unknown rather than empty. It is not a
+            statement that no sessions exist.
+          </p>
+        ) : perProviderConversion.length === 0 ? (
           <p className="text-sm text-muted">
             No sessions yet: drive traffic to populate (link out from{" "}
             <a className="text-good underline" href="/attribution">
