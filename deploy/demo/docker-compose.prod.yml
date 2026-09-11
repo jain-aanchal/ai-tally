@@ -54,6 +54,17 @@ services:
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_CLICKHOUSE_DB: default
       TALLY_GATEWAY_URL: http://gateway:8080
+      # CTO-371: where the server-rendered pages fetch their OWN route handlers. Without this,
+      # web/lib/api.ts derives the base from the incoming request's Host header, so the container
+      # tries to reach https://${DOMAIN} from inside itself: out to the public IP, back through
+      # Caddy. A droplet generally cannot hairpin to its own public address, so every page dies on
+      # UND_ERR_CONNECT_TIMEOUT after 10s. Loopback keeps the call inside the container, where the
+      # Next server is already listening, and skips TLS and the proxy for a request that never
+      # needed either.
+      #
+      # Despite the NEXT_PUBLIC_ prefix this is read only by api.ts on the server (grep confirms no
+      # client reference), so pointing it at loopback cannot leak into a browser bundle.
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:3000
       # Initiative 1 §10: the dev escape hatch that pins the tenant, so the demo VM needs no Clerk
       # account. It MUST be the tenant UUID, not the name `local-dev`: the web binds this value
       # straight into the ClickHouse read filter (TenantId = ...) and the backfill tags spans with
