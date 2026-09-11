@@ -51,6 +51,17 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+# CTO-370: `make` is a hard dependency of this script (the ch-migrate and seed targets live in
+# infra/Makefile), and it is NOT part of a Docker install. DigitalOcean's Docker marketplace image
+# and a minimal Ubuntu plus get.docker.com both lack it, so the failure used to land AFTER two image
+# builds and seven containers, roughly three minutes in, as a bare "make: command not found".
+command -v make >/dev/null 2>&1 || {
+  echo "make is required but not installed. It is not part of Docker." >&2
+  echo "  Debian/Ubuntu:  apt-get update && apt-get install -y make" >&2
+  echo "  RHEL/Alma:      dnf install -y make" >&2
+  exit 1
+}
+
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
 
 # Tenant-UUID resolution and the service-token preflight, shared with deploy.sh.

@@ -91,11 +91,17 @@ RAM, so size for it:
 - **4 vCPU / 8-16 GB RAM**, ~40 GB disk.
 - Open inbound TCP **80** and **443** only. Nothing else needs a public port.
 
-Install Docker Engine + the Compose plugin (Docker's official convenience script is fine):
+Install Docker Engine + the Compose plugin (Docker's official convenience script is fine), and
+`make`, which deploy.sh uses for the ClickHouse DDL and seed targets in `infra/Makefile`:
 
 ```
 curl -fsSL https://get.docker.com | sh
+apt-get update && apt-get install -y make
 ```
+
+`make` is worth calling out because it is NOT part of a Docker install. DigitalOcean's Docker
+marketplace image does not ship it, and neither does a minimal Ubuntu. deploy.sh now checks for it
+before building anything rather than failing three minutes in.
 
 Then clone this repo onto the VM (e.g. into `/opt/ai-tally`).
 
