@@ -35,8 +35,11 @@ source "${ENV_FILE}"
 set +a
 
 : "${DOMAIN:?DOMAIN must be set in ${ENV_FILE}}"
-: "${BASIC_AUTH_USER:?BASIC_AUTH_USER must be set in ${ENV_FILE}}"
-: "${BASIC_AUTH_HASH:?BASIC_AUTH_HASH must be set in ${ENV_FILE} (see .env.example for the generator)}"
+
+# CTO-367 follow-up: the basic-auth pair is required by `basic` mode ONLY, and this check used to be
+# unconditional, which made AUTH_MODE=clerk impossible to run: the script exited before it ever read
+# AUTH_MODE. The per-mode requirements are asserted together further down, next to the line that
+# picks the Caddy site file, so the two cannot drift apart again.
 
 # Compose reads the same .env for base-stack defaults; pass it explicitly so both files see it.
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
@@ -56,6 +59,11 @@ warn_backfill_unsupported_if_auth_on
 # never appears. Exported so Compose interpolates it into the caddy volume mount.
 if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
   export CADDY_SITE_FILE=Caddyfile.clerk
+  # Asserted HERE, before the build, not after it. NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is a BUILD ARG
+  # (next build inlines it into the client bundle), so discovering it missing afterwards means an
+  # image that looks fine and can never sign anyone in, plus a wasted build on a small VM.
+  : "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?AUTH_MODE=clerk needs NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY in .env (Clerk dashboard, Configure > API Keys, production instance)}"
+  : "${CLERK_SECRET_KEY:?AUTH_MODE=clerk needs CLERK_SECRET_KEY in .env (Clerk dashboard, Configure > API Keys, production instance)}"
 else
   export CADDY_SITE_FILE=Caddyfile
   : "${BASIC_AUTH_USER:?AUTH_MODE=basic needs BASIC_AUTH_USER in .env}"
@@ -110,8 +118,6 @@ echo "    ${DEMO_TENANT_NAME} = ${TENANT_UUID}"
 # Setting TALLY_DEV_TENANT in clerk mode would silently disable auth on an instance the operator
 # believes is protected, so the modes are exclusive here rather than additive.
 if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
-  : "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?AUTH_MODE=clerk needs NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY in .env (Clerk dashboard, API Keys)}"
-  : "${CLERK_SECRET_KEY:?AUTH_MODE=clerk needs CLERK_SECRET_KEY in .env (Clerk dashboard, API Keys)}"
   echo "==> Auth mode: CLERK. The dashboard requires sign-in; TALLY_DEV_TENANT stays unset."
   if [ -z "${CLERK_WEBHOOK_SIGNING_SECRET:-}" ]; then
     echo "    NOTE: CLERK_WEBHOOK_SIGNING_SECRET is unset. Sign-in will work, but organization.created"
