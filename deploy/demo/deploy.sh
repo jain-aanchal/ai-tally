@@ -36,6 +36,18 @@ set +a
 
 : "${DOMAIN:?DOMAIN must be set in ${ENV_FILE}}"
 
+# CTO-370: `make` is a hard dependency of this script (the ch-migrate and seed targets live in
+# infra/Makefile), and it is NOT part of a Docker install. DigitalOcean's Docker marketplace image
+# and a minimal Ubuntu plus get.docker.com both lack it, so the failure used to land AFTER two image
+# builds and seven containers, roughly three minutes in, as a bare "make: command not found".
+command -v make >/dev/null 2>&1 || {
+  echo "make is required but not installed. It is not part of Docker." >&2
+  echo "  Debian/Ubuntu:  apt-get update && apt-get install -y make" >&2
+  echo "  RHEL/Alma:      dnf install -y make" >&2
+  exit 1
+}
+
+
 # CTO-367 follow-up: the basic-auth pair is required by `basic` mode ONLY, and this check used to be
 # unconditional, which made AUTH_MODE=clerk impossible to run: the script exited before it ever read
 # AUTH_MODE. The per-mode requirements are asserted together further down, next to the line that
