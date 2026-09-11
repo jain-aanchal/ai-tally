@@ -1,0 +1,30 @@
+# ai-tally demo-deploy-kit - Caddy site config for CLERK auth (CTO-367).
+#
+# The sibling `Caddyfile` fronts the synthetic-data demo: authentication is off inside the app and
+# Caddy's HTTP basic-auth is the only thing standing in front of it. This file is for the other
+# mode, where the dashboard runs with real Clerk sign-in and Caddy is TLS and nothing else.
+#
+# WHY BASIC-AUTH IS ABSENT RATHER THAN ADDITIONAL. Clerk's flows are redirects: the hosted sign-in
+# page, the OAuth round trip to Google, and the `organization.created` webhook Clerk POSTs to
+# /api/webhooks/clerk. A basic-auth challenge in front of those either breaks them or prompts the
+# user twice for two unrelated credentials. The webhook is the one that fails silently: Clerk gets a
+# 401, no tenant is ever provisioned, and the symptom is a signed-in user whose workspace never
+# appears.
+#
+# Env used (set by docker-compose.prod.yml from .env):
+#   ${DOMAIN}   e.g. app.example.com
+
+{$DOMAIN} {
+	# The browser talks only to the dashboard. ClickHouse, Postgres and the gateway stay on the
+	# compose network with no published ports, exactly as in the basic-auth mode.
+	reverse_proxy web:3000
+
+	# ---- OPTIONAL: expose the gateway ingest endpoint ------------------------------------------
+	# Uncomment to let an app POST its own telemetry. Note this endpoint authenticates with a tally
+	# API key, not with a Clerk session, so it is safe to expose without a browser login. Everything
+	# else on the gateway (the control plane in particular) stays internal.
+	#
+	# handle /v1/batches* {
+	# 	reverse_proxy gateway:8080
+	# }
+}

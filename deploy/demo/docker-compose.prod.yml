@@ -43,6 +43,9 @@ services:
       # Always invoke as: docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml
       context: ..
       dockerfile: deploy/demo/web.Dockerfile
+      args:
+        # Inlined by `next build`, so it must be a build arg. See the Dockerfile.
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
     container_name: ai-tally-web
     environment:
       # EXACT env var names the web reads (web/lib/clickhouse.ts, web/lib/tenant.ts, etc.).
@@ -61,6 +64,18 @@ services:
       # empty on the very first `up` (before seeding), where the dashboard errors loudly rather
       # than rendering a blank page for an unknown tenant.
       TALLY_DEV_TENANT: ${TALLY_DEV_TENANT:-}
+      # CTO-367: Clerk, for AUTH_MODE=clerk. All four are empty in the basic-auth demo mode, where
+      # TALLY_DEV_TENANT pins the tenant and Clerk is never consulted. In clerk mode TALLY_DEV_TENANT
+      # is empty instead and these carry the sign-in: the two modes are mutually exclusive by
+      # construction, which is the same property web/lib/mock.ts relies on to keep fixtures away from
+      # a real tenant.
+      #
+      # NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is inlined into the client bundle at BUILD time, so it is
+      # also a build arg below. Changing it needs a rebuild, not a restart.
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      CLERK_WEBHOOK_SIGNING_SECRET: ${CLERK_WEBHOOK_SIGNING_SECRET:-}
+
       # CTO-268: the explicit "yes, serve this with no authentication" opt-in. TALLY_DEV_TENANT does
       # not only pin the tenant, it turns the dashboard's auth off completely, and this kit is the
       # thing operators copy when standing up a REAL instance. So the web image refuses to boot on
@@ -93,11 +108,18 @@ services:
       - "443:443"  # the private demo link
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER in .env}
-      # bcrypt hash, generated with: docker run --rm caddy:2 caddy hash-password --plaintext '...'
-      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH in .env}
+      # CTO-367: only the basic-auth site file reads these, so they are optional. AUTH_MODE=clerk
+      # mounts Caddyfile.clerk, which has no basic_auth block; leaving them unset there is correct
+      # rather than an omission. Caddy fails to start on an unset variable a site file DOES use, so
+      # a mismatch between AUTH_MODE and .env surfaces immediately instead of serving unprotected.
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:-}
     volumes:
-      - ../deploy/demo/Caddyfile:/etc/caddy/Caddyfile:ro   # path is relative to infra/ (first -f file)
+      # CTO-367: which site file depends on AUTH_MODE. `basic` (the default, unchanged) fronts the
+      # synthetic demo with HTTP basic-auth because the app itself runs with auth off. `clerk` mounts
+      # a file with no basic_auth block, because Clerk's redirects and its organization.created
+      # webhook cannot pass a basic-auth challenge. deploy.sh exports CADDY_SITE_FILE.
+      - ../deploy/demo/${CADDY_SITE_FILE:-Caddyfile}:/etc/caddy/Caddyfile:ro   # relative to infra/ (first -f file)
       - caddy_data:/data    # ACME account + issued certs; persist so restarts do not re-issue
       - caddy_config:/config
     restart: unless-stopped
