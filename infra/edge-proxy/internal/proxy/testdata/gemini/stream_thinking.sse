@@ -1,0 +1,5 @@
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 310,"thoughtsTokenCount": 2048,"totalTokenCount": 2358},"modelVersion": "gemini-2.5-pro"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "Net margin improved"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 310,"thoughtsTokenCount": 8000,"candidatesTokenCount": 40,"totalTokenCount": 8350},"modelVersion": "gemini-2.5-pro"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " by 3 points."}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 310,"thoughtsTokenCount": 8000,"candidatesTokenCount": 150,"totalTokenCount": 8460},"modelVersion": "gemini-2.5-pro"}

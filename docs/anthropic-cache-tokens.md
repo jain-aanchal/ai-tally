@@ -61,7 +61,25 @@ reads.
   **includes** the cached share. The proxy reads it straight into `CachedInputTokens` and adds
   nothing to the total. OpenAI does not bill a separate cache-write rate, so there is no equivalent
   gap.
-- **Gemini** reports `usageMetadata.cachedContentTokenCount` for context caching. The proxy does not
-  read it yet; a Gemini call using an explicit cached context therefore prices its cached tokens at
-  the standard input rate. It is the same shape of fix as the OpenAI one and is not covered here
-  because CTO-349 had no Gemini cache fixture to verify the semantics against.
+- **Gemini** reports `usageMetadata.cachedContentTokenCount` for context caching, and
+  `promptTokenCount` **includes** it: the API reference says it "is still the total effective prompt
+  size meaning this includes the number of tokens in the cached content". So it is the OpenAI shape,
+  read straight into `CachedInputTokens` with nothing added to the total (CTO-375). Closed.
+
+  Gemini also reports `usageMetadata.thoughtsTokenCount` on thinking models, and those tokens are
+  billed: the thinking docs state "response pricing is the sum of output tokens and thinking tokens".
+  They are folded into `CompletionTokens` (CTO-376). Unlike the Anthropic cache-write case this is
+  **not** an approximation, because thinking tokens bill at the ordinary output rate, so no new price
+  type is needed to represent them.
+
+  **The one subtlety worth carrying forward.** `geminiCompletion` is not a plain
+  `candidates + thoughts` sum. The reference defines `totalTokenCount` as
+  `prompt + thoughts + candidates`, which makes the two disjoint, and the captured
+  `testdata/gemini/response_max_tokens.json` fixture confirms it arithmetically (1204 + 96 + 8 =
+  1308). But the convention is not uniform in the field: Vertex AI excludes thinking tokens from
+  `candidatesTokenCount` while the Generative Language API has been observed including them, and
+  some models omit `thoughtsTokenCount` entirely while still charging for thinking. So the sum is
+  cross-checked against `totalTokenCount - promptTokenCount`, which is `thoughts + candidates` under
+  either convention and therefore the authority whenever the provider supplied a total. Without that
+  guard, a payload that had already folded thoughts into candidates would be over-billed by the
+  entire thinking share, which on a reasoning-heavy call is most of the cost.

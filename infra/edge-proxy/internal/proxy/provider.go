@@ -98,9 +98,59 @@ type anthropicUsageDoc struct {
 }
 
 // geminiUsageDoc is the Generative Language usageMetadata block.
+//
+// promptTokenCount and candidatesTokenCount are not the whole story, which is what CTO-375 and
+// CTO-376 were about. See geminiCompletion for why totalTokenCount is carried too.
 type geminiUsageDoc struct {
 	PromptTokenCount     *int64 `json:"promptTokenCount"`
 	CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
+	// CachedContentTokenCount is the context-cache share of the prompt (CTO-375). The API reference
+	// is explicit that promptTokenCount "is still the total effective prompt size meaning this
+	// includes the number of tokens in the cached content", so this is the OpenAI shape, not the
+	// Anthropic one: it is a SUBSET of the prompt and must not be added to it.
+	CachedContentTokenCount *int64 `json:"cachedContentTokenCount"`
+	// ThoughtsTokenCount is reasoning tokens on thinking models (CTO-376). Billed: the thinking
+	// docs state "response pricing is the sum of output tokens and thinking tokens".
+	ThoughtsTokenCount *int64 `json:"thoughtsTokenCount"`
+	// TotalTokenCount is documented as prompt + thoughts + candidates. Carried as the cross-check
+	// in geminiCompletion rather than for its own sake.
+	TotalTokenCount *int64 `json:"totalTokenCount"`
+}
+
+// geminiCompletion returns the billable output token count: generated candidates plus the thinking
+// tokens billed at the same rate (CTO-376).
+//
+// WHY THIS IS NOT JUST candidates+thoughts. The API reference defines totalTokenCount as
+// "prompt + thoughts + response candidates", which makes the two disjoint and the sum correct. But
+// the inclusion is reported inconsistently in the field: Vertex AI excludes thinking tokens from
+// candidatesTokenCount while the Generative Language API has been observed including them, and
+// some models omit thoughtsTokenCount entirely while still charging for thinking. A blind sum
+// therefore double-counts on whichever platform already folded them in, and double-counting a
+// reasoning-heavy call is a large error in the direction of over-billing.
+//
+// So the sum is cross-checked against the provider's own total when it gave us one. total-prompt is
+// thoughts+candidates by definition, whatever the reporting convention, so it is the authority: if
+// candidates+thoughts exceeds it, candidates already contained the thoughts and adding them again
+// would invent tokens.
+//
+// Returns nil when the provider reported no output count at all, which stays unknown rather than 0.
+func geminiCompletion(candidates, thoughts, total, prompt *int64) *int64 {
+	if candidates == nil && thoughts == nil {
+		return nil
+	}
+	var summed int64
+	if candidates != nil {
+		summed += *candidates
+	}
+	if thoughts != nil {
+		summed += *thoughts
+	}
+	if total != nil && prompt != nil {
+		if billable := *total - *prompt; billable >= 0 && billable < summed {
+			return &billable
+		}
+	}
+	return &summed
 }
 
 func openAIMeta(body []byte) responseMeta {
@@ -180,9 +230,15 @@ func geminiMeta(path string, body []byte) responseMeta {
 	_ = json.Unmarshal(body, &r)
 
 	m := responseMeta{Model: geminiModel(path, r.ModelVersion)}
-	if r.UsageMetadata != nil {
-		m.PromptTokens = r.UsageMetadata.PromptTokenCount
-		m.CompletionTokens = r.UsageMetadata.CandidatesTokenCount
+	if u := r.UsageMetadata; u != nil {
+		m.PromptTokens = u.PromptTokenCount
+		// CTO-375: promptTokenCount already includes the cached share, so this is recorded as the
+		// subset it is and nothing is added to the total. Without it a 100k-token cached context
+		// priced at the full input rate.
+		m.CachedInputTokens = u.CachedContentTokenCount
+		m.CompletionTokens = geminiCompletion(
+			u.CandidatesTokenCount, u.ThoughtsTokenCount, u.TotalTokenCount, u.PromptTokenCount,
+		)
 	}
 	return m
 }
