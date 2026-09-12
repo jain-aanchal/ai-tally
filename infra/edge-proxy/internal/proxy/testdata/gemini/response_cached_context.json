@@ -1,0 +1,18 @@
+{
+  "_comment": "HAND-WRITTEN from the documented usageMetadata shape (CTO-375), not captured traffic. No cachedContents handle was available to record against. The inclusion semantics it encodes (promptTokenCount already contains cachedContentTokenCount) are load-bearing and are quoted from the API reference in geminiUsageDoc; 100200 = 200 fresh + 100000 cached is consistent with that, and with the documented totalTokenCount = prompt + thoughts + candidates.",
+  "candidates": [
+    {
+      "content": { "parts": [{ "text": "Clause 14(b) covers termination for convenience." }], "role": "model" },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 100200,
+    "cachedContentTokenCount": 100000,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 100231
+  },
+  "modelVersion": "gemini-2.5-pro",
+  "responseId": "cachedCtxExampleRespId01"
+}

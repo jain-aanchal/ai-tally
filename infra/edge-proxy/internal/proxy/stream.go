@@ -126,6 +126,11 @@ type streamFolder struct {
 	anthInput       *int64
 	anthCacheCreate *int64
 	anthCacheRead   *int64
+
+	// Gemini reports thinking tokens outside candidatesTokenCount, folded in geminiCompletion
+	// (CTO-376). The total rides along as that fold's cross-check against double counting.
+	gemThoughts *int64
+	gemTotal    *int64
 }
 
 func newStreamFolder(p config.Provider) *streamFolder { return &streamFolder{provider: p} }
@@ -225,11 +230,17 @@ func (f *streamFolder) feedGemini(payload []byte) {
 	if c.ModelVersion != "" {
 		f.model = c.ModelVersion
 	}
-	if c.UsageMetadata != nil {
-		setIfNotNil(&f.prompt, c.UsageMetadata.PromptTokenCount)
+	if u := c.UsageMetadata; u != nil {
+		setIfNotNil(&f.prompt, u.PromptTokenCount)
 		// The first chunks carry promptTokenCount with no candidatesTokenCount yet; an absent count
 		// must not overwrite one a later chunk supplied (nor invent a 0 for the early chunks).
-		setIfNotNil(&f.completion, c.UsageMetadata.CandidatesTokenCount)
+		setIfNotNil(&f.completion, u.CandidatesTokenCount)
+		// CTO-375/376: same last-wins rule. The cached share is fixed for the whole stream, while
+		// thoughts and the total climb with each chunk, so the trailing chunk wins and the fold in
+		// meta() runs once over the final numbers rather than per chunk.
+		setIfNotNil(&f.cached, u.CachedContentTokenCount)
+		setIfNotNil(&f.gemThoughts, u.ThoughtsTokenCount)
+		setIfNotNil(&f.gemTotal, u.TotalTokenCount)
 	}
 }
 
@@ -243,6 +254,11 @@ func (f *streamFolder) meta() responseMeta {
 	}
 	m.PromptTokens = f.prompt
 	m.CachedInputTokens = f.cached
+	if f.provider == config.ProviderGemini {
+		// CTO-376: fold the thinking tokens into the output count, with the same double-count guard
+		// the non-streamed path uses. A streamed reasoning-heavy call is the common case here.
+		m.CompletionTokens = geminiCompletion(f.completion, f.gemThoughts, f.gemTotal, f.prompt)
+	}
 	return m
 }
 

@@ -110,13 +110,18 @@ func TestGeminiMetaFromPublishedResponses(t *testing.T) {
 		wantComp   *int64
 	}{
 		{
-			// finishReason MAX_TOKENS, plus the thinking-model thoughtsTokenCount the parser does
-			// not read. candidatesTokenCount excludes thoughts, so 8 is the visible output only and
-			// the 96 thinking tokens are billed but unrecorded. Pinned here so the omission is
-			// visible rather than assumed away.
+			// finishReason MAX_TOKENS on a thinking model. CTO-376: candidatesTokenCount excludes
+			// thoughtsTokenCount, and thinking tokens are billed at the output rate, so the output
+			// is 8 visible + 96 thought = 104. This case used to pin the omission (wantComp: 8) so
+			// it would be visible rather than assumed away; the fold closes it.
+			//
+			// This fixture is also the empirical proof of the inclusion semantics the fold depends
+			// on, which is why the numbers are not round: 1204 prompt + 96 thoughts + 8 candidates
+			// is exactly the 1308 totalTokenCount the provider reported. Captured traffic, not a
+			// reading of the docs.
 			name: "max_tokens_with_thoughts", fixture: "gemini/response_max_tokens.json",
 			path:      "/v1beta/models/gemini-2.5-flash:generateContent",
-			wantModel: "gemini-2.5-flash", wantPrompt: ptr(1204), wantComp: ptr(8),
+			wantModel: "gemini-2.5-flash", wantPrompt: ptr(1204), wantComp: ptr(104),
 		},
 		{
 			// A safety-blocked prompt returns no candidates and a usageMetadata carrying only
