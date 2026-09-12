@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 GATEWAY := ai-tally-gateway
 
-.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-apply-retention ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop gateway-shell test prod-preflight ch psql
+.PHONY: help up down nuke logs ps seed demo pg-migrate ch-migrate ch-migrate-otel-engine ch-apply-retention ch-rollup-check ch-rollup-rebuild ch-priced-zero-check ch-repair-priced-zero aider-demo aider-demo-stop chatbot-demo chatbot-demo-realistic chatbot-demo-backfill chatbot-demo-stop verify-real-traffic gateway-shell test prod-preflight ch psql
 
 EDGE_PROXY_PID := /tmp/ai-tally-aider-edge-proxy.pid
 
@@ -241,6 +241,11 @@ chatbot-demo: ## Run the Vercel AI chatbot demo (needs OPENAI_API_KEY, ANTHROPIC
 
 chatbot-demo-realistic: ## Live realistic-volume run (~5000 sessions/~10min, REAL LLM spend capped ~$10)
 	@$(MAKE) chatbot-demo MODE=realistic
+
+verify-real-traffic: ## Check edge-proxy metering against REAL provider calls (your keys; MAX_USD cap, default 0.50; ARGS=--capture). CTO-350
+	@# A dedicated harness, not chatbot-demo-realistic: the chatbot calls providers directly and never
+	@# touches the edge proxy. See docs/real-traffic-verification.md.
+	cd edge-proxy && go run ./cmd/verify-real-traffic --max-usd $(or $(MAX_USD),0.50) $(ARGS)
 
 chatbot-demo-backfill: ## $0 backfill — POST 30 days of backdated synthetic spans to match the seed story (no LLM calls, no API keys)
 	@curl -sf http://localhost:8080/healthz >/dev/null || { \
