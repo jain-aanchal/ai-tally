@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
+import { sampleDataAllowed } from "@/lib/mock";
+
 import {
   MOCK_CAC_PERIODS,
   MOCK_PERIOD_ECONOMICS,
@@ -34,6 +36,14 @@ export async function GET(): Promise<NextResponse<CacPayload>> {
       economics: live.economics,
       isMock: false,
     });
+  }
+  // CTO-379: same gate as every other fixture fallback (#364). This route was missed alongside
+  // /api/compare, so Unit Economics answered a blank signed-in workspace with the fixture's CAC
+  // periods: a blended CAC, a payback in months and an LTV/CAC band, all computed from marketing
+  // spend the customer never entered. The comment above called it "clearly-labelled", but the label
+  // lived on the page and the numbers did not read as a label.
+  if (!sampleDataAllowed()) {
+    return NextResponse.json({ periods: [], economics: {}, isMock: false });
   }
   return NextResponse.json({
     periods: MOCK_CAC_PERIODS,

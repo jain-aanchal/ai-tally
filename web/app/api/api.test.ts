@@ -86,31 +86,30 @@ describe("api routes", () => {
     expect(miss.status).toBe(404);
   });
 
-  it("GET /api/compare returns a comparison", async () => {
-    // CompareGET is async since the live "current model from traffic" wiring;
-    // without a live stack the route returns the mock comparison untouched.
+  it("GET /api/compare answers the empty state, not the fixture, with no stack and no demo build", async () => {
+    // CTO-379: this case used to read "without a live stack the route returns the mock comparison
+    // untouched", and asserted candidates.length > 0. That expectation WAS the bug: this request
+    // (no ClickHouse, no NEXT_PUBLIC_DEMO_MODE, no TALLY_DEV_TENANT) is shaped exactly like a
+    // signed-in customer who has sent no traffic, and the fixture's $19,100/mo incumbent was the
+    // answer they got.
+    //
+    // Unlike three-states.test.ts this file runs against a real (absent) stack rather than a mocked
+    // one, so it pins the no-stack default specifically: fixtures require an explicit demo build,
+    // and nothing here sets one.
     const body = await json<{
-      workload: string;
-      current: {
-        qualityScore: number | null;
-        latencyP95Ms: number | null;
-        errorRate: number | null;
-      };
-      candidates: Array<{ qualityScore: number | null; qualityCi?: unknown }>;
+      workload: string | null;
+      current: unknown;
+      candidates: unknown[];
+      recommendation: unknown;
+      replay_source: string;
     }>(await CompareGET(new Request("http://test/api/compare") as never));
-    expect(body.workload).toBeTypeOf("string");
-    expect(body.candidates.length).toBeGreaterThan(0);
-    // CTO-114: with no eval pass having run (gateway unreachable in tests), every
-    // qualityScore must be null; the route MUST NOT fabricate a number.
-    expect(body.current.qualityScore).toBeNull();
-    for (const c of body.candidates) {
-      expect(c.qualityScore).toBeNull();
-      expect(c.qualityCi).toBeUndefined();
-    }
-    // CTO-115: shape check: fields exist; live path returns numbers (n>=50) or null (n<50);
-    // mock-fallback returns numbers. Route.test.ts covers both branches explicitly.
-    expect("latencyP95Ms" in body.current).toBe(true);
-    expect("errorRate" in body.current).toBe(true);
+    expect(body.current).toBeNull();
+    expect(body.workload).toBeNull();
+    expect(body.recommendation).toBeNull();
+    expect(body.candidates).toEqual([]);
+    // Not "mock": nothing here came from the fixture, and the page reads this to tell the
+    // new-workspace state from a demo build.
+    expect(body.replay_source).toBe("none");
   });
 
   it("GET /api/cost returns series + featureRows + alerts", async () => {
@@ -225,22 +224,22 @@ describe("api routes", () => {
     expect(body.filters.outcome).toBe("positive_feedback");
   });
 
-  it("GET /api/cac falls back to the labelled mock when the gateway is unreachable", async () => {
-    // CI / fresh-clone: the gateway isn't running, so queryCacPeriods returns [] and the route
-    // serves MOCK_CAC_PERIODS. Real CAC data goes through the live path (isMock=false).
+  it("GET /api/cac answers empty, not the mock, when the gateway is unreachable outside a demo build", async () => {
+    // CTO-379: this case used to assert isMock=true and periods.length > 0 from a bare unreachable
+    // gateway. That is indistinguishable from a signed-in customer who has entered no CAC data, and
+    // Unit Economics was showing them a blended CAC, a payback and an LTV/CAC band derived from
+    // marketing spend they never entered.
+    //
+    // The fixture still exists for demo builds; it now needs NEXT_PUBLIC_DEMO_MODE and
+    // TALLY_DEV_TENANT, which this request does not set. The gate is pinned in three-states.test.ts.
     const body = await json<{
-      periods: { periodStart: string; locked: boolean }[];
-      economics: Record<string, { arpaMicroUsd: number }>;
+      periods: { periodStart: string }[];
+      economics: Record<string, unknown>;
       isMock: boolean;
     }>(await CacGET());
-    expect(body.isMock).toBe(true);
-    expect(body.periods.length).toBeGreaterThan(0);
-    // Newest-first ordering.
-    expect(body.periods[0].periodStart).toBe("2026-05-01");
-    // A period intentionally omits economics (honest-null payback/LTV demo).
-    expect(body.economics["2026-03-01"]).toBeUndefined();
-    // And at least one period carries economics so the cards render real numbers.
-    expect(body.economics["2026-05-01"].arpaMicroUsd).toBeGreaterThan(0);
+    expect(body.isMock).toBe(false);
+    expect(body.periods).toEqual([]);
+    expect(body.economics).toEqual({});
   });
 
   it("POST /api/guardrails echoes a valid rule (gateway unreachable), rejects an unconstrained one", async () => {

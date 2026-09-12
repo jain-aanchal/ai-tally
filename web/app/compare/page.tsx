@@ -11,6 +11,7 @@ import { Suspense, type ReactNode } from "react";
 
 import { Card } from "@/components/Card";
 import {
+  NoDataYet,
   PartialDataBanner,
   StaleBadge,
   SyntheticPreviewBanner,
@@ -58,6 +59,26 @@ export default async function ComparePage({
   await searchParams;
   const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
+
+  // CTO-379: no incumbent means no subject. Every figure below is derived from the current model,
+  // so this is the new-workspace case and the next step is setup, not a comparison.
+  //
+  // This used to be the `state === "empty"` branch at the bottom, which wrapped the FIXTURE body in
+  // a "synthetic preview" banner. That was the right shape when fixtures were the fallback and the
+  // wrong one the moment they were gated: a signed-in customer with no traffic got a labelled tour
+  // of somebody else's migration, where Home and Cost Explorer would have pointed them at setup.
+  // The banner still has its job on a demo build, where the route does serve the fixture.
+  if (current === null || recommendation === null) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Model Comparison" />
+        <NoDataYet
+          what="model traffic"
+          detail="No model has served traffic for this workspace, so there is no current model to compare alternatives against."
+        />
+      </div>
+    );
+  }
 
   // This projection is built off reconciled baseline traffic — surface that baseline's freshness so
   // a comparison off a stale window is never shown as fresh (CTO-80).

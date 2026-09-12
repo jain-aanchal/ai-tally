@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// #364. The six dashboard routes must tell three facts apart, and answer each of them differently:
+// #364. The eight dashboard routes must tell three facts apart, and answer each of them differently:
 //
 //   unavailable - the read threw or timed out. We do not know. Say so; claim no figure.
 //   empty       - the read succeeded over no rows. We DO know: nothing has arrived. This is the
@@ -33,11 +33,25 @@ vi.mock("@/lib/clickhouse", () => ({
   queryAttributionDiagnostics: vi.fn(),
   queryFeatureValueEvents: vi.fn().mockResolvedValue([]),
   queryConnectorActivity: vi.fn(),
+  // CTO-379: compare was the one fixture route missing from this suite, which is how its ungated
+  // fallback survived #364. Adding it here is the part that stops the next one slipping through.
+  queryCurrentModel: vi.fn(),
+  queryReplayCandidates: vi.fn(),
+  queryEvalCandidates: vi.fn(),
   queryIntegrationStatus: vi.fn().mockResolvedValue([]),
+}));
+
+// CTO-379: /api/cac reads the gateway, not ClickHouse, so it needs its own stub. Without it this
+// suite would be asserting the gate over a real unreachable gateway, which is the kind of
+// environment dependence the file exists to avoid (see the header).
+vi.mock("@/lib/cac", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/cac")>()),
+  queryCacPeriods: vi.fn().mockResolvedValue({ periods: [], economics: {} }),
 }));
 
 import * as ch from "@/lib/clickhouse";
 import { agents as fixtureAgents, runs as fixtureRuns } from "@/lib/agents";
+import { comparison as fixtureComparison } from "@/lib/compare";
 import {
   LAYERS,
   costSeries as fixtureSeries,
@@ -55,6 +69,8 @@ import { GET as CostGET } from "./cost/route";
 import { GET as FeaturesGET } from "./features/route";
 import { GET as AttributionGET } from "./attribution/route";
 import { GET as ConnectorsGET } from "./connectors/route";
+import { GET as CompareGET } from "./compare/route";
+import { GET as CacGET } from "./cac/route";
 
 const mocked = ch as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -104,6 +120,10 @@ function allEmpty() {
     isMock: false,
   });
   mocked.queryAgents.mockResolvedValue({ agents: [], runs: [] });
+  // No incumbent, no replay corpus, no eval pass: the state of a workspace that has sent nothing.
+  mocked.queryCurrentModel.mockResolvedValue(null);
+  mocked.queryReplayCandidates.mockResolvedValue(null);
+  mocked.queryEvalCandidates.mockResolvedValue(null);
   mocked.queryCostSeries.mockResolvedValue({
     reconciledThrough: "1970-01-01",
     days: Array.from({ length: 30 }, (_, i) => ({
@@ -365,6 +385,16 @@ describe("the sample gate", () => {
     expect(ag.sources.agents).toBe("sample");
     const f = await body<{ sources: Record<string, string> }>(await FeaturesGET());
     expect(f.sources.features).toBe("sample");
+    // CTO-379: compare has no `sources` map; its fixture tell is the incumbent, whose $19,100/mo is
+    // the number a blank account was being shown.
+    const cmp = await body<{ current: { monthlyCostMicroUsd: number | null } | null }>(
+      await CompareGET(new Request("http://test/api/compare") as never),
+    );
+    expect(cmp.current?.monthlyCostMicroUsd).toBe(fixtureComparison.current.monthlyCostMicroUsd);
+    // CTO-379: /api/cac was ungated alongside compare. Its tell is isMock, which it already carried.
+    const cac = await body<{ isMock: boolean; periods: unknown[] }>(await CacGET());
+    expect(cac.isMock).toBe(true);
+    expect(cac.periods.length).toBeGreaterThan(0);
   });
 
   it("refuses fixtures for a demo build once a real organization resolves the tenant", async () => {
@@ -386,6 +416,27 @@ describe("the sample gate", () => {
     const c = await body<{ activity: string; connectors: { records: number }[] }>(await ConnectorsGET());
     expect(c.activity).toBe("empty");
     expect(c.connectors.every((x) => x.records === 0)).toBe(true);
+
+    // CTO-379, the reported bug: Model Comparison on a blank signed-in account. It used to answer
+    // with the fixture's $19,100/mo incumbent, a priced candidate table and a switch recommendation.
+    // Null across the three is what lets the page send them to setup instead.
+    const cmp = await body<{
+      current: unknown;
+      candidates: unknown[];
+      recommendation: unknown;
+      workload: unknown;
+    }>(await CompareGET(new Request("http://test/api/compare") as never));
+    expect(cmp.current).toBeNull();
+    expect(cmp.recommendation).toBeNull();
+    expect(cmp.workload).toBeNull();
+    expect(cmp.candidates).toEqual([]);
+
+    // CTO-379: Unit Economics on the same blank account. The fixture CAC periods produced a blended
+    // CAC, a payback in months and an LTV/CAC band from marketing spend nobody entered.
+    const cac = await body<{ isMock: boolean; periods: unknown[]; economics: unknown }>(await CacGET());
+    expect(cac.isMock).toBe(false);
+    expect(cac.periods).toEqual([]);
+    expect(cac.economics).toEqual({});
   });
 
   it("refuses fixtures for the dev escape hatch when demo mode is not switched on", async () => {

@@ -15,6 +15,7 @@ import { Suspense, useMemo } from "react";
 
 import { Card } from "@/components/Card";
 import { DataTable, type Column } from "@/components/DataTable";
+import { NoDataYet } from "@/components/DataStateBanner";
 import { FilterBar, type FilterOption } from "@/components/FilterBar";
 import { Blank, Money } from "@/components/HonestValue";
 import { LiveIndicator } from "@/components/LiveIndicator";
@@ -170,8 +171,18 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
           <p className="text-sm">
             <Blank reason={report.unavailable} /> the waste report is unavailable for this window.
           </p>
+        ) : findings.length === 0 && report.hasTelemetry === false ? (
+          // CTO-379: no spans at all. The detectors did run, and they ran over an empty window, so
+          // the good-news sentence below would be congratulating this workspace on the efficiency of
+          // no traffic. Home and Cost Explorer send a workspace in this state to setup; so does this.
+          <NoDataYet
+            what="AI spend to examine"
+            detail="No telemetry has reached this workspace, so there is nothing for the waste detectors to find."
+          />
         ) : findings.length === 0 ? (
           // GOOD news, not a broken page: nothing recoverable was detected in this window.
+          // Reached when telemetry exists, or when its presence could not be read: in the second
+          // case the detectors still ran and still flagged nothing, which is what this claims.
           <p className="text-sm text-good">
             No recoverable waste found in this window. Every detector ran and flagged nothing.
           </p>
