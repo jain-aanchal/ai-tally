@@ -89,8 +89,9 @@ func TestAnthropicMetaFromPublishedResponses(t *testing.T) {
 		// A refusal (stop_reason "refusal", empty content) bills the input and produces no output.
 		// The 0 here is the provider's own reported figure, not a proxy-invented one.
 		{"anthropic/message_refusal.json", "claude-opus-5", ptr(331), ptr(0)},
-		// Cache hit: see TestAnthropicCacheTokensAreNotFoldedIntoPromptTokens below.
-		{"anthropic/message_cache_read.json", "claude-opus-5", ptr(21), ptr(44)},
+		// Cache hit: input_tokens (21) EXCLUDES the 18923 tokens served from cache, so the billable
+		// prompt is the sum. See TestAnthropicCacheTokensFoldIntoPromptTokens below.
+		{"anthropic/message_cache_read.json", "claude-opus-5", ptr(18944), ptr(44)},
 		// The error envelope carries neither model nor usage. Everything stays unknown.
 		{"anthropic/error_overloaded.json", "", nil, nil},
 	}
@@ -106,24 +107,42 @@ func TestAnthropicMetaFromPublishedResponses(t *testing.T) {
 	}
 }
 
-// TestAnthropicCacheTokensAreNotFoldedIntoPromptTokens pins a real fidelity limit rather than
-// asserting it away. Anthropic reports cache_read_input_tokens and cache_creation_input_tokens
-// alongside input_tokens, and input_tokens EXCLUDES them, so PromptTokens on a cache hit is the
-// uncached prompt only. That is honest (it is the field the provider labels input tokens) but it
-// is not the whole billable input, and pricing a cached call from this record alone under-reports
-// it. Recording the cache counts is a schema change beyond this proxy, so the test exists to make
-// the gap visible instead of letting a future reader assume the number is complete.
-func TestAnthropicCacheTokensAreNotFoldedIntoPromptTokens(t *testing.T) {
+// TestAnthropicCacheTokensFoldIntoPromptTokens covers CTO-349's second defect.
+//
+// Anthropic reports cache_creation_input_tokens and cache_read_input_tokens alongside
+// input_tokens, and input_tokens EXCLUDES both. Reporting input_tokens alone therefore under-counts
+// a cached prompt by everything the cache served: this fixture's real prompt is 18944 tokens and
+// the record used to claim 21. The cache-read share rides along separately, because it is billed at
+// a lower rate than fresh input and the price catalog can express exactly that split.
+//
+// What is still approximate is recorded rather than hidden: cache CREATION tokens are inside the
+// total but have no separate field, so they price at the standard input rate instead of the write
+// premium. See docs/anthropic-cache-tokens.md.
+func TestAnthropicCacheTokensFoldIntoPromptTokens(t *testing.T) {
 	meta := extractMeta(config.ProviderAnthropic, "/v1/messages",
 		readFixture(t, "anthropic/message_cache_read.json"))
-	if !tokensEq(meta.PromptTokens, 21) {
-		t.Fatalf("PromptTokens = %s, want 21 (input_tokens only)", tokensStr(meta.PromptTokens))
-	}
-	// If this ever starts reporting 18944 (21 + 18923), the proxy learned about cache tokens and
-	// this test should be replaced by one that asserts the new, richer record.
-	if tokensEq(meta.PromptTokens, 18944) {
-		t.Errorf("cache tokens are now folded into PromptTokens; update this test and the pricing path")
-	}
+	// 21 fresh + 0 cache writes + 18923 cache reads.
+	assertTokens(t, "PromptTokens", meta.PromptTokens, ptr(18944))
+	assertTokens(t, "CachedInputTokens", meta.CachedInputTokens, ptr(18923))
+}
+
+// TestAnthropicCacheTokenAbsenceVsZero is the honesty half of the fold, and the distinction the
+// pointer counts exist for. A response that omits the cache fields reports the cache share as
+// UNKNOWN; one that reports them as 0 reports 0. Collapsing the two would make the proxy assert
+// "prompt caching saved this tenant nothing" on every payload that simply did not mention it.
+func TestAnthropicCacheTokenAbsenceVsZero(t *testing.T) {
+	// message_tool_use.json carries usage with no cache fields at all.
+	absent := extractMeta(config.ProviderAnthropic, "/v1/messages",
+		readFixture(t, "anthropic/message_tool_use.json"))
+	assertTokens(t, "PromptTokens", absent.PromptTokens, ptr(472))
+	assertTokens(t, "CachedInputTokens", absent.CachedInputTokens, nil)
+
+	// message_end_turn.json reports both cache buckets as an explicit 0, which is the provider's
+	// own figure and is preserved as 0.
+	reported := extractMeta(config.ProviderAnthropic, "/v1/messages",
+		readFixture(t, "anthropic/message_end_turn.json"))
+	assertTokens(t, "PromptTokens", reported.PromptTokens, ptr(10))
+	assertTokens(t, "CachedInputTokens", reported.CachedInputTokens, ptr(0))
 }
 
 // TestAnthropicProxyRecordsMetadataAndHidesKey is the end-to-end acceptance: a POST /v1/messages
@@ -223,25 +242,35 @@ func TestAnthropicProxyToolUseTurn(t *testing.T) {
 	}
 }
 
-// TestAnthropicProxyStreamingSSE drives the published SSE event sequence.
+// TestAnthropicProxyStreamingSSE drives the published SSE event sequence end to end (CTO-349).
 //
-// Two things are asserted, and one gap is recorded honestly. The stream is relayed byte-for-byte,
-// and the metadata stays UNKNOWN rather than being invented: anthropicMeta json.Unmarshals the
-// whole body, an SSE stream is not one JSON document, so the decode fails and the record carries
-// nils. That is the correct failure direction (a nil is a NULL downstream; a 0 would be a lie), but
-// it does mean a streamed Anthropic call is currently unattributed to a model, even though the
-// model and both token counts are right there in the message_start and message_delta events. The
-// gemini path avoids this only because it can recover the model from the request URL, and the
-// Anthropic path has no such fallback. Parsing SSE is a change to provider.go, which this
-// test-only change deliberately does not make; see the issue.
+// Anthropic splits the usage across events: message_start carries the model and the input tokens,
+// message_delta the final cumulative output count, so a parser that reads either one alone gets
+// half the answer. The stream must still reach the client byte-for-byte and unbuffered, which is
+// asserted here too: the fold happens on the bytes as they pass, never by holding them.
+//
+// The mid-stream error case is the interesting one for honesty. That stream ends after
+// message_start with an error event and no message_delta, so the input count and the 1 output token
+// message_start reported are real and are kept, while the final output count never existed and
+// stays at what was actually reported rather than being completed with a guess.
 func TestAnthropicProxyStreamingSSE(t *testing.T) {
-	for _, name := range []string{
-		"anthropic/stream_text.sse",
-		"anthropic/stream_tool_use.sse",
-		"anthropic/stream_midstream_error.sse",
-	} {
-		t.Run(name, func(t *testing.T) {
-			body := readFixture(t, name)
+	cases := []struct {
+		fixture    string
+		wantModel  string
+		wantPrompt *int64
+		wantComp   *int64
+	}{
+		// message_start input 25, message_delta cumulative output 15.
+		{"anthropic/stream_text.sse", "claude-opus-5", ptr(25), ptr(15)},
+		// A tool-use stream meters like any other: input 472, final output 89. The partial_json
+		// deltas carrying the tool arguments are content and are never retained.
+		{"anthropic/stream_tool_use.sse", "claude-opus-5", ptr(472), ptr(89)},
+		// Cut short by an error event: what message_start reported stands, nothing is invented.
+		{"anthropic/stream_midstream_error.sse", "claude-opus-5", ptr(25), ptr(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			body := readFixture(t, tc.fixture)
 			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
@@ -274,17 +303,54 @@ func TestAnthropicProxyStreamingSSE(t *testing.T) {
 				t.Errorf("trace status = %d, want 200 (a mid-stream error is still a 200 on the wire)",
 					rec.StatusCode)
 			}
-			// The gap, pinned: unknown, and specifically not fabricated.
-			if rec.PromptTokens != nil || rec.CompletionTokens != nil {
-				t.Errorf("streamed usage is not parsed today; expected unknown counts, got %s/%s",
-					tokensStr(rec.PromptTokens), tokensStr(rec.CompletionTokens))
+			if rec.Model != tc.wantModel {
+				t.Errorf("Model = %q, want %q", rec.Model, tc.wantModel)
 			}
-			if rec.Model != "" {
-				t.Errorf("Model = %q; if the SSE parser landed, replace this test with one that "+
-					"asserts the model and the cumulative message_delta usage", rec.Model)
+			assertTokens(t, "PromptTokens", rec.PromptTokens, tc.wantPrompt)
+			assertTokens(t, "CompletionTokens", rec.CompletionTokens, tc.wantComp)
+			// None of these streams mentions the prompt cache, so the cache share is unknown.
+			assertTokens(t, "CachedInputTokens", rec.CachedInputTokens, nil)
+			// The fold reads counts only; no fragment of the streamed content may survive on the
+			// record (the tool-use stream carries a location argument, the text stream "Hello").
+			for _, leak := range []string{"San Francisco", "Hello", "get_weather"} {
+				if strings.Contains(fmt.Sprintf("%+v", rec), leak) {
+					t.Errorf("trace record leaked streamed content %q", leak)
+				}
 			}
 		})
 	}
+}
+
+// TestAnthropicStreamClientDisconnect covers the stream that ends early because the CLIENT walked
+// away mid-event, not because the provider finished. The proxy reports what the provider managed to
+// send before the cut and nothing more: a truncated final event is not parsed at all (a half-read
+// JSON object could decode to a plausible wrong number), so the counts from complete earlier events
+// stand and the rest is whatever was last reported.
+func TestAnthropicStreamClientDisconnect(t *testing.T) {
+	full := string(readFixture(t, "anthropic/stream_text.sse"))
+	// Cut in the middle of the message_delta event that carries the final output count.
+	cut := strings.Index(full, `"stop_reason": "end_turn"`)
+	if cut < 0 {
+		t.Fatal("fixture no longer contains the message_delta stop_reason")
+	}
+	truncated := full[:cut]
+
+	var meta responseMeta
+	mc := newMetaCapture(io.NopCloser(strings.NewReader(truncated)),
+		config.ProviderAnthropic, "/v1/messages", true, &meta)
+	if _, err := io.Copy(io.Discard, mc); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if err := mc.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if meta.Model != "claude-opus-5" {
+		t.Errorf("Model = %q, want claude-opus-5", meta.Model)
+	}
+	// message_start completed, so its counts are real; the final output count never arrived.
+	assertTokens(t, "PromptTokens", meta.PromptTokens, ptr(25))
+	assertTokens(t, "CompletionTokens", meta.CompletionTokens, ptr(1))
 }
 
 // TestAnthropicProxyErrorResponse: a 529 error envelope is recorded with its real status and no
@@ -328,13 +394,9 @@ func TestAnthropicProxyErrorResponse(t *testing.T) {
 	}
 }
 
-// TestAnthropicProviderDefaultUpstream records today's behavior, which is a wart found while
-// closing this issue: only gemini has a provider-specific default upstream, so
-// EDGE_PROXY_PROVIDER=anthropic with no EDGE_PROXY_UPSTREAM resolves to api.openai.com and
-// every request 404s against a protocol it was never meant for. Deployments always set the
-// upstream explicitly, so nothing is broken in practice, but the default is wrong. The assertion
-// is written so that adding a DefaultAnthropicUpstream fails here and the fix is a deliberate,
-// reviewed change rather than a silent one.
+// TestAnthropicProviderDefaultUpstream covers CTO-349's third defect: EDGE_PROXY_PROVIDER=anthropic
+// with no EDGE_PROXY_UPSTREAM used to resolve to api.openai.com, quietly pointing a customer's
+// Anthropic traffic at the wrong vendor. Each provider now names its own origin.
 func TestAnthropicProviderDefaultUpstream(t *testing.T) {
 	cfg, err := config.FromEnv(func(k string) string {
 		if k == "EDGE_PROXY_PROVIDER" {
@@ -345,9 +407,54 @@ func TestAnthropicProviderDefaultUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	if got := cfg.Upstream.String(); got != config.DefaultUpstream {
-		t.Errorf("default upstream for provider=anthropic = %q, want %q; if an Anthropic-specific "+
-			"default was added, update this test to assert it", got, config.DefaultUpstream)
+	if got := cfg.Upstream.String(); got != config.DefaultAnthropicUpstream {
+		t.Errorf("default upstream for provider=anthropic = %q, want %q", got,
+			config.DefaultAnthropicUpstream)
+	}
+}
+
+// TestProviderDefaultUpstreamIsExplicit checks the whole mapping, because the bug was not really
+// "anthropic is missing" but "anything that is not gemini silently becomes OpenAI". An explicit
+// EDGE_PROXY_UPSTREAM still wins everywhere.
+func TestProviderDefaultUpstreamIsExplicit(t *testing.T) {
+	cases := []struct{ provider, want string }{
+		{"", config.DefaultUpstream},
+		{"openai", config.DefaultUpstream},
+		{"anthropic", config.DefaultAnthropicUpstream},
+		{"gemini", config.DefaultGeminiUpstream},
+	}
+	for _, tc := range cases {
+		t.Run("default/"+tc.provider, func(t *testing.T) {
+			cfg, err := config.FromEnv(func(k string) string {
+				if k == "EDGE_PROXY_PROVIDER" {
+					return tc.provider
+				}
+				return ""
+			})
+			if err != nil {
+				t.Fatalf("config: %v", err)
+			}
+			if got := cfg.Upstream.String(); got != tc.want {
+				t.Errorf("provider %q default upstream = %q, want %q", tc.provider, got, tc.want)
+			}
+		})
+		t.Run("explicit/"+tc.provider, func(t *testing.T) {
+			cfg, err := config.FromEnv(func(k string) string {
+				switch k {
+				case "EDGE_PROXY_PROVIDER":
+					return tc.provider
+				case "EDGE_PROXY_UPSTREAM":
+					return "https://llm.internal.example"
+				}
+				return ""
+			})
+			if err != nil {
+				t.Fatalf("config: %v", err)
+			}
+			if got := cfg.Upstream.String(); got != "https://llm.internal.example" {
+				t.Errorf("explicit upstream for provider %q = %q", tc.provider, got)
+			}
+		})
 	}
 }
 

@@ -54,18 +54,50 @@ func TestOpenAIMetaFromPublishedResponses(t *testing.T) {
 	}
 }
 
-// TestOpenAIStreamedUsageIsNotParsed pins a gap the same way the Anthropic streaming test does.
-// With stream_options.include_usage the final SSE chunk carries the full usage block, but the body
-// is a sequence of "data:" frames rather than one JSON document, so the parse fails and everything
-// stays unknown. Honest (unknown, not zero) and incomplete: a streamed OpenAI call is currently
-// unattributed even to a model, though both are present on the wire.
-func TestOpenAIStreamedUsageIsNotParsed(t *testing.T) {
+// TestOpenAIStreamedUsage covers CTO-349 on the OpenAI protocol. With
+// stream_options.include_usage the final chunk (the one whose choices array is empty) carries the
+// whole usage block, and every chunk carries the model, so a streamed call now meters exactly like
+// a buffered one.
+func TestOpenAIStreamedUsage(t *testing.T) {
 	meta := extractMeta(config.ProviderOpenAI, "/v1/chat/completions",
 		readFixture(t, "openai/stream_with_usage.sse"))
-	if meta.Model != "" || meta.PromptTokens != nil || meta.CompletionTokens != nil {
-		t.Errorf("streamed chunks are not parsed today; got %+v. If an SSE parser landed, replace "+
-			"this test with one asserting model gpt-4o-2024-08-06 and 19/10 tokens", meta)
+	if meta.Model != "gpt-4o-2024-08-06" {
+		t.Errorf("Model = %q, want gpt-4o-2024-08-06", meta.Model)
 	}
+	assertTokens(t, "PromptTokens", meta.PromptTokens, ptr(19))
+	assertTokens(t, "CompletionTokens", meta.CompletionTokens, ptr(10))
+	// The fixture's usage block has no prompt_tokens_details, so the cached share is unknown.
+	assertTokens(t, "CachedInputTokens", meta.CachedInputTokens, nil)
+}
+
+// TestOpenAIStreamedWithoutUsageOptIn is the case the proxy cannot fix and must not paper over.
+//
+// OpenAI emits the usage chunk only when the request set stream_options.include_usage. Without it
+// the counts are on no chunk at all, so they stay unknown: the proxy does not estimate them from
+// the streamed text, and deliberately does not inject the opt-in into the customer's request body,
+// which it forwards byte-for-byte. The model is still recovered from the chunks, so the span is
+// attributable to a model and reads as an unpriced call rather than a free one. The fix for those
+// spans is for the caller to set stream_options.include_usage.
+func TestOpenAIStreamedWithoutUsageOptIn(t *testing.T) {
+	meta := extractMeta(config.ProviderOpenAI, "/v1/chat/completions",
+		readFixture(t, "openai/stream_no_usage.sse"))
+	if meta.Model != "gpt-4o-2024-08-06" {
+		t.Errorf("Model = %q, want gpt-4o-2024-08-06", meta.Model)
+	}
+	assertTokens(t, "PromptTokens", meta.PromptTokens, nil)
+	assertTokens(t, "CompletionTokens", meta.CompletionTokens, nil)
+	assertTokens(t, "CachedInputTokens", meta.CachedInputTokens, nil)
+}
+
+// TestOpenAIStreamedCachedPromptTokens reads prompt_tokens_details.cached_tokens off the streamed
+// usage block. OpenAI's prompt_tokens INCLUDES the cached share (unlike Anthropic's input_tokens),
+// so the cached count is reported as the subset it is and nothing is added to the prompt total.
+func TestOpenAIStreamedCachedPromptTokens(t *testing.T) {
+	meta := extractMeta(config.ProviderOpenAI, "/v1/chat/completions",
+		readFixture(t, "openai/stream_cached_prompt.sse"))
+	assertTokens(t, "PromptTokens", meta.PromptTokens, ptr(2048))
+	assertTokens(t, "CompletionTokens", meta.CompletionTokens, ptr(12))
+	assertTokens(t, "CachedInputTokens", meta.CachedInputTokens, ptr(1920))
 }
 
 func TestGeminiMetaFromPublishedResponses(t *testing.T) {
@@ -102,10 +134,13 @@ func TestGeminiMetaFromPublishedResponses(t *testing.T) {
 			wantModel: "gemini-1.5-pro", wantPrompt: nil, wantComp: nil,
 		},
 		{
-			// alt=sse streaming: not one JSON document, so only the path-derived model survives.
+			// alt=sse streaming (CTO-349): usageMetadata repeats on every chunk with the running
+			// totals, so the counts come from the last chunk that reported each one. The early
+			// chunks carry promptTokenCount with no candidatesTokenCount yet, and that absence must
+			// not overwrite the final count nor read as an output of 0.
 			name: "streaming_sse", fixture: "gemini/stream_generate_content.sse",
 			path:      "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
-			wantModel: "gemini-2.5-flash", wantPrompt: nil, wantComp: nil,
+			wantModel: "gemini-2.5-flash", wantPrompt: ptr(25), wantComp: ptr(15),
 		},
 	}
 	for _, tc := range cases {

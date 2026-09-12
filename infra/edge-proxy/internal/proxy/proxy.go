@@ -190,13 +190,17 @@ func (p *Proxy) captureMeta(resp *http.Response) error {
 	if holder == nil {
 		return nil
 	}
-	resp.Body = &metaCapture{
-		inner:    resp.Body,
-		provider: rt.provider,
-		path:     resp.Request.URL.Path,
-		out:      holder,
-	}
+	// CTO-349: a streamed response puts its usage in the event sequence rather than in one JSON
+	// document, so it is folded incrementally as it passes. Deciding from the response Content-Type
+	// means the choice is made before any body byte arrives, and a stream is never accumulated.
+	resp.Body = newMetaCapture(
+		resp.Body, rt.provider, resp.Request.URL.Path, isEventStream(resp.Header), holder)
 	return nil
+}
+
+// isEventStream reports whether the upstream is streaming SSE back to the client.
+func isEventStream(h http.Header) bool {
+	return strings.Contains(strings.ToLower(h.Get("Content-Type")), "text/event-stream")
 }
 
 // ServeHTTP forwards the request and records a telemetry copy.
@@ -304,22 +308,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.rp.ServeHTTP(rec, r.WithContext(ctx))
 
 	p.sink.Record(TraceRecord{
-		TenantKey:        tenant,
-		TenantId:         tenantID,
-		FeatureTag:       featureTag,
-		AccountIdHash:    accountIdHash,
-		Method:           r.Method,
-		Path:             r.URL.Path,
-		Provider:         string(route.provider),
-		Model:            meta.Model,
-		PromptTokens:     meta.PromptTokens,
-		CompletionTokens: meta.CompletionTokens,
-		StatusCode:       rec.status,
-		ReqBytes:         reqBytes,
-		RespBytes:        rec.written,
-		Duration:         p.now().Sub(start),
-		StartedAt:        start,
-		Failed:           rec.failed,
+		TenantKey:         tenant,
+		TenantId:          tenantID,
+		FeatureTag:        featureTag,
+		AccountIdHash:     accountIdHash,
+		Method:            r.Method,
+		Path:              r.URL.Path,
+		Provider:          string(route.provider),
+		Model:             meta.Model,
+		PromptTokens:      meta.PromptTokens,
+		CompletionTokens:  meta.CompletionTokens,
+		CachedInputTokens: meta.CachedInputTokens,
+		StatusCode:        rec.status,
+		ReqBytes:          reqBytes,
+		RespBytes:         rec.written,
+		Duration:          p.now().Sub(start),
+		StartedAt:         start,
+		Failed:            rec.failed,
 	})
 }
 

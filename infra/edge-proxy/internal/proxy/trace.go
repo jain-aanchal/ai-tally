@@ -57,6 +57,20 @@ type TraceRecord struct {
 	// never persists or logs the body they came from.
 	PromptTokens     *int64
 	CompletionTokens *int64
+	// CachedInputTokens is the share of PromptTokens the provider served from its prompt cache
+	// (Anthropic usage.cache_read_input_tokens, OpenAI usage.prompt_tokens_details.cached_tokens).
+	// It is a SUBSET of PromptTokens, matching how the price catalog reads it: the gateway bills
+	// (input - cached) at the standard rate and cached at the cheaper cached rate, so shipping it
+	// is what stops a cache-heavy call being priced as if every prompt token were fresh (CTO-349).
+	// Nil like the other counts when the provider did not report it; a provider that reported an
+	// explicit 0 is a different fact and is preserved as 0.
+	//
+	// Anthropic's cache CREATION tokens have no field here. They are included in PromptTokens (they
+	// are prompt input, and dropping them would under-count the call outright) but are billed at a
+	// premium the wire has no way to express, so a cache-write-heavy call is under-priced by that
+	// premium. Adding a field would be dishonest without the matching gen_ai attribute, price type
+	// and column downstream; see docs/anthropic-cache-tokens.md.
+	CachedInputTokens *int64
 	// StatusCode is the upstream response status relayed to the client (0 if the upstream failed
 	// before any status, e.g. connection refused, see Failed).
 	StatusCode int

@@ -47,7 +47,8 @@ These are enforced by tests, not just documented:
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `EDGE_PROXY_LISTEN` | `:8088` | bind address |
-| `EDGE_PROXY_UPSTREAM` | `https://api.openai.com` | provider origin |
+| `EDGE_PROXY_UPSTREAM` | per provider (see `EDGE_PROXY_PROVIDER`) | provider origin |
+| `EDGE_PROXY_PROVIDER` | (none) | `openai` / `anthropic` / `gemini`: read model and token usage off each response into the span. Empty is pure pass-through with no response inspection. It also picks the default upstream when `EDGE_PROXY_UPSTREAM` is unset: `https://api.openai.com`, `https://api.anthropic.com`, `https://generativelanguage.googleapis.com`. A provider with no registered default refuses to start rather than falling back to the wrong vendor |
 | `EDGE_PROXY_TENANT_HEADER` | `X-Tenant-Key` | control header carrying the tenant id (stripped before upstream) |
 | `EDGE_PROXY_FEATURE_TAG_HEADER` | `X-Tally-Feature-Tag` | optional control header carrying a per-request feature/agent tag (stripped before upstream) |
 | `EDGE_PROXY_ACCOUNT_ID_HASH_HEADER` | `X-Tally-Account-Id-Hash` | optional control header carrying the **already-hashed** account id (stripped before upstream), see below |
@@ -122,6 +123,36 @@ never forwarded unauthenticated; a brand-new key can miss the cache until the ne
 is honest and bounded, not a fabricated success. A transient feed error keeps the last good map:
 resolution never fails open. `GET /v1/edge/keys` is delivered by a separate gateway PR; only the
 SHA-256 hash is ever sent over it, never a raw or reversible token.
+
+## Usage extraction, including streamed responses (CTO-167 / CTO-349)
+
+With a provider protocol configured, the proxy reads the model id and the token counts off each
+response and hangs them on the span. It reads **only** scalars: no prompt, completion, or retrieved
+text is parsed, kept, or logged.
+
+Streamed (SSE) responses are folded event by event as they pass, not buffered. Each provider puts
+the numbers somewhere different:
+
+- **OpenAI**: one final chunk carries the whole `usage` block, and every chunk carries the model.
+  That chunk is only sent when the request set `stream_options.include_usage`. **Without the opt-in
+  the counts are on no chunk at all**, so the span is recorded with the model and unknown counts.
+  The proxy does not estimate them and deliberately does not inject `stream_options` into the
+  customer's request body, which it forwards byte-for-byte. Set `include_usage` in your client to
+  get streamed OpenAI calls priced.
+- **Anthropic**: `message_start` carries the model and the input tokens, `message_delta` the final
+  cumulative output count, so both events are needed. Cache buckets fold in from either (see
+  `docs/anthropic-cache-tokens.md`).
+- **Gemini**: `usageMetadata` repeats on every chunk with running totals; the last chunk to report
+  each count wins. The model still comes from the request path.
+
+Nothing is buffered and nothing is retained: the scan holds one SSE line, so a completion that
+streams for minutes costs the same memory as one that streams for a second, and `FlushInterval = -1`
+still hands every byte to the client immediately. An event larger than the 1 MiB line bound is
+skipped rather than half-parsed, and a stream that ends early (client disconnect, mid-stream `error`
+event) keeps whatever the provider actually reported before the cut.
+
+Where a count is not on the wire it stays **unknown**, never `0`: an unpriced span reads as a blank,
+not as a call that cost nothing.
 
 ## Account attribution (CTO-182)
 
