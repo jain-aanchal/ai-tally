@@ -1,6 +1,8 @@
 # Scope: the scheduler
 
-**Status: proposal.** Periodic per-tenant job execution. Nothing in this repo schedules anything, and five features are blocked on that.
+**Status: SHIPPED (#342).** Periodic per-tenant job execution.
+
+The opening claim below ("nothing in this repo schedules anything, and five features are blocked on that") is no longer true: `infra/gateway/src/gateway/scheduler.py` is built and runs per-tenant jobs on a cadence. It follows the design argued here, calling the existing `record_run` paths rather than inventing a second source of truth for "did it run".
 
 ## The problem, measured
 

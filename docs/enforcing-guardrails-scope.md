@@ -1,7 +1,10 @@
 # Scope: guardrails that stop things
 
-**Status: proposal, not built.** A budget ceiling per feature and per tenant that can downgrade the
+**Status: SHIPPED (#342).** A budget ceiling per feature and per tenant that can downgrade the
 model or refuse the call.
+
+The control plane is `infra/gateway/src/gateway/tenant_budgets.py` over `0026_tenant_budgets.sql`,
+with the SDK-side engine enforcing in-flight and the dashboard at `web/app/guardrails/`.
 
 ## One correction: refusal already works
 

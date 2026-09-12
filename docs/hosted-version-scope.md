@@ -1,7 +1,21 @@
 # Scope: hosted ai-tally
 
-**Status: proposal, not built.** A managed multi-tenant service, so evaluating ai-tally does not
-require standing up ClickHouse, Postgres, Redpanda and MinIO first.
+**Status: proposal. NOT built, but both of its stated blockers are gone (#342).** A managed
+multi-tenant service, so evaluating ai-tally does not require standing up ClickHouse, Postgres,
+Redpanda and MinIO first.
+
+This is the doc most worth re-reading, because it argues from two obstacles that Initiative 1 has
+since cleared:
+
+- "the dashboard has no authentication at all" is false. Clerk protects every route through
+  `web/middleware.ts`.
+- "the tenant is a deploy-time environment variable" is false. `web/lib/getTenant.ts` resolves the
+  tenant from the authenticated Clerk organization and throws rather than falling back; the
+  `TALLY_DEV_TENANT` escape hatch is for keyless local dev and CI, and a production build refuses to
+  boot on it (`instrumentation.ts`).
+
+So the feature is still unbuilt, but the case below for it being far off no longer holds. See
+`docs/initiatives/01-organizations-users-access.md` §13 for the as-built status map.
 
 ## One correction to the premise
 
