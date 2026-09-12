@@ -144,6 +144,24 @@ else
   pin_dashboard_tenant "${TENANT_UUID}"
 fi
 
+# CTO-373: skip the backfill when this tenant already has spans. Re-running deploy.sh to pick up a
+# code change should not re-post a 30-day corpus: it takes minutes and ships 512k spans over the wire
+# for a tenant that already holds them. The generator is deterministic and the gateway dedupes a
+# replayed batch_id, so a second run is not corrupting, just slow and confusing.
+#
+# The count comes from ClickHouse rather than a marker file, so it stays right across a repo re-clone
+# and a `make nuke`. SKIP_BACKFILL=1 forces the skip, FORCE_BACKFILL=1 runs it anyway.
+EXISTING_SPANS="$("${COMPOSE[@]}" exec -T clickhouse clickhouse-client \
+  --user "${CLICKHOUSE_USER:-tally}" --password "${CLICKHOUSE_PASSWORD:-tally}" \
+  -q "SELECT count() FROM otel_spans WHERE TenantId='${TENANT_UUID}'" 2>/dev/null | tr -d '[:space:]')"
+EXISTING_SPANS="${EXISTING_SPANS:-0}"
+
+if [ "${SKIP_BACKFILL:-}" = "1" ]; then
+  echo "==> Skipping the backfill (SKIP_BACKFILL=1). Tenant holds ${EXISTING_SPANS} spans."
+elif [ "${EXISTING_SPANS}" != "0" ] && [ "${FORCE_BACKFILL:-}" != "1" ]; then
+  echo "==> Skipping the backfill: tenant ${TENANT_UUID} already holds ${EXISTING_SPANS} spans."
+  echo "    Re-post it anyway with: FORCE_BACKFILL=1 ./deploy/demo/deploy.sh"
+else
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # The `make chatbot-demo-backfill` target runs on the HOST and POSTs to localhost:8080 - neither
 # works on a locked-down single VM (no host Node, and the gateway publishes no host port in prod).
@@ -169,15 +187,25 @@ docker run --rm \
   -e GATEWAY_SERVICE_TOKEN="${TALLY_GATEWAY_SERVICE_TOKEN:-}" \
   node:22-bookworm-slim \
   npx --yes tsx /scripts/backfill-spans.ts --tenant "${TENANT_UUID}"
+fi
 
 # --- Done ---------------------------------------------------------------------------------------
+# CTO-373: the login line depends on the auth mode. In clerk mode there is no BASIC_AUTH_USER, and
+# printing "Login:  (password: the plaintext you hashed...)" told the operator to use a credential
+# that does not exist in that mode.
+if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
+  LOGIN_LINE="  Login: Clerk sign-in at https://${DOMAIN}/sign-in"
+else
+  LOGIN_LINE="  Login: ${BASIC_AUTH_USER}  (password: the plaintext you hashed into BASIC_AUTH_HASH)"
+fi
+
 cat <<EOF
 
 ==================================================================
   ai-tally demo is up.
 
   URL:   https://${DOMAIN}
-  Login: ${BASIC_AUTH_USER}  (password: the plaintext you hashed into BASIC_AUTH_HASH)
+${LOGIN_LINE}
 
   The dataset is SYNTHETIC (seeded + backfilled), safe to share with testers.
   Share the link and password privately. Reset the data with deploy/demo/reseed.sh.
