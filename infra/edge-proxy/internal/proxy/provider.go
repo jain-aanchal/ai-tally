@@ -30,6 +30,13 @@ type responseMeta struct {
 	Model            string
 	PromptTokens     *int64
 	CompletionTokens *int64
+	// CachedInputTokens is the portion of PromptTokens the provider served from a prompt cache
+	// (Anthropic usage.cache_read_input_tokens, OpenAI usage.prompt_tokens_details.cached_tokens).
+	// It is a SUBSET of PromptTokens, not an addition to it, which is the semantics the rest of the
+	// product already uses (sdk/python/src/tally/pricing.py prices input - cached at the standard
+	// rate and cached at the cached rate). Nil when the provider did not report it, which is not the
+	// same fact as a reported 0 (CTO-349).
+	CachedInputTokens *int64
 }
 
 // metaCaptureCap bounds how many response bytes we tee aside for parsing. A generateContent /
@@ -44,26 +51,62 @@ const metaCaptureCap = 1 << 20
 // is best-effort and must never fail the proxied request.
 func extractMeta(p config.Provider, path string, body []byte) responseMeta {
 	switch p {
+	case config.ProviderOpenAI, config.ProviderAnthropic, config.ProviderGemini:
+	default:
+		return responseMeta{}
+	}
+	// A body that turns out to be an event stream is folded event by event (CTO-349). The request
+	// path normally decides from the response Content-Type before any bytes arrive; this is the
+	// fallback for an upstream that streamed without the header, and the entry point the fixture
+	// tests use.
+	if looksLikeSSE(body) {
+		m := scanSSE(p, body)
+		if p == config.ProviderGemini {
+			m.Model = geminiModel(path, m.Model)
+		}
+		return m
+	}
+	switch p {
 	case config.ProviderOpenAI:
 		return openAIMeta(body)
 	case config.ProviderAnthropic:
 		return anthropicMeta(body)
-	case config.ProviderGemini:
-		return geminiMeta(path, body)
 	default:
-		return responseMeta{}
+		return geminiMeta(path, body)
 	}
 }
 
+// openAIUsageDoc is the OpenAI usage block, shared by the single-document and streamed paths.
+// Pointer fields throughout: an absent "usage" object, or an absent count inside it, must stay
+// absent rather than decode to 0 (see responseMeta).
+type openAIUsageDoc struct {
+	PromptTokens        *int64 `json:"prompt_tokens"`
+	CompletionTokens    *int64 `json:"completion_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens *int64 `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// anthropicUsageDoc is the Anthropic usage block. input_tokens counts ONLY the uncached prompt
+// tokens: the two cache buckets are reported alongside it and are not included in it, which is why
+// anthropicPrompt has to add them up (CTO-349).
+type anthropicUsageDoc struct {
+	InputTokens              *int64 `json:"input_tokens"`
+	OutputTokens             *int64 `json:"output_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+}
+
+// geminiUsageDoc is the Generative Language usageMetadata block.
+type geminiUsageDoc struct {
+	PromptTokenCount     *int64 `json:"promptTokenCount"`
+	CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
+}
+
 func openAIMeta(body []byte) responseMeta {
-	// Pointer fields throughout: an absent "usage" object, or an absent count inside it, must stay
-	// absent rather than decode to 0 (see responseMeta).
 	var r struct {
-		Model string `json:"model"`
-		Usage *struct {
-			PromptTokens     *int64 `json:"prompt_tokens"`
-			CompletionTokens *int64 `json:"completion_tokens"`
-		} `json:"usage"`
+		Model string          `json:"model"`
+		Usage *openAIUsageDoc `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return responseMeta{}
@@ -72,51 +115,86 @@ func openAIMeta(body []byte) responseMeta {
 	if r.Usage != nil {
 		m.PromptTokens = r.Usage.PromptTokens
 		m.CompletionTokens = r.Usage.CompletionTokens
+		if r.Usage.PromptTokensDetails != nil {
+			m.CachedInputTokens = r.Usage.PromptTokensDetails.CachedTokens
+		}
 	}
 	return m
 }
 
 func anthropicMeta(body []byte) responseMeta {
 	var r struct {
-		Model string `json:"model"`
-		Usage *struct {
-			InputTokens  *int64 `json:"input_tokens"`
-			OutputTokens *int64 `json:"output_tokens"`
-		} `json:"usage"`
+		Model string             `json:"model"`
+		Usage *anthropicUsageDoc `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return responseMeta{}
 	}
 	m := responseMeta{Model: r.Model}
 	if r.Usage != nil {
-		m.PromptTokens = r.Usage.InputTokens
+		m.PromptTokens = anthropicPrompt(
+			r.Usage.InputTokens, r.Usage.CacheCreationInputTokens, r.Usage.CacheReadInputTokens)
 		m.CompletionTokens = r.Usage.OutputTokens
+		m.CachedInputTokens = r.Usage.CacheReadInputTokens
 	}
 	return m
 }
 
+// anthropicPrompt totals the three buckets Anthropic bills a prompt under (CTO-349).
+//
+// usage.input_tokens excludes both cache buckets, so reporting it alone under-counts a cached
+// prompt by however much the cache served: a request that read 18923 tokens from cache and sent 21
+// fresh ones was reported as 21 prompt tokens. The total is the honest token count, and
+// CachedInputTokens carries the cache-read share so the gateway prices that share at the cached
+// rate rather than the standard one.
+//
+// The bucket the record CANNOT represent is cache CREATION, which Anthropic bills at a premium over
+// standard input. It is counted in this total (those tokens really were prompt input, and omitting
+// them would under-count by 100% of the write rather than mis-rate it) but priced at the standard
+// input rate, so a cache-write-heavy call is under-priced by the write premium. Representing it
+// honestly needs a wire attribute and a price type that do not exist yet; see
+// docs/anthropic-cache-tokens.md rather than a forced approximation here.
+//
+// Returns nil when the provider reported none of the three, because "no usage" and "zero prompt
+// tokens" are different facts.
+func anthropicPrompt(input, cacheCreate, cacheRead *int64) *int64 {
+	if input == nil && cacheCreate == nil && cacheRead == nil {
+		return nil
+	}
+	var total int64
+	for _, v := range []*int64{input, cacheCreate, cacheRead} {
+		if v != nil {
+			total += *v
+		}
+	}
+	return &total
+}
+
 func geminiMeta(path string, body []byte) responseMeta {
 	var r struct {
-		ModelVersion  string `json:"modelVersion"`
-		UsageMetadata *struct {
-			PromptTokenCount     *int64 `json:"promptTokenCount"`
-			CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
-		} `json:"usageMetadata"`
+		ModelVersion  string          `json:"modelVersion"`
+		UsageMetadata *geminiUsageDoc `json:"usageMetadata"`
 	}
 	// The body may be missing/unparseable (e.g. an error response); still return the path-derived
 	// model so an errored call is at least attributable to a model.
 	_ = json.Unmarshal(body, &r)
 
-	model := geminiModelFromPath(path)
-	if model == "" {
-		model = r.ModelVersion
-	}
-	m := responseMeta{Model: model}
+	m := responseMeta{Model: geminiModel(path, r.ModelVersion)}
 	if r.UsageMetadata != nil {
 		m.PromptTokens = r.UsageMetadata.PromptTokenCount
 		m.CompletionTokens = r.UsageMetadata.CandidatesTokenCount
 	}
 	return m
+}
+
+// geminiModel prefers the model named in the request path, falling back to the one the response
+// reported. The path is authoritative for Generative Language calls and is available even when the
+// body carried nothing parseable (an error response, a stream past the cap).
+func geminiModel(path, fromBody string) string {
+	if m := geminiModelFromPath(path); m != "" {
+		return m
+	}
+	return fromBody
 }
 
 // geminiModelFromPath pulls the model id out of a Generative Language request path of the form
@@ -153,13 +231,39 @@ type metaCapture struct {
 
 	buf  []byte
 	over bool // capture exceeded the cap; stop teeing and skip body-derived metadata
+
+	// folder/scan are set instead of buf when the response is an event stream (CTO-349). A stream
+	// is folded incrementally as it passes, so nothing is accumulated: a completion that streams for
+	// minutes still yields its usage, and retained memory stays one SSE line rather than one body.
+	folder *streamFolder
+	scan   *sseScanner
+}
+
+// newMetaCapture wraps body for the given provider. stream selects the incremental SSE fold (the
+// caller decides from the response Content-Type) over the buffered single-document scan.
+func newMetaCapture(
+	inner io.ReadCloser, p config.Provider, path string, stream bool, out *responseMeta,
+) *metaCapture {
+	m := &metaCapture{inner: inner, provider: p, path: path, out: out}
+	if stream {
+		m.folder = newStreamFolder(p)
+		m.scan = m.folder.scanner()
+	}
+	return m
 }
 
 func (m *metaCapture) Read(p []byte) (int, error) {
 	n, err := m.inner.Read(p)
-	if n > 0 && !m.over {
+	if n <= 0 {
+		return n, err
+	}
+	if m.scan != nil {
+		m.scan.write(p[:n])
+		return n, err
+	}
+	if !m.over {
 		if len(m.buf)+n > metaCaptureCap {
-			// Oversized/streaming response: drop the partial capture rather than grow unbounded.
+			// Oversized response: drop the partial capture rather than grow unbounded.
 			m.over = true
 			m.buf = nil
 		} else {
@@ -171,10 +275,21 @@ func (m *metaCapture) Read(p []byte) (int, error) {
 
 func (m *metaCapture) Close() error {
 	if m.out != nil {
-		if m.over {
+		switch {
+		case m.scan != nil:
+			// Flush a final event that arrived without its trailing newline, which is what a stream
+			// cut short mid-event looks like. Whatever the provider reported before the cut stands;
+			// what it never reported stays nil.
+			m.scan.close()
+			meta := m.folder.meta()
+			if m.provider == config.ProviderGemini {
+				meta.Model = geminiModel(m.path, meta.Model)
+			}
+			*m.out = meta
+		case m.over:
 			// We never saw the whole body; still try path-based metadata (Gemini model).
 			*m.out = extractMeta(m.provider, m.path, nil)
-		} else {
+		default:
 			*m.out = extractMeta(m.provider, m.path, m.buf)
 		}
 	}

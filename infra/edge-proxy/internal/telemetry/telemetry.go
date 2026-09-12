@@ -102,6 +102,11 @@ type wireSpan struct {
 	// tracked separately; this encoder is the half of it that can be honest without one.
 	InputTokens  *int64 `json:"gen_ai.usage.input_tokens,omitempty"`
 	OutputTokens *int64 `json:"gen_ai.usage.output_tokens,omitempty"`
+	// CachedInputTokens is the cache-served share of InputTokens (a subset, not an addition). The
+	// gateway maps this attribute to otel_spans.CachedInputTokens and prices the remainder at the
+	// standard input rate, so omitting it prices a cached prompt as if every token were fresh
+	// (CTO-349). Nil is omitted like the other counts: unknown stays unknown.
+	CachedInputTokens *int64 `json:"gen_ai.usage.cached_input_tokens,omitempty"`
 	// FeatureTag / AccountIdHash mirror the same span attributes the Python SDK emits, so a proxied
 	// request lands in the same FeatureTag / AccountIdHash columns (CTO-104, CTO-182). Omitted when
 	// the caller did not tag or attribute the request: the unattributed bucket, not a customer
@@ -187,27 +192,28 @@ func toWire(dep Deployment, rec proxy.TraceRecord, id ids) wireBatch {
 		status = statusError
 	}
 	span := wireSpan{
-		TimestampNs:    rec.StartedAt.UnixNano(),
-		TraceId:        id.newHex(16),
-		SpanId:         id.newHex(8),
-		ServiceName:    ServiceName,
-		SpanName:       "llm.call",
-		StatusCode:     status,
-		DurationNs:     rec.Duration.Nanoseconds(),
-		Operation:      "chat",
-		System:         genAISystem(rec.Provider),
-		ResponseModel:  rec.Model,
-		InputTokens:    rec.PromptTokens,
-		OutputTokens:   rec.CompletionTokens,
-		FeatureTag:     rec.FeatureTag,
-		AccountIdHash:  rec.AccountIdHash,
-		Deployment:     dep,
-		Method:         rec.Method,
-		Path:           rec.Path,
-		HTTPStatus:     rec.StatusCode,
-		ReqBytes:       rec.ReqBytes,
-		RespBytes:      rec.RespBytes,
-		UpstreamFailed: rec.Failed,
+		TimestampNs:       rec.StartedAt.UnixNano(),
+		TraceId:           id.newHex(16),
+		SpanId:            id.newHex(8),
+		ServiceName:       ServiceName,
+		SpanName:          "llm.call",
+		StatusCode:        status,
+		DurationNs:        rec.Duration.Nanoseconds(),
+		Operation:         "chat",
+		System:            genAISystem(rec.Provider),
+		ResponseModel:     rec.Model,
+		InputTokens:       rec.PromptTokens,
+		OutputTokens:      rec.CompletionTokens,
+		CachedInputTokens: rec.CachedInputTokens,
+		FeatureTag:        rec.FeatureTag,
+		AccountIdHash:     rec.AccountIdHash,
+		Deployment:        dep,
+		Method:            rec.Method,
+		Path:              rec.Path,
+		HTTPStatus:        rec.StatusCode,
+		ReqBytes:          rec.ReqBytes,
+		RespBytes:         rec.RespBytes,
+		UpstreamFailed:    rec.Failed,
 	}
 	return wireBatch{
 		TenantId:       rec.TenantId,

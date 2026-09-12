@@ -181,9 +181,14 @@ const (
 	DefaultUpstream   = "https://api.openai.com"
 	// DefaultGeminiUpstream is the origin used when Provider is gemini and EDGE_PROXY_UPSTREAM is
 	// unset, Google's Generative Language API (CTO-167).
-	DefaultGeminiUpstream   = "https://generativelanguage.googleapis.com"
-	DefaultTenantHeader     = "X-Tenant-Key"
-	DefaultFeatureTagHeader = "X-Tally-Feature-Tag"
+	DefaultGeminiUpstream = "https://generativelanguage.googleapis.com"
+	// DefaultAnthropicUpstream is the origin used when Provider is anthropic and EDGE_PROXY_UPSTREAM
+	// is unset (CTO-349). Before this, an anthropic proxy with no explicit upstream inherited
+	// DefaultUpstream and sent every Messages request to api.openai.com, which is a misconfiguration
+	// that looks configured: the traffic leaves for the wrong vendor and fails there.
+	DefaultAnthropicUpstream = "https://api.anthropic.com"
+	DefaultTenantHeader      = "X-Tenant-Key"
+	DefaultFeatureTagHeader  = "X-Tally-Feature-Tag"
 	// DefaultAccountIdHashHeader carries the pre-hashed account id (CTO-182). Named to match the
 	// existing X-Tally-* control-header convention and the gen_ai.account_id_hash wire attribute.
 	DefaultAccountIdHashHeader = "X-Tally-Account-Id-Hash"
@@ -226,9 +231,9 @@ func FromEnv(lookup Env) (Config, error) {
 		}
 	}
 
-	defaultUpstream := DefaultUpstream
-	if cfg.Provider == ProviderGemini {
-		defaultUpstream = DefaultGeminiUpstream
+	defaultUpstream, err := defaultUpstreamFor(cfg.Provider)
+	if err != nil {
+		return Config{}, err
 	}
 	rawUpstream := firstNonEmpty(lookup("EDGE_PROXY_UPSTREAM"), defaultUpstream)
 	u, err := url.Parse(rawUpstream)
@@ -348,6 +353,33 @@ func FromEnv(lookup Env) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// defaultUpstreamFor returns the origin a provider's traffic goes to when EDGE_PROXY_UPSTREAM is
+// unset, and refuses to boot for a provider that has no registered default (CTO-349).
+//
+// The failure branch is the point. The old code took DefaultUpstream (OpenAI's origin) as the
+// fallback for everything except gemini, so provider=anthropic with no upstream configured silently
+// pointed Anthropic traffic at api.openai.com: a wrong answer dressed as a working configuration,
+// and one that any future provider added here would inherit by default. Every provider now names
+// its own origin or the proxy refuses to start, in the same spirit as the gateway failing closed at
+// boot rather than guessing (infra/gateway/src/gateway/app.py). An operator who genuinely wants a
+// non-standard origin (a gateway, a regional endpoint, a test double) still sets EDGE_PROXY_UPSTREAM
+// and never reaches this.
+func defaultUpstreamFor(p Provider) (string, error) {
+	switch p {
+	case "", ProviderOpenAI:
+		return DefaultUpstream, nil
+	case ProviderAnthropic:
+		return DefaultAnthropicUpstream, nil
+	case ProviderGemini:
+		return DefaultGeminiUpstream, nil
+	default:
+		return "", fmt.Errorf(
+			"EDGE_PROXY_PROVIDER=%q has no default upstream: set EDGE_PROXY_UPSTREAM explicitly "+
+				"(refusing to fall back to %s, which would send %s traffic to the wrong vendor)",
+			p, DefaultUpstream, p)
+	}
 }
 
 // Warnings returns operator-facing problems with a configuration that parses cleanly but will not

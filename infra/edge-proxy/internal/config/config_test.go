@@ -199,9 +199,39 @@ func TestProviderSelection(t *testing.T) {
 		t.Errorf("Upstream = %q, want explicit override", cfg.Upstream)
 	}
 
+	// anthropic with no explicit upstream defaults to Anthropic's origin (CTO-349). It used to
+	// inherit DefaultUpstream and point Messages traffic at api.openai.com.
+	cfg, err = FromEnv(envMap(map[string]string{"EDGE_PROXY_PROVIDER": "anthropic"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Upstream.String() != DefaultAnthropicUpstream {
+		t.Errorf("Upstream = %q, want %q", cfg.Upstream, DefaultAnthropicUpstream)
+	}
+
 	// An unknown provider is rejected.
 	if _, err := FromEnv(envMap(map[string]string{"EDGE_PROXY_PROVIDER": "bard"})); err == nil {
 		t.Error("expected error for unknown provider")
+	}
+}
+
+// TestDefaultUpstreamForRefusesUnknownProvider covers the guard behind CTO-349's third defect. The
+// original bug was not that anthropic lacked an entry, it was that everything without one fell
+// through to OpenAI's origin, so the next provider added would inherit the same silent
+// mis-routing. A provider with no registered default now refuses to boot, and the message says
+// which env var fixes it.
+func TestDefaultUpstreamForRefusesUnknownProvider(t *testing.T) {
+	for _, p := range []Provider{"", ProviderOpenAI, ProviderAnthropic, ProviderGemini} {
+		if _, err := defaultUpstreamFor(p); err != nil {
+			t.Errorf("provider %q should have a default upstream: %v", p, err)
+		}
+	}
+	_, err := defaultUpstreamFor(Provider("bedrock"))
+	if err == nil {
+		t.Fatal("expected a provider with no registered default to be refused, not defaulted")
+	}
+	if !strings.Contains(err.Error(), "EDGE_PROXY_UPSTREAM") {
+		t.Errorf("error should name the env var that fixes it, got %q", err)
 	}
 }
 

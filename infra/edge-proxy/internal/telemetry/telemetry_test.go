@@ -216,6 +216,49 @@ func TestUnknownTokensSerializeAsNullNeverZero(t *testing.T) {
 	}
 }
 
+// TestCachedInputTokensReachTheWire covers the CTO-349 cache share. The gateway maps
+// gen_ai.usage.cached_input_tokens onto its own column and prices (input - cached) at the standard
+// rate, so a record that folded Anthropic's cache_read_input_tokens into the prompt total but did
+// not ship the share would price every cached token as fresh: worse than the under-count it
+// replaced. Absent stays absent, like every other count.
+func TestCachedInputTokensReachTheWire(t *testing.T) {
+	rec := sampleRecord()
+	rec.PromptTokens = i64(18944)
+	rec.CachedInputTokens = i64(18923)
+
+	span := decodeSpan(t, mustEncode(t, rec))
+	if v := span["gen_ai.usage.cached_input_tokens"]; v != float64(18923) {
+		t.Errorf("cached input tokens = %v, want 18923", v)
+	}
+
+	rec.CachedInputTokens = nil
+	body := mustEncode(t, rec)
+	if v, present := decodeSpan(t, body)[GenAICachedInputTokens]; present {
+		t.Errorf("unknown cache share present as %#v; it must be omitted, never 0", v)
+	}
+	if strings.Contains(string(body), `"gen_ai.usage.cached_input_tokens":0`) {
+		t.Fatalf("unknown cache share serialized as 0: %s", body)
+	}
+
+	// A provider that reported an explicit 0 said something real and must keep saying it.
+	rec.CachedInputTokens = i64(0)
+	if v, ok := decodeSpan(t, mustEncode(t, rec))[GenAICachedInputTokens]; !ok || v != float64(0) {
+		t.Errorf("a reported 0 cache share must serialize, got %#v (present=%v)", v, ok)
+	}
+}
+
+// GenAICachedInputTokens is the wire key under test, spelled once.
+const GenAICachedInputTokens = "gen_ai.usage.cached_input_tokens"
+
+func mustEncode(t *testing.T, rec proxy.TraceRecord) []byte {
+	t.Helper()
+	body, err := Encode(DeploymentCloud, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 // TestZeroTokensStillSerialize: a count the provider genuinely reported as 0 is a fact and must
 // survive. This is the other half of the nullable contract: omitempty keys off nil, not off 0.
 func TestZeroTokensStillSerialize(t *testing.T) {
