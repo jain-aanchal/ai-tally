@@ -144,7 +144,7 @@ export function accountRevenueSql(
         sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String})       AS refund_micro,
         countIf(${moneyTyped})                                                             AS revenue_events,
         uniqExactIf(b.UserIdHash, ${moneyTyped})                                           AS distinct_users
-      FROM business_events b
+      FROM business_events b FINAL
       WHERE b.TenantId = {tenant:String}
         AND b.OccurredAt >= ${revenueWindowSql(windowDays)}
         ${sourceFilter.sql}

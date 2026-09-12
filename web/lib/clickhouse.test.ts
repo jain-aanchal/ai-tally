@@ -1154,7 +1154,7 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
 // The guard DISCOVERS its own inputs: it walks web/ and checks every file that mentions otel_spans.
 // A hardcoded file list would only guard the readers that existed when the list was written, and the
 // failure this exists to prevent is a NEW reader (a detector, an /api route) shipping without FINAL.
-describe("otel_spans read paths dedupe (#314)", () => {
+describe("ReplacingMergeTree read paths dedupe (#314, widened in #347)", () => {
   // Vitest's root is `web/`, so the walk covers the checkout rather than a bundle.
   const WEB_ROOT = process.cwd();
 
@@ -1186,12 +1186,38 @@ describe("otel_spans read paths dedupe (#314)", () => {
     "SELECT 1 AS one FROM otel_spans WHERE TenantId = {tenant:String} LIMIT 1",
   ];
 
-  // FROM/JOIN otel_spans, plus an optional database qualifier, an optional `AS`, an optional alias,
+  // #347: every ReplacingMergeTree in db/clickhouse/, not just otel_spans. The guard shipped in #326
+  // knew about exactly one table, so the identical exposure on business_events sat unnoticed on the
+  // other side of the revenue join: 7 of its 10 reads counted undeduplicated rows, and a duplicated
+  // business event inflated revenue until a background merge ran.
+  //
+  // Keep this list in step with `ENGINE = ReplacingMergeTree` in db/clickhouse/*.sql. The test below
+  // ("covers every ReplacingMergeTree table in the schema") reads the DDL and fails if it drifts, so
+  // a new table cannot be added to the schema and quietly skipped here.
+  const REPLACING_TABLES = [
+    "otel_spans",
+    "business_events",
+    "identity_graph",
+    "attribution_records",
+    "unattributed_events",
+    "last_touch_index",
+    "replay_samples",
+    "replay_runs",
+    "eval_runs",
+  ];
+
+  // FROM/JOIN <table>, plus an optional database qualifier, an optional `AS`, an optional alias,
   // and FINAL if it is there. The alias is matched so that a read WITHOUT FINAL still produces a
   // match to flag: dropping it would turn a missing FINAL into zero matches, which is the silent
   // pass this guard exists to rule out. Case-insensitive and qualifier-aware for the same reason.
-  const READ =
-    /\b(?:FROM|(?:(?:INNER|LEFT|RIGHT|FULL|OUTER|CROSS|ANY|ALL|ASOF|SEMI|ANTI)\s+)*JOIN)\s+(?:[A-Za-z_]\w*\s*\.\s*)?otel_spans\b(?:\s+AS\b)?(?:\s+(?!FINAL\b)[A-Za-z_]\w*)?(?:\s+FINAL\b)?/gi;
+  const readPattern = (table: string) =>
+    new RegExp(
+      String.raw`\b(?:FROM|(?:(?:INNER|LEFT|RIGHT|FULL|OUTER|CROSS|ANY|ALL|ASOF|SEMI|ANTI)\s+)*JOIN)\s+(?:[A-Za-z_]\w*\s*\.\s*)?${table}\b(?:\s+AS\b)?(?:\s+(?!FINAL\b)[A-Za-z_]\w*)?(?:\s+FINAL\b)?`,
+      "gi",
+    );
+
+  // Kept for the pattern-behaviour cases below, which are all written against otel_spans.
+  const READ = readPattern("otel_spans");
 
   const HAS_FINAL = /\bFINAL\b/i;
 
@@ -1232,40 +1258,65 @@ describe("otel_spans read paths dedupe (#314)", () => {
     return found.sort();
   }
 
-  /** Every file under web/ whose text mentions otel_spans, with its comment-stripped source. */
-  async function mentions(): Promise<Array<{ rel: string; src: string }>> {
+  /** Every file under web/ whose text mentions `table`, with its comment-stripped source. */
+  async function mentions(table = "otel_spans"): Promise<Array<{ rel: string; src: string }>> {
     const { readFile } = await import("node:fs/promises");
     const { resolve } = await import("node:path");
     const out: Array<{ rel: string; src: string }> = [];
     for (const rel of await walk()) {
       if (rel === SELF) continue;
       const raw = await readFile(resolve(WEB_ROOT, rel), "utf8");
-      if (!raw.includes("otel_spans")) continue;
+      if (!raw.includes(table)) continue;
       out.push({ rel, src: stripComments(raw) });
     }
     return out;
   }
 
-  function offenders(rel: string, src: string): string[] {
+  function offenders(rel: string, src: string, table = "otel_spans"): string[] {
     let scanned = src;
     for (const exempt of EXEMPT_READS) scanned = blank(scanned, exempt);
     const found: string[] = [];
-    for (const m of scanned.matchAll(READ)) {
+    for (const m of scanned.matchAll(readPattern(table))) {
       if (HAS_FINAL.test(m[0])) continue;
       found.push(`${rel}:${lineOf(scanned, m.index)}: ${m[0].replace(/\s+/g, " ").trim()}`);
     }
     return found;
   }
 
-  it("every otel_spans read under web/ says FINAL", async () => {
-    const bad = (await mentions()).flatMap(({ rel, src }) => offenders(rel, src));
+  it.each(REPLACING_TABLES)("every %s read under web/ says FINAL", async (table) => {
+    const bad = (await mentions(table)).flatMap(({ rel, src }) => offenders(rel, src, table));
     expect(
       bad,
-      "otel_spans is a ReplacingMergeTree: read it with FINAL or the panel over-counts replayed " +
-        "spend until a background merge runs. Add FINAL to the read below, or, if the query " +
+      `${table} is a ReplacingMergeTree: read it with FINAL or the panel counts rows that a ` +
+        "background merge has not collapsed yet. On otel_spans that over-counts replayed spend; on " +
+        "business_events it inflates revenue (#347). Add FINAL to the read below, or, if the query " +
         "provably cannot see a duplicate, add its exact SQL to EXEMPT_READS in this file with the " +
         "reason.",
     ).toEqual([]);
+  });
+
+  it("covers every ReplacingMergeTree table in the schema", async () => {
+    // #347: the guard's blind spot was its table list, not its pattern, so the list is checked
+    // against the DDL rather than trusted. A table added to db/clickhouse/ with this engine and not
+    // added above would otherwise be unguarded in exactly the way business_events was.
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { join, resolve } = await import("node:path");
+    const ddlDir = resolve(WEB_ROOT, "..", "db", "clickhouse");
+    const declared = new Set<string>();
+    for (const entry of await readdir(ddlDir, { withFileTypes: true })) {
+      // Top level only: migrations/ and checks/ rewrite and inspect these same tables rather than
+      // declaring new ones, and a migration's intermediate table is not a read surface.
+      if (!entry.isFile() || !entry.name.endsWith(".sql")) continue;
+      const sql = await readFile(join(ddlDir, entry.name), "utf8");
+      // CREATE TABLE ... <name> ... up to the ENGINE line, then whether that engine is Replacing.
+      for (const m of sql.matchAll(
+        /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[A-Za-z_]\w*\s*\.\s*)?([A-Za-z_]\w*)([\s\S]*?)ENGINE\s*=\s*(\w+)/gi,
+      )) {
+        if (m[3] === "ReplacingMergeTree") declared.add(m[1]);
+      }
+    }
+    expect(declared.size, "found no ReplacingMergeTree tables: the DDL scan is broken").toBeGreaterThan(0);
+    expect([...declared].sort()).toEqual([...REPLACING_TABLES].sort());
   });
 
   it("matches the reads it is meant to be guarding", async () => {

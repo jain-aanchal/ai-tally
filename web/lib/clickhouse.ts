@@ -454,8 +454,8 @@ export async function queryDataQuality(): Promise<DataQuality | null> {
     const out = await rows<{ attributed: string; total: string }>(
       db,
       `SELECT
-         (SELECT count() FROM attribution_records WHERE TenantId = {tenant:String}) AS attributed,
-         (SELECT count() FROM business_events WHERE TenantId = {tenant:String}) AS total`,
+         (SELECT count() FROM attribution_records FINAL WHERE TenantId = {tenant:String}) AS attributed,
+         (SELECT count() FROM business_events FINAL WHERE TenantId = {tenant:String}) AS total`,
       tenant,
     );
     const attributed = parseInt(out[0]?.attributed ?? "0", 10);
@@ -1981,7 +1981,7 @@ export async function queryDistinctBusinessEventNames(): Promise<ObservedBusines
     const out = await rows<{ name: string; n: string }>(
       db,
       `SELECT EventName AS name, count() AS n
-       FROM business_events
+       FROM business_events FINAL
        WHERE TenantId = {tenant:String} AND OccurredAt >= now() - INTERVAL 30 DAY AND EventName != ''
        GROUP BY name
        ORDER BY n DESC`,
@@ -2102,7 +2102,7 @@ const ACCOUNT_PAIRS_CTE = `
     SELECT
       if(IdentityAType = 'account_id', IdentityB, IdentityA) AS person_hash,
       if(IdentityAType = 'account_id', IdentityA, IdentityB) AS account_hash
-    FROM identity_graph
+    FROM identity_graph FINAL
     WHERE TenantId = {tenant:String}
       AND ((IdentityAType = 'account_id') != (IdentityBType = 'account_id'))
   )`;
@@ -2209,8 +2209,8 @@ export async function queryDataQualityReport(): Promise<DataQualityReport | null
     const attr = await rows<{ attributed: string; total: string }>(
       db,
       `SELECT
-         (SELECT count() FROM attribution_records WHERE TenantId = {tenant:String}) AS attributed,
-         (SELECT count() FROM business_events WHERE TenantId = {tenant:String}) AS total`,
+         (SELECT count() FROM attribution_records FINAL WHERE TenantId = {tenant:String}) AS attributed,
+         (SELECT count() FROM business_events FINAL WHERE TenantId = {tenant:String}) AS total`,
       tenant,
     );
     const attributed = parseInt(attr[0]?.attributed ?? "0", 10);
@@ -2874,7 +2874,7 @@ export async function queryConnectorActivity(): Promise<ConnectorActivity | null
     const revRows = await rows<{ src: string; n: string; last: string | null }>(
       db,
       `SELECT lower(Source) AS src, count() AS n, toString(max(OccurredAt)) AS last
-       FROM business_events
+       FROM business_events FINAL
        WHERE TenantId = {tenant:String}
        GROUP BY src`,
       tenant,
@@ -3001,7 +3001,7 @@ export function attributionRevenueSql(opts: {
              - sumIf(abs(ifNull(b.ValueAmountMicro, 0)), b.ValueType = {refundType:String})
              AS revenue_micro,
            countIf(${moneyTyped}) AS revenue_events
-         FROM business_events b
+         FROM business_events b FINAL
          WHERE b.TenantId = {tenant:String}
            AND b.OccurredAt >= ${windowSql}
            AND b.UserIdHash != ''
@@ -3082,7 +3082,7 @@ export async function queryAttribution(
       `SELECT
          ${providerExpr} AS provider,
          uniqExact(b.BusinessEventId) AS conversions
-       FROM business_events b
+       FROM business_events b FINAL
        INNER JOIN otel_spans s FINAL ON s.UserIdHash = b.UserIdHash AND s.TenantId = b.TenantId
        WHERE b.TenantId = {tenant:String}
          AND b.EventName = {outcome:String}
