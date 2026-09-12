@@ -183,6 +183,17 @@ URL:   https://demo.example.com
 Login: tester  (password: the plaintext you hashed)
 ```
 
+Re-running `deploy.sh` (to pick up a code change, say) does **not** re-post the backfill: it counts
+the tenant's existing spans in ClickHouse first and skips the step when there are any. Two overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `SKIP_BACKFILL=1` | Never back-fill, even on an empty tenant. |
+| `FORCE_BACKFILL=1` | Back-fill anyway, on top of what is already there. |
+
+Use `./deploy/demo/reseed.sh` rather than `FORCE_BACKFILL=1` when you want a clean dataset: it
+truncates first, so the spans are replaced instead of doubled.
+
 ### 5. Share privately
 
 Send the link and the shared password to testers **privately** (DM / password manager share). This
