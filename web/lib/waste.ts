@@ -83,6 +83,18 @@ export interface WasteReport {
   byCategory: Record<WasteCategory, MicroUSD | null>;
   generatedForWindowDays: number;
   unavailable: string | null;
+  /**
+   * Whether any span reached this workspace in the window (CTO-379).
+   *
+   * "No recoverable waste found, every detector ran and flagged nothing" is good news, and on a
+   * workspace that has sent nothing it is the wrong news: the detectors did run, and they ran over
+   * an empty window, so the page was congratulating a customer on the efficiency of no traffic
+   * instead of pointing them at setup the way Home and Cost Explorer do.
+   *
+   * `null` when the count could not be read, which is neither of those states and must not be
+   * rendered as either.
+   */
+  hasTelemetry: boolean | null;
 }
 
 /**
@@ -117,7 +129,13 @@ function findingKey(f: WasteFinding): string {
  *      A blank is honest for both, and a total-less-than-sum-of-parts never appears.
  *   5. `unavailable` is always `null` here; only the endpoint sets it, on a failure to produce.
  */
-export function aggregateWaste(findings: WasteFinding[], windowDays: number): WasteReport {
+export function aggregateWaste(
+  findings: WasteFinding[],
+  windowDays: number,
+  // CTO-379. Defaults to null (unknown) so an existing caller that cannot say keeps the honest
+  // blank rather than silently asserting the workspace has traffic.
+  hasTelemetry: boolean | null = null,
+): WasteReport {
   // 1. De-dupe, keeping first occurrence and input order.
   const seen = new Set<string>();
   const deduped: WasteFinding[] = [];
@@ -159,5 +177,6 @@ export function aggregateWaste(findings: WasteFinding[], windowDays: number): Wa
     byCategory,
     generatedForWindowDays: windowDays,
     unavailable: null,
+    hasTelemetry,
   };
 }

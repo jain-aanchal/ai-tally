@@ -6,6 +6,7 @@ import {
   deriveWorkload,
   scaleCandidateMonthlyCost,
 } from "@/lib/compare";
+import { sampleDataAllowed } from "@/lib/mock";
 import {
   queryCurrentModel,
   queryEvalCandidates,
@@ -96,9 +97,34 @@ export async function GET(req: Request) {
   // model over the last 7 days. Quality/latency on `current` stay mocked because we don't yet
   // have an eval harness — flagged honestly via SyntheticPreviewBanner on the page.
   const live = await queryCurrentModel();
+  if (!live && !sampleDataAllowed()) {
+    // #364 finished here (CTO-379). Every other fixture fallback in app/api/** was put behind
+    // sampleDataAllowed(); this route was missed, so it stayed the one surface that still answered
+    // "this workspace has no traffic" with the storyline from lib/compare: a $19,100/mo incumbent,
+    // a candidate table with costs and latencies, and a recommendation to switch. A customer who
+    // signed in and sent nothing was shown a migration plan for models they have never called.
+    //
+    // There is nothing to fall back TO here: without an incumbent there is no baseline, and every
+    // figure on the page is derived from one. So the honest answer is the empty one, and the page
+    // reads it as the new-workspace case and points at setup.
+    return NextResponse.json({
+      ...comparison,
+      workload: null,
+      current: null,
+      candidates: [],
+      recommendation: null,
+      diagnostics: {
+        ...comparison.diagnostics,
+        ...replayDiagnostics(replay),
+        reconcilerLastRunMinutesAgo,
+      },
+      replay_source: "none",
+    });
+  }
   if (!live) {
-    // Pure-mock fallback (CI / no DB). Even here, qualityScore must not be a fabricated
-    // number — splice real eval data in if available, else null per-candidate.
+    // Demo builds only, now that sampleDataAllowed() gates the branch above: a fixture incumbent
+    // for screenshots. Even here, qualityScore must not be a fabricated number: splice real eval
+    // data in if available, else null per-candidate.
     const candidates = comparison.candidates.map((c) => {
       const quality = evalQualityFor(evalProj?.per_candidate, c.provider, c.model);
       return {

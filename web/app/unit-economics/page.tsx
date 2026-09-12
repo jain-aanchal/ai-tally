@@ -8,7 +8,7 @@
 import { Suspense } from "react";
 
 import { Card } from "@/components/Card";
-import { SyntheticPreviewBanner } from "@/components/DataStateBanner";
+import { NoDataYet, SyntheticPreviewBanner } from "@/components/DataStateBanner";
 import { ExploreChartCard } from "@/components/ExploreChartCard";
 import { FilterBar } from "@/components/FilterBar";
 import { PageHeader } from "@/components/PageHeader";
@@ -90,6 +90,26 @@ export default async function UnitEconomicsPage() {
   // Headline cards reflect the most recent period for which we have both CAC inputs and economics.
   // Falling to the latest period regardless keeps the CAC flavors visible even when economics is
   // missing (payback/LTV then honest-null to "—").
+  // CTO-379: no CAC period means no acquisition cost, and every headline on this page (payback,
+  // LTV, the LTV/CAC band) is computed from one. This used to fall through to a grid of dashes,
+  // which is honest about each cell and silent about what to do; Home and Cost Explorer point a
+  // workspace in this state at setup, and this page now does too.
+  //
+  // Unit economics needs marketing spend and customer counts, NOT telemetry, so the wording sends
+  // them to the CAC input rather than implying the SDK install is what is missing.
+  if (periods.length === 0) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Unit Economics" />
+        <NoDataYet
+          what="CAC data"
+          detail="No acquisition-cost period has been recorded for this workspace, so payback, LTV and the LTV/CAC ratio have nothing to be computed from. These come from marketing spend and customer counts, entered on Connectors, not from telemetry."
+          onboarding={false}
+        />
+      </div>
+    );
+  }
+
   const latest: CacPeriod | undefined = periods[0];
   const latestEcon = latest ? economics[latest.periodStart] : undefined;
 

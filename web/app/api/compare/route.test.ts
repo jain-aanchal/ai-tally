@@ -21,13 +21,28 @@ const queryCurrentModel = ch.queryCurrentModel as unknown as ReturnType<typeof v
 const queryReplayCandidates = ch.queryReplayCandidates as unknown as ReturnType<typeof vi.fn>;
 const queryEvalCandidates = ch.queryEvalCandidates as unknown as ReturnType<typeof vi.fn>;
 
+const originalDemo = process.env.NEXT_PUBLIC_DEMO_MODE;
+const originalDev = process.env.TALLY_DEV_TENANT;
+
 beforeEach(() => {
   // Default: no eval pass has run. CTO-114 tests below override per-case.
   queryEvalCandidates.mockResolvedValue(null);
+  // CTO-379: the fixture branch now requires sampleDataAllowed(), so the cases below that exercise
+  // it have to ask for a demo build explicitly. They were written when the fallback was
+  // unconditional, which is the bug: a signed-in customer with no traffic reached it.
+  //
+  // The gate itself is pinned in api/three-states.test.ts ("the sample gate"), which is where every
+  // fixture route is checked together. This file keeps testing what the fixture branch RETURNS.
+  process.env.NEXT_PUBLIC_DEMO_MODE = "1";
+  process.env.TALLY_DEV_TENANT = "00000000-0000-0000-0000-000000000000";
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  if (originalDemo === undefined) delete process.env.NEXT_PUBLIC_DEMO_MODE;
+  else process.env.NEXT_PUBLIC_DEMO_MODE = originalDemo;
+  if (originalDev === undefined) delete process.env.TALLY_DEV_TENANT;
+  else process.env.TALLY_DEV_TENANT = originalDev;
 });
 
 describe("/api/compare", () => {
@@ -137,7 +152,7 @@ describe("/api/compare", () => {
     expect(haiku.monthlyCostMicroUsd).toBe(3_000_000);
     expect(haiku.monthlyCostMicroUsd).not.toBe(75_000);
     // Savings recomputed off the cheapest candidate on the corrected basis.
-    expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
+    expect(body.recommendation!.projectedSavingsMicroUsd).toBe(7_000_000);
     // Diagnostics reflect the real samples_available + replay cost.
     expect(body.diagnostics.samplesAvailable).toBe(50);
     expect(body.diagnostics.replayCostMicroUsd).toBe(12_500);
@@ -196,9 +211,9 @@ describe("/api/compare", () => {
     // NOT the raw corpus projection the gateway returned.
     expect(haiku.monthlyCostMicroUsd).not.toBe(13_200_000);
     // Savings are believable (~63%), never the bogus ~100% the un-rescaled corpus cost produced.
-    expect(body.recommendation.projectedSavingsMicroUsd).toBe(45_600_000_000);
-    expect(body.recommendation.projectedSavingsPct).toBeCloseTo(0.6333, 3);
-    expect(body.recommendation.projectedSavingsPct).toBeLessThan(1);
+    expect(body.recommendation!.projectedSavingsMicroUsd).toBe(45_600_000_000);
+    expect(body.recommendation!.projectedSavingsPct).toBeCloseTo(0.6333, 3);
+    expect(body.recommendation!.projectedSavingsPct).toBeLessThan(1);
   });
 
   // CTO-231: a candidate with zero replayed responses has no per-call cost to scale. We must not
@@ -240,10 +255,10 @@ describe("/api/compare", () => {
     // The zero-sample candidate is dropped rather than shown with a fabricated / NaN cost.
     expect(body.candidates).toHaveLength(0);
     // No candidate cleared replay → honest insufficient-data recommendation, never the fixture prose.
-    expect(body.recommendation.summary).toMatch(/no alternative candidate cleared replay/i);
-    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    expect(body.recommendation!.summary).toMatch(/no alternative candidate cleared replay/i);
+    expect(body.recommendation!.summary).not.toBe(comparison.recommendation.summary);
     // Savings default to 0 when there is no candidate to project (never a fabricated figure).
-    expect(body.recommendation.projectedSavingsMicroUsd).toBe(0);
+    expect(body.recommendation!.projectedSavingsMicroUsd).toBe(0);
   });
 
   // CTO-123: a candidate with fewer than 50 replayed responses gets null latency/error —
@@ -686,16 +701,16 @@ describe("/api/compare", () => {
     expect(body.workload).not.toBe(comparison.workload);
 
     // Verdict + summary reflect the REAL deltas: 70% cheaper + 60% judge win-rate → switch.
-    expect(body.recommendation.verdict).toBe("switch");
-    expect(body.recommendation.summary).toContain("claude-haiku-4-5");
-    expect(body.recommendation.summary).toContain("70%");
-    expect(body.recommendation.summary).toContain("60%");
+    expect(body.recommendation!.verdict).toBe("switch");
+    expect(body.recommendation!.summary).toContain("claude-haiku-4-5");
+    expect(body.recommendation!.summary).toContain("70%");
+    expect(body.recommendation!.summary).toContain("60%");
     // The old hardcoded fixture prose must never appear on the live path.
-    expect(body.recommendation.summary).not.toContain("$12.2K");
-    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    expect(body.recommendation!.summary).not.toContain("$12.2K");
+    expect(body.recommendation!.summary).not.toBe(comparison.recommendation.summary);
     // Savings computed off the cheapest candidate vs live current cost.
-    expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
-    expect(body.recommendation.projectedSavingsPct).toBeCloseTo(0.7, 6);
+    expect(body.recommendation!.projectedSavingsMicroUsd).toBe(7_000_000);
+    expect(body.recommendation!.projectedSavingsPct).toBeCloseTo(0.7, 6);
   });
 
   it("CTO-168: workload defaults to 'all traffic' when no ?tag= filter is set", async () => {
@@ -733,8 +748,8 @@ describe("/api/compare", () => {
     const body = await res.json();
     expect(body.workload).toBe("all traffic / production / last 7 days");
     // No eval judged (< floor is moot — none ran) → quality unknown → verdict "mixed".
-    expect(body.recommendation.verdict).toBe("mixed");
-    expect(body.recommendation.summary).toContain("Run an eval pass");
+    expect(body.recommendation!.verdict).toBe("mixed");
+    expect(body.recommendation!.summary).toContain("Run an eval pass");
   });
 
   it("CTO-168: honest 'insufficient data' recommendation when replay samples are thin", async () => {
@@ -771,10 +786,10 @@ describe("/api/compare", () => {
     const res = await CompareGET(new Request("http://test/api/compare") as never);
     const body = await res.json();
     // Thin data → say so honestly, never the fixture prose.
-    expect(body.recommendation.summary).toMatch(/insufficient replay data/i);
-    expect(body.recommendation.summary).not.toBe(comparison.recommendation.summary);
+    expect(body.recommendation!.summary).toMatch(/insufficient replay data/i);
+    expect(body.recommendation!.summary).not.toBe(comparison.recommendation.summary);
     // Savings are still projected off the (thin) cheapest candidate for the display.
-    expect(body.recommendation.projectedSavingsMicroUsd).toBe(7_000_000);
+    expect(body.recommendation!.projectedSavingsMicroUsd).toBe(7_000_000);
   });
 
   it("CTO-168: rescaled-mock branch (live current, no replay) drops the fixture prose", async () => {
@@ -796,8 +811,8 @@ describe("/api/compare", () => {
     // Live current model exists → workload derived, fixture label gone.
     expect(body.workload).toBe("research_agent / production / last 7 days");
     // No real replay → honest "insufficient replay data", not the hardcoded "$12.2K" prose.
-    expect(body.recommendation.summary).toMatch(/insufficient replay data/i);
-    expect(body.recommendation.summary).not.toContain("$12.2K");
+    expect(body.recommendation!.summary).toMatch(/insufficient replay data/i);
+    expect(body.recommendation!.summary).not.toContain("$12.2K");
   });
 
   // CTO-244 follow-up. queryCurrentModel returns a null monthlyCostMicroUsd when the incumbent's
@@ -834,9 +849,9 @@ describe("/api/compare", () => {
 
       const res = await CompareGET(new Request("http://test/api/compare") as never);
       const body = await res.json();
-      expect(body.recommendation.projectedSavingsMicroUsd).toBeNull();
-      expect(body.recommendation.projectedSavingsPct).toBeNull();
-      expect(body.recommendation.summary).toMatch(/could not be priced/);
+      expect(body.recommendation!.projectedSavingsMicroUsd).toBeNull();
+      expect(body.recommendation!.projectedSavingsPct).toBeNull();
+      expect(body.recommendation!.summary).toMatch(/could not be priced/);
     });
 
     it("does the same on the replay branch, where candidates come from real replay", async () => {
@@ -859,8 +874,8 @@ describe("/api/compare", () => {
       const res = await CompareGET(new Request("http://test/api/compare") as never);
       const body = await res.json();
       expect(body.current.monthlyCostMicroUsd).toBeNull();
-      expect(body.recommendation.projectedSavingsMicroUsd).toBeNull();
-      expect(body.recommendation.projectedSavingsPct).toBeNull();
+      expect(body.recommendation!.projectedSavingsMicroUsd).toBeNull();
+      expect(body.recommendation!.projectedSavingsPct).toBeNull();
     });
   });
 
@@ -909,8 +924,8 @@ describe("/api/compare", () => {
     expect(body.replay_source).toBe("mock");
     // This is the only path that still ships the fixture prose (labeled by SyntheticPreviewBanner).
     expect(body.workload).toBe(comparison.workload);
-    expect(body.recommendation.summary).toBe(comparison.recommendation.summary);
-    expect(body.recommendation.verdict).toBe(comparison.recommendation.verdict);
+    expect(body.recommendation!.summary).toBe(comparison.recommendation.summary);
+    expect(body.recommendation!.verdict).toBe(comparison.recommendation.verdict);
   });
 
   // #320 item 2. The bug as reported: a stack holding nine spans rendered "REPLAY COST $42.30 /

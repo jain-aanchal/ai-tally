@@ -77,17 +77,28 @@ export interface CandidateMetrics {
 }
 
 export interface Comparison {
-  workload: string;        // e.g. "research_agent / production / last 7 days"
-  current: CandidateMetrics;
+  /**
+   * CTO-379: null across all three of these is the new-workspace state, and the only shape this
+   * response can honestly take when no traffic has arrived.
+   *
+   * Every figure on the Compare page is derived from the incumbent: the candidate table is rescaled
+   * onto its call volume, the savings are a delta against its cost, and the verdict is a judgement
+   * about replacing it. So "no incumbent" is not one missing tile, it is the whole page having no
+   * subject, and it gets one representation rather than a scatter of nulls the page has to
+   * reassemble. Nulling `current` alone would leave `workload` naming a workload nobody ran.
+   */
+  workload: string | null; // e.g. "research_agent / production / last 7 days"
+  /** null when no model has served traffic in the window: there is no incumbent to compare against. */
+  current: CandidateMetrics | null;
   candidates: CandidateMetrics[];
-  /** human-written-ish recommendation (the routing rule export hooks off this) */
+  /** human-written-ish recommendation (the routing rule export hooks off this). null with no baseline. */
   recommendation: {
     verdict: "switch" | "keep" | "mixed";
     summary: string;
     /** null when the incumbent's cost is unknown, so there is no saving to project (CTO-244). */
     projectedSavingsMicroUsd: MicroUSD | null;
     projectedSavingsPct: number | null; // 0..1, null when there is nothing to divide by
-  };
+  } | null;
   /**
    * Replay diagnostics. Every count is nullable and null is the ONLY honest answer when no
    * cross-provider replay has run (#320).
@@ -168,7 +179,20 @@ export function scaleCandidateMonthlyCost(
 // CTO-168: this whole object is the unreachable-gateway fallback ONLY. The `workload` label and
 // the `recommendation` verdict/summary below are fixture prose. On the live path the route
 // replaces them with values derived from real traffic (deriveWorkload / deriveRecommendation).
-export const comparison: Comparison = {
+/**
+ * The fixture is typed as a COMPLETE comparison, not as the nullable response shape (CTO-379).
+ *
+ * Widening `Comparison` so the route can express the new-workspace state would otherwise force a
+ * null check on every reader of this constant, which always has all three. `PopulatedComparison`
+ * keeps the nulls where they mean something (the wire) and out of where they cannot happen (here).
+ */
+export type PopulatedComparison = Comparison & {
+  workload: string;
+  current: CandidateMetrics;
+  recommendation: NonNullable<Comparison["recommendation"]>;
+};
+
+export const comparison: PopulatedComparison = {
   // Fixture label, used only in the unreachable-gateway fallback. Live path calls deriveWorkload.
   workload: "research_agent / production / last 7 days",
   current: {

@@ -21,6 +21,7 @@ import { collectDuplicatedWork } from "@/lib/waste/duplicated-work";
 import { collectWrongSizedModel } from "@/lib/waste/wrong-sized-model";
 import { collectNoMeasuredReturn } from "@/lib/waste/no-measured-return";
 import { collectStructuralInefficiency } from "@/lib/waste/structural-inefficiency";
+import { querySpendSummary } from "@/lib/clickhouse";
 import { aggregateWaste, type WasteReport } from "@/lib/waste";
 import { parseFilters, rangeDays } from "@/lib/filters";
 
@@ -48,7 +49,13 @@ export async function GET(request: Request) {
       collectStructuralInefficiency(windowDays, state.filters),
     ]);
     const allFindings = perDetector.flat();
-    return NextResponse.json(aggregateWaste(allFindings, windowDays));
+    // CTO-379: "every detector ran and flagged nothing" is good news, and it is the wrong news for a
+    // workspace that has sent nothing. The spend summary already counts spans for Home's empty
+    // state, so the same read decides which sentence this page is entitled to. null (unreadable)
+    // stays unknown and the page says neither.
+    const spend = await querySpendSummary(windowDays);
+    const hasTelemetry = spend === null ? null : (spend.spanCount ?? 0) > 0;
+    return NextResponse.json(aggregateWaste(allFindings, windowDays, hasTelemetry));
   } catch (err) {
     // Hard failure: return an honest unavailable shell (empty findings, null totals) rather than a
     // fabricated or partial report (CTO-227 honesty). Never invent findings.
@@ -65,6 +72,8 @@ export async function GET(request: Request) {
       },
       generatedForWindowDays: windowDays,
       unavailable: reason,
+      // The report could not be produced, so whether telemetry exists was never established.
+      hasTelemetry: null,
     };
     return NextResponse.json(shell);
   }
