@@ -1,6 +1,6 @@
 # Scope: CI cost check (GitHub Action)
 
-**Status: proposal, not built.** A GitHub Action that comments on a pull request with the projected
+**Status: proposal, still NOT built, verified #342 (tracked as #344).** A GitHub Action that comments on a pull request with the projected
 cost impact of the change: "this PR raises cost per request 22 percent."
 
 The strategic case is that this reaches teams who will never install a dashboard. It lands in the

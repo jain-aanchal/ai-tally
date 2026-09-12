@@ -1,7 +1,11 @@
 # Scope: "Cost per customer" tab
 
-**Status: proposal, not built.** This is a scoping doc for a new dashboard tab that answers "what
+**Status: SHIPPED (#342).** This is the scoping doc for the dashboard tab that answers "what
 does each of our customers cost us in AI spend, and are they profitable?"
+
+The tab is built and live at `web/app/cost-per-customer/`, with per-account drill-down
+(`[account]/`), identity resolution and its own onboarding panel. Read below for the reasoning, not
+as a plan.
 
 The short version: the reporting and UI are the easy half. The hard half is that ai-tally has no
 concept of a customer today, and roughly half of a tenant's bill cannot be attributed to one

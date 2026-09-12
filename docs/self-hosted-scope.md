@@ -1,7 +1,19 @@
 # Scope: self-hosting ai-tally and linking it from your website
 
-**Status: proposal.** One organization (ours) runs one ai-tally instance on its own cloud account,
-for its own AI spend, and links to it from its own marketing site.
+**Status: SHIPPED, on a different substrate than this doc recommends (#342).** One organization
+(ours) runs one ai-tally instance on its own cloud account, for its own AI spend, and links to it
+from its own marketing site.
+
+This is live at `https://app.ai-tally.com`, and the deployment is real: a single VM (DigitalOcean,
+not the AWS path this doc and `docs/aws-bundle-scope.md` argue for), the compose stack from
+`deploy/demo/` in `AUTH_MODE=clerk`, Caddy terminating Let's Encrypt TLS, and a Clerk production
+instance on `accounts.ai-tally.com`. The single-VM route was chosen over ECS Fargate for operational
+weight, not because the argument below is wrong.
+
+So read the reasoning here as sound and the AWS-specific mechanics as the road not taken. The
+recommendation this doc makes and that DID hold is the sequencing: a private Clerk-gated instance
+first, a public demo later and separately, because a public demo needs an anonymous read-only mode
+that still does not exist. See #333 for the epic, which needs the same correction.
 
 ## What this is and is not
 

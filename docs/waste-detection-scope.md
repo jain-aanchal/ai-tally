@@ -1,7 +1,14 @@
 # Scope: waste detection
 
-**Status: proposal, not built.** Find the spend that produced nothing: the gap between "here is your
+**Status: SHIPPED (#342).** Find the spend that produced nothing: the gap between "here is your
 bill" and "here is the $3k a month you are burning for no reason".
+
+All five detectors are built and running behind `/waste`: `paid-for-nothing`, `duplicated-work`,
+`wrong-sized-model`, `no-measured-return` and `structural-inefficiency`, each in `web/lib/waste/`
+with its own tests, aggregated by the pure `aggregateWaste` in `web/lib/waste.ts` and served by
+`web/app/api/waste/route.ts`. Read the sections below as the reasoning behind what shipped, not as
+work waiting to be done. The retry-attribution gap noted in the table further down is still real:
+the SDK has no retry attribute, so that class of waste remains undetectable.
 
 This is the most demo-able idea in the product. It is also the one most able to damage trust,
 because every number it prints is a claim about money you could have saved, and that claim is a

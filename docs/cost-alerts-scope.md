@@ -1,7 +1,13 @@
 # Scope: cost alerts with Slack delivery
 
-**Status: proposal, not built.** Alert a tenant when AI spend crosses a threshold per day, week or
-month, and deliver it to Slack.
+**Status: proposal, still NOT built, verified #342.** Alert a tenant when AI spend crosses a
+threshold per day, week or month, and deliver it to Slack.
+
+Checked against the code while correcting the other scope docs: there is no alerts schema in
+`db/postgres/`, and no Slack delivery anywhere in the gateway. The `cost_cap` guardrail
+(`0006_tenant_guardrails.sql`) and the budgets in `0026_tenant_budgets.sql` are both preventive, and
+the distinction this doc draws between preventive and detective still stands. The scheduler this
+would hang off now exists (`gateway/scheduler.py`), so the main structural dependency is met.
 
 ## What exists, and what does not
 

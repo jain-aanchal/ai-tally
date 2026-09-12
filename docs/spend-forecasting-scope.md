@@ -1,6 +1,10 @@
 # Scope: spend forecasting and burn-down
 
-**Status: proposal, not built.** Projected month-end spend against a budget, with a burn-down chart.
+**Status: SHIPPED (#342).** Projected month-end spend against a budget, with a burn-down chart.
+
+Built across `web/lib/forecast.ts`, `web/lib/budgetVsActual.ts` and `web/lib/burndown.ts`, surfaced
+by `BudgetVsActualCard` and `BurndownCard` on `/cost`, with budgets managed at
+`/settings/budgets` and served by `web/app/api/cost/budget/route.ts`.
 
 ## What exists
 
