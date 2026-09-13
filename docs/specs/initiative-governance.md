@@ -125,7 +125,12 @@ effective(capability, call) =
 
 - **P0 to P1:** org-wide only.
 - **P2 onward:** per-feature-tag overrides (`FeatureTag` is already a first-class dimension on every span), so a team can enforce on `checkout` while the rest of the org stays in shadow.
-- **Overrides only tighten, by default.** The feature tag is set by the caller (`X-Tally-Feature-Tag` on the proxy, `start_trace(feature_tag=...)` in the SDK). An override that loosened policy would let a buggy service or a prompt-injected agent step around enforcement by putting a looser feature's tag on its calls. So `tighten(mode, override)` in section 3.3 takes the stricter of the two. Loosening is allowed only for a feature bound server-side: a request authenticated with an API key scoped to that feature tag, so the tag is not self-declared. The settings UI labels a loosening override as such and says which keys it applies to.
+- **Overrides only tighten, by default.** The feature tag is set by the caller (`X-Tally-Feature-Tag` on the proxy, `start_trace(feature_tag=...)` in the SDK). An override that loosened policy would let a buggy service or a prompt-injected agent step around enforcement by putting a looser feature's tag on its calls. So `tighten(mode, override)` in section 3.3 takes the stricter of the two. Loosening is allowed only for a feature bound server-side, and the resolution rule is exact, not left to implementation:
+  - **The policy tag comes from the key when the key is feature-scoped.** A request authenticated with a key bound to `checkout` is governed as `checkout`, whatever `X-Tally-Feature-Tag` says. A header naming a different feature is ignored for policy and recorded as `tag_mismatch`.
+  - **With an org-level key, the header tag is used for attribution and for tighten-only overrides, never for a loosening override.** A request with an org key and `X-Tally-Feature-Tag: loose_feature` resolves to the org policy, tightened by any stricter `loose_feature` settings, and never loosened by them.
+  - **This is enforced where the decision is made: the proxy or the SDK, not the gateway.** The gateway never sees per-request headers, only decisions. The bundle marks which overrides loosen, and the key feed carries each key's bound feature tag, so an enforcement point can resolve the tag without a network call.
+  - **A conformance fixture pins it** in both Go and Python: an org key plus a header naming a loosening feature must resolve to org policy, and a feature-scoped key plus a mismatching header must resolve to the key's feature.
+  - The settings UI labels a loosening override as such and lists the keys bound to it.
 - **Not planned:** per-end-user overrides (non-goal).
 
 ### 3.5 Schema (Postgres, new; next free migration numbers after #385's 0033)
@@ -238,6 +243,11 @@ Each artifact is served with a small **signed manifest**, not a signature over t
   - **Signature pack** (global, versioned by ai-tally, changes rarely): PII, secret and injection patterns. Megabytes are acceptable. Fetched by hash, cached on disk where the enforcement point has a disk, signed separately.
 - **No delta protocol in V1.** Content addressing already gives "fetch only what changed" at artifact granularity, which is where the size is. A byte-level delta protocol adds a second correctness surface for little gain until a single artifact is both large and changes often.
 - **Patterns must be linear-time.** A pack runs on attacker-influenced input on the call path, so a backtracking regex is a denial-of-service lever. Every pattern must compile under RE2 semantics: Go's `regexp` already is RE2; the Python SDK must use an RE2 binding (`google-re2`), not the standard `re` module it uses today (`redaction.py`, `evals.py`). A pattern that is not RE2-compatible is rejected when the pack is published, not discovered at the edge.
+- **RE2 has no lookarounds, so filtering moves out of the pattern.** Much secret detection written for backtracking engines uses lookaheads and lookbehinds to avoid matching UUIDs, hashes and markup. Under RE2 that job splits into two stages:
+  - **Match** with an RE2 pattern, deliberately broad.
+  - **Filter each match** in code: a Shannon-entropy threshold, allowlists by shape (UUIDs, hex hashes, HTML and markup tokens, known placeholder and test keys), a keyword proximity window (the match must sit within N bytes of a keyword such as `secret` or `api_key`), and checksum validation where a format has one (Luhn for card numbers, provider key checksums). Filters run only on matches and are bounded by match length, so the whole stage stays linear.
+- **Sourcing patterns: adapt, not write from scratch, and not import blindly.** Rules from backtracking-engine libraries often fail to compile under RE2 and cannot be imported as they are. Scanners built on Go's regex engine are different: [gitleaks](https://github.com/gitleaks/gitleaks) rules are Go regular expressions, which cannot use lookarounds, and it handles false positives with allowlists and entropy rather than lookarounds, the same two-stage shape as above. Rules from such sources are the starting point; each is license-checked, reviewed, and must pass the publish gate before it enters the pack.
+- **The publish gate:** every pattern compiles under RE2; the pack passes a true-positive corpus (real-format keys and PII, synthetic where needed) and a false-positive corpus (UUIDs, content hashes, HTML, base64 images, minified JavaScript); and the pack's measured false-positive rate is recorded with its version, so a pack that regresses precision is not published.
 
 ### 4.3 Distribution
 
@@ -281,13 +291,31 @@ The per-step figures are design targets for each piece, **not terms of a sum**: 
 
 Post-checks that need the whole output run after the stream completes and can only flag or trigger a follow-up.
 
-Spend enforcement **can** act mid-stream, but only under the explicit `truncate` action, never as part of `block`. Many clients treat a closed SSE stream as the end of a normal answer and keep the partial content without an error, so simply closing the stream would turn a budget stop into a silently truncated reply in the customer's product. Under `truncate`, when the running output-token count crosses the reservation, the enforcement point:
+Spend enforcement **can** act mid-stream, but only under the explicit `truncate` action, never as part of `block`. Many clients treat a closed SSE stream as the end of a normal answer and keep the partial content without an error, so simply closing the stream would turn a budget stop into a silently truncated reply in the customer's product. Under `truncate`, when the output crosses the limit, the enforcement point:
 
 - sends a **provider-shaped terminal error event** first (the error event format each provider's client already raises on), then closes the stream;
 - in the SDK, raises a typed `tally.governance.BudgetTruncated` exception that the application can catch;
 - records `truncated_by_policy`.
 
 In the proxy this is the one action that changes what a response contains, which D9 and D11 otherwise avoid, so it is available only where a budget explicitly selects `truncate`.
+
+**When truncation can apply at all.** A request that sets `max_tokens` is reserved at prompt estimate plus `max_tokens` (6.1), so its output cannot exceed its reservation, and mid-stream truncation never triggers for it. `truncate` therefore only matters for requests **without** `max_tokens`, reserved at `default_output_reservation`.
+
+**Counting output mid-stream.** The final usage block is the only exact count for most providers, and it arrives at the end. What each provider gives during a stream:
+
+| Provider | Mid-stream signal | How the running count is known |
+|---|---|---|
+| Gemini | `usageMetadata` repeats on every chunk with running totals | Exact |
+| OpenAI | Usage only on the final chunk, and only when the client sets `stream_options.include_usage` | Estimated from emitted content |
+| Anthropic | `message_start` reports output so far (about 1); the cumulative count arrives on `message_delta` near the end | Estimated from emitted content |
+
+Where the count is estimated, no tokenizer runs at the edge, consistent with 6.1. The estimate is the character count of emitted content deltas multiplied by a **per-model output ratio**, and its error is measured, not asserted:
+
+- **Calibration.** Every stream that ends with a usage block records the estimate beside the exact count, per tenant and model. The ratio is the running median of that relationship; the error margin `ε` is its measured 99th-percentile relative error.
+- **A conservative trigger.** The stream is cut only when even the low end of the estimate crosses the limit: `estimate x (1 - ε) >= limit`. Truncation is therefore never premature at p99. The price is a bounded overrun of up to `ε x limit` on that call, which the settlement corrects in the counters afterwards.
+- **No calibration, no truncation.** Until a model has at least 200 measured streams for the tenant, `truncate` is unavailable for it and the budget falls back to `block` on the next call instead, recorded as `truncate_uncalibrated`. An OpenAI client that never sets `include_usage` never produces a usage block, so calibration is impossible and `truncate` stays unavailable; the dashboard says so rather than guessing.
+- **The margin is published.** The dashboard shows `ε` per model next to every budget that uses `truncate`.
+- Counting emitted characters means the proxy reads response content lengths in memory, never storing content. That is the same posture as D11's request inspection and falls under the same hosted-proxy disclosure (3.6).
 
 ### 5.3 Failure modes
 
@@ -300,6 +328,8 @@ In the proxy this is the one action that changes what a response contains, which
 | Request over the 1 MiB inspection cap (D11) | Per capability `oversize`: skip and flag (default), or block | `request_too_large` |
 | Strict parse fails: duplicate keys, invalid UTF-8, trailing data (D11) | Enforce: block. Shadow: proceed and record. A smuggling attempt is never silently evaluated | `parse_rejected` |
 | Spend lease or Redis unavailable (section 6.1) | Per `spend.on_unavailable`: `shadow` (default, availability first) or `block` (budget first) | `lease_unavailable` / `counters_unavailable` |
+| Lease denied because budget is held in other instances' unexpired leases, not spent (6.1) | Retry once after a short backoff, then per `on_unavailable`; never the budget's `block` action, since the budget is not exhausted | `budget_leased_out` |
+| `truncate` requested for a model without calibration (5.2) | No mid-stream cut; the next call is evaluated under `block` | `truncate_uncalibrated` |
 | Signature pack missing or hash mismatch | Use the last good pack; if none was ever loaded, cap `prompt_policy` at shadow | `sigpack_stale` / `sigpack_missing` |
 | Provider error during a cascade | Return the last successful response, or the original error | `cascade_failed` |
 | Evaluation throws | The call proceeds, as if the capability were shadow | `governance_error` |
@@ -323,8 +353,18 @@ The last row is the rule behind all of them: a bug in governance must never be t
 
 - **Lease design.**
   - A replica requests a lease from the control plane: a slice of the *remaining* budget, sized `max(min(remaining x lease_fraction, lease_max), min_lease)` (defaults 5%, $1, and `min_lease` equal to the budget's largest recent worst-case reservation), with a 30-second expiry.
-  - **A lease smaller than one call is never granted.** Without the floor, leases shrink geometrically toward zero as a tenant nears its budget: at $0.40 left a 5% lease is $0.02, below a single long-context call's reservation, so every call would exhaust its lease and need a synchronous lease request. That is the per-request control-plane round trip D1 rejects, arriving exactly at the budget edge. When `remaining < min_lease`, the lease request is **denied**, and the call follows the budget's action (`warn`, `downgrade`, `block`), because the budget is effectively spent.
+  - **A lease smaller than one call is never granted.** Without the floor, leases shrink geometrically toward zero as a tenant nears its budget: at $0.40 left a 5% lease is $0.02, below a single long-context call's reservation, so every call would exhaust its lease and need a synchronous lease request. That is the per-request control-plane round trip D1 rejects, arriving exactly at the budget edge. When `remaining < min_lease` and no other leases are outstanding, the lease request is **denied**, and the call follows the budget's action (`warn`, `downgrade`, `block`), because the budget is effectively spent.
+  - **Held is not spent.** When the unleased remainder is below `min_lease` but other leases are still outstanding, the budget is not exhausted; it is sitting in other instances. That denial is `budget_leased_out`, and the call retries once and then follows `on_unavailable` (5.3), never the budget's `block` action, so a hoarding problem never presents as a spent budget.
   - Calls reserve against the local lease. A background refill requests more below 50% remaining; a synchronous request happens only when a lease is exhausted, and **waits at most 50 ms** before `on_unavailable` applies, so a slow control plane can never stall the call path.
+
+- **Scale-to-zero containers hoard leases unless they run in ephemeral lease mode.** Section 7 requires Redis for serverless functions, but containerized platforms that scale to zero (Google Cloud Run, AWS App Runner, Azure Container Apps) look long-running to the SDK and would use ordinary leases. An instance that takes a lease, serves one small call and then goes idle holds the rest of that lease until it expires. Up to `lease_max` per instance, across many idle instances, can starve active ones into `budget_leased_out`. (`min_lease` is one worst-case reservation; the large grants come from the `lease_fraction` and `lease_max` sizing.)
+  - **Returning the lease after the response is not enough on these platforms.** With Cloud Run's default request-based billing, CPU is throttled as soon as a response completes, so work scheduled after the response (a post-response hook, a background thread) may not run until the next request arrives ([Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings)). A return that only happens there is a return that often does not happen.
+  - **Ephemeral lease mode** is selected when the SDK detects such a platform from its environment (for example `K_SERVICE` on Cloud Run), or explicitly with `TALLY_RUNTIME=ephemeral`. In this mode:
+    - leases are sized to in-flight need, one worst-case reservation per concurrent call, not a fraction of the remaining budget;
+    - when an instance's in-flight count drops to zero, the unused portion is **returned inline, before the response is written**, while the platform still grants CPU; the return is a single small request, bounded by the same 50 ms cap, and a failed return simply expires;
+    - expiry is 10 seconds instead of 30;
+    - refills and returns double as heartbeats, and the control plane reclaims any lease not heartbeated within one expiry, so a frozen instance's lease is freed on schedule even if it never returns it.
+  - **Redis is still the better answer** for these platforms, because there is nothing to hoard. The SDK logs a one-time recommendation when it detects a scale-to-zero platform running on leases.
   - **The invariant:** the control plane never has outstanding leases totalling more than the remaining budget. Worst-case overrun is therefore bounded by reservation *estimation error* on in-flight calls, not by replica count or traffic shape. Autoscaling is safe, because a new replica gets a lease from what is left rather than a partition of the original.
   - Unused lease budget returns on expiry or settlement, so idle replicas do not strand it.
 
@@ -393,6 +433,7 @@ The last row is the rule behind all of them: a bug in governance must never be t
 | Sidecar | No | Localhost | Redis, or leases | Recommend only (D9) | Stream, under 10s | Latency-sensitive, strict isolation |
 | SDK, long-running process | No | None | Redis, or leases | Native | Stream, under 10s | Python services |
 | SDK, serverless (Vercel, Lambda) | No | None | Redis required | Native | Inline, TTL-bounded (6.7) | Serverless apps |
+| SDK, scale-to-zero container (Cloud Run, App Runner) | No | None | Redis, or ephemeral leases (6.1) | Native | Inline, TTL-bounded, as serverless: a throttled idle container cannot keep a stream open | Containerized services that scale to zero |
 
 **What serverless changes.** Beyond the kill switch, three things behave differently in an ephemeral function, and the SDK has an explicit serverless mode for them rather than pretending they are long-running:
 
@@ -537,6 +578,8 @@ An earlier draft had every edge endpoint use "the tenant's API key". That fits o
 - **Parser differentials.** Any gap between the proxy's parser and a provider's is a policy bypass. Strict parsing (D11) closes the known class; a conformance test per provider, fed deliberately ambiguous bodies, keeps it closed.
 - **Regex denial of service.** Pattern packs run on attacker-influenced input. RE2-only patterns (section 4.2) are the mitigation, and it adds `google-re2`, a compiled dependency, to the Python SDK.
 - **Caller-set dimensions.** Feature tag and account hash come from the caller. Section 3.4 makes overrides tighten-only unless the tag is bound to a key, and section 6.7 states that account-scoped kill switches stop cooperative callers only. Any future policy that loosens on a caller-set value needs the same server-side binding.
+- **SDK enforcement is cooperative.** The SDK runs inside the customer's process, so code that skips it, or calls a provider directly, is not governed. Only a proxy is non-bypassable, and only when the customer's network blocks direct egress to the providers. The spec's guarantees against a misbehaving caller (3.4, 6.7) hold fully at a proxy with egress controls and are best-effort in the SDK; the dashboard shows which enforcement point governed each call so the difference is visible.
+- **Estimated mid-stream counts.** `truncate` for OpenAI and Anthropic depends on a calibrated estimate (5.2). It is conservative by construction and unavailable until calibrated, but a model change that shifts the output ratio widens `ε` until the calibration catches up.
 - **Serverless is a weaker enforcement point.** TTL-bounded kill switch propagation, Redis-only spend enforcement, and decision loss on freeze without a flush hook. The dashboard must say which calls were governed from serverless.
 
 ## 14. Open questions
@@ -562,6 +605,9 @@ Still open:
 8. **Hosted judge tier:** worth offering at all, given its consent and data-residency cost?
 9. **Feature-scoped API keys:** a feature column on `api_keys`, or a separate binding table, and whether one key may be bound to several features.
 10. **The allow sample rate** (1% in the draft) and how long the full decision rows are retained relative to the counts table.
+11. **Ephemeral platform detection:** the environment signals per platform (Cloud Run is `K_SERVICE`; App Runner and Azure Container Apps need confirming), and whether detection defaults to ephemeral mode or only recommends it.
+12. **Streaming calibration thresholds:** the 200-stream minimum and the p99 `ε`, and whether calibration pools across tenants for the same model to become available sooner.
+13. **Signature pack corpora:** who owns the true-positive and false-positive corpora, and the false-positive rate a pack must stay under to publish.
 
 ## 15. Phasing
 
@@ -573,13 +619,13 @@ Done when: an org admin turns governance on, sees a week of would-have-acted dec
 
 ### P1: deterministic enforcement and the kill switch
 
-Scope: `spend` (reservation, settlement, once-per-period seeding and one-way reconcile, Redis counters, leases with the minimum lease and the 50 ms synchronous cap, `on_unavailable`, the streaming `truncate` action with a terminal error event), `model_policy` with `block`, D11 request inspection in the proxy with strict parsing and the hosted-proxy inspection confirmation, prompt scans (PII, secrets) with `block` on an RE2-only signature pack, output schema `flag`, the kill switch with streaming delivery, the serverless inline check, and runaway detection as proposals with opt-in expiring auto-activation; the SDK's serverless mode (TTL bundles, spans and decisions flushed together); the enforce confirmation dialog. Gated on the #350 real-key run for `spend`.
+Scope: `spend` (reservation, settlement, once-per-period seeding and one-way reconcile, Redis counters, leases with the minimum lease, the 50 ms synchronous cap, `budget_leased_out` and ephemeral lease mode for scale-to-zero containers, `on_unavailable`, the streaming `truncate` action with a terminal error event, per-model output calibration and the conservative trigger), `model_policy` with `block`, D11 request inspection in the proxy with strict parsing and the hosted-proxy inspection confirmation, prompt scans (PII, secrets) with `block` on an RE2-only signature pack with post-match filters and the corpus publish gate, output schema `flag`, the kill switch with streaming delivery, the serverless inline check, and runaway detection as proposals with opt-in expiring auto-activation; the SDK's serverless mode (TTL bundles, spans and decisions flushed together); the enforce confirmation dialog. Gated on the #350 real-key run for `spend`.
 
 Done when: a tenant enforces a monthly budget with downgrade, a disallowed model is blocked, a kill switch stops a feature's traffic within 10 seconds, and a control-plane outage during all of this causes no additional blocked calls.
 
 ### P2: prompt governance and per-feature scoping
 
-Scope: `tally.prompt` template API, approved template versions, proxy fingerprinting with fidelity labels, scans on retrieved context and tool outputs, SDK `redact`, injection signals, per-feature-tag overrides that tighten only, and feature-scoped API keys for the overrides that loosen.
+Scope: `tally.prompt` template API, approved template versions, proxy fingerprinting with fidelity labels, scans on retrieved context and tool outputs, SDK `redact`, injection signals, per-feature-tag overrides that tighten only, and feature-scoped API keys for the overrides that loosen, with each key's bound tag carried in the key feed and the tag-resolution conformance fixtures in Go and Python.
 
 Done when: a team enforces approved templates on one feature while the rest of the org stays in shadow, and the dashboard shows which calls had full template checking.
 
@@ -597,11 +643,11 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 
 ## 16. File-level change list (planned)
 
-- **db/postgres:** `tenant_governance_settings`, `tenant_governance_capabilities`, `tenant_governance_changes`, governance bundle versions and signing metadata, `governance_edge_credentials` (9.1), the spend lease ledger (6.1), and feature scoping for API keys (P2); mounts in `infra/docker-compose.yml`. Existing deployments pick these up through `make pg-migrate`, which `deploy.sh` now runs (#384).
+- **db/postgres:** `tenant_governance_settings`, `tenant_governance_capabilities`, `tenant_governance_changes`, governance bundle versions and signing metadata, `governance_edge_credentials` (9.1), per-model stream calibration, the spend lease ledger (6.1), and feature scoping for API keys (P2); mounts in `infra/docker-compose.yml`. Existing deployments pick these up through `make pg-migrate`, which `deploy.sh` now runs (#384).
 - **db/clickhouse:** `governance_decisions.sql` and `governance_decision_counts.sql`; add both ReplacingMergeTree tables to the `FINAL` guard in `web/lib/clickhouse.test.ts` (the counts table is a SummingMergeTree and is read with `sum()`).
-- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign, content-addressed routing tables), `governance_sigpack.py` (publish, RE2 validation), `governance_leases.py` (ledger, minimum lease), `governance_seed.py` (settled-watermark seeding, one-way reconcile), `governance_signing.py` (manifests, root and signing key set; the gateway has no signing facility today), `governance_edge_identity.py` (9.1), `governance_decisions.py` (ingest, allow counts), `governance_kill.py` (manual switch, runaway proposals, expiring auto-activation); routes in `app.py`; tests including bundle signature, lease invariant (outstanding leases never exceed remaining budget), and resolution-order conformance fixtures.
-- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, Redis counters and leases, RE2 scans via `google-re2`, `tally.prompt`, serverless mode with TTL revalidation and spans and decisions flushed together; the `BudgetTruncated` exception; effective-mode precedence with `GuardrailConfig.mode`); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
-- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, D11 request inspection with a strict duplicate-rejecting JSON parser, pre and post checks, Redis counters and leases, kill switch stream); a per-provider parser-differential conformance suite. No request-body rewriting (D9).
+- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign, content-addressed routing tables), `governance_sigpack.py` (publish gate: RE2 compile check, true-positive and false-positive corpora, recorded false-positive rate), `governance_leases.py` (ledger, minimum lease, `budget_leased_out`, ephemeral leases with heartbeat reclaim), `governance_seed.py` (settled-watermark seeding, one-way reconcile), `governance_signing.py` (manifests, root and signing key set; the gateway has no signing facility today), `governance_edge_identity.py` (9.1), `governance_decisions.py` (ingest, allow counts), `governance_kill.py` (manual switch, runaway proposals, expiring auto-activation); routes in `app.py`; tests including bundle signature, lease invariant (outstanding leases never exceed remaining budget), and resolution-order conformance fixtures.
+- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, Redis counters and leases, RE2 scans via `google-re2`, `tally.prompt`, serverless mode with TTL revalidation and spans and decisions flushed together; the `BudgetTruncated` exception; ephemeral runtime detection with inline lease return; stream output estimation and calibration; tag resolution from key binding; post-match secret filters; effective-mode precedence with `GuardrailConfig.mode`); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
+- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, D11 request inspection with a strict duplicate-rejecting JSON parser, pre and post checks, Redis counters and leases, stream output estimation with per-model calibration, tag resolution from the key's bound feature, post-match secret filters, kill switch stream); a per-provider parser-differential conformance suite. No request-body rewriting (D9).
 - **judge worker:** a new container under `infra/judge-worker/`.
 - **web:** `app/settings/governance/` (capabilities off until enabled, body-reading capabilities labeled, loosening overrides labeled, hosted-proxy inspection confirmation), `app/governance/` (overview from the counts table, audit, runaway proposals), `lib/governance.ts`, server routes enforcing `org:admin`; update the #385 proxy switch copy to mention inspection when a body-reading capability is on.
 - **docs:** conformance fixture format; operator guide for the in-VPC gateway and shared counter store.
@@ -640,3 +686,10 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 - **Serverless (7).** Spans and decisions flushed together, since the SDK's existing transport relies on a thread and `atexit` a frozen function never runs.
 - **Latency (goal 3, 5.1).** End-to-end p99 per enforcement point and capability mix; per-step figures are targets, not a sum; network round trips reported separately.
 - **Consistency and status.** Removed a failure-mode row that contradicted `on_unavailable`; #384 and #385 marked merged; #350's auto-close noted; account-scoped kill switches and proxy-only judge coverage stated.
+
+**Review 3** (operational review of the Review 2 draft):
+
+- **Lease hoarding on scale-to-zero containers (6.1, 7).** Containers on Cloud Run, App Runner and similar platforms look long-running but go idle holding leases. Added ephemeral lease mode: leases sized to in-flight need, the unused portion returned inline before the response is written (a post-response return is unreliable where CPU is throttled after the response), 10-second expiry, and heartbeat reclaim. Added `budget_leased_out`, so budget held in other leases never presents as a spent budget.
+- **Mid-stream output counting (5.2).** Truncation only applies to requests without `max_tokens`. Gemini gives exact running counts; OpenAI and Anthropic are estimated from emitted content with a per-model ratio whose p99 error is measured from each stream's final usage. The trigger cuts only when the low end of the estimate crosses the limit, and `truncate` is unavailable until a model is calibrated.
+- **RE2 without lookarounds (4.2).** Matching and false-positive filtering are separate stages; filters (entropy, shape allowlists, keyword proximity, checksums) run in code on matches only. Rules from RE2-native scanners such as gitleaks are adapted after license and corpus checks; rules from backtracking engines are not imported as-is. Added a publish gate with true- and false-positive corpora.
+- **Feature tag resolution (3.4).** Exact rules: a feature-scoped key's bound tag governs; with an org key the header tag never reaches a loosening override; resolution happens at the enforcement point from the key feed, pinned by conformance fixtures in Go and Python. Added the risk that SDK enforcement is cooperative and only a proxy with egress controls is non-bypassable.
