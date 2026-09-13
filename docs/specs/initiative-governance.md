@@ -57,9 +57,24 @@ Every part of it is **optional and settings-driven**. An organization can have g
 
 **D8. Extend the guardrails model, do not replace it.** `tenant_guardrails` (0006) already has rule kinds, a per-rule `state` of `enabled | shadow | disabled`, and an audit table `tenant_guardrail_changes`. The SDK already has enforcement actions `observe | warn | graceful | hard_stop` (`sdk/python/src/tally/guardrails.py`) and per-rule verdict span attributes. Governance generalizes these; existing rules keep working unchanged.
 
-**D9. Routing in the proxy requires a scoped exception to "bodies are never mutated".** The edge proxy's invariant #1 (`infra/edge-proxy/README.md`) is that request bodies are forwarded byte for byte. Routing a call to a different model means rewriting the request's `model` field. The SDK can route natively, because it constructs the request. For the proxy this spec proposes a narrow exception: under the routing capability in **enforce** mode only, the proxy may rewrite exactly the `model` field, the rewrite is recorded in the decision log, and every other byte is still forwarded untouched. This needs explicit sign-off (section 14, Q1); until it has it, proxy routing is recommend-only.
+**D9. The proxy never rewrites request bodies in V1; proxy routing is recommend-only.** An earlier draft proposed letting the proxy rewrite the request's `model` field as a "scoped exception" to its invariant that bodies are forwarded byte for byte. Review rejected that, correctly: it is a change of network posture, not an exception.
+
+- A different model id changes the payload length, so `Content-Length` must be recomputed, or the request re-framed as chunked.
+- Rewriting safely means buffering the whole request and parsing it, where today the proxy streams requests untouched (`countingReadCloser` in `proxy.go` only counts bytes). Re-serializing a parsed tree also changes bytes the policy never meant to touch.
+- **Parser differentials** open a smuggling path: a body with two `model` keys can be read as an allowed model by the proxy's parser and as a different model by the provider's. Go's `encoding/json` keeps the last duplicate; a provider may keep the first.
+- Gemini carries the model in the URL path, not the body, and some endpoints take multipart bodies, so "rewrite the model field" is not even one operation.
+
+So in V1 routing, model rewriting and redaction are **SDK-only**, where the SDK builds the request and nothing is re-parsed. The proxy blocks or records a recommendation. Revisiting proxy rewriting (not before P4) requires all of: D11's strict parser, splicing only the validated value's byte range instead of re-serializing, recomputing `Content-Length`, a request size cap, and its own measured latency budget.
 
 **D10. Shadow first, always.** Every new capability ships in shadow before enforce exists for it, and a capability enabled for the first time defaults to shadow.
+
+**D11. Request inspection in the proxy is opt-in, bounded, and uses one strict parse.** D9's analysis applies to reading a request, not only to rewriting one. `model_policy` and `prompt_policy` in the proxy must read the request body, which the proxy does not do today. So:
+
+- The proxy buffers a request **only** when some capability that reads the body is in shadow or enforce for that tenant. Otherwise requests keep streaming untouched.
+- Buffering is capped at 1 MiB, the same bound as the existing response tee. Over the cap, the capability's `oversize` param decides: `skip_and_flag` (default) or `block`.
+- The body is parsed once, **strictly**: duplicate keys at any depth, invalid UTF-8 and trailing data are parse failures, so the value a policy evaluates is the only value the provider can see. A parse failure is `parse_rejected`: blocked under enforce, recorded under shadow (section 5.3).
+- The decision and the forwarded request come from the same buffered bytes, which are forwarded unmodified (D9).
+- Buffering and parsing have their own line in the latency budget (section 5.1), measured before P1 rather than assumed.
 
 ## 3. Settings model
 
@@ -160,13 +175,13 @@ A capability row that does not exist reads as `off` when the org switch is off a
 | Capability | Inputs at the edge | Decides | Enforce actions | Builds on |
 |---|---|---|---|---|
 | `spend` | estimated cost, counters | whether the call fits budget | `warn`, `downgrade` (route cheaper), `block` | `tenant_budgets` (0026), SDK `cost_cap` |
-| `model_policy` | requested model, provider | allowed, deprecated, or disallowed model | `rewrite` (D9), `block` | `model_deprecation` rule kind |
+| `model_policy` | requested model, provider | allowed, deprecated, or disallowed model | `block`; `rewrite` SDK-only (D9) | `model_deprecation` rule kind |
 | `prompt_policy` | template id and version, variables, retrieved context, tool outputs | approved template, PII, secrets, injection signals | `redact` (SDK only), `block` | `pii_gate` rule kind |
 | `output_policy` | response, requested schema | schema adherence, refusal | `retry`, `escalate`, `flag` | `FormatAdherenceEvaluator`, `RefusalEvaluator` |
-| `routing` | task type (feature tag), routing table | which model to call | `route` (D9), `cascade` | replay + eval, `wrong-sized-model` detector |
+| `routing` | task type (feature tag), routing table | which model to call | `route`, `cascade`: SDK-only in V1 (D9); proxy records a recommendation | replay + eval, `wrong-sized-model` detector |
 | `quality_judge` | sampled logged calls, criteria | quality score and verdict | none inline; feeds routing and reports | `CorrectnessEvaluator` |
 
-`redact` is SDK-only because the proxy does not mutate bodies beyond D9's single field.
+`redact`, `rewrite`, `route` and `cascade` are SDK-only in V1 because the proxy never rewrites request bodies (D9). Proxy capabilities that read the body follow D11.
 
 ### 4.2 Policy bundle
 
@@ -186,20 +201,27 @@ The control plane compiles settings, capability params, routing tables and the r
     "routing":       { "mode": "off" }
   },
   "overrides": { "checkout": { "spend": { "mode": "enforce", "action": "block" } } },
-  "routing_tables": {},
+  "routing_tables": { "summarize": "sha256:9f2c...", "support.reply": "sha256:41ab..." },
+  "signature_pack": { "id": "sigpack-2026-09-10", "sha256": "c07e..." },
   "signature": { "alg": "Ed25519", "key_id": "gov-2026-09", "value": "..." }
 }
 ```
 
 - **Versioning:** a monotonically increasing integer per tenant. Every decision records the version it was made under.
 - **Signing:** Ed25519 over the canonical JSON. The signing key is held by reference in KMS or Secrets Manager (credentials-by-reference invariant); the public key ships with the SDK and proxy and is rotatable by `key_id`. An edge rejects a bundle whose signature does not verify and keeps its last good bundle.
-- **Size bound:** 256 KiB. Routing tables beyond that are paged by task type (Q6).
+- **Two kinds of artifact, not one bundle.** Review pointed out that one 256 KiB bundle cannot hold allowlists, routing tables and prompt-injection signatures together, and comprehensive injection heuristics alone run to hundreds of KiB. So:
+  - **Settings bundle** (per tenant, small, changes often): settings, capability params, allowlists, and *references* to routing tables and the signature pack by content hash. Target under 64 KiB; hard cap 256 KiB.
+  - **Routing tables** (per tenant, per task type): fetched by hash only when the reference changes.
+  - **Signature pack** (global, versioned by ai-tally, changes rarely): PII, secret and injection patterns. Megabytes are acceptable. Fetched by hash, cached on disk where the enforcement point has a disk, signed separately.
+- **No delta protocol in V1.** Content addressing already gives "fetch only what changed" at artifact granularity, which is where the size is. A byte-level delta protocol adds a second correctness surface for little gain until a single artifact is both large and changes often.
+- **Patterns must be linear-time.** A pack runs on attacker-influenced input on the call path, so a backtracking regex is a denial-of-service lever. Every pattern must compile under RE2 semantics: Go's `regexp` already is RE2; the Python SDK must use an RE2 binding (`google-re2`), not the standard `re` module it uses today (`redaction.py`, `evals.py`). A pattern that is not RE2-compatible is rejected when the pack is published, not discovered at the edge.
 
 ### 4.3 Distribution
 
-- **Pull:** the edge fetches `GET /v1/governance/bundle` with `If-None-Match: <version>` every 30 seconds, the same outbound-only pattern the proxy's key feed uses (#385).
+- **Long-running enforcement points** (proxies, SDK in a server process): poll the settings bundle every 30 seconds with `If-None-Match: <version>`, the same outbound-only pattern as the proxy's key feed (#385). Fetch routing tables and the signature pack only when their hash changes.
+- **Serverless enforcement points** (SDK in Vercel functions or Lambda): no background threads, so no polling. The bundle is cached in module scope across warm invocations and revalidated inline, with a conditional `GET`, at most once per `bundle_ttl_seconds` (default 30). A cold start fetches it before the first call, which costs one round trip on cold starts only; the signature pack is loaded lazily, only when a capability that scans is active.
 - **Kill switch:** a separate, tiny channel (section 6.7), not the bundle.
-- **Staleness:** past `max_staleness_seconds` without a successful fetch, every capability is capped at shadow (section 3.3), and the edge reports `bundle_stale` on its decisions.
+- **Staleness:** past `max_staleness_seconds` without a successful fetch, every capability is capped at shadow (section 3.3), and the enforcement point reports `bundle_stale` on its decisions.
 
 ## 5. Enforcement pipeline
 
@@ -226,6 +248,7 @@ Per call, at the enforcement point. Deterministic steps only; nothing in this pa
 | Model policy | 20 µs |
 | Prompt scans | 1 ms for inputs up to 64 KiB; above that, policy decides `scan_prefix` or `skip_and_flag` |
 | Routing lookup | 50 µs |
+| Request buffering and strict parse (D11), only when a body-reading capability is active | Measured before P1; target under 1 ms up to 64 KiB. Reported separately from the total below, because it scales with prompt size |
 | **Total deterministic** | **under 2 ms** |
 
 ### 5.2 Streaming
@@ -241,6 +264,10 @@ Post-checks that need the whole output run after the stream completes and can on
 | Bundle signature invalid | Reject it, keep the last good bundle | `bundle_rejected` |
 | Shared counter store unreachable | Fall back to local per-replica counters (section 6.1) | `counters_degraded` |
 | Scan input over size cap | Per policy: scan the prefix, or skip and flag | `scan_truncated` / `scan_skipped` |
+| Request over the 1 MiB inspection cap (D11) | Per capability `oversize`: skip and flag (default), or block | `request_too_large` |
+| Strict parse fails: duplicate keys, invalid UTF-8, trailing data (D11) | Enforce: block. Shadow: proceed and record. A smuggling attempt is never silently evaluated | `parse_rejected` |
+| Spend lease or Redis unavailable (section 6.1) | Per `spend.on_unavailable`: `shadow` (default, availability first) or `block` (budget first) | `lease_unavailable` / `counters_unavailable` |
+| Signature pack missing or hash mismatch | Use the last good pack; if none was ever loaded, cap `prompt_policy` at shadow | `sigpack_stale` / `sigpack_missing` |
 | Provider error during a cascade | Return the last successful response, or the original error | `cascade_failed` |
 | Evaluation throws | The call proceeds, as if the capability were shadow | `governance_error` |
 
@@ -254,17 +281,27 @@ The last row is the rule behind all of them: a bug in governance must never be t
   - Prompt tokens are estimated from character count with a per-provider ratio, recalibrated weekly from each tenant's own recorded usage. No tokenizer ships to the edge.
   - A request with no `max_tokens` is reserved at the policy's `default_output_reservation`. The request is not modified to add one (the proxy does not mutate bodies).
 - **Settlement after the call:** the reservation is replaced by the exact cost from the provider's usage block, which the proxy and SDK already parse (#372, #377, #378). Usage arrives in the response body, not headers.
-- **Counters:** budgets are rolling totals per scope (`tenant`, `feature`, `model`, `layer`, matching `tenant_budgets.scope_kind`).
-  - Hosted proxy on one instance: exact local counters.
-  - Multiple replicas without a shared store: each replica enforces `budget / N` plus a sync of settled totals from the control plane every 60 seconds. Approximate by design, and labeled so in the dashboard.
-  - Multiple replicas with a shared store: a customer-run Redis in their network, configured on the enforcement point. Exact.
+- **Counters.** Budgets are rolling totals per scope (`tenant`, `feature`, `model`, `layer`, matching `tenant_budgets.scope_kind`). Three tiers, chosen by deployment:
+  - **One instance** (the hosted proxy today): exact local counters.
+  - **Redis** (the only shared store in V1, hardcoded, no pluggable interface): reserve and settle are single atomic Lua scripts against a key per scope and period. Exact. Serverless functions reuse the client across warm invocations; the per-cold-start connect cost is accepted and measured.
+  - **No Redis, multiple replicas: spend leases.** Replicas do not share a counter; they hold leases.
+
+- **Why leases, and not the earlier draft.** The first draft had each replica enforce `budget / N` and sync settled totals every 60 seconds. Review showed the overrun: with $10 left and a spike across 50 replicas, each believes it has room, and together they can spend far past the budget inside the sync window. Partitioning statically ($10 / 50 = $0.20 each) fixes that case but breaks two others: autoscaling changes N while replicas hold stale partitions, so new replicas over-allocate, and uneven traffic blocks a hot replica while idle ones sit on unspent budget.
+
+- **Lease design.**
+  - A replica requests a lease from the control plane: a slice of the *remaining* budget, sized `min(remaining x lease_fraction, lease_max)` (defaults 5% and $1), with a 30-second expiry.
+  - Calls reserve against the local lease. A background refill requests more below 50% remaining; a synchronous request happens only when a lease is exhausted.
+  - **The invariant:** the control plane never has outstanding leases totalling more than the remaining budget. Worst-case overrun is therefore bounded by reservation *estimation error* on in-flight calls, not by replica count or traffic shape. Autoscaling is safe, because a new replica gets a lease from what is left rather than a partition of the original.
+  - Unused lease budget returns on expiry or settlement, so idle replicas do not strand it.
+
+- **When leases or Redis are unavailable.** This is a real trade-off, and it is made explicit per budget rather than hidden inside D5. `spend.on_unavailable = shadow` (default) keeps traffic flowing and records `lease_unavailable`; spend is then unenforced until the control plane or Redis returns. `on_unavailable = block` refuses calls instead: budget over availability. The dashboard shows which one each budget uses.
 - **Baseline:** counters are seeded from ai-tally's recorded spend for the period on bundle load, so enforcement starts from real month-to-date spend, not zero.
 - **Gate:** `spend` may not be set to enforce until real-traffic verification (#350) has run for the providers the tenant uses (section 12).
 
 ### 6.2 Model policy
 
 - Allow and deny lists by model id and provider; deprecation dates, extending the existing `model_deprecation` rule kind.
-- `rewrite` maps a disallowed model to its configured replacement (D9 applies in the proxy).
+- `rewrite` maps a disallowed model to its configured replacement. SDK-only in V1; the proxy blocks or records the recommended replacement (D9).
 
 ### 6.3 Prompt policy
 
@@ -275,7 +312,7 @@ The last row is the rule behind all of them: a bug in governance must never be t
   tally.prompt("support.reply", version="v4", variables={"ticket": ticket_text})
   ```
   The static template is hashed and checked against the approved versions in the bundle. Scans run on the variables.
-- **Proxy (reduced fidelity):** the proxy only sees the joined messages. It fingerprints the system message (usually static) plus the message role structure, and runs scans on the rest. The decision records `fidelity = proxy_fingerprint` so the dashboard can say which calls had full template checking.
+- **Proxy (reduced fidelity):** the proxy only sees the joined messages. It fingerprints the system message (usually static) plus the message role structure, and runs scans on the rest. The decision records `fidelity = proxy_fingerprint` so the dashboard can say which calls had full template checking. Any of this in the proxy requires request inspection under D11.
 - **What gets scanned:** not only user-supplied variables. Prompt injection most often arrives through retrieved documents and tool outputs, so the SDK scans those inputs too when they pass through instrumented retrieval and tool calls.
 - **Scans:** PII (pattern and checksum based), secrets (provider key formats, high-entropy tokens), injection signals (pattern set, versioned in the bundle). Only a verdict and the category leave the process.
 
@@ -288,7 +325,7 @@ The last row is the rule behind all of them: a bug in governance must never be t
 ### 6.5 Routing and cascade
 
 - **Routing tables** map a task type (feature tag) to an ordered list of models with measured cost, quality and latency, built offline from replay and evaluation. This is the routing-intelligence scope's P0 and P1: real replay and an outcome signal are prerequisites (section 12).
-- **Phases:** recommend (a finding in the dashboard: "switch `summarize` to X, same measured quality, saves $Y"), then route with human approval of the table, then automatic.
+- **Phases:** recommend (a finding in the dashboard: "switch `summarize` to X, same measured quality, saves $Y"), then route with human approval of the table, then automatic. In V1 only the SDK applies a route; the proxy records the recommendation (D9).
 - **Cascade:** try the cheapest model whose measured quality clears the task's floor; on a post-check failure, escalate to the next. Bounded by `max_escalations` (default 1) and by the spend reservation, which must cover the worst case of the cascade, not the first call.
 - **Honesty:** a routing claim is only as good as the judge that produced the quality numbers. The routing table carries the judge's measured accuracy, and a recommendation whose quality difference is inside the judge's error is shown as inconclusive, not as a saving.
 
@@ -303,17 +340,25 @@ The last row is the rule behind all of them: a bug in governance must never be t
 - **Scopes:** org, feature tag, model, account hash.
 - **Triggers:** manual (dashboard, API) and automatic (a spend runaway rule, for example spend in the last 10 minutes above N times the trailing hourly rate).
 - **Delivery:** outbound only, because customer networks block inbound. The enforcement point holds a long-lived streaming connection (`GET /v1/governance/kill/stream`, server-sent events) and falls back to polling `GET /v1/governance/kill` every 5 seconds. Target propagation: under 10 seconds.
+- **Serverless:** a function cannot hold a streaming connection or run a 5-second poller. The SDK in serverless mode checks kill-switch state **inline**, cached in module scope for `kill_ttl_seconds` (default 5): the first invocation after the TTL does a conditional `GET /v1/governance/kill`, so warm invocations pay nothing and one invocation per TTL pays a round trip. Propagation there is therefore bounded by the TTL plus that request, and the dashboard states it separately from the under-10-seconds target for long-running points. Customers who cannot accept a round trip on the request path can mirror the switch into their platform's own low-latency configuration store (Vercel Edge Config, AWS AppConfig with the Lambda extension); ai-tally writing to those stores is a P2 integration, not V1.
 - **Sticky:** once active at an edge, it stays active if the control plane becomes unreachable, until an explicit clear is received. This is the one exception to D5.
 - **Today's precedent:** revoking an API key already stops proxy traffic within one 45-second key-feed refresh. The kill switch is the fast, scoped, reversible version of that.
 
 ## 7. Deployment modes
 
-| Mode | Prompt leaves customer network | Added network hop | Counters | Routing | Best for |
-|---|---|---|---|---|---|
-| Hosted proxy (#384) | Transits ai-tally, never stored | Customer to ai-tally region | Exact (single instance today) | Recommend, or rewrite under D9 | Evaluation, pilots |
-| In-VPC gateway (few replicas) | No | Inside their network | Shared store, or approximate | Rewrite under D9 | Enterprise default |
-| Sidecar | No | Localhost | Shared store required | Rewrite under D9 | Latency-sensitive, strict isolation |
-| SDK | No | None | Shared store, or approximate | Native | Serverless (Vercel, Lambda), Python apps |
+| Mode | Prompt leaves customer network | Added network hop | Counters | Routing | Kill switch | Best for |
+|---|---|---|---|---|---|---|
+| Hosted proxy (#384) | Transits ai-tally, never stored | Customer to ai-tally region | Exact (single instance today) | Recommend only (D9) | Stream, under 10s | Evaluation, pilots |
+| In-VPC gateway (few replicas) | No | Inside their network | Redis, or leases | Recommend only (D9) | Stream, under 10s | Enterprise default |
+| Sidecar | No | Localhost | Redis, or leases | Recommend only (D9) | Stream, under 10s | Latency-sensitive, strict isolation |
+| SDK, long-running process | No | None | Redis, or leases | Native | Stream, under 10s | Python services |
+| SDK, serverless (Vercel, Lambda) | No | None | Redis required | Native | Inline, TTL-bounded (6.7) | Serverless apps |
+
+**What serverless changes.** Beyond the kill switch, three things behave differently in an ephemeral function, and the SDK has an explicit serverless mode for them rather than pretending they are long-running:
+
+- **Bundles** are cached in module scope and revalidated inline on a TTL (section 4.3), not polled.
+- **Counters** cannot be local, because instances do not share memory and die without settling, so spend enforcement in serverless requires Redis. Without it, `spend` is capped at shadow in serverless mode.
+- **Decision records** must be flushed before the function returns, using the platform's post-response hook (`waitUntil` on Vercel, a Lambda extension), or they are lost when the instance is frozen. Losing them is recorded as a gap in decision coverage, never silently.
 
 The hosted proxy's single-instance deployment is not suitable for enforce mode at scale; section 13 treats this as a risk, not a footnote.
 
@@ -336,7 +381,7 @@ CREATE TABLE governance_decisions (
     ReasonCode      LowCardinality(String),     -- budget_exceeded | pii_detected | model_denied | ...
     BundleVersion   UInt64,
     Fidelity        LowCardinality(String),     -- sdk_template | proxy_fingerprint | n/a
-    Degraded        Array(LowCardinality(String)), -- bundle_stale | counters_degraded | ...
+    Degraded        Array(LowCardinality(String)), -- bundle_stale | lease_unavailable | parse_rejected | request_too_large | sigpack_stale | ...
     RequestedModel  LowCardinality(String),
     RoutedModel     LowCardinality(String),
     ReservedMicroUsd Nullable(Int64),
@@ -371,7 +416,9 @@ All tenant endpoints use the service token plus `x-tenant-id`, like every `/v1/t
 | GET | `/v1/tenant/governance/changes` | web | Audit log |
 | POST/DELETE | `/v1/tenant/governance/kill` | web | Activate or clear a kill switch |
 | GET | `/v1/tenant/governance/shadow-summary` | web | Would-have-acted counts and examples per capability |
-| GET | `/v1/governance/bundle` | edge | Signed bundle, `ETag` by version |
+| GET | `/v1/governance/bundle` | edge | Signed settings bundle, `ETag` by version |
+| GET | `/v1/governance/routing/{sha256}` and `/v1/governance/sigpack/{sha256}` | edge | Content-addressed routing tables and signature pack, immutable, cacheable forever |
+| POST | `/v1/governance/leases` | edge | Request, renew or return a spend lease (section 6.1) |
 | GET | `/v1/governance/kill` and `/kill/stream` | edge | Kill switch state |
 | POST | `/v1/governance/decisions` | edge | Decision batches, same transport and idempotency as `/v1/batches` |
 | POST | `/v1/governance/judge-results` | judge worker | Scores, verdicts, judge accuracy |
@@ -391,7 +438,7 @@ All tenant endpoints use the service token plus `x-tenant-id`, like every `/v1/t
 - **Identifiers by hash, credentials by reference.** Account ids stay HMAC hashes; the bundle signing key is a KMS reference; template approval uses hashes.
 - **Money is integer micro-USD.** Reservations, settlements, budgets and savings are integers; rate math uses `Decimal` and BigInt.
 - **Control-plane writes through the gateway.** The web app changes settings through gateway endpoints only.
-- **Edge proxy invariants.** Unchanged except the single, scoped, recorded `model` rewrite in D9, which needs sign-off.
+- **Edge proxy invariants.** Unchanged. V1 never rewrites a request body (D9). Request inspection is opt-in per capability, bounded, strictly parsed, and forwards exactly the bytes it inspected (D11).
 
 ## 12. Prerequisites
 
@@ -411,17 +458,29 @@ All tenant endpoints use the service token plus `x-tenant-id`, like every `/v1/t
 - **False positives erode trust quickly.** A PII or injection scan that blocks legitimate calls gets governance turned off. Mitigation: the enforce confirmation (section 10) and per-capability shadow data before enforcing.
 - **Judge accuracy bounds every quality claim.** A 90% accurate judge cannot support a routing claim more precise than its error; hiding that would overstate the product.
 - **Competitive overlap.** AI gateways already do routing and guardrails. The spec only pays off if routing decisions are visibly grounded in measured cost and quality per customer and feature.
-- **Body mutation (D9).** Relaxing a tested proxy invariant is a real change in what the proxy promises. If it is rejected, proxy-mode routing stays recommend-only.
+- **Request inspection cost scales with prompt size.** D11 keeps it opt-in and capped, but long-context tenants who enable prompt policy in the proxy will see latency grow with request size. The SDK is the better enforcement point for them.
+- **Parser differentials.** Any gap between the proxy's parser and a provider's is a policy bypass. Strict parsing (D11) closes the known class; a conformance test per provider, fed deliberately ambiguous bodies, keeps it closed.
+- **Regex denial of service.** Pattern packs run on attacker-influenced input. RE2-only patterns (section 4.2) are the mitigation, and it adds `google-re2`, a compiled dependency, to the Python SDK.
+- **Serverless is a weaker enforcement point.** TTL-bounded kill switch propagation, Redis-only spend enforcement, and decision loss on freeze without a flush hook. The dashboard must say which calls were governed from serverless.
 
 ## 14. Open questions
 
-1. **D9 sign-off:** may the proxy rewrite the `model` field under routing enforce, or does proxy routing stay recommend-only?
-2. **Policy language:** a small JSON rule format of our own, or OPA/Rego at the edge (larger binary and latency, more expressive)?
-3. **Shared counter store:** Redis only, or pluggable? Who runs it for hosted-proxy customers who later go multi-replica?
-4. **Signing key custody and rotation cadence**, and whether customers can pin their own verification key.
-5. **Plan packaging:** which capabilities are in which plan tier, and whether shadow mode is free on every plan as the adoption path.
-6. **Routing table size:** paging by task type, or a separate fetch per table?
-7. **Labeled sets for judge accuracy:** who produces them per task type, and what the minimum size is before a score is shown as measured.
+Resolved in review:
+
+- ~~Policy language~~ **Decided: a custom JSON schema.** OPA/Rego brings a runtime dependency and evaluation latency that do not fit a 2 ms budget, and its expressiveness is not needed for the capabilities in section 4.1.
+- ~~Shared counter store~~ **Decided: Redis, hardcoded for V1.** A pluggable store abstraction multiplies the test matrix for no V1 customer. Leases (section 6.1) cover deployments without Redis.
+- ~~Proxy body rewriting (D9)~~ **Decided: not in V1.** Proxy routing is recommend-only; revisit no earlier than P4, under the constraints in D9.
+- ~~Routing table size~~ **Decided: content-addressed per task type** (section 4.2).
+
+Still open:
+
+1. **`spend.on_unavailable` default.** `shadow` favors availability, `block` favors budget. The draft defaults to `shadow`; a finance-led buyer may expect `block`.
+2. **Lease sizing defaults** (`lease_fraction`, `lease_max`, expiry), which trade control-plane request volume against worst-case overrun.
+3. **Redis from serverless:** accept connection setup on cold starts, or also support an HTTP-accessible Redis endpoint, which would reopen the "one store" decision.
+4. **`google-re2` in the Python SDK:** acceptable as a hard dependency, or an optional extra that caps `prompt_policy` at shadow when absent?
+5. **Signing key custody and rotation cadence**, and whether customers can pin their own verification key.
+6. **Plan packaging:** which capabilities are in which plan tier, and whether shadow mode is free on every plan as the adoption path.
+7. **Labeled sets for judge accuracy:** who produces them per task type, and the minimum size before a score is shown as measured.
 8. **Hosted judge tier:** worth offering at all, given its consent and data-residency cost?
 
 ## 15. Phasing
@@ -434,7 +493,7 @@ Done when: an org admin turns governance on, sees a week of would-have-acted dec
 
 ### P1: deterministic enforcement and the kill switch
 
-Scope: `spend` (reservation, settlement, counters), `model_policy`, prompt scans (PII, secrets) with `block`, output schema `flag`, the kill switch with streaming delivery; the enforce confirmation dialog. Gated on #350 for `spend`.
+Scope: `spend` (reservation, settlement, Redis counters and leases, `on_unavailable`), `model_policy` with `block`, D11 request inspection in the proxy with strict parsing, prompt scans (PII, secrets) with `block` on an RE2-only signature pack, output schema `flag`, the kill switch with streaming delivery and the serverless inline check; the SDK's serverless mode (TTL bundles, `waitUntil` flush); the enforce confirmation dialog. Gated on #350 for `spend`.
 
 Done when: a tenant enforces a monthly budget with downgrade, a disallowed model is blocked, a kill switch stops a feature's traffic within 10 seconds, and a control-plane outage during all of this causes no additional blocked calls.
 
@@ -452,7 +511,7 @@ Done when: a recommendation shows a measured saving at a quality difference outs
 
 ### P4: automatic routing and cascade
 
-Scope: automatic routing within approved bounds, cascade with bounded escalation, proxy routing if D9 is accepted.
+Scope: automatic routing within approved bounds and cascade with bounded escalation, both in the SDK. Proxy routing is re-evaluated here under D9's constraints, as a separate decision, not assumed.
 
 Done when: a feature runs on the cheapest model that clears its quality floor, escalates on post-check failure, and the dashboard reports settled savings net of escalations.
 
@@ -460,9 +519,9 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 
 - **db/postgres:** `tenant_governance_settings`, `tenant_governance_capabilities`, `tenant_governance_changes`, governance bundle versions and signing metadata; mounts in `infra/docker-compose.yml`.
 - **db/clickhouse:** `governance_decisions.sql`; add the table to the `FINAL` guard in `web/lib/clickhouse.test.ts`.
-- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign), `governance_decisions.py` (ingest), `governance_kill.py`; routes in `app.py`; tests including bundle signature and resolution-order conformance fixtures.
-- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, counters, scans, `tally.prompt`); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
-- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, pre and post checks, counters, kill switch stream); the D9 rewrite behind a capability check, if accepted.
+- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign, content-addressed routing tables), `governance_sigpack.py` (publish, RE2 validation), `governance_leases.py`, `governance_decisions.py` (ingest), `governance_kill.py`; routes in `app.py`; tests including bundle signature, lease invariant (outstanding leases never exceed remaining budget), and resolution-order conformance fixtures.
+- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, Redis counters and leases, RE2 scans via `google-re2`, `tally.prompt`, serverless mode with TTL revalidation and `waitUntil` flush); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
+- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, D11 request inspection with a strict duplicate-rejecting JSON parser, pre and post checks, Redis counters and leases, kill switch stream); a per-provider parser-differential conformance suite. No request-body rewriting (D9).
 - **judge worker:** a new container under `infra/judge-worker/`.
 - **web:** `app/settings/governance/`, `app/governance/` (overview, audit), `lib/governance.ts`, server routes enforcing `org:admin`.
 - **docs:** conformance fixture format; operator guide for the in-VPC gateway and shared counter store.
@@ -474,3 +533,14 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 - Safety: zero calls blocked because of a control-plane outage or a governance evaluation error.
 - Precision: shadow would-have-acted decisions later confirmed as correct by the admin before enforcing, per capability.
 - Value: settled spend saved by downgrade and routing per month, net of escalations.
+
+## 18. Revision log
+
+**Review 1** (architecture review of the first draft):
+
+- **D9 reversed.** Proxy model rewriting was not a scoped exception: it changes `Content-Length`, requires buffering and parsing, and opens a duplicate-key smuggling path. V1 proxy routing is recommend-only; the SDK routes.
+- **D11 added.** The same analysis applies to *reading* a request, which the proxy does not do today, so request inspection is now opt-in, capped at 1 MiB and strictly parsed.
+- **Budget overrun fixed (6.1).** The 60-second sync allowed replicas to collectively overspend. Replaced by spend leases bounded by remaining budget, with an explicit `on_unavailable` trade-off. Static per-replica partitioning was considered and rejected because it breaks under autoscaling and uneven load.
+- **Serverless made explicit (4.3, 6.7, 7).** Inline TTL-bounded kill switch and bundle revalidation, Redis-only spend enforcement, and flushing decisions before the function freezes.
+- **Bundle split (4.2).** Settings bundle, content-addressed routing tables and a separately versioned signature pack; no delta protocol in V1. Patterns must be RE2-compatible because the Python SDK's standard `re` is backtracking.
+- **Open questions resolved:** custom JSON policy schema; Redis hardcoded for V1.
