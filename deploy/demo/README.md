@@ -200,6 +200,80 @@ Send the link and the shared password to testers **privately** (DM / password ma
 beta is **private, not open** - the single basic-auth login is the only gate, so treat it like a
 password.
 
+## Hosted edge proxy: zero-code connect (AUTH_MODE=clerk)
+
+In Clerk mode the stack also runs the Go edge proxy as a hosted service on its own hostname, so a
+customer can start metering by changing one base URL instead of installing the SDK.
+
+### One-time setup
+
+1. Create a DNS **A record** for the ingest hostname (e.g. `ingest.ai-tally.com`) pointing at the
+   same VM as `${DOMAIN}`. Caddy issues its certificate on first request, so the record has to
+   resolve before you deploy.
+2. In `.env`, set `INGEST_DOMAIN=ingest.ai-tally.com` and make sure `TALLY_GATEWAY_SERVICE_TOKEN`
+   is set (`openssl rand -hex 32`, generated on the box). `deploy.sh` refuses to run in Clerk mode
+   without both, before building anything.
+3. Run `./deploy/demo/deploy.sh`. It enables the `ingest` compose profile and prints the endpoint.
+
+No firewall change is needed: the proxy has no host port and is reached only through Caddy on 443.
+
+### What a customer configures
+
+They create a key in the dashboard under Settings > API keys, then point their client at the
+matching prefix and add one header. Their own provider key is sent exactly as before and forwarded
+untouched; ai-tally never stores it.
+
+| Provider | Base URL | Header |
+|---|---|---|
+| OpenAI | `https://ingest.ai-tally.com/openai/v1` | `X-Tenant-Key: tally_sk_...` |
+| Anthropic | `https://ingest.ai-tally.com/anthropic` | `X-Tenant-Key: tally_sk_...` |
+| Gemini | `https://ingest.ai-tally.com/gemini` | `X-Tenant-Key: tally_sk_...` |
+
+Optional headers: `X-Tally-Feature-Tag` (which feature made the call) and `X-Tally-Account-Id-Hash`
+(an already-hashed customer id, for cost per customer). OpenAI streaming reports token usage only
+when the client sets `stream_options: {"include_usage": true}`.
+
+### How it behaves
+
+- **Unknown or revoked key: `403`, never forwarded.** The proxy runs with
+  `EDGE_PROXY_REQUIRE_TENANT=true`, so the hostname is not an open relay.
+- **The key needs `write` or `admin` scope.** Metering a call writes spans, so a `read` key is
+  refused with `403 tenant key lacks write scope`, the same rule the gateway applies to
+  `/v1/batches`. Settings > API keys creates `write` keys by default.
+- **A brand-new key can take up to 45 seconds to work.** Keys resolve from an in-memory cache of the
+  gateway's key feed, refreshed every 45s, so no gateway call sits in the request path. Revocation
+  propagates on the same interval.
+- **Anything except `/openai/*`, `/anthropic/*`, `/gemini/*` and `/healthz` is a `404` from Caddy.**
+  The ingest hostname cannot reach the dashboard or the gateway.
+- **Spans reach the dashboard through the internal network.** The gateway's `/v1/batches` stays
+  unpublished.
+- **If the proxy cannot load keys at startup, it exits rather than serving.** Resolution fails
+  closed, so a proxy that could not read the key feed does not come up accepting traffic it cannot
+  authenticate. Compose waits for the gateway to be healthy first and restarts the proxy, so a
+  transient failure recovers on its own. A proxy stuck restarting usually means
+  `TALLY_GATEWAY_SERVICE_TOKEN` does not match between the gateway and the proxy while
+  `TALLY_REQUIRE_API_KEY` is on: check `docker logs ai-tally-edge-proxy`. After a successful start,
+  a feed error keeps the last good key map instead of failing.
+
+### Check it after a deploy
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://ingest.ai-tally.com/healthz
+curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Tenant-Key: tally_sk_bogus' https://ingest.ai-tally.com/openai/v1/models
+```
+
+The first should print `200` and the second `403`. For token counts checked against real provider
+usage, run `docs/real-traffic-verification.md` (#350) before onboarding customers.
+
+### What this is not
+
+**It is one container on one VM in the synchronous path of your customers' LLM calls.** When the
+droplet is down, their AI features fail, not just the dashboard. That is acceptable for pilot
+customers who have been told, and not for a broad launch, which wants at least two instances behind
+a load balancer (`deploy/aws/terraform` builds that). Latency: the proxy itself adds well under 3ms,
+but the round trip through this VM's region adds a network hop that depends on where the customer
+runs.
+
 ## Security posture
 
 - **Only Caddy is public.** It publishes 80/443; every other service has its host ports removed by

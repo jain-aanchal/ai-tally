@@ -108,6 +108,49 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- Hosted edge proxy: zero-code connect on ${INGEST_DOMAIN} ---------------------------------
+  # A customer points OPENAI_BASE_URL (or the Anthropic / Gemini equivalent) at
+  # https://${INGEST_DOMAIN}/<provider> and adds an X-Tenant-Key header. The proxy forwards the call
+  # to the real provider byte for byte and ships a metadata-only span to the gateway over the
+  # internal network, so the gateway's /v1/batches stays unpublished.
+  #
+  # PROFILE `ingest`, enabled by deploy.sh in AUTH_MODE=clerk. The proxy refuses to start without a
+  # service token for the key feed, so running it unconditionally would leave the basic-auth demo,
+  # which has no token, with a container restarting forever.
+  #
+  # NO healthcheck, deliberately. The image is FROM scratch: no shell and no HTTP client, so any
+  # compose healthcheck fails every attempt (the trap #339 documents for the ECS task definition).
+  # Liveness is /healthz, reachable through Caddy.
+  #
+  # NOT redundant. This is one container on one VM sitting in the synchronous path of a customer's
+  # LLM calls, so when this box is down their AI features are down, not just our dashboard. Fine for
+  # pilots who have been told; a broad launch wants two instances behind a load balancer, which is
+  # what deploy/aws/terraform builds.
+  edge-proxy:
+    profiles: ["ingest"]
+    build:
+      context: edge-proxy   # relative to infra/, the first -f file
+    container_name: ai-tally-edge-proxy
+    environment:
+      EDGE_PROXY_LISTEN: ":8088"
+      # Path mode on one hostname rather than host mode on three: one DNS record and one certificate.
+      # The prefix is stripped before forwarding, so the provider sees its own path.
+      EDGE_PROXY_ROUTE_MODE: path
+      EDGE_PROXY_ROUTES: "/openai=https://api.openai.com:openai,/anthropic=https://api.anthropic.com:anthropic,/gemini=https://generativelanguage.googleapis.com:gemini"
+      # A request must present a live ai-tally key. Without this the hostname is an open relay to
+      # every provider for anyone who finds it.
+      EDGE_PROXY_REQUIRE_TENANT: "true"
+      # Key-to-tenant resolution from the gateway's delta feed, cached in memory, so no gateway call
+      # sits in the request path. A newly created key can miss the cache for one refresh (45s).
+      EDGE_PROXY_KEYS_URL: http://gateway:8080/v1/edge/keys
+      EDGE_PROXY_SERVICE_TOKEN: ${TALLY_GATEWAY_SERVICE_TOKEN:-}
+      EDGE_PROXY_TELEMETRY_URL: http://gateway:8080/v1/batches
+    # No host port: the only way in is Caddy on ${INGEST_DOMAIN}.
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
   # --- Reverse proxy: automatic TLS + HTTP basic-auth, the only public surface -----------------
   caddy:
     image: caddy:2
@@ -119,6 +162,8 @@ services:
       - "443:443"  # the private demo link
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      # Only Caddyfile.clerk reads it, and deploy.sh requires it in that mode.
+      INGEST_DOMAIN: ${INGEST_DOMAIN:-}
       # CTO-367: only the basic-auth site file reads these, so they are optional. AUTH_MODE=clerk
       # mounts Caddyfile.clerk, which has no basic_auth block; leaving them unset there is correct
       # rather than an omission. Caddy fails to start on an unset variable a site file DOES use, so

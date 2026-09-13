@@ -28,3 +28,28 @@
 	# 	reverse_proxy gateway:8080
 	# }
 }
+
+# ---- Hosted edge proxy: zero-code connect ------------------------------------------------------
+# A separate hostname, not a path on ${DOMAIN}, so the dashboard's Clerk middleware never sees API
+# traffic and the two can be moved apart later without customers changing a URL.
+#
+# Env used: ${INGEST_DOMAIN}, e.g. ingest.example.com. Needs its own DNS A record at this VM.
+{$INGEST_DOMAIN} {
+	# Only the three provider prefixes and the liveness path reach the proxy. Everything else is a
+	# 404 from Caddy, so this hostname cannot be used to reach the dashboard or the gateway.
+	@provider path /openai/* /anthropic/* /gemini/*
+	handle @provider {
+		reverse_proxy edge-proxy:8088 {
+			# Streamed completions must arrive token by token. Caddy already flushes
+			# text/event-stream immediately; this makes it unconditional, so a stream sent under
+			# another content type is not buffered either.
+			flush_interval -1
+		}
+	}
+	handle /healthz {
+		reverse_proxy edge-proxy:8088
+	}
+	handle {
+		respond 404
+	}
+}
