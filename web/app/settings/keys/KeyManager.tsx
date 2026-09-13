@@ -7,6 +7,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import type { ConnectEndpoints } from "@/lib/connectSnippets";
+
 import { ConnectPanel } from "./ConnectPanel";
 
 interface KeyMeta {
@@ -33,7 +35,14 @@ function orDash(v: string | null): string {
   return v && v.trim() ? v : "—";
 }
 
-export function KeyManager({ canManage }: { canManage: boolean }) {
+export function KeyManager({
+  canManage,
+  endpoints,
+}: {
+  canManage: boolean;
+  /** This deployment's connect endpoints, resolved on the server (see defaultEndpoints). */
+  endpoints?: ConnectEndpoints;
+}) {
   const [keys, setKeys] = useState<KeyMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -184,7 +193,7 @@ export function KeyManager({ canManage }: { canManage: boolean }) {
           {/* One-step connect (Initiative 2, §9): snippets with the real key inlined into this
               one-time view, plus the live first-event indicator. The key is never stored to render
               this later; it lives only in `minted` until dismissed. */}
-          <ConnectPanel token={minted.token} />
+          <ConnectPanel token={minted.token} endpoints={endpoints} />
         </div>
       )}
 

@@ -88,9 +88,13 @@ fi
 if [ -n "${INGEST_DOMAIN:-}" ]; then
   : "${TALLY_GATEWAY_SERVICE_TOKEN:?INGEST_DOMAIN is set, so the hosted edge proxy is on, and it needs TALLY_GATEWAY_SERVICE_TOKEN in .env to read the gateway key feed (generate one on the box: openssl rand -hex 32)}"
   export COMPOSE_PROFILES=ingest CADDY_EXTRA=on
+  # Read by the dashboard at runtime so its connect snippets point at THIS deployment's proxy.
+  export TALLY_INGEST_URL="https://${INGEST_DOMAIN}"
   echo "==> Hosted edge proxy: ON at https://${INGEST_DOMAIN}"
 else
   export CADDY_EXTRA=off
+  # Empty tells the dashboard there is no hosted proxy, so it offers no proxy snippets at all.
+  export TALLY_INGEST_URL=""
   echo "==> Hosted edge proxy: off (set INGEST_DOMAIN in .env to turn it on)"
 fi
 echo "==> Building images and starting the stack (auth mode: ${AUTH_MODE:-basic})"
@@ -112,10 +116,32 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
+# --- Apply Postgres migrations to the running stack ---------------------------------------------
+# Same gap as the ClickHouse step below: initdb mounts only fire on a first boot against an empty
+# volume, so an existing deployment never picks up a new migration on its own (db/postgres/README.md).
+# This script used to replay only the ClickHouse DDL, so a release whose code needed a new Postgres
+# table shipped the code without the table. 0033 is the case that surfaced it: the gateway's edge-key
+# feed joins tenant_proxy_config, and on the droplet's existing volume that query fails with
+# "relation does not exist", so the hosted proxy never completes its first key sync. Every migration
+# is idempotent, so replaying the whole set over a current schema is a no-op.
+#
+# PG_USER / PG_DB passed explicitly: .env is read by this script but not necessarily exported, and the
+# Makefile's fallback is `tally`, which is wrong for any operator who changed POSTGRES_USER.
+echo "==> Applying Postgres migrations (make pg-migrate)"
+make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" PG_USER="${POSTGRES_USER:-tally}" PG_DB="${POSTGRES_DB:-tally}" pg-migrate
+
 # --- Apply ClickHouse DDL (incl. replay_samples) to the running stack ---------------------------
 # initdb mounts only fire on a first boot against an empty volume, so replay the idempotent DDL.
 echo "==> Applying ClickHouse DDL (make ch-migrate)"
 make -C infra COMPOSE="docker compose --env-file ${REPO_ROOT}/${ENV_FILE} -f ${REPO_ROOT}/${BASE_COMPOSE} -f ${REPO_ROOT}/${PROD_COMPOSE}" ch-migrate
+
+# The proxy started alongside the gateway, before the migrations above, so its first key sync may have
+# run against the old schema, failed, and left it in docker's restart backoff. Restart it now that the
+# schema is current, rather than leaving the first minutes of a deploy to that backoff.
+if [ -n "${INGEST_DOMAIN:-}" ]; then
+  echo "==> Restarting the hosted edge proxy against the migrated schema"
+  "${COMPOSE[@]}" restart edge-proxy >/dev/null
+fi
 
 # --- Load the SYNTHETIC demo dataset ------------------------------------------------------------
 # seed: creates the `local-dev` tenant + API key + price catalog, and prints the tenant UUID.

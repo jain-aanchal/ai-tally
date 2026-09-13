@@ -11,7 +11,13 @@
 
 import { useEffect, useState } from "react";
 
-import { connectSnippets, type ConnectPath, type Snippet } from "@/lib/connectSnippets";
+import {
+  type ConnectEndpoints,
+  type ConnectPath,
+  type Snippet,
+  connectSnippets,
+  defaultEndpoints,
+} from "@/lib/connectSnippets";
 import type { FirstEventPayload } from "@/app/api/onboarding/first-event/route";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -104,9 +110,23 @@ function FirstEventBadge() {
   );
 }
 
-export function ConnectPanel({ token }: { token: string }) {
-  const [path, setPath] = useState<ConnectPath>("proxy");
-  const snippets = connectSnippets(token);
+export function ConnectPanel({
+  token,
+  endpoints,
+}: {
+  token: string;
+  /**
+   * Resolved on the server: defaultEndpoints reads TALLY_INGEST_URL, which the browser cannot see.
+   * Absent, the panel falls back to what the client bundle can see (the NEXT_PUBLIC_ overrides only),
+   * so a deployment that configured neither shows the SDK path alone.
+   */
+  endpoints?: ConnectEndpoints;
+}) {
+  const snippets = connectSnippets(token, endpoints ?? defaultEndpoints());
+  // Only paths that have snippets get a tab. With no hosted proxy there are no proxy snippets, and a
+  // proxy tab would point the customer at a hostname this deployment does not serve.
+  const paths = (Object.keys(PATH_LABELS) as ConnectPath[]).filter((p) => snippets[p].length > 0);
+  const [path, setPath] = useState<ConnectPath>(paths[0]);
   const [active, setActive] = useState(0);
   const current = snippets[path];
   const shown = current[Math.min(active, current.length - 1)];
@@ -115,7 +135,7 @@ export function ConnectPanel({ token }: { token: string }) {
     <div className="space-y-3 rounded-md border border-edge bg-panel p-4">
       <div className="text-sm font-semibold text-fg">Connect your app</div>
       <div className="flex gap-2">
-        {(Object.keys(PATH_LABELS) as ConnectPath[]).map((p) => (
+        {paths.map((p) => (
           <button
             key={p}
             type="button"
