@@ -19,13 +19,21 @@ export interface ConnectEndpoints {
   sdkEndpoint: string;
 }
 
-/** Read the hosted endpoints from NEXT_PUBLIC_* env, falling back to the spec's §6.4 hostnames. */
+/**
+ * Read the hosted endpoints from NEXT_PUBLIC_* env, falling back to the deployed ingest hostname.
+ *
+ * The fallbacks used to be the spec's §6.4 host-mode names (openai.proxy.ai-tally.com), which no
+ * deployment ever served and nothing in the repo set an override for, so every snippet this page
+ * rendered pointed at a hostname that did not resolve (docs/onboarding-flow-audit.md). The hosted
+ * proxy that actually ships (deploy/demo, caddy-extra/on/ingest.caddy) runs in PATH mode on one
+ * hostname, so the defaults are that hostname plus the provider prefix it strips.
+ */
 export function defaultEndpoints(): ConnectEndpoints {
   return {
     openaiProxyBaseUrl:
-      process.env.NEXT_PUBLIC_TALLY_OPENAI_PROXY_URL ?? "https://openai.proxy.ai-tally.com/v1",
+      process.env.NEXT_PUBLIC_TALLY_OPENAI_PROXY_URL ?? "https://ingest.ai-tally.com/openai/v1",
     anthropicProxyBaseUrl:
-      process.env.NEXT_PUBLIC_TALLY_ANTHROPIC_PROXY_URL ?? "https://anthropic.proxy.ai-tally.com",
+      process.env.NEXT_PUBLIC_TALLY_ANTHROPIC_PROXY_URL ?? "https://ingest.ai-tally.com/anthropic",
     sdkEndpoint: process.env.NEXT_PUBLIC_TALLY_INGEST_URL ?? "",
   };
 }

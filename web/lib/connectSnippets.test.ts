@@ -53,7 +53,8 @@ describe("connectSnippets", () => {
 
   it("defaults to the hosted proxy hostnames", () => {
     const e = defaultEndpoints();
-    expect(e.openaiProxyBaseUrl).toContain("openai.proxy.ai-tally.com");
-    expect(e.anthropicProxyBaseUrl).toContain("anthropic.proxy.ai-tally.com");
+    // The path-mode hostname the hosted proxy is deployed on, prefix included.
+    expect(e.openaiProxyBaseUrl).toBe("https://ingest.ai-tally.com/openai/v1");
+    expect(e.anthropicProxyBaseUrl).toBe("https://ingest.ai-tally.com/anthropic");
   });
 });
