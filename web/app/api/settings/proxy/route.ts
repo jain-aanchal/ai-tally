@@ -4,15 +4,25 @@
 // service token and the resolved tenant, so it cannot tell an admin from a member.
 import { NextResponse } from "next/server";
 
+import { defaultEndpoints } from "@/lib/connectSnippets";
 import { canManage, controlPlaneHeaders, currentUserId, getTenant } from "@/lib/getTenant";
 import { queryProxyEnabled } from "@/lib/proxySetting";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
-/** Any member may read it; the Connect snippets need to know whether they will work. */
+/**
+ * Any member may read it; the Connect snippets need to know whether they will work.
+ *
+ * `deployed` first: on a deployment with no hosted proxy there is no setting worth reading, and
+ * `enabled` is null rather than a stored value that controls nothing.
+ */
 export async function GET(): Promise<NextResponse> {
   const tenant = await getTenant();
-  return NextResponse.json({ enabled: await queryProxyEnabled(tenant.tenantId) });
+  const deployed = defaultEndpoints().proxyDeployed;
+  return NextResponse.json({
+    deployed,
+    enabled: deployed ? await queryProxyEnabled(tenant.tenantId) : null,
+  });
 }
 
 /** Admins only. Body: `{ enabled: boolean }`. */
@@ -22,6 +32,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json(
       { error: "admin role required to change the hosted proxy setting" },
       { status: 403 },
+    );
+  }
+  // Review of #385, finding 3: refuse rather than store a switch for a proxy that does not exist.
+  // Saving it would answer "On. Proxies start accepting this organization's keys", which is false here.
+  if (!defaultEndpoints().proxyDeployed) {
+    return NextResponse.json(
+      { error: "this deployment runs no hosted proxy, so there is nothing to turn on or off" },
+      { status: 409 },
     );
   }
   const input = (await req.json().catch(() => null)) as { enabled?: unknown } | null;

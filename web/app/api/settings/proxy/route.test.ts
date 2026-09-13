@@ -13,6 +13,7 @@ const ORG_ID = "org_test";
 
 const originalDevTenant = process.env.TALLY_DEV_TENANT;
 const originalToken = process.env.GATEWAY_SERVICE_TOKEN;
+const originalIngest = process.env.TALLY_INGEST_URL;
 
 let fetchCalls: Array<{ url: string; init?: RequestInit }>;
 /** What the gateway's GET answers with, so the unreadable case can be exercised. */
@@ -26,6 +27,8 @@ beforeEach(() => {
   vi.resetModules();
   delete process.env.TALLY_DEV_TENANT;
   process.env.GATEWAY_SERVICE_TOKEN = "svc-token";
+  // A deployment that runs the hosted proxy. The no-proxy case unsets it per test.
+  process.env.TALLY_INGEST_URL = "https://ingest.example.com";
   fetchCalls = [];
   configStatus = 200;
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
@@ -54,6 +57,8 @@ afterEach(() => {
   else process.env.TALLY_DEV_TENANT = originalDevTenant;
   if (originalToken === undefined) delete process.env.GATEWAY_SERVICE_TOKEN;
   else process.env.GATEWAY_SERVICE_TOKEN = originalToken;
+  if (originalIngest === undefined) delete process.env.TALLY_INGEST_URL;
+  else process.env.TALLY_INGEST_URL = originalIngest;
 });
 
 function setRequest(body: unknown): Request {
@@ -116,7 +121,7 @@ describe("GET /api/settings/proxy", () => {
     const res = await GET();
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ enabled: false });
+    expect(await res.json()).toEqual({ deployed: true, enabled: false });
   });
 
   it("reports an unreadable setting as null, never as off", async () => {
@@ -128,6 +133,30 @@ describe("GET /api/settings/proxy", () => {
 
     const res = await GET();
 
-    expect(await res.json()).toEqual({ enabled: null });
+    expect(await res.json()).toEqual({ deployed: true, enabled: null });
+  });
+
+  it("reports no deployment, and reads no setting, where no hosted proxy runs", async () => {
+    delete process.env.TALLY_INGEST_URL;
+    authMock.mockResolvedValue({ orgId: ORG_ID, orgRole: "org:admin", userId: "user_1" });
+    const { GET } = await import("./route");
+
+    const res = await GET();
+
+    expect(await res.json()).toEqual({ deployed: false, enabled: null });
+    expect(fetchCalls.some((c) => c.url.endsWith("/v1/tenant/proxy/config"))).toBe(false);
+  });
+});
+
+describe("POST /api/settings/proxy on a deployment without a hosted proxy (review of #385, finding 3)", () => {
+  it("refuses with 409 and never writes, so no one is told proxies will start accepting keys", async () => {
+    delete process.env.TALLY_INGEST_URL;
+    authMock.mockResolvedValue({ orgId: ORG_ID, orgRole: "org:admin", userId: "user_1" });
+    const { POST } = await import("./route");
+
+    const res = await POST(setRequest({ enabled: true }));
+
+    expect(res.status).toBe(409);
+    expect(gatewayWrites()).toHaveLength(0);
   });
 });

@@ -11,30 +11,47 @@
 //
 // Pure and framework-free so it is unit-tested directly; the React view maps over the result.
 
-/** The hosted endpoints the snippets point at. Overridable per deployment via NEXT_PUBLIC_* env. */
+/** The endpoints the snippets point at, resolved for THIS deployment (see defaultEndpoints). */
 export interface ConnectEndpoints {
   openaiProxyBaseUrl: string;
   anthropicProxyBaseUrl: string;
   /** The SDK ingest endpoint. Empty string means "use the SDK default" and is omitted from init(). */
   sdkEndpoint: string;
+  /**
+   * Whether this deployment runs a hosted proxy at all. When false there are no proxy snippets: a
+   * snippet for a proxy that does not exist would send the customer's traffic, and their provider
+   * key with it, to a hostname this deployment does not serve.
+   */
+  proxyDeployed: boolean;
 }
 
 /**
- * Read the hosted endpoints from NEXT_PUBLIC_* env, falling back to the deployed ingest hostname.
+ * Resolve the connect endpoints for this deployment. Server-side: pass the result to the client.
  *
- * The fallbacks used to be the spec's §6.4 host-mode names (openai.proxy.ai-tally.com), which no
- * deployment ever served and nothing in the repo set an override for, so every snippet this page
- * rendered pointed at a hostname that did not resolve (docs/onboarding-flow-audit.md). The hosted
- * proxy that actually ships (deploy/demo, caddy-extra/on/ingest.caddy) runs in PATH mode on one
- * hostname, so the defaults are that hostname plus the provider prefix it strips.
+ * Order, per proxy URL:
+ *   1. An explicit NEXT_PUBLIC_TALLY_*_PROXY_URL override.
+ *   2. Derived from TALLY_INGEST_URL (the hosted proxy's base URL, set by deploy/demo when
+ *      INGEST_DOMAIN turns the proxy on), plus the path-mode provider prefix the proxy strips.
+ *   3. Nothing: this deployment has no hosted proxy, so proxyDeployed is false.
+ *
+ * There is deliberately no hardcoded hostname. The previous fallback, ingest.ai-tally.com (and before
+ * it openai.proxy.ai-tally.com), was right for exactly one deployment and wrong for every other:
+ * anyone running this kit on their own domain showed their users snippets aimed at ai-tally's proxy.
+ *
+ * TALLY_INGEST_URL is not NEXT_PUBLIC_, so it is read on the server at request time. That is why the
+ * keys page resolves this and passes it down, rather than the client component calling it: in the
+ * browser only the NEXT_PUBLIC_ overrides would be visible.
  */
-export function defaultEndpoints(): ConnectEndpoints {
+export function defaultEndpoints(env: Record<string, string | undefined> = process.env): ConnectEndpoints {
+  const base = (env.TALLY_INGEST_URL ?? "").trim().replace(/\/+$/, "");
+  const openaiProxyBaseUrl = env.NEXT_PUBLIC_TALLY_OPENAI_PROXY_URL || (base ? `${base}/openai/v1` : "");
+  const anthropicProxyBaseUrl =
+    env.NEXT_PUBLIC_TALLY_ANTHROPIC_PROXY_URL || (base ? `${base}/anthropic` : "");
   return {
-    openaiProxyBaseUrl:
-      process.env.NEXT_PUBLIC_TALLY_OPENAI_PROXY_URL ?? "https://ingest.ai-tally.com/openai/v1",
-    anthropicProxyBaseUrl:
-      process.env.NEXT_PUBLIC_TALLY_ANTHROPIC_PROXY_URL ?? "https://ingest.ai-tally.com/anthropic",
-    sdkEndpoint: process.env.NEXT_PUBLIC_TALLY_INGEST_URL ?? "",
+    openaiProxyBaseUrl,
+    anthropicProxyBaseUrl,
+    sdkEndpoint: env.NEXT_PUBLIC_TALLY_INGEST_URL ?? "",
+    proxyDeployed: Boolean(openaiProxyBaseUrl && anthropicProxyBaseUrl),
   };
 }
 
@@ -133,7 +150,7 @@ export function connectSnippets(
   endpoints: ConnectEndpoints = defaultEndpoints(),
 ): Record<ConnectPath, Snippet[]> {
   return {
-    proxy: [proxyOpenAi(key, endpoints), proxyAnthropic(key, endpoints)],
+    proxy: endpoints.proxyDeployed ? [proxyOpenAi(key, endpoints), proxyAnthropic(key, endpoints)] : [],
     sdk: [sdkPython(key, endpoints)],
   };
 }

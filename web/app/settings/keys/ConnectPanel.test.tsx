@@ -99,3 +99,28 @@ describe("ConnectPanel first-event badge (finding #11)", () => {
     expect(fetchMock.mock.calls.length).toBe(callsAtConnect);
   });
 });
+
+describe("ConnectPanel paths follow the deployment (review of #384, finding 2)", () => {
+  const deployed = {
+    openaiProxyBaseUrl: "https://ingest.example.com/openai/v1",
+    anthropicProxyBaseUrl: "https://ingest.example.com/anthropic",
+    sdkEndpoint: "",
+    proxyDeployed: true,
+  };
+
+  it("offers the proxy path, pointed at this deployment's host, when a proxy is deployed", () => {
+    stubFetch("waiting");
+    render(<ConnectPanel token="tally_sk_live_test" endpoints={deployed} />);
+    expect(screen.getByRole("button", { name: "Proxy (zero-code)" })).toBeTruthy();
+    expect(screen.getByText(/ingest\.example\.com\/openai\/v1/)).toBeTruthy();
+  });
+
+  it("offers no proxy path at all when the deployment has no hosted proxy", () => {
+    stubFetch("waiting");
+    render(<ConnectPanel token="tally_sk_live_test" endpoints={{ ...deployed, proxyDeployed: false }} />);
+    expect(screen.queryByRole("button", { name: "Proxy (zero-code)" })).toBeNull();
+    // The SDK path is still there, so a customer is never left with nothing to copy.
+    expect(screen.getByText(/tally\.init/)).toBeTruthy();
+    expect(screen.queryByText(/ingest\.example\.com/)).toBeNull();
+  });
+});

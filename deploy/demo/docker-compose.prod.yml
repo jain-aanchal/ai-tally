@@ -54,6 +54,11 @@ services:
       TALLY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-tally}
       TALLY_CLICKHOUSE_DB: default
       TALLY_GATEWAY_URL: http://gateway:8080
+      # The hosted edge proxy's base URL, set by deploy.sh only when INGEST_DOMAIN turns the proxy on.
+      # A RUNTIME variable read by the server, deliberately not NEXT_PUBLIC_*: those are inlined when
+      # the image is built, and this kit never passed one, so every deployment's snippets pointed at
+      # ingest.ai-tally.com. Empty means "no proxy here", and the dashboard offers no proxy path.
+      TALLY_INGEST_URL: ${TALLY_INGEST_URL:-}
       # CTO-371: where the server-rendered pages fetch their OWN route handlers. Without this,
       # web/lib/api.ts derives the base from the incoming request's Host header, so the container
       # tries to reach https://${DOMAIN} from inside itself: out to the public IP, back through
