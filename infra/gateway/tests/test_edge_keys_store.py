@@ -39,9 +39,17 @@ class Row:
     revoked_at: dt.datetime | None
     row_id: str
     visible_at: dt.datetime  # models commit time: the row is invisible to reads before this
+    # 0033: a hosted-proxy toggle stamps this on the org's live keys, and the LEFT JOIN to
+    # tenant_proxy_config supplies proxy_enabled (false for an org with no row).
+    edge_updated_at: dt.datetime | None = None
+    proxy_enabled: bool = False
 
     def watermark(self) -> dt.datetime:
-        return max(self.created_at, self.revoked_at or self.created_at)
+        return max(
+            self.created_at,
+            self.revoked_at or self.created_at,
+            self.edge_updated_at or self.created_at,
+        )
 
 
 class FakeCursor:
@@ -62,7 +70,7 @@ class FakeCursor:
         ]
         matched.sort(key=lambda r: (r.watermark(), r.row_id))
         self._result = [
-            (r.key_hash, r.tenant_id, r.scope, r.revoked_at, r.watermark(), r.row_id)
+            (r.key_hash, r.tenant_id, r.scope, r.revoked_at, r.watermark(), r.row_id, r.proxy_enabled)
             for r in matched[:limit]
         ]
 
@@ -170,3 +178,56 @@ def test_revocation_propagates_once_outside_the_lag_window(monkeypatch) -> None:
     changes, _ = store.changes_since(cursor)
     assert len(changes) == 1
     assert changes[0].revoked_at == _ts(40)
+
+
+def test_proxy_enabled_is_carried_on_every_change(monkeypatch) -> None:
+    """0033: the feed carries each key's org hosted-proxy switch, off for an org that never set it."""
+    table = FakeTable()
+    table.rows = [
+        Row("hashOff", "tenantOff", "write", _ts(10), None, "keyOff", visible_at=_ts(10)),
+        Row("hashOn", "tenantOn", "write", _ts(11), None, "keyOn", visible_at=_ts(11), proxy_enabled=True),
+    ]
+    store = _store(monkeypatch, table, lag_seconds=5.0)
+    table.now = _ts(100)
+    changes, _ = store.changes_since(None)
+    by_hash = {c.key_hash: c for c in changes}
+    assert by_hash["hashOff"].proxy_enabled is False
+    assert by_hash["hashOn"].proxy_enabled is True
+    # Always present on the wire. The proxy reads an ABSENT field as "no switch exists" and allows the
+    # key, so dropping it from the payload would silently bypass an admin's "off".
+    assert by_hash["hashOff"].as_dict()["proxy_enabled"] is False
+
+
+def test_toggle_re_emits_keys_already_past_the_cursor(monkeypatch) -> None:
+    """A toggle changes no key row, so without edge_updated_at a running proxy would never learn of it.
+
+    The key is delivered once (proxy off), the cursor moves past it, then an admin turns the proxy on.
+    The toggle stamps edge_updated_at, which raises the watermark above the cursor, so the next poll
+    outside the lag window re-emits the key carrying proxy_enabled=True.
+    """
+    table = FakeTable()
+    key = Row("hashK", "tenantK", "write", _ts(10), None, "keyK", visible_at=_ts(10))
+    table.rows = [key]
+    store = _store(monkeypatch, table, lag_seconds=5.0)
+
+    table.now = _ts(100)
+    changes, cursor = store.changes_since(None)
+    assert [(c.key_hash, c.proxy_enabled) for c in changes] == [("hashK", False)]
+
+    # Steady state: nothing changed, nothing re-sent.
+    table.now = _ts(150)
+    changes, cursor = store.changes_since(cursor)
+    assert changes == []
+
+    # The admin turns the proxy on at t=200 (same transaction as the config write).
+    key.edge_updated_at = _ts(200)
+    key.proxy_enabled = True
+
+    # Inside the lag window the change is held back, exactly like a fresh key.
+    table.now = _ts(202)
+    changes, cursor = store.changes_since(cursor)
+    assert changes == []
+
+    table.now = _ts(210)
+    changes, cursor = store.changes_since(cursor)
+    assert [(c.key_hash, c.proxy_enabled) for c in changes] == [("hashK", True)]

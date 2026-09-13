@@ -124,6 +124,19 @@ is honest and bounded, not a fabricated success. A transient feed error keeps th
 resolution never fails open. `GET /v1/edge/keys` is delivered by a separate gateway PR; only the
 SHA-256 hash is ever sent over it, never a raw or reversible token.
 
+### Per-organization switch (gateway migration 0033)
+
+Each change in the feed also carries `proxy_enabled`, the organization's hosted-proxy setting from
+Settings > API keys. It is off by default, because routing an org's production LLM traffic through
+this proxy is a decision its admin makes. A valid write key whose organization has it off is refused
+with `403` under `EDGE_PROXY_REQUIRE_TENANT=true` (and forwarded untagged without it), while the same
+key keeps working for the SDK. Turning the setting on or off stamps `api_keys.edge_updated_at` on the
+org's live keys, which raises their feed watermark, so the change arrives within one refresh interval.
+
+`proxy_enabled` is a pointer on the wire: an **absent** field means a gateway that predates the
+switch, so there is no admin choice to honor and the key is allowed as before. An explicit `false` is
+always enforced. The gateway always sends the field, so this fallback only applies across versions.
+
 ## Usage extraction, including streamed responses (CTO-167 / CTO-349)
 
 With a provider protocol configured, the proxy reads the model id and the token counts off each

@@ -113,6 +113,7 @@ function FirstEventBadge() {
 export function ConnectPanel({
   token,
   endpoints,
+  proxyEnabled = null,
 }: {
   token: string;
   /**
@@ -121,6 +122,12 @@ export function ConnectPanel({
    * so a deployment that configured neither shows the SDK path alone.
    */
   endpoints?: ConnectEndpoints;
+  /**
+   * The organization's hosted-proxy switch (0033). false shows a warning on the proxy tab, because
+   * those snippets are refused with 403 until an admin turns it on. null (unknown, or no proxy on this
+   * deployment) shows nothing rather than guessing either way.
+   */
+  proxyEnabled?: boolean | null;
 }) {
   const snippets = connectSnippets(token, endpoints ?? defaultEndpoints());
   // Only paths that have snippets get a tab. With no hosted proxy there are no proxy snippets, and a
@@ -167,6 +174,12 @@ export function ConnectPanel({
               {s.label}
             </button>
           ))}
+        </div>
+      )}
+      {path === "proxy" && proxyEnabled === false && (
+        <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+          The zero-code proxy is off for this organization, so these snippets are refused with a 403
+          until an admin turns it on above. The SDK path works either way.
         </div>
       )}
       <CodeBlock snippet={shown} />

@@ -38,10 +38,13 @@ function orDash(v: string | null): string {
 export function KeyManager({
   canManage,
   endpoints,
+  proxyEnabled = null,
 }: {
   canManage: boolean;
   /** This deployment's connect endpoints, resolved on the server (see defaultEndpoints). */
   endpoints?: ConnectEndpoints;
+  /** Passed through to the Connect snippets so the proxy tab can say when it will be refused. */
+  proxyEnabled?: boolean | null;
 }) {
   const [keys, setKeys] = useState<KeyMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -193,7 +196,7 @@ export function KeyManager({
           {/* One-step connect (Initiative 2, §9): snippets with the real key inlined into this
               one-time view, plus the live first-event indicator. The key is never stored to render
               this later; it lives only in `minted` until dismissed. */}
-          <ConnectPanel token={minted.token} endpoints={endpoints} />
+          <ConnectPanel token={minted.token} endpoints={endpoints} proxyEnabled={proxyEnabled} />
         </div>
       )}
 

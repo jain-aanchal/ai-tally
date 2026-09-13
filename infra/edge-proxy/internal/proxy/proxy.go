@@ -42,6 +42,13 @@ type TenantResolver interface {
 	Resolve(keyHash string) (tenantID string, scope string, ok bool)
 }
 
+// OrgSwitchResolver is implemented by resolvers that also carry each organization's hosted-proxy
+// switch (edgekeys.Cache does). It is a separate, optional interface so resolvers that predate the
+// switch keep compiling and keep their behavior: without it, nothing is enforced.
+type OrgSwitchResolver interface {
+	ProxyEnabled(keyHash string) bool
+}
+
 // Proxy is an http.Handler that forwards to a configured upstream and emits telemetry copies.
 type Proxy struct {
 	cfg      config.Config
@@ -224,7 +231,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// unknown or revoked key when RequireTenant is set, never forwarding an unauthenticated call.
 	var tenantID string
 	if p.resolver != nil && tenant != "" {
-		id, scope, found := p.resolver.Resolve(edgekeys.HashKey(tenant))
+		keyHash := edgekeys.HashKey(tenant)
+		id, scope, found := p.resolver.Resolve(keyHash)
+		orgSwitch, hasSwitch := p.resolver.(OrgSwitchResolver)
 		switch {
 		case !found:
 			if p.cfg.RequireTenant {
@@ -238,6 +247,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// TenantId (an honest blank, never a fabricated tag for a key that may not be attributed).
 			if p.cfg.RequireTenant {
 				http.Error(w, `{"error":"tenant key lacks write scope"}`+"\n", http.StatusForbidden)
+				return
+			}
+		case hasSwitch && !orgSwitch.ProxyEnabled(keyHash):
+			// A valid key whose organization has the hosted proxy turned OFF (gateway 0033, Settings >
+			// API keys). The same key still works for the SDK. Fail closed only under RequireTenant, as
+			// for scope; in open mode forward untagged rather than attribute traffic the org opted out of.
+			if p.cfg.RequireTenant {
+				http.Error(w, `{"error":"the hosted proxy is turned off for this organization; an admin can turn it on under Settings > API keys"}`+"\n", http.StatusForbidden)
 				return
 			}
 		default:

@@ -168,6 +168,7 @@ from gateway.tenant_guardrails import (
     TenantGuardrailStore,
 )
 from gateway.tenant_integrations import TenantIntegrationStore
+from gateway.tenant_proxy import TenantProxyStore
 from gateway.tenant_replay import TenantReplayStore
 from gateway.revenue_upload import (
     UPLOAD_SOURCE,
@@ -344,6 +345,7 @@ async def lifespan(app: FastAPI):
     # a deployment shim. Replay runs accumulate in-memory until ClickHouse writeback lands
     # (sink wired to a list for v1; the projection API reads from it directly).
     app.state.tenant_replay = TenantReplayStore(settings)
+    app.state.tenant_proxy = TenantProxyStore(settings)
     app.state.replay_blob_store = _build_replay_blob_store(settings)
     app.state.replay_sample_index = []  # list[ReplaySampleRow]
     # Hydrate the in-memory replay index from ClickHouse so /v1/replay + /v1/eval serve a captured
@@ -3090,6 +3092,50 @@ def _response_dict(resp: BatchResponse, *, replayed: bool = False) -> dict[str, 
 # --------------------------------------------------------------------------------------------
 # Replay infrastructure (CTO-113): sampling config, capture, projection.
 # --------------------------------------------------------------------------------------------
+
+
+@app.get("/v1/tenant/proxy/config")
+def get_tenant_proxy_config(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Read whether the hosted edge proxy is on for the caller's organization (0033).
+
+    ``enabled=false`` for a tenant that has never changed it: the proxy is opt-in.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    cfg = app.state.tenant_proxy.get(tenant_id)
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
+
+
+@app.post("/v1/tenant/proxy/config")
+async def set_tenant_proxy_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+    x_clerk_user_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Turn the hosted edge proxy on or off for the caller's organization. Body: ``{enabled: bool}``.
+
+    The web server has already checked the caller is an org admin, as for key management. The change
+    reaches running proxies through the edge-key feed within one refresh interval.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict) or "enabled" not in body:
+        raise HTTPException(status_code=422, detail="body must be a JSON object with a boolean 'enabled'")
+    try:
+        cfg = app.state.tenant_proxy.set_enabled(
+            tenant_id, body["enabled"], updated_by=x_clerk_user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse({"tenant_id": tenant_id, "config": cfg.as_dict()})
 
 
 @app.get("/v1/tenant/replay/config")

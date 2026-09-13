@@ -261,3 +261,58 @@ func TestRunRefreshesUntilContextCancelled(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 }
+
+// TestProxySwitchFromFeed covers the per-organization hosted-proxy switch (gateway 0033). An ABSENT
+// field is a gateway that predates the switch, so there is no admin choice to honor and the key is
+// allowed; an explicit false is an admin turning the proxy off and must be honored; and a later
+// change flipping it back on is applied in place, which is how a toggle reaches a running proxy.
+func TestProxySwitchFromFeed(t *testing.T) {
+	on, off := true, false
+	legacy := hashOf("tally_sk_live_legacy")
+	optedOut := hashOf("tally_sk_live_off")
+	optedIn := hashOf("tally_sk_live_on")
+	feed := &fakeFeed{responses: map[string]feedResponse{
+		"": {
+			Changes: []change{
+				{KeyHash: legacy, TenantID: "uuid-l", Scope: "write"},
+				{KeyHash: optedOut, TenantID: "uuid-o", Scope: "write", ProxyEnabled: &off},
+				{KeyHash: optedIn, TenantID: "uuid-i", Scope: "write", ProxyEnabled: &on},
+			},
+			Cursor: "c1",
+		},
+		"c1": {
+			Changes: []change{{KeyHash: optedOut, TenantID: "uuid-o", Scope: "write", ProxyEnabled: &on}},
+			Cursor:  "c2",
+		},
+	}}
+	srv := httptest.NewServer(feed)
+	defer srv.Close()
+
+	c := New(Options{URL: srv.URL, ServiceToken: "t", Interval: time.Minute})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if !c.ProxyEnabled(legacy) {
+		t.Error("a change with no proxy_enabled field must allow the key (gateway without the switch)")
+	}
+	if c.ProxyEnabled(optedOut) {
+		t.Error("proxy_enabled=false must be honored")
+	}
+	// Turned off is not revoked: the key is still valid, for the SDK path, and still resolves.
+	if _, _, ok := c.Resolve(optedOut); !ok {
+		t.Error("a key whose org turned the proxy off must still resolve")
+	}
+	if !c.ProxyEnabled(optedIn) {
+		t.Error("proxy_enabled=true must allow the key")
+	}
+	if c.ProxyEnabled(hashOf("tally_sk_live_unknown")) {
+		t.Error("an unknown key must never report the proxy as enabled")
+	}
+
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if !c.ProxyEnabled(optedOut) {
+		t.Error("a later change turning the proxy on must be applied to the cached key")
+	}
+}

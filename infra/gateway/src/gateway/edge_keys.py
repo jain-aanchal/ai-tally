@@ -39,9 +39,14 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
-#: The row's change watermark: the later of creation and revocation. A live key sits at its
-#: ``created_at``; a revoked key rises to its ``revoked_at`` so the revoke re-enters the feed.
-_WATERMARK_SQL = "GREATEST(created_at, COALESCE(revoked_at, created_at))"
+#: The row's change watermark: the latest of creation, revocation and an edge-visible settings
+#: change. A live key sits at its ``created_at``; a revoked key rises to its ``revoked_at`` so the
+#: revoke re-enters the feed; and turning the org's hosted proxy on or off stamps ``edge_updated_at``
+#: on its live keys, so they re-enter carrying the new ``proxy_enabled``. MUST match the expression in
+#: ``idx_api_keys_edge_watermark_v2`` (0033) or every poll becomes a sequential scan.
+_WATERMARK_SQL = (
+    "GREATEST(k.created_at, COALESCE(k.revoked_at, k.created_at), COALESCE(k.edge_updated_at, k.created_at))"
+)
 
 #: Max changes returned per call. The proxy pages with the returned cursor until a short page. Large
 #: enough that a cold start is a handful of round-trips, bounded so one call is never unbounded.
@@ -60,6 +65,10 @@ class KeyChange:
     tenant_id: str
     scope: str
     revoked_at: datetime | None
+    #: Whether the key's organization has the hosted proxy turned on (0033). Defaults to False, the
+    #: same default as a tenant with no ``tenant_proxy_config`` row, so a change built without it
+    #: refuses the proxy rather than silently allowing it.
+    proxy_enabled: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -68,6 +77,9 @@ class KeyChange:
             "scope": self.scope,
             # null means live; a timestamp means revoked. The proxy drops any row with a timestamp.
             "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            # Always sent. The proxy treats an ABSENT field as "this gateway has no per-org switch" and
+            # allows the key, so omitting it here would quietly bypass an admin's "off".
+            "proxy_enabled": self.proxy_enabled,
         }
 
 
@@ -117,11 +129,13 @@ class EdgeKeyStore:
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT key_hash, tenant_id, scope, revoked_at, {_WATERMARK_SQL} AS wm, id
-                FROM api_keys
-                WHERE ({_WATERMARK_SQL}, id) > (%s, %s)
+                SELECT k.key_hash, k.tenant_id, k.scope, k.revoked_at, {_WATERMARK_SQL} AS wm, k.id,
+                       COALESCE(c.enabled, false) AS proxy_enabled
+                FROM api_keys k
+                LEFT JOIN tenant_proxy_config c ON c.tenant_id = k.tenant_id
+                WHERE ({_WATERMARK_SQL}, k.id) > (%s, %s)
                   AND {_WATERMARK_SQL} <= now() - make_interval(secs => %s)
-                ORDER BY wm, id
+                ORDER BY wm, k.id
                 LIMIT %s
                 """,
                 (after_wm, after_id, self._safe_lag_seconds, self._limit),
@@ -136,6 +150,7 @@ class EdgeKeyStore:
                 tenant_id=str(row[1]),
                 scope=str(row[2]),
                 revoked_at=row[3],
+                proxy_enabled=bool(row[6]),
             )
             for row in rows
         ]
