@@ -29,27 +29,8 @@
 	# }
 }
 
-# ---- Hosted edge proxy: zero-code connect ------------------------------------------------------
-# A separate hostname, not a path on ${DOMAIN}, so the dashboard's Clerk middleware never sees API
-# traffic and the two can be moved apart later without customers changing a URL.
-#
-# Env used: ${INGEST_DOMAIN}, e.g. ingest.example.com. Needs its own DNS A record at this VM.
-{$INGEST_DOMAIN} {
-	# Only the three provider prefixes and the liveness path reach the proxy. Everything else is a
-	# 404 from Caddy, so this hostname cannot be used to reach the dashboard or the gateway.
-	@provider path /openai/* /anthropic/* /gemini/*
-	handle @provider {
-		reverse_proxy edge-proxy:8088 {
-			# Streamed completions must arrive token by token. Caddy already flushes
-			# text/event-stream immediately; this makes it unconditional, so a stream sent under
-			# another content type is not buffered either.
-			flush_interval -1
-		}
-	}
-	handle /healthz {
-		reverse_proxy edge-proxy:8088
-	}
-	handle {
-		respond 404
-	}
-}
+# ---- Optional sites ---------------------------------------------------------------------------
+# The hosted edge proxy lives in caddy-extra/on/ingest.caddy and is mounted only when deploy.sh
+# enables it (INGEST_DOMAIN set). With it off the glob matches no files, which Caddy accepts, so the
+# dashboard serves exactly as before and no empty {$INGEST_DOMAIN} site address can break TLS.
+import /etc/caddy/extra/*.caddy

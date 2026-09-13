@@ -200,10 +200,13 @@ Send the link and the shared password to testers **privately** (DM / password ma
 beta is **private, not open** - the single basic-auth login is the only gate, so treat it like a
 password.
 
-## Hosted edge proxy: zero-code connect (AUTH_MODE=clerk)
+## Hosted edge proxy: zero-code connect (optional, off by default)
 
-In Clerk mode the stack also runs the Go edge proxy as a hosted service on its own hostname, so a
-customer can start metering by changing one base URL instead of installing the SDK.
+The stack can also run the Go edge proxy as a hosted service on its own hostname, so a customer can
+start metering by changing one base URL instead of installing the SDK. It is **off unless
+`INGEST_DOMAIN` is set**: off means no proxy container and no Caddy site, not a proxy that rejects
+traffic. Turn it off again by removing `INGEST_DOMAIN` and re-running `deploy.sh`, which removes the
+site; stop the container with `docker compose ... --profile ingest stop edge-proxy`.
 
 ### One-time setup
 
@@ -211,9 +214,10 @@ customer can start metering by changing one base URL instead of installing the S
    same VM as `${DOMAIN}`. Caddy issues its certificate on first request, so the record has to
    resolve before you deploy.
 2. In `.env`, set `INGEST_DOMAIN=ingest.ai-tally.com` and make sure `TALLY_GATEWAY_SERVICE_TOKEN`
-   is set (`openssl rand -hex 32`, generated on the box). `deploy.sh` refuses to run in Clerk mode
-   without both, before building anything.
-3. Run `./deploy/demo/deploy.sh`. It enables the `ingest` compose profile and prints the endpoint.
+   is set (`openssl rand -hex 32`, generated on the box). With `INGEST_DOMAIN` set and no token,
+   `deploy.sh` stops before building.
+3. Run `./deploy/demo/deploy.sh`. It enables the `ingest` compose profile, mounts the ingest Caddy
+   site, and prints the endpoint.
 
 No firewall change is needed: the proxy has no host port and is reached only through Caddy on 443.
 

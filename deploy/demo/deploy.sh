@@ -76,17 +76,22 @@ if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
   # image that looks fine and can never sign anyone in, plus a wasted build on a small VM.
   : "${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?AUTH_MODE=clerk needs NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY in .env (Clerk dashboard, Configure > API Keys, production instance)}"
   : "${CLERK_SECRET_KEY:?AUTH_MODE=clerk needs CLERK_SECRET_KEY in .env (Clerk dashboard, Configure > API Keys, production instance)}"
-  # The hosted edge proxy (zero-code connect). Asserted up front for the same reason as the Clerk
-  # keys: Caddyfile.clerk has a {$INGEST_DOMAIN} site, and Caddy refuses an empty site address, so a
-  # missing value would take the dashboard's TLS down with it. The service token is required because
-  # the proxy will not start without one for the gateway's key feed.
-  : "${INGEST_DOMAIN:?AUTH_MODE=clerk needs INGEST_DOMAIN in .env (e.g. ingest.ai-tally.com), with a DNS A record pointing at this VM, for the hosted edge proxy}"
-  : "${TALLY_GATEWAY_SERVICE_TOKEN:?the hosted edge proxy needs TALLY_GATEWAY_SERVICE_TOKEN in .env to read the gateway key feed (generate one on the box: openssl rand -hex 32)}"
-  export COMPOSE_PROFILES=ingest
 else
   export CADDY_SITE_FILE=Caddyfile
   : "${BASIC_AUTH_USER:?AUTH_MODE=basic needs BASIC_AUTH_USER in .env}"
   : "${BASIC_AUTH_HASH:?AUTH_MODE=basic needs BASIC_AUTH_HASH in .env (docker run --rm caddy:2 caddy hash-password --plaintext '...')}"
+fi
+# The hosted edge proxy (zero-code connect) is OPTIONAL: on when INGEST_DOMAIN is set, off otherwise.
+# Off means no container and no Caddy site, not a proxy that rejects traffic. When on, the service
+# token is asserted here, before the build, because the proxy will not start without one for the
+# gateway's key feed and would otherwise restart forever after a successful-looking deploy.
+if [ -n "${INGEST_DOMAIN:-}" ]; then
+  : "${TALLY_GATEWAY_SERVICE_TOKEN:?INGEST_DOMAIN is set, so the hosted edge proxy is on, and it needs TALLY_GATEWAY_SERVICE_TOKEN in .env to read the gateway key feed (generate one on the box: openssl rand -hex 32)}"
+  export COMPOSE_PROFILES=ingest CADDY_EXTRA=on
+  echo "==> Hosted edge proxy: ON at https://${INGEST_DOMAIN}"
+else
+  export CADDY_EXTRA=off
+  echo "==> Hosted edge proxy: off (set INGEST_DOMAIN in .env to turn it on)"
 fi
 echo "==> Building images and starting the stack (auth mode: ${AUTH_MODE:-basic})"
 "${COMPOSE[@]}" up -d --build
@@ -197,13 +202,16 @@ docker run --rm \
 fi
 
 # --- Done ---------------------------------------------------------------------------------------
+if [ -n "${INGEST_DOMAIN:-}" ]; then
+  INGEST_LINE="  Ingest: https://${INGEST_DOMAIN}/openai/v1  /anthropic  /gemini  (header X-Tenant-Key)"
+else
+  INGEST_LINE="  Ingest: off"
+fi
 # CTO-373: the login line depends on the auth mode. In clerk mode there is no BASIC_AUTH_USER, and
 # printing "Login:  (password: the plaintext you hashed...)" told the operator to use a credential
 # that does not exist in that mode.
 if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
-  LOGIN_LINE="  Login: Clerk sign-in at https://${DOMAIN}/sign-in
-  Ingest: https://${INGEST_DOMAIN}/openai/v1  /anthropic  /gemini
-          header X-Tenant-Key: a key from Settings > API keys"
+  LOGIN_LINE="  Login: Clerk sign-in at https://${DOMAIN}/sign-in"
 else
   LOGIN_LINE="  Login: ${BASIC_AUTH_USER}  (password: the plaintext you hashed into BASIC_AUTH_HASH)"
 fi
@@ -215,6 +223,7 @@ cat <<EOF
 
   URL:   https://${DOMAIN}
 ${LOGIN_LINE}
+${INGEST_LINE}
 
   The dataset is SYNTHETIC (seeded + backfilled), safe to share with testers.
   Share the link and password privately. Reset the data with deploy/demo/reseed.sh.

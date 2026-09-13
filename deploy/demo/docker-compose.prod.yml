@@ -114,9 +114,10 @@ services:
   # to the real provider byte for byte and ships a metadata-only span to the gateway over the
   # internal network, so the gateway's /v1/batches stays unpublished.
   #
-  # PROFILE `ingest`, enabled by deploy.sh in AUTH_MODE=clerk. The proxy refuses to start without a
-  # service token for the key feed, so running it unconditionally would leave the basic-auth demo,
-  # which has no token, with a container restarting forever.
+  # OPTIONAL. Profile `ingest`, enabled by deploy.sh only when INGEST_DOMAIN is set in .env; unset, the
+  # container is never created and Caddy serves no ingest site. Off by default because the proxy
+  # refuses to start without a service token for the key feed, and because putting a VM in the
+  # request path of customers' LLM calls is a decision, not a default.
   #
   # NO healthcheck, deliberately. The image is FROM scratch: no shell and no HTTP client, so any
   # compose healthcheck fails every attempt (the trap #339 documents for the ECS task definition).
@@ -162,7 +163,7 @@ services:
       - "443:443"  # the private demo link
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
-      # Only Caddyfile.clerk reads it, and deploy.sh requires it in that mode.
+      # Read only by caddy-extra/on/ingest.caddy, which is mounted only when this is set.
       INGEST_DOMAIN: ${INGEST_DOMAIN:-}
       # CTO-367: only the basic-auth site file reads these, so they are optional. AUTH_MODE=clerk
       # mounts Caddyfile.clerk, which has no basic_auth block; leaving them unset there is correct
@@ -176,6 +177,10 @@ services:
       # a file with no basic_auth block, because Clerk's redirects and its organization.created
       # webhook cannot pass a basic-auth challenge. deploy.sh exports CADDY_SITE_FILE.
       - ../deploy/demo/${CADDY_SITE_FILE:-Caddyfile}:/etc/caddy/Caddyfile:ro   # relative to infra/ (first -f file)
+      # Optional sites. `off` (the default) holds no *.caddy files; deploy.sh selects `on` only when
+      # INGEST_DOMAIN is set, which also enables the edge-proxy profile. Default off so a bare
+      # `docker compose up` never serves an ingest site it was not asked for.
+      - ../deploy/demo/caddy-extra/${CADDY_EXTRA:-off}:/etc/caddy/extra:ro
       - caddy_data:/data    # ACME account + issued certs; persist so restarts do not re-issue
       - caddy_config:/config
     restart: unless-stopped

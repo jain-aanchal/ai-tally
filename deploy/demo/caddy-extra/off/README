@@ -1,0 +1,2 @@
+Intentionally empty of *.caddy files. deploy.sh mounts this directory when the hosted edge proxy is
+off, so the Caddyfiles' `import /etc/caddy/extra/*.caddy` matches nothing and adds no site.
