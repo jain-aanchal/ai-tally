@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jain-aanchal/ai-tally/infra/edge-proxy/internal/config"
@@ -194,5 +196,97 @@ func TestByteForByteUnderRouting(t *testing.T) {
 	echoed, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(echoed, payload) {
 		t.Errorf("echoed %d bytes, want %d exact byte-for-byte", len(echoed), len(payload))
+	}
+}
+
+// switchResolver resolves one write-scope key and reports a fixed hosted-proxy switch for its
+// organization, exercising the optional OrgSwitchResolver path (gateway 0033).
+type switchResolver struct {
+	keyHash string
+	tenant  string
+	enabled bool
+}
+
+func (s switchResolver) Resolve(keyHash string) (string, string, bool) {
+	if keyHash == s.keyHash {
+		return s.tenant, "write", true
+	}
+	return "", "", false
+}
+
+func (s switchResolver) ProxyEnabled(keyHash string) bool { return keyHash == s.keyHash && s.enabled }
+
+// TestOrgSwitchOffFailsClosed: a valid write key whose organization has the hosted proxy turned OFF
+// is refused with 403 and never forwarded. This is the whole point of the setting: an admin's "off"
+// holds even though the key itself is valid.
+func TestOrgSwitchOffFailsClosed(t *testing.T) {
+	var forwarded atomic.Bool
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded.Store(true)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	resolver := switchResolver{keyHash: edgekeys.HashKey("tally_sk_live_optedout"), tenant: "uuid-acme", enabled: false}
+	front, _ := resolverProxy(t, true, resolver, upstream)
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
+	req.Header.Set("X-Tenant-Key", "tally_sk_live_optedout")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 when the org has the proxy turned off", resp.StatusCode)
+	}
+	// The error has to say what to do, or a customer reads a valid key being refused as a bug.
+	if !strings.Contains(string(body), "turned off for this organization") {
+		t.Errorf("body = %q, want it to say the proxy is turned off for the organization", body)
+	}
+	if forwarded.Load() {
+		t.Error("a key whose org turned the proxy off must not be forwarded upstream")
+	}
+}
+
+// TestOrgSwitchOnForwardsAndAttributes: the same key with the switch on forwards and is attributed.
+func TestOrgSwitchOnForwardsAndAttributes(t *testing.T) {
+	resolver := switchResolver{keyHash: edgekeys.HashKey("tally_sk_live_optedin"), tenant: "uuid-acme", enabled: true}
+	front, sink := resolverProxy(t, true, resolver, echoUpstream())
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
+	req.Header.Set("X-Tenant-Key", "tally_sk_live_optedin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when the org has the proxy turned on", resp.StatusCode)
+	}
+	sink.waitFor(t, 1)
+	if got := sink.last(); got.TenantId != "uuid-acme" {
+		t.Errorf("TenantId = %q, want uuid-acme", got.TenantId)
+	}
+}
+
+// TestOrgSwitchOffOpenModeForwardsUntagged: without RequireTenant the call still forwards, as for a
+// read-only key, but carries no TenantId: traffic an organization opted out of is never attributed.
+func TestOrgSwitchOffOpenModeForwardsUntagged(t *testing.T) {
+	resolver := switchResolver{keyHash: edgekeys.HashKey("tally_sk_live_optedout"), tenant: "uuid-acme", enabled: false}
+	front, sink := resolverProxy(t, false, resolver, echoUpstream())
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", nil)
+	req.Header.Set("X-Tenant-Key", "tally_sk_live_optedout")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (open when tenant not required)", resp.StatusCode)
+	}
+	sink.waitFor(t, 1)
+	if got := sink.last(); got.TenantId != "" {
+		t.Errorf("TenantId = %q, want empty for a key whose org turned the proxy off", got.TenantId)
 	}
 }

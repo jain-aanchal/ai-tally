@@ -33,7 +33,14 @@ function orDash(v: string | null): string {
   return v && v.trim() ? v : "—";
 }
 
-export function KeyManager({ canManage }: { canManage: boolean }) {
+export function KeyManager({
+  canManage,
+  proxyEnabled = null,
+}: {
+  canManage: boolean;
+  /** Passed through to the Connect snippets so the proxy tab can say when it will be refused. */
+  proxyEnabled?: boolean | null;
+}) {
   const [keys, setKeys] = useState<KeyMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -184,7 +191,7 @@ export function KeyManager({ canManage }: { canManage: boolean }) {
           {/* One-step connect (Initiative 2, §9): snippets with the real key inlined into this
               one-time view, plus the live first-event indicator. The key is never stored to render
               this later; it lives only in `minted` until dismissed. */}
-          <ConnectPanel token={minted.token} />
+          <ConnectPanel token={minted.token} proxyEnabled={proxyEnabled} />
         </div>
       )}
 

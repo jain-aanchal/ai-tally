@@ -241,6 +241,11 @@ when the client sets `stream_options: {"include_usage": true}`.
 
 - **Unknown or revoked key: `403`, never forwarded.** The proxy runs with
   `EDGE_PROXY_REQUIRE_TENANT=true`, so the hostname is not an open relay.
+- **Each organization turns it on for itself, and it starts off.** Running the proxy (this section)
+  makes it available; an org admin then enables it under Settings > API keys > Zero-code proxy. Until
+  they do, that org's keys get `403 the hosted proxy is turned off for this organization` from the
+  proxy while still working for the SDK. A change reaches running proxies within one key-feed refresh
+  (about 45s). Stored in `tenant_proxy_config` (migration 0033).
 - **The key needs `write` or `admin` scope.** Metering a call writes spans, so a `read` key is
   refused with `403 tenant key lacks write scope`, the same rule the gateway applies to
   `/v1/batches`. Settings > API keys creates `write` keys by default.

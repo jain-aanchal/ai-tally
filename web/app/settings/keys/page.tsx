@@ -3,10 +3,13 @@
 // and the caller's role, then hands the client manager whether this user may mint/rotate/revoke.
 // Members see the list read-only; admins get the write controls (§9).
 import { canManage, getTenant } from "@/lib/getTenant";
+import { queryProxyEnabled } from "@/lib/proxySetting";
 import { KeyManager } from "./KeyManager";
+import { ProxySwitch } from "./ProxySwitch";
 
 export default async function KeysPage() {
   const tenant = await getTenant();
+  const proxyEnabled = await queryProxyEnabled(tenant.tenantId);
   return (
     <div className="space-y-4">
       <div>
@@ -16,7 +19,8 @@ export default async function KeysPage() {
           once at creation and never again.
         </p>
       </div>
-      <KeyManager canManage={canManage(tenant)} />
+      <ProxySwitch initialEnabled={proxyEnabled} canManage={canManage(tenant)} />
+      <KeyManager canManage={canManage(tenant)} proxyEnabled={proxyEnabled} />
     </div>
   );
 }

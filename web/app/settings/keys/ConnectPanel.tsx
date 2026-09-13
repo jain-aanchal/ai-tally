@@ -104,7 +104,18 @@ function FirstEventBadge() {
   );
 }
 
-export function ConnectPanel({ token }: { token: string }) {
+export function ConnectPanel({
+  token,
+  proxyEnabled = null,
+}: {
+  token: string;
+  /**
+   * The organization's hosted-proxy switch (0033). false shows a warning on the proxy tab, because
+   * those snippets are refused with 403 until an admin turns it on. null (unknown) shows nothing
+   * rather than guessing either way.
+   */
+  proxyEnabled?: boolean | null;
+}) {
   const [path, setPath] = useState<ConnectPath>("proxy");
   const snippets = connectSnippets(token);
   const [active, setActive] = useState(0);
@@ -147,6 +158,12 @@ export function ConnectPanel({ token }: { token: string }) {
               {s.label}
             </button>
           ))}
+        </div>
+      )}
+      {path === "proxy" && proxyEnabled === false && (
+        <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+          The zero-code proxy is off for this organization, so these snippets are refused with a 403
+          until an admin turns it on above. The SDK path works either way.
         </div>
       )}
       <CodeBlock snippet={shown} />

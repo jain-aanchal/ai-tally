@@ -42,6 +42,8 @@ func HashKey(token string) string {
 type entry struct {
 	tenantID string
 	scope    string
+	// proxyEnabled is the key's organization's hosted-proxy switch (gateway 0033).
+	proxyEnabled bool
 }
 
 // change is one row of the delta feed. Only the SHA-256 hash is ever sent, never a raw key.
@@ -50,6 +52,10 @@ type change struct {
 	TenantID  string `json:"tenant_id"`
 	Scope     string `json:"scope"`
 	RevokedAt string `json:"revoked_at"`
+	// ProxyEnabled is the organization's hosted-proxy switch. A pointer so ABSENT and false stay
+	// distinct: a gateway that predates the switch sends no field, and there is no admin choice to
+	// honor, so the key is allowed as before. An explicit false is an admin turning the proxy off.
+	ProxyEnabled *bool `json:"proxy_enabled"`
 }
 
 // feedResponse is the /v1/edge/keys payload: the changes since the requested cursor plus the new
@@ -112,6 +118,15 @@ func (c *Cache) Resolve(keyHash string) (tenantID string, scope string, ok bool)
 		return "", "", false
 	}
 	return e.tenantID, e.scope, true
+}
+
+// ProxyEnabled reports whether the organization behind a key has the hosted proxy turned on. A key
+// that is not in the cache reports false; callers check Resolve first. Hot path: read lock, O(1).
+func (c *Cache) ProxyEnabled(keyHash string) bool {
+	c.mu.RLock()
+	e, found := c.m[keyHash]
+	c.mu.RUnlock()
+	return found && e.proxyEnabled
 }
 
 // writeScopes mirrors the gateway's WRITE_SCOPES (gateway/auth.py): the scopes permitted to write
@@ -213,7 +228,9 @@ func (c *Cache) Refresh(ctx context.Context) error {
 			delete(c.m, ch.KeyHash)
 			continue
 		}
-		c.m[ch.KeyHash] = entry{tenantID: ch.TenantID, scope: ch.Scope}
+		// Absent field: a gateway without the per-org switch, so nothing to enforce (see change).
+		enabled := ch.ProxyEnabled == nil || *ch.ProxyEnabled
+		c.m[ch.KeyHash] = entry{tenantID: ch.TenantID, scope: ch.Scope, proxyEnabled: enabled}
 	}
 	if fr.Cursor != "" {
 		c.cursor = fr.Cursor

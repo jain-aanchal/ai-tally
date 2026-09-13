@@ -264,7 +264,9 @@ def test_edge_keys_payload_is_metadata_only() -> None:
     with _client(auth_on=True, edge=edge) as (c, _h, _e):
         r = c.get("/v1/edge/keys", headers={"Authorization": f"Bearer {SERVICE_TOKEN}"})
         change = r.json()["changes"][0]
-        # Exactly the metadata contract, and no token/token_prefix/secret leaks in.
-        assert set(change.keys()) == {"key_hash", "tenant_id", "scope", "revoked_at"}
+        # Exactly the metadata contract, and no token/token_prefix/secret leaks in. proxy_enabled (0033)
+        # is the org's hosted-proxy switch: a boolean about the organization, not about the key's
+        # secret, so it belongs in the contract and must always be present (see KeyChange.as_dict).
+        assert set(change.keys()) == {"key_hash", "tenant_id", "scope", "revoked_at", "proxy_enabled"}
         assert change["key_hash"] == "hash123"
         assert "token" not in change
