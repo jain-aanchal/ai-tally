@@ -330,6 +330,9 @@ Where the count is estimated, no tokenizer runs at the edge, consistent with 6.1
 | Spend lease or Redis unavailable (section 6.1) | Per `spend.on_unavailable`: `shadow` (default, availability first) or `block` (budget first) | `lease_unavailable` / `counters_unavailable` |
 | Lease denied because budget is held in other instances' unexpired leases, not spent (6.1) | Retry once after a short backoff, then per `on_unavailable`; never the budget's `block` action, since the budget is not exhausted | `budget_leased_out` |
 | `truncate` requested for a model without calibration (5.2) | No mid-stream cut; the next call is evaluated under `block` | `truncate_uncalibrated` |
+| Decision queue full at the edge (8.3) | Shed by priority (sampled allows, then `would_act`, then `acted`/`error`); counts merge in place; the call is unaffected | `decisions_shed` |
+| Serverless flush deadline reached (8.3) | Stop flushing, carry unsent enforcement rows to the next warm invocation, count the rest | `flush_deadline` |
+| Feature tag over the tenant's distinct-tag cap (8.3) | Counted and rolled up as `__overflow__`; no override can match it | `tag_overflow` |
 | Signature pack missing or hash mismatch | Use the last good pack; if none was ever loaded, cap `prompt_policy` at shadow | `sigpack_stale` / `sigpack_missing` |
 | Provider error during a cascade | Return the last successful response, or the original error | `cascade_failed` |
 | Evaluation throws | The call proceeds, as if the capability were shadow | `governance_error` |
@@ -439,7 +442,7 @@ The last row is the rule behind all of them: a bug in governance must never be t
 
 - **Bundles** are cached in module scope and revalidated inline on a TTL (section 4.3), not polled.
 - **Counters** cannot be local, because instances do not share memory and die without settling, so spend enforcement in serverless requires Redis. Without it, `spend` is capped at shadow in serverless mode.
-- **Spans and decision records are flushed together** before the function is frozen. The SDK sends spans today from a daemon worker thread with an `atexit` drain (`sdk/python/src/tally/transport.py`), and a frozen serverless instance runs neither, so flushing only decisions would leave decisions pointing at spans that never arrive. Serverless mode drains both in the platform's post-response hook: `waitUntil` on Vercel, which is available to Python functions; on Lambda, a synchronous flush at the end of the handler, with an extension as an option for customers who cannot spend the time in the handler. Anything still lost is recorded as a gap in coverage, never silently.
+- **Spans and decision records are flushed together** before the function is frozen. The SDK sends spans today from a daemon worker thread with an `atexit` drain (`sdk/python/src/tally/transport.py`), and a frozen serverless instance runs neither, so flushing only decisions would leave decisions pointing at spans that never arrive. Serverless mode drains both in the platform's post-response hook: `waitUntil` on Vercel, which is available to Python functions; on Lambda, a synchronous flush at the end of the handler, with an extension as an option for customers who cannot spend the time in the handler. Anything still lost is recorded as a gap in coverage, never silently. The flush has a hard deadline and makes one attempt, so a slow ingest endpoint cannot keep the function alive (8.3).
 
 The hosted proxy's single-instance deployment is not suitable for enforce mode at scale; section 13 treats this as a risk, not a footnote.
 
@@ -505,6 +508,46 @@ Added to `tally.schema` alongside the existing `gen_ai.guardrail.{rule_id}.*` at
 - `gen_ai.governance.verdict` (the most severe verdict on the call)
 - `gen_ai.governance.routed_model` (when routing changed the model)
 
+### 8.3 Ingest path
+
+Decisions are written by many enforcement points into one ClickHouse deployment, so how they get there matters as much as the tables. Five pressures, and what the design does about each:
+
+**Part explosion.** ClickHouse creates a data part per insert and relies on background merges to combine them. An insert per incoming edge batch, under high concurrency, creates parts faster than merges retire them, and ClickHouse protects itself by refusing writes with "too many parts".
+
+- This is not only a future governance problem. The gateway's existing burst buffer (`gateway/ingest_buffer.py`, CTO-37) is **off by default** (`ingest_buffered = False`), the production droplet does not enable it, and nothing sets ClickHouse's `async_insert`. So `/v1/batches` today performs one ClickHouse insert per request. Section 12 makes fixing that a prerequisite.
+- **Decisions always go through a buffered path**, never an insert per request. Two layers:
+  - **ClickHouse `async_insert = 1` with `wait_for_async_insert = 1`.** ClickHouse accumulates rows server-side and flushes them as one part per table on a size or time threshold (a 200 ms busy timeout to start). Because the insert waits for that flush, the edge's acknowledgement means the rows are durable.
+  - **The gateway's burst buffer** in front of it, for fairness across tenants and to shed with a retryable status when ClickHouse is slow. Rows are drained in chunks (2,000 rows by default), so even without `async_insert` the insert count is bounded by drain cycles, not by request count.
+- **Acknowledgement is durable for decisions.** The in-memory buffer acknowledges before the write, which loses acknowledged rows if a gateway process dies. Decisions are audit data, so the decision endpoint acknowledges only after the buffered insert completes. Spans keep their existing behavior until the Kafka topic the buffer was designed for replaces the in-memory queue (a later infra ticket, not built).
+- **The counts table is not written per batch at all.** The gateway folds per-minute counts in memory from each decision batch and writes one row per key per minute, so its part count is set by time, not traffic.
+
+**Edge memory.** If `/v1/governance/decisions` is slow or down, enforcement points must not buffer without limit, because an out-of-memory proxy takes live traffic down with it.
+
+- The existing clients already shed rather than grow: the proxy's telemetry sink drops onto a bounded channel and counts what it sheds (`telemetry.go`), and the SDK's transport drops the oldest record past `max_buffer` (10,000) and counts it. Both bound by **record count**, not bytes.
+- Decisions get **their own queue**, separate from spans, so a decision backlog can never evict cost data and a span backlog can never evict an enforcement record.
+- The decision queue has a **hard byte cap** (8 MiB by default per enforcement point) as well as a record cap. Decision rows carry no bodies and are close to fixed size, but a byte cap is what the out-of-memory guarantee actually needs.
+- **Shedding is by priority, not arrival order.** When the queue is full, sampled `allow` rows go first, then `would_act`, and `acted` and `error` rows last. Per-minute counts are merged in place rather than queued, so an outage grows counters, never the queue.
+- Everything shed is counted, reported on the next successful send, and shown in the dashboard as a coverage gap.
+
+**Serverless flush latency.** A flush in a post-response hook that waits on a slow ingest endpoint keeps the function alive, which the customer pays for and which can hit platform timeouts.
+
+- In serverless and ephemeral modes the flush has a **hard deadline** (300 ms by default for spans and decisions together), makes **one attempt with no retries**, and sheds and counts whatever did not send.
+- On a warm instance, shed counts and unsent `acted`/`error` rows (within the byte cap) are carried in module scope and sent first on the next invocation, so a single slow flush does not lose enforcement records.
+- The durable acknowledgement above is fast because `async_insert` flushes on a short timer; if it is not, the edge's deadline wins and the gateway's retryable response is simply not waited for.
+
+**Deduplication cost.** Retries must not become a stream of identical rows for ClickHouse to collapse.
+
+- **Retried batches never reach ClickHouse.** Decision batches use the same `(tenant_id, batch_id)` claim in Postgres as `/v1/batches` (migration 0032): a retry of a batch already written is answered from the recorded response, before any insert.
+- **Buffer redelivery** after a failed drain carries an `insert_deduplication_token` derived from the batch, with `non_replicated_deduplication_window` set on the table, so ClickHouse drops a re-sent block at insert time instead of storing it.
+- `ReplacingMergeTree` is therefore the last line for a narrow residue (a gateway that dies between the ClickHouse write and the Postgres record), not the routine deduplication mechanism, and its merge cost stays proportional to that residue.
+
+**Feature tag cardinality.** Feature tags are caller-supplied. A customer that accidentally puts user ids or request ids into `FeatureTag` explodes the sorting key of the counts table, and of the existing span rollups (`rollups.sql` orders by `FeatureTag` too), bloating storage and slowing every aggregation.
+
+- **A per-tenant cap on distinct feature tags** (500 per day by default). Tags a tenant has declared (the existing `feature_tags` table from migration 0001) always count; beyond the cap, **undeclared** new tags are recorded as `__overflow__` in the counts table and the rollups, while the raw tag stays on the span for drill-down.
+- **Id-shaped tags are flagged early:** a tag matching a UUID, a long hex string or a numeric id pattern raises a dashboard warning with examples, before the cap is reached.
+- Policy follows the same line: overrides (3.4) can only target declared tags, so an overflowed or id-shaped tag can never select a policy.
+- `LowCardinality(String)` is used because tags are expected to be few; the cap is what keeps that assumption true.
+
 ## 9. Control-plane API
 
 All tenant endpoints use the service token plus `x-tenant-id`, like every `/v1/tenant/*` route. Edge endpoints authenticate with the enforcement point's own identity and name the tenant explicitly (section 9.1).
@@ -521,7 +564,7 @@ All tenant endpoints use the service token plus `x-tenant-id`, like every `/v1/t
 | POST | `/v1/governance/leases` | edge | Request, renew or return a spend lease (section 6.1) |
 | GET | `/v1/governance/kill` and `/kill/stream` | edge | Kill switch state |
 | GET | `/v1/governance/keys` | edge | Signed set of current bundle-signing public keys, verified against the shipped root key (4.2) |
-| POST | `/v1/governance/decisions` | edge | Decision batches, same transport and idempotency as `/v1/batches` |
+| POST | `/v1/governance/decisions` | edge | Decision batches: same `(tenant_id, batch_id)` idempotency as `/v1/batches`, buffered with a durable acknowledgement (8.3) |
 | POST | `/v1/governance/judge-results` | judge worker | Scores, verdicts, judge accuracy |
 
 ### 9.1 Edge identities
@@ -561,6 +604,8 @@ An earlier draft had every edge endpoint use "the tenant's API key". That fits o
 | Real-traffic verification (#350) | `spend` in enforce | Harness shipped (#383). GitHub auto-closed #350 when #383 merged, but the run with real keys, checked against provider dashboards, has not happened |
 | Per-org switch pattern (#385) | Section 3 implementation | Merged |
 | Edge deployment credentials (9.1) | Customer-run proxies in P0 | Not built |
+| Buffered ClickHouse ingest (8.3): `async_insert` and the gateway burst buffer | Decision ingest in P0; also protects `/v1/batches` today | Buffer built but off by default and not enabled on the droplet; `async_insert` unused; Kafka backing not built |
+| Feature tag cardinality cap (8.3) | Counts table in P0 | Not built; `validation.py` can flag unknown tags but nothing calls it with declared tags |
 | API keys scoped to a feature tag (3.4) | Loosening overrides in P2 | Not built; `api_keys` has no feature column |
 | Outcome signal per run (routing-intelligence P1) | `output_policy` metrics, routing P3 | Not built |
 | Real replay corpus (routing-intelligence P0) | Routing tables | Not built; replay runs on mocks today |
@@ -578,6 +623,7 @@ An earlier draft had every edge endpoint use "the tenant's API key". That fits o
 - **Parser differentials.** Any gap between the proxy's parser and a provider's is a policy bypass. Strict parsing (D11) closes the known class; a conformance test per provider, fed deliberately ambiguous bodies, keeps it closed.
 - **Regex denial of service.** Pattern packs run on attacker-influenced input. RE2-only patterns (section 4.2) are the mitigation, and it adds `google-re2`, a compiled dependency, to the Python SDK.
 - **Caller-set dimensions.** Feature tag and account hash come from the caller. Section 3.4 makes overrides tighten-only unless the tag is bound to a key, and section 6.7 states that account-scoped kill switches stop cooperative callers only. Any future policy that loosens on a caller-set value needs the same server-side binding.
+- **Ingest pressure lands on one ClickHouse.** Decisions multiply write volume by the number of capabilities. Buffered, durably acknowledged ingest and per-minute counts (8.3) keep part creation proportional to time rather than traffic, but a deployment that turns governance on before enabling buffered ingest will hit "too many parts" on its span ingest first.
 - **SDK enforcement is cooperative.** The SDK runs inside the customer's process, so code that skips it, or calls a provider directly, is not governed. Only a proxy is non-bypassable, and only when the customer's network blocks direct egress to the providers. The spec's guarantees against a misbehaving caller (3.4, 6.7) hold fully at a proxy with egress controls and are best-effort in the SDK; the dashboard shows which enforcement point governed each call so the difference is visible.
 - **Estimated mid-stream counts.** `truncate` for OpenAI and Anthropic depends on a calibrated estimate (5.2). It is conservative by construction and unavailable until calibrated, but a model change that shifts the output ratio widens `ε` until the calibration catches up.
 - **Serverless is a weaker enforcement point.** TTL-bounded kill switch propagation, Redis-only spend enforcement, and decision loss on freeze without a flush hook. The dashboard must say which calls were governed from serverless.
@@ -608,12 +654,15 @@ Still open:
 11. **Ephemeral platform detection:** the environment signals per platform (Cloud Run is `K_SERVICE`; App Runner and Azure Container Apps need confirming), and whether detection defaults to ephemeral mode or only recommends it.
 12. **Streaming calibration thresholds:** the 200-stream minimum and the p99 `ε`, and whether calibration pools across tenants for the same model to become available sooner.
 13. **Signature pack corpora:** who owns the true-positive and false-positive corpora, and the false-positive rate a pack must stay under to publish.
+14. **When the burst buffer moves to Kafka** (Redpanda is already in the compose stack), which would give spans the durable acknowledgement decisions get from `async_insert`.
+15. **The feature tag cap** (500 distinct per day in the draft), whether it is per plan, and how long `__overflow__` tags keep their raw value on spans.
+16. **Edge queue sizing:** the 8 MiB decision byte cap and the 300 ms serverless flush deadline, which trade enforcement-record loss against memory and billed function time.
 
 ## 15. Phasing
 
 ### P0: settings, shadow, decision log
 
-Scope: section 3 settings and audit, with a missing capability row reading as off; resolution that checks the org switch before any degraded branch; edge identities (9.1), including deployment credentials; signed manifests, the root key and the signing key set; bundle compile and distribute; the decision log with rule and attempt in its key, the allow counts table and allow sampling; mode resolution in the SDK and proxy, with the effective-mode precedence for existing guardrail rules (3.2); the existing guardrail rule kinds and budgets evaluated in **shadow only**; the Governance settings page and shadow overview.
+Scope: section 3 settings and audit, with a missing capability row reading as off; resolution that checks the org switch before any degraded branch; edge identities (9.1), including deployment credentials; signed manifests, the root key and the signing key set; bundle compile and distribute; the decision log with rule and attempt in its key, the allow counts table and allow sampling; decision ingest through the buffered path with `async_insert`, a durable acknowledgement, insert deduplication tokens and in-memory count folding; separate byte-capped decision queues with priority shedding at the edge; the feature tag cardinality cap (8.3); mode resolution in the SDK and proxy, with the effective-mode precedence for existing guardrail rules (3.2); the existing guardrail rule kinds and budgets evaluated in **shadow only**; the Governance settings page and shadow overview.
 
 Done when: an org admin turns governance on, sees a week of would-have-acted decisions per capability with reason codes and bundle versions, turns it off, and traffic behaves exactly as before throughout.
 
@@ -644,10 +693,10 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 ## 16. File-level change list (planned)
 
 - **db/postgres:** `tenant_governance_settings`, `tenant_governance_capabilities`, `tenant_governance_changes`, governance bundle versions and signing metadata, `governance_edge_credentials` (9.1), per-model stream calibration, the spend lease ledger (6.1), and feature scoping for API keys (P2); mounts in `infra/docker-compose.yml`. Existing deployments pick these up through `make pg-migrate`, which `deploy.sh` now runs (#384).
-- **db/clickhouse:** `governance_decisions.sql` and `governance_decision_counts.sql`; add both ReplacingMergeTree tables to the `FINAL` guard in `web/lib/clickhouse.test.ts` (the counts table is a SummingMergeTree and is read with `sum()`).
-- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign, content-addressed routing tables), `governance_sigpack.py` (publish gate: RE2 compile check, true-positive and false-positive corpora, recorded false-positive rate), `governance_leases.py` (ledger, minimum lease, `budget_leased_out`, ephemeral leases with heartbeat reclaim), `governance_seed.py` (settled-watermark seeding, one-way reconcile), `governance_signing.py` (manifests, root and signing key set; the gateway has no signing facility today), `governance_edge_identity.py` (9.1), `governance_decisions.py` (ingest, allow counts), `governance_kill.py` (manual switch, runaway proposals, expiring auto-activation); routes in `app.py`; tests including bundle signature, lease invariant (outstanding leases never exceed remaining budget), and resolution-order conformance fixtures.
-- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, Redis counters and leases, RE2 scans via `google-re2`, `tally.prompt`, serverless mode with TTL revalidation and spans and decisions flushed together; the `BudgetTruncated` exception; ephemeral runtime detection with inline lease return; stream output estimation and calibration; tag resolution from key binding; post-match secret filters; effective-mode precedence with `GuardrailConfig.mode`); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
-- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, D11 request inspection with a strict duplicate-rejecting JSON parser, pre and post checks, Redis counters and leases, stream output estimation with per-model calibration, tag resolution from the key's bound feature, post-match secret filters, kill switch stream); a per-provider parser-differential conformance suite. No request-body rewriting (D9).
+- **db/clickhouse:** `governance_decisions.sql` (with `non_replicated_deduplication_window`) and `governance_decision_counts.sql`; `async_insert` settings for the ingest user; add both ReplacingMergeTree tables to the `FINAL` guard in `web/lib/clickhouse.test.ts` (the counts table is a SummingMergeTree and is read with `sum()`).
+- **infra/gateway:** `governance_settings.py`, `governance_bundle.py` (compile, sign, content-addressed routing tables), `governance_sigpack.py` (publish gate: RE2 compile check, true-positive and false-positive corpora, recorded false-positive rate), `governance_leases.py` (ledger, minimum lease, `budget_leased_out`, ephemeral leases with heartbeat reclaim), `governance_seed.py` (settled-watermark seeding, one-way reconcile), `governance_signing.py` (manifests, root and signing key set; the gateway has no signing facility today), `governance_edge_identity.py` (9.1), `governance_decisions.py` (buffered ingest with durable acknowledgement, insert deduplication tokens, in-memory per-minute count folding), `feature_tag_cardinality.py` (per-tenant distinct-tag cap, `__overflow__`, id-shaped tag detection), `governance_kill.py` (manual switch, runaway proposals, expiring auto-activation); routes in `app.py`; tests including bundle signature, lease invariant (outstanding leases never exceed remaining budget), and resolution-order conformance fixtures.
+- **sdk/python:** `tally/governance/` (bundle client and verification, mode resolution, pipeline, Redis counters and leases, RE2 scans via `google-re2`, `tally.prompt`, serverless mode with TTL revalidation and spans and decisions flushed together; the `BudgetTruncated` exception; ephemeral runtime detection with inline lease return; a separate byte-capped decision queue with priority shedding, and the serverless flush deadline with warm carry-over; stream output estimation and calibration; tag resolution from key binding; post-match secret filters; effective-mode precedence with `GuardrailConfig.mode`); decision batching reusing the ingest transport; span attributes in `tally/schema.py`.
+- **infra/edge-proxy:** `internal/governance/` (bundle client, resolution, D11 request inspection with a strict duplicate-rejecting JSON parser, pre and post checks, Redis counters and leases, stream output estimation with per-model calibration, tag resolution from the key's bound feature, post-match secret filters, a separate byte-capped decision queue with priority shedding, kill switch stream); a per-provider parser-differential conformance suite. No request-body rewriting (D9).
 - **judge worker:** a new container under `infra/judge-worker/`.
 - **web:** `app/settings/governance/` (capabilities off until enabled, body-reading capabilities labeled, loosening overrides labeled, hosted-proxy inspection confirmation), `app/governance/` (overview from the counts table, audit, runaway proposals), `lib/governance.ts`, server routes enforcing `org:admin`; update the #385 proxy switch copy to mention inspection when a body-reading capability is on.
 - **docs:** conformance fixture format; operator guide for the in-VPC gateway and shared counter store.
@@ -693,3 +742,11 @@ Done when: a feature runs on the cheapest model that clears its quality floor, e
 - **Mid-stream output counting (5.2).** Truncation only applies to requests without `max_tokens`. Gemini gives exact running counts; OpenAI and Anthropic are estimated from emitted content with a per-model ratio whose p99 error is measured from each stream's final usage. The trigger cuts only when the low end of the estimate crosses the limit, and `truncate` is unavailable until a model is calibrated.
 - **RE2 without lookarounds (4.2).** Matching and false-positive filtering are separate stages; filters (entropy, shape allowlists, keyword proximity, checksums) run in code on matches only. Rules from RE2-native scanners such as gitleaks are adapted after license and corpus checks; rules from backtracking engines are not imported as-is. Added a publish gate with true- and false-positive corpora.
 - **Feature tag resolution (3.4).** Exact rules: a feature-scoped key's bound tag governs; with an org key the header tag never reaches a loosening override; resolution happens at the enforcement point from the key feed, pinned by conformance fixtures in Go and Python. Added the risk that SDK enforcement is cooperative and only a proxy with egress controls is non-bypassable.
+
+**Review 4** (ingest and storage review):
+
+- **Part explosion (8.3).** Decisions always go through buffered ingest: ClickHouse `async_insert` with a durable acknowledgement behind the gateway's burst buffer, and per-minute counts folded in memory. Found in passing that `/v1/batches` itself inserts per request today (buffer off by default, not enabled on the droplet, no `async_insert`); added as a prerequisite.
+- **Edge memory (8.3).** Existing clients already shed by record count; decisions get a separate, byte-capped queue with priority shedding, and counts merge in place during outages.
+- **Serverless flush (7, 8.3).** Hard 300 ms deadline, one attempt, shed and count, with unsent enforcement rows carried to the next warm invocation.
+- **Deduplication cost (8.3).** Largely already addressed: retried batches are answered from the Postgres `(tenant_id, batch_id)` claim (0032) before any insert. Added insert deduplication tokens for buffer redelivery, leaving `ReplacingMergeTree` for a narrow crash residue.
+- **Feature tag cardinality (8.3).** Per-tenant distinct-tag cap with `__overflow__` for undeclared tags, early warning on id-shaped tags, and overrides restricted to declared tags. Applies to the existing span rollups too.
