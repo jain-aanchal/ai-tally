@@ -41,3 +41,7 @@
 #
 # Then: curl -i localhost:8088                     -> 401 (auth required)
 #       curl -i -u tester:secret localhost:8088    -> 200 (reaches the dashboard)
+
+# ---- Optional sites ---------------------------------------------------------------------------
+# Hosted edge proxy, mounted only when deploy.sh enables it. Matches nothing when off.
+import /etc/caddy/extra/*.caddy

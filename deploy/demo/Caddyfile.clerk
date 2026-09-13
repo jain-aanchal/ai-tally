@@ -28,3 +28,9 @@
 	# 	reverse_proxy gateway:8080
 	# }
 }
+
+# ---- Optional sites ---------------------------------------------------------------------------
+# The hosted edge proxy lives in caddy-extra/on/ingest.caddy and is mounted only when deploy.sh
+# enables it (INGEST_DOMAIN set). With it off the glob matches no files, which Caddy accepts, so the
+# dashboard serves exactly as before and no empty {$INGEST_DOMAIN} site address can break TLS.
+import /etc/caddy/extra/*.caddy
