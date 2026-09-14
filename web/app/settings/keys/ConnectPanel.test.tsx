@@ -89,6 +89,8 @@ describe("ConnectPanel first-event badge (finding #11)", () => {
       await vi.advanceTimersByTimeAsync(4000);
     });
     expect(screen.getByText(/We received your first event\./i)).toBeTruthy();
+    // The link must land on a real route: Cost Explorer is /cost, and /explore was a 404.
+    expect(screen.getByRole("link", { name: "View Cost Explorer" }).getAttribute("href")).toBe("/cost");
     const callsAtConnect = fetchMock.mock.calls.length;
     expect(callsAtConnect).toBeGreaterThan(0);
 
