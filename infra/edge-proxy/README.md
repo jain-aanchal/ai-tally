@@ -99,9 +99,16 @@ pass through byte-for-byte, `FlushInterval = -1` streaming is unchanged, and the
 `provider` picks the existing `extractMeta` branch, so there is no new parser. A configured
 route table that matches nothing returns `404` rather than forwarding to a wrong origin.
 
+**Compression (CTO-367).** On a route with a provider, the proxy drops the client's
+`Accept-Encoding` and lets its own transport negotiate gzip with the provider, so it can read model
+and usage from a decoded body. The client receives the same content uncompressed. Forwarding the
+client's header instead (Caddy and the openai / anthropic SDKs all send `gzip`) left the proxy
+parsing compressed bytes, and those calls were metered with no model and no tokens. Pure
+pass-through routes, which never read a body, still forward `Accept-Encoding` untouched.
+
 **Per-provider credential (sec 6.4).** Each provider expects a different credential header, and
-the proxy forwards whatever the client sent untouched, stripping only `X-Tenant-Key` and the
-Tally control headers. The Anthropic route therefore forwards `x-api-key` and `anthropic-version`
+the proxy forwards whatever the client sent untouched, stripping only `X-Tenant-Key`, the
+Tally control headers, and (on provider routes) `Accept-Encoding`. The Anthropic route therefore forwards `x-api-key` and `anthropic-version`
 (not `Authorization`); the OpenAI/Gemini-OpenAI routes forward `Authorization: Bearer ...`.
 
 ### Fast key-to-tenant resolution (sec 6.2 / 6.3)
