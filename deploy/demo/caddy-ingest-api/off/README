@@ -1,0 +1,3 @@
+Intentionally empty of *.caddy files. deploy.sh mounts this directory unless the ingest hostname is on
+AND gateway auth (TALLY_REQUIRE_API_KEY) is true, so ingest.caddy's `import /etc/caddy/ingest-api/*.caddy`
+matches nothing and the SDK and OTLP routes stay a 404 (CTO-369).

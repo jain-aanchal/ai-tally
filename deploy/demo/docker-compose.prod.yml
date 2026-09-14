@@ -186,6 +186,10 @@ services:
       # INGEST_DOMAIN is set, which also enables the edge-proxy profile. Default off so a bare
       # `docker compose up` never serves an ingest site it was not asked for.
       - ../deploy/demo/caddy-extra/${CADDY_EXTRA:-off}:/etc/caddy/extra:ro
+      # CTO-369: the SDK and OTLP ingest routes on the ingest site. `off` (the default) holds no
+      # *.caddy files; deploy.sh selects `on` only when INGEST_DOMAIN is set AND TALLY_REQUIRE_API_KEY
+      # is true, because with gateway auth off those routes would accept spans for any tenant.
+      - ../deploy/demo/caddy-ingest-api/${INGEST_API:-off}:/etc/caddy/ingest-api:ro
       - caddy_data:/data    # ACME account + issued certs; persist so restarts do not re-issue
       - caddy_config:/config
     restart: unless-stopped

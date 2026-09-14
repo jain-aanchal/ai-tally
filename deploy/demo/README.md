@@ -237,6 +237,29 @@ Optional headers: `X-Tally-Feature-Tag` (which feature made the call) and `X-Tal
 (an already-hashed customer id, for cost per customer). OpenAI streaming reports token usage only
 when the client sets `stream_options: {"include_usage": true}`.
 
+### SDK and OpenTelemetry ingest (needs gateway auth on)
+
+The same hostname can also take SDK and OTLP traffic, for customers who do not want ai-tally in
+their request path: the SDK ships batches in the background while the provider call goes direct. It
+is on only when **both** `INGEST_DOMAIN` is set **and** `TALLY_REQUIRE_API_KEY=true` is in `.env`.
+With auth off the gateway takes the tenant from the request body (`/v1/batches`) or an
+`X-Tenant-Id` header (`/v1/otlp/traces`), so a public route would let anyone write spans into any
+tenant. `deploy.sh` leaves the routes off in that case and says so (CTO-369).
+
+Turning auth on changes two things. Every ingest call must carry a `write` key as a bearer; the SDK
+and the proxy already do, and the dashboard already sends the service token. And the synthetic
+backfill can no longer post, so also set `SKIP_BACKFILL=1`.
+
+| Path | Used by | Auth |
+|---|---|---|
+| `/v1/batches` | Python SDK (`tally.init(key)`) | `Authorization: Bearer tally_sk_...` |
+| `/v1/tenant/hmac-key` | Python SDK hashing bootstrap | the same key, `write` scope |
+| `/v1/otlp/traces` | OTLP/HTTP **JSON** trace exporters | the same key |
+
+For OpenTelemetry, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://ingest.ai-tally.com/v1/otlp/traces`
+and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json`. The generic `OTEL_EXPORTER_OTLP_ENDPOINT` appends
+`/v1/traces`, which the gateway does not serve.
+
 ### How it behaves
 
 - **Unknown or revoked key: `403`, never forwarded.** The proxy runs with
@@ -252,10 +275,11 @@ when the client sets `stream_options: {"include_usage": true}`.
 - **A brand-new key can take up to 45 seconds to work.** Keys resolve from an in-memory cache of the
   gateway's key feed, refreshed every 45s, so no gateway call sits in the request path. Revocation
   propagates on the same interval.
-- **Anything except `/openai/*`, `/anthropic/*`, `/gemini/*` and `/healthz` is a `404` from Caddy.**
-  The ingest hostname cannot reach the dashboard or the gateway.
-- **Spans reach the dashboard through the internal network.** The gateway's `/v1/batches` stays
-  unpublished.
+- **Anything except `/openai/*`, `/anthropic/*`, `/gemini/*` and `/healthz` is a `404` from Caddy,**
+  plus the three SDK and OTLP paths above when gateway auth is on. The ingest hostname never reaches
+  the dashboard or the gateway's control plane.
+- **Proxy spans reach the dashboard through the internal network.** The proxy posts to the gateway's
+  `/v1/batches` over the compose network, not through Caddy, so the proxy works with auth on or off.
 - **If the proxy cannot load keys at startup, it exits rather than serving.** Resolution fails
   closed, so a proxy that could not read the key feed does not come up accepting traffic it cannot
   authenticate. Compose waits for the gateway to be healthy first and restarts the proxy, so a
