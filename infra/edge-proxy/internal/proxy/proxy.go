@@ -148,6 +148,16 @@ func New(cfg config.Config, opts ...Option) *Proxy {
 			pr.SetURL(rt.upstream)
 			// Send the upstream's own Host so TLS SNI and provider routing are correct.
 			pr.Out.Host = rt.upstream.Host
+			// CTO-367: drop the client's Accept-Encoding so our transport negotiates compression
+			// itself. Go decodes a response transparently only when it added the header, and
+			// metaCapture parses model and usage from the body it sees. Forwarding a client's gzip
+			// (Caddy's transport and the openai / anthropic SDKs all send one) handed metaCapture
+			// compressed bytes, so every such call was metered with no model and no tokens. The
+			// client now receives the decoded body, which it accepts whether or not it asked for
+			// gzip; the wire still compresses between us and the provider.
+			if rt.provider != "" {
+				pr.Out.Header.Del("Accept-Encoding")
+			}
 		},
 		// Stream every write straight to the client, critical for SSE completions.
 		FlushInterval: -1,
