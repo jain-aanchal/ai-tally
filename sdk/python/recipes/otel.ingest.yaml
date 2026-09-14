@@ -18,11 +18,15 @@ sdk_surface:
 edit:
   imports_to_add: []
   template: |
-    # If the app already emits OpenTelemetry gen_ai.* spans, point the OTLP exporter
-    # at the ai-tally gateway instead of adding SDK calls. The gateway ingests OTLP
-    # traces at ingest_otlp_traces (infra/gateway/src/gateway/app.py).
-    export OTEL_EXPORTER_OTLP_ENDPOINT="{gateway_otlp_endpoint}"
-    export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer {tally_key}"
+    # If the app already emits OpenTelemetry gen_ai.* spans, point its OTLP trace
+    # exporter at the ai-tally gateway instead of adding SDK calls. The gateway ingests
+    # OTLP/HTTP JSON at /v1/otlp/traces (ingest_otlp_traces in
+    # infra/gateway/src/gateway/app.py), so {gateway_otlp_endpoint} is that full URL.
+    # Use the TRACES_ variables: the generic OTEL_EXPORTER_OTLP_ENDPOINT gets /v1/traces
+    # appended, a path the gateway does not serve, and it reads JSON, not protobuf (CTO-369).
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="{gateway_otlp_endpoint}"
+    export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/json"
+    export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer {tally_key}"
   placement: config
 verify:
   layer: otel

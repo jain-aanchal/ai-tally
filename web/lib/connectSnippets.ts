@@ -6,7 +6,7 @@
 // Two paths, both keyed by the same per-org ingest key (Initiative 2, Decision 2):
 //   * Proxy (zero-code): point the provider base URL at the hosted ai-tally proxy and send the key
 //     as the X-Tenant-Key header. Any language; shown here as a shell/curl block per provider.
-//   * SDK (deep context): `pip install tally` then `tally.init(key)` auto-instruments the official
+//   * SDK (deep context): install the SDK from the repo, then `tally.init(key)` auto-instruments the official
 //     openai / anthropic clients.
 //
 // Pure and framework-free so it is unit-tested directly; the React view maps over the result.
@@ -130,7 +130,10 @@ function sdkPython(key: string, e: ConnectEndpoints): Snippet {
     label: "Python",
     language: "python",
     code: [
-      "# pip install tally",
+      // CTO-369: `pip install tally` installed an unrelated Django package from PyPI, and the
+      // tally-sdk name there belongs to someone else too. Install from the repo until a package is
+      // published under a name we own.
+      '# pip install "git+https://github.com/jain-aanchal/ai-tally#subdirectory=sdk/python"',
       "import tally",
       "",
       `tally.init(${initArgs})`,

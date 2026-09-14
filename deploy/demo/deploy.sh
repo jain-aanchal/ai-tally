@@ -91,8 +91,24 @@ if [ -n "${INGEST_DOMAIN:-}" ]; then
   # Read by the dashboard at runtime so its connect snippets point at THIS deployment's proxy.
   export TALLY_INGEST_URL="https://${INGEST_DOMAIN}"
   echo "==> Hosted edge proxy: ON at https://${INGEST_DOMAIN}"
+  # CTO-369: the SDK (/v1/batches, /v1/tenant/hmac-key) and OTLP (/v1/otlp/traces) routes share the
+  # ingest hostname, but only with gateway auth ON. With TALLY_REQUIRE_API_KEY off the gateway takes
+  # the tenant from the request body or an X-Tenant-Id header, so a public route would let anyone
+  # write spans into any tenant. The proxy path is safe either way: its spans stay on the internal
+  # network.
+  case "${TALLY_REQUIRE_API_KEY:-false}" in
+    true|TRUE|True|1|yes|on)
+      export INGEST_API=on
+      echo "==> SDK and OTLP ingest: ON at https://${INGEST_DOMAIN}/v1/batches and /v1/otlp/traces"
+      ;;
+    *)
+      export INGEST_API=off
+      echo "==> SDK and OTLP ingest: OFF. Set TALLY_REQUIRE_API_KEY=true in .env to serve them;"
+      echo "    with gateway auth off those routes would accept spans for any tenant."
+      ;;
+  esac
 else
-  export CADDY_EXTRA=off
+  export CADDY_EXTRA=off INGEST_API=off
   # Empty tells the dashboard there is no hosted proxy, so it offers no proxy snippets at all.
   export TALLY_INGEST_URL=""
   echo "==> Hosted edge proxy: off (set INGEST_DOMAIN in .env to turn it on)"

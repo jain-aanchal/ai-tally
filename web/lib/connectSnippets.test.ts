@@ -47,6 +47,13 @@ describe("connectSnippets", () => {
     expect(python.language).toBe("python");
   });
 
+  it("the SDK install line installs this repo's SDK, never a same-named PyPI package (CTO-369)", () => {
+    const python = connectSnippets(KEY, DEPLOYED).sdk[0];
+    expect(python.code).toContain("git+https://github.com/jain-aanchal/ai-tally#subdirectory=sdk/python");
+    // `tally` on PyPI is an unrelated Django app, and `tally-sdk` there belongs to someone else.
+    expect(python.code).not.toMatch(/pip install tally(-sdk)?(\s|$)/);
+  });
+
   it("threads a custom SDK endpoint into init() when configured", () => {
     const python = connectSnippets(KEY, { ...DEPLOYED, sdkEndpoint: "https://ingest.example.com" }).sdk[0];
     expect(python.code).toContain(`tally.init("${KEY}", endpoint="https://ingest.example.com")`);

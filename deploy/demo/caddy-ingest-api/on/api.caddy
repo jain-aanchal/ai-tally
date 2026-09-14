@@ -1,0 +1,12 @@
+# ---- SDK and OTLP ingest on the ingest hostname (CTO-369) -----------------------------------------
+# Imported inside the {$INGEST_DOMAIN} site by caddy-extra/on/ingest.caddy. deploy.sh mounts this
+# directory only when TALLY_REQUIRE_API_KEY is true. With gateway auth off, /v1/batches takes the
+# tenant from the request body and /v1/otlp/traces from an X-Tenant-Id header, so exposing them would
+# let anyone write spans into any tenant. With auth on, the ingest key decides the tenant.
+#
+# Exactly three paths, never a /v1/* prefix: the control plane and the edge key feed stay internal.
+# /v1/tenant/hmac-key is the SDK's hashing bootstrap and always requires a write-scoped ingest key.
+@ingest_api path /v1/batches /v1/otlp/traces /v1/tenant/hmac-key
+handle @ingest_api {
+	reverse_proxy gateway:8080
+}
