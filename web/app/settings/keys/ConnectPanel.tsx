@@ -89,7 +89,7 @@ function FirstEventBadge() {
     return (
       <div className="rounded-md border border-accent bg-panel px-3 py-2 text-sm text-fg">
         <span className="font-semibold">We received your first event.</span>{" "}
-        <a className="underline" href="/explore">
+        <a className="underline" href="/cost">
           View Cost Explorer
         </a>
       </div>
