@@ -99,11 +99,47 @@ class PriceCatalog:
         tenant_id: str | None = None,
     ) -> PriceEntry | None:
         at = at or date.today()
+        # CTO-368: providers report the snapshot they served (claude-haiku-4-5-20251001,
+        # gpt-4o-mini-2024-07-18) while the catalog lists families, so an exact-only match left
+        # real calls unpriced. The exact id is tried first, so a snapshot priced unlike its family
+        # can still be listed on its own. A tenant's contract is checked before the public table at
+        # both steps: a contract on the family is what the tenant pays for every snapshot of it.
+        models = [model]
+        family = _family_model(model)
+        if family is not None:
+            models.append(family)
+        pools = [self._entries]
         if tenant_id and tenant_id in self._overrides:
-            hit = self._best(self._overrides[tenant_id], provider, model, price_type, at)
-            if hit is not None:
-                return hit
-        return self._best(self._entries, provider, model, price_type, at)
+            pools.insert(0, self._overrides[tenant_id])
+        for pool in pools:
+            for candidate in models:
+                hit = self._best(pool, provider, candidate, price_type, at)
+                if hit is not None:
+                    return hit
+        return None
+
+
+def _family_model(model: str) -> str | None:
+    """Strip a trailing snapshot date (``-YYYYMMDD`` or ``-YYYY-MM-DD``) from a model id.
+
+    Returns ``None`` unless the suffix is a real calendar date with a model name left in front of
+    it. Anything else (``gpt-4-0613``, ``-20251399``, ``-v2``) stays a miss rather than borrowing a
+    family price it may not have.
+    """
+    if len(model) > 9 and model[-9] == "-" and model[-8:].isascii() and model[-8:].isdigit():
+        digits = model[-8:]
+        iso, family = f"{digits[:4]}-{digits[4:6]}-{digits[6:]}", model[:-9]
+    elif len(model) > 11 and model[-11] == "-" and model[-10:].isascii():
+        iso, family = model[-10:], model[:-11]
+        if not (iso[4] == "-" and iso[7] == "-" and iso.replace("-", "").isdigit()):
+            return None
+    else:
+        return None
+    try:
+        date.fromisoformat(iso)
+    except ValueError:
+        return None
+    return family
 
 
 @dataclass(frozen=True, slots=True)
