@@ -39,6 +39,10 @@ These are enforced throughout and reviews reject violations:
 - Postgres migrations are strictly numbered; take the next free number and add the `infra/docker-compose.yml` mount. `docker-entrypoint-initdb.d` only runs on a first boot against an empty volume, so apply a new migration by hand to test against a running stack.
 - Tenant identity: the canonical identifier is the tenant UUID (`tenants.id`). The dashboard resolves and passes the UUID (`web/lib/getTenant.ts`: the Clerk org resolves to a UUID via the gateway, or `TALLY_DEV_TENANT` pins one for keyless local dev and CI), and control-plane tables key on it. The tenant NAME (`local-dev`) is still an accepted spelling on gateway control-plane calls, so resolve with `gateway.tenant_lookup.resolve_tenant_uuid`; do not feed a name into a UUID column. The ingest path does NOT fold a name onto the UUID: `/v1/batches` stores `TenantId` as the spelling the caller posted, so telemetry written under a name is invisible to a UUID-bound dashboard read. See `docs/initiatives/01-organizations-users-access.md`.
 
+## Roadmap and issue tracking
+
+Linear is the source of truth for the roadmap, epics and issues: the "TALLY - AI Observability Platform" project, team CTO Assist, keys `CTO-*`. Epics are `[Epic] ...` issues with child issues. File new roadmap items and bugs there, not as GitHub issues, and cite the `CTO-*` key when a change implements one. Design docs stay in `docs/`; see `docs/ROADMAP.md`.
+
 ## Verification
 
 CI must stay green. Before shipping a change, run the affected project's checks:
