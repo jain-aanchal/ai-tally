@@ -148,9 +148,7 @@ def test_dashboard_sdk_snippet_runs_and_records(stub_gateway: tuple[str, _Record
     namespace: dict[str, object] = {}
     exec(compile(_sdk_snippet(), "connect-snippets.json:sdk-python", "exec"), namespace)  # noqa: S102
 
-    # The snippet only connects; record one call so the connection is proven end to end. An
-    # embedding call is used because it is always sent: a hand-written record_llm_call is head-
-    # sampled (the default keeps 1 in 10 cheap calls), so a single one may legitimately not arrive.
+    # The snippet only connects; record one call so the connection is proven end to end.
     tally.record_embedding_call(provider="openai", model="text-embedding-3-small", input_tokens=40)
     tally.flush(timeout=5.0)
 
@@ -180,19 +178,18 @@ def test_documented_sdk_usage_runs_against_the_gateway(stub_gateway: tuple[str, 
     )
     tally.flush(timeout=5.0)
 
-    # record_llm_call is head-sampled, so whether its span is sent is a coin flip by design. What
-    # must hold regardless is that the documented keywords were accepted and the call was priced;
-    # a swallowed TypeError would come back as the benign fallback result with no cost.
+    # A swallowed TypeError would come back as the benign fallback result with no cost.
+    assert llm.kept, "tally.init must send every record_llm_call (CTO-382)"
     assert llm.cost_micro_usd is not None and llm.cost_micro_usd > 0
     assert llm.attributes.get("gen_ai.feature_tag") == "summarize"
 
-    # The embedding, tool and vector calls are always sent.
-    assert _wait_for(lambda: len(_span_values(recorder)) >= 3), (
-        f"expected the 3 unsampled documented calls to arrive, got {len(_span_values(recorder))}"
+    # Every documented call is sent, the hand-recorded LLM call included (CTO-382).
+    assert _wait_for(lambda: len(_span_values(recorder)) >= 4), (
+        f"expected the 4 documented calls to arrive, got {len(_span_values(recorder))}"
     )
     spans = _span_values(recorder)
     operations = {s.get("gen_ai.operation.name") for s in spans}
-    assert {"embeddings", "tool", "vector"} <= operations
+    assert {"chat", "embeddings", "tool", "vector"} <= operations
     assert any(
         s.get("gen_ai.feature_tag") == "summarize"
         and s.get("gen_ai.operation.name") == "embeddings"
@@ -221,6 +218,49 @@ def test_documented_hash_account_cli_prints_a_hash(stub_gateway: tuple[str, _Rec
     )
     assert result.returncode == 0, result.stderr
     assert re.fullmatch(r"[0-9a-f]{64}", result.stdout.strip())
+
+
+def test_every_model_in_the_connect_snippets_has_a_price() -> None:
+    """CTO-383: a pilot's first call through a copied snippet must not land with a blank cost."""
+    from tally.pricing import compute_cost_micro_usd, seed_catalog
+
+    data = json.loads(SNIPPETS.read_text())
+    snippets = [s for group in data["snippets"].values() for s in group]
+    provider_by_id = {"proxy-openai": "openai", "proxy-anthropic": "anthropic"}
+    catalog = seed_catalog()
+    checked = 0
+    for snippet in snippets:
+        provider = provider_by_id.get(snippet["id"])
+        for model in re.findall(r'"model"\s*:\s*"([^"]+)"', snippet["code"]):
+            assert provider, f"snippet {snippet['id']} names a model but has no provider mapping"
+            cost, _version = compute_cost_micro_usd(
+                catalog, provider, model, Usage(input_tokens=1_000, output_tokens=1_000)
+            )
+            assert cost, f"snippet {snippet['id']} uses {model}, which has no price"
+            checked += 1
+    assert checked >= 2, "expected the OpenAI and Anthropic proxy snippets to name a model"
+
+
+def test_init_sends_every_record_llm_call(stub_gateway: tuple[str, _Recorder]) -> None:
+    """CTO-382: cheap hand-recorded calls were head-sampled 1 in 10 and never scaled back up."""
+    _endpoint, recorder = stub_gateway
+    tally.init()
+    results = []
+    for i in range(30):
+        with tally.start_trace(feature_tag=f"sampled-{i}"):
+            results.append(
+                tally.record_llm_call(
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    usage=Usage(input_tokens=10, output_tokens=5),
+                )
+            )
+    tally.flush(timeout=5.0)
+
+    assert all(r.kept and r.sample_rate == 1.0 for r in results)
+    assert _wait_for(
+        lambda: sum(s.get("gen_ai.operation.name") == "chat" for s in _span_values(recorder)) >= 30
+    )
 
 
 @pytest.mark.parametrize(
