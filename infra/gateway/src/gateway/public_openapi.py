@@ -194,7 +194,9 @@ _COMPONENT_SCHEMAS: dict[str, Any] = {
         "required": ["tenant_id", "key_version", "key_material_b64", "algorithm"],
         "properties": {
             "tenant_id": {"type": "string"},
-            "key_version": {"type": "integer"},
+            # A string like "v1": parsed from the key reference's trailing version selector
+            # (tenant_hmac_key._version_from_ref), not a number.
+            "key_version": {"type": "string", "description": "Key version, like `v1`."},
             "key_material_b64": {"type": "string", "description": "Treat as a secret."},
             "algorithm": {"type": "string", "enum": ["HMAC-SHA256"]},
         },

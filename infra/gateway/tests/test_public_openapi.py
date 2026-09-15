@@ -64,6 +64,20 @@ def test_rate_limit_documents_retry_after_and_protocol_header() -> None:
     assert "422" in batches["responses"] and "400" in batches["responses"]
 
 
+def test_hmac_key_schema_matches_what_the_handler_returns() -> None:
+    # The overlay is hand-written, so pin it to the real response model: key_version is the string
+    # selector ("v1"), which an earlier draft of this spec wrongly called an integer.
+    from dataclasses import fields
+
+    from gateway.tenant_hmac_key import HmacKeyMaterial
+
+    schema = _spec()["components"]["schemas"]["HmacKey"]
+    assert set(schema["properties"]) == {f.name for f in fields(HmacKeyMaterial)}
+    assert schema["properties"]["key_version"]["type"] == "string"
+    material = HmacKeyMaterial(tenant_id="t", key_version="v1", key_material_b64="eA==")
+    assert set(material.as_dict()) == set(schema["properties"])
+
+
 def test_committed_spec_is_current() -> None:
     assert OUTPUT.exists(), f"{OUTPUT} is missing; run scripts/export_public_openapi.py"
     assert OUTPUT.read_text() == render(app.openapi()), (

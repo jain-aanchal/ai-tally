@@ -573,7 +573,8 @@
             "type": "string"
           },
           "key_version": {
-            "type": "integer"
+            "type": "string",
+            "description": "Key version, like `v1`."
           },
           "key_material_b64": {
             "type": "string",
