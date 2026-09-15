@@ -8,6 +8,7 @@
 import { useState, useTransition } from "react";
 
 import { Blank } from "@/components/HonestValue";
+import { DOCS_LINKS } from "@/lib/docsLinks";
 
 export function ProxySwitch({
   initialEnabled,
@@ -58,7 +59,15 @@ export function ProxySwitch({
             Lets this organization&apos;s keys meter LLM calls by changing a base URL instead of
             installing the SDK. Calls pass through ai-tally&apos;s proxy on the way to the provider;
             prompts and responses are forwarded, never stored. While off, the proxy refuses these
-            keys and the SDK keeps working.
+            keys and the SDK keeps working.{" "}
+            <a
+              href={DOCS_LINKS.proxy}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-fg"
+            >
+              Learn more
+            </a>
           </p>
         </div>
         <div className="flex items-center gap-2">

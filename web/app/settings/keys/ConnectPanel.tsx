@@ -18,6 +18,7 @@ import {
   connectSnippets,
   defaultEndpoints,
 } from "@/lib/connectSnippets";
+import { DOCS_LINKS } from "@/lib/docsLinks";
 import type { FirstEventPayload } from "@/app/api/onboarding/first-event/route";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -140,7 +141,18 @@ export function ConnectPanel({
 
   return (
     <div className="space-y-3 rounded-md border border-edge bg-panel p-4">
-      <div className="text-sm font-semibold text-fg">Connect your app</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-fg">Connect your app</div>
+        {/* CTO-379: the docs page for whichever path is showing, since that is the one being set up. */}
+        <a
+          href={path === "proxy" ? DOCS_LINKS.proxy : DOCS_LINKS.pythonSdk}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-muted underline hover:text-fg"
+        >
+          Learn more
+        </a>
+      </div>
       <div className="flex gap-2">
         {paths.map((p) => (
           <button

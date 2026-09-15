@@ -12,6 +12,7 @@ import {
   liveAvailableCount,
 } from "@/lib/connectors";
 import { queryCostConnectorConfigs } from "@/lib/costConnectors";
+import { DOCS_LINKS } from "@/lib/docsLinks";
 import { queryRevenueUploads } from "@/lib/revenueUpload";
 import type { SourceState } from "@/lib/dataState";
 import { queryEnabledConnectors } from "@/lib/tenant";
@@ -124,6 +125,18 @@ export default async function ConnectorsPage() {
       */}
       <Card title="Revenue upload: CSV">
         <RevenueUpload snapshots={revenueUploads ?? []} unreachable={revenueUploads === null} />
+        {/* CTO-379: only this card links to the docs. The cloud cost connectors have no docs page
+            yet, because per-tenant credential resolution is not wired (see the docs PR). */}
+        <p className="mt-3 text-xs text-muted">
+          <a
+            href={DOCS_LINKS.revenueUpload}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-fg"
+          >
+            Learn more about the revenue CSV
+          </a>
+        </p>
       </Card>
     </div>
   );
