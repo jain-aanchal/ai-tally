@@ -41,9 +41,14 @@ def _resolve_registry(
     key: str | None, endpoint: str | None
 ) -> tuple[HmacKeyRegistry, str]:
     # Prefer an already-bootstrapped in-process registry (no second fetch).
-    from tally import init as _init
+    # CTO-377: import the function from the submodule. `from tally import init` returns the
+    # package-level `tally.init` FUNCTION (re-exported in tally/__init__.py), which shadows the
+    # module of the same name, so the old `_init.get_client()` raised AttributeError on every call
+    # and the documented `python -m tally.hash_account` never worked. Found by running the docs'
+    # own snippets against a stub gateway (tests/test_docs_snippets.py).
+    from tally.init import get_client
 
-    client = _init.get_client()
+    client = get_client()
     if client is not None and client.hmac_registry is not None and client.tenant_id:
         return client.hmac_registry, client.tenant_id
 
