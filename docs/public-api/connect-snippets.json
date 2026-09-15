@@ -1,0 +1,37 @@
+{
+  "generated_from": "web/lib/connectSnippets.ts",
+  "placeholder_key": "YOUR_TALLY_KEY",
+  "endpoints": {
+    "openaiProxyBaseUrl": "https://ingest.ai-tally.com/openai/v1",
+    "anthropicProxyBaseUrl": "https://ingest.ai-tally.com/anthropic",
+    "sdkEndpoint": "",
+    "proxyDeployed": true
+  },
+  "snippets": {
+    "proxy": [
+      {
+        "id": "proxy-openai",
+        "label": "OpenAI",
+        "language": "bash",
+        "code": "# Point the OpenAI SDK at the ai-tally proxy\nexport OPENAI_BASE_URL=\"https://ingest.ai-tally.com/openai/v1\"\n\n# ai-tally identifies your org by this ingest key, sent as the X-Tenant-Key header:\n#   X-Tenant-Key: YOUR_TALLY_KEY\n# e.g. a raw request:\ncurl \"https://ingest.ai-tally.com/openai/v1/chat/completions\" \\\n  -H \"Authorization: Bearer $OPENAI_API_KEY\" \\\n  -H \"X-Tenant-Key: YOUR_TALLY_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'",
+        "note": "A brand-new key can take a few seconds to attribute while the proxy picks it up. Your provider key is unchanged and never sent to ai-tally."
+      },
+      {
+        "id": "proxy-anthropic",
+        "label": "Anthropic",
+        "language": "bash",
+        "code": "# Point the Anthropic SDK at the ai-tally proxy\nexport ANTHROPIC_BASE_URL=\"https://ingest.ai-tally.com/anthropic\"\n\n# Send your ai-tally ingest key as the X-Tenant-Key header:\n#   X-Tenant-Key: YOUR_TALLY_KEY\n# e.g. a raw request (your x-api-key and anthropic-version pass through untouched):\ncurl \"https://ingest.ai-tally.com/anthropic/v1/messages\" \\\n  -H \"x-api-key: $ANTHROPIC_API_KEY\" \\\n  -H \"anthropic-version: 2023-06-01\" \\\n  -H \"X-Tenant-Key: YOUR_TALLY_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"claude-3-5-haiku-latest\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'",
+        "note": "A brand-new key can take a few seconds to attribute while the proxy picks it up. Your provider key is unchanged and never sent to ai-tally."
+      }
+    ],
+    "sdk": [
+      {
+        "id": "sdk-python",
+        "label": "Python",
+        "language": "python",
+        "code": "# pip install \"git+https://github.com/jain-aanchal/ai-tally#subdirectory=sdk/python\"\nimport tally\n\ntally.init(\"YOUR_TALLY_KEY\")\n# From here your unmodified openai / anthropic calls are auto-instrumented:\n# model, tokens, and cost land in ai-tally with no per-call record_* code.",
+        "note": "Set with_account(...) once per request to unlock cost per customer; start_trace(feature_tag=...) for cost per feature."
+      }
+    ]
+  }
+}

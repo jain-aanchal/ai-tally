@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# CTO-371: keep the docs at ai-tally.com/docs in step with the code.
+#
+# The docs site lives in the private ai-tally-website repo and renders three files generated here
+# (docs/public-api/): the public OpenAPI spec, the connect snippets the dashboard shows, and the SDK
+# reference. On a merge to main that could change any of them, this workflow proves the committed
+# copies are current, uploads them as an artifact, and pings ai-tally-website with the commit SHA.
+# ai-tally-website's docs-sync workflow then fetches the files at that SHA and opens a PR; a human
+# merges it.
+#
+# Staleness itself is caught earlier, in CI on the pull request: the gateway, SDK and web test
+# suites each include a test that fails when their committed artifact is out of date. The --check
+# steps below repeat that so an artifact is never published from a commit where it is stale.
+name: Docs sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/python/src/tally/**"
+      - "sdk/python/scripts/sdk_reference.py"
+      - "infra/gateway/src/gateway/**"
+      - "infra/gateway/scripts/export_public_openapi.py"
+      - "web/lib/connectSnippets.ts"
+      - "web/lib/connectSnippetsExport.ts"
+      - "docs/public-api/**"
+      - ".github/workflows/docs-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Public OpenAPI spec is current
+        working-directory: infra/gateway
+        run: uv run --extra dev python scripts/export_public_openapi.py --check
+      - name: SDK reference is current
+        working-directory: sdk/python
+        run: uv run --extra dev python scripts/sdk_reference.py --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Connect snippets export is current
+        working-directory: web
+        run: |
+          npm ci
+          npx vitest run lib/connectSnippetsExport.test.ts
+      - name: Upload docs artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-public-api
+          path: docs/public-api/*.json
+          if-no-files-found: error
+
+  dispatch:
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      # A fork, a fresh clone of the repo, or a maintainer who has not created the token yet has no
+      # DOCS_SYNC_TOKEN. That is not a failure of the code under test, so the job says so and exits 0
+      # instead of turning main red. Secrets cannot be read in an `if:` expression, hence the env
+      # indirection.
+      - name: Notify ai-tally-website
+        env:
+          DOCS_SYNC_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCS_SYNC_TOKEN}" ]; then
+            echo "::notice::DOCS_SYNC_TOKEN is not set; skipping the docs sync dispatch."
+            exit 0
+          fi
+          payload=$(printf '{"event_type":"ai-tally-docs-sync","client_payload":{"sha":"%s","run_id":"%s"}}' "$SHA" "$RUN_ID")
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${DOCS_SYNC_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/jain-aanchal/ai-tally-website/dispatches \
+            -d "$payload"
+          echo "Dispatched docs sync for $SHA"

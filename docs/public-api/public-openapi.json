@@ -1,0 +1,593 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ai-tally public ingest API",
+    "version": "0.1.0",
+    "description": "The three routes a customer can call on the hosted ingest host. Generated from the gateway (infra/gateway/src/gateway/public_openapi.py); do not edit by hand."
+  },
+  "servers": [
+    {
+      "url": "https://ingest.ai-tally.com"
+    }
+  ],
+  "paths": {
+    "/v1/batches": {
+      "post": {
+        "operationId": "ingest_batch_v1_batches_post",
+        "summary": "Send spans in the ai-tally batch format",
+        "description": "The endpoint the Python SDK posts to. Idempotent on `batch_id`: resending a batch after a timeout or a 429/503 never double counts it.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Ingest-Protocol",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ingest-Protocol"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted. `status` is `accepted`, or `partial` when some spans were rejected (see `partial_errors`). A batch whose `batch_id` was already processed returns the original result with `replayed: true`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`INVALID_SCHEMA`: `X-Ingest-Protocol` names a protocol the gateway does not support. Supported: ingest-v1.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`UNAUTHENTICATED`: missing bearer token, or an invalid or revoked key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`FORBIDDEN_SCOPE`: the key has `read` scope and cannot write spans. `TENANT_MISMATCH`: the body names a tenant the key is not bound to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Every span in the batch was rejected (a `BatchResponse` with `status: rejected` and per-span `partial_errors`), or the body is malformed (`{\"detail\": \"...\"}`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BatchResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`RATE_LIMITED`, `QUOTA_EXCEEDED`: back off for `Retry-After` seconds and resend the same body with the same `batch_id`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying (integer).",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporarily unable to accept the batch (`status: retry`). Includes `IDEMPOTENCY_UNAVAILABLE`. Resend the same body with the same `batch_id`; it is never double counted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying (integer).",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/otlp/traces": {
+      "post": {
+        "operationId": "ingest_otlp_traces_v1_otlp_traces_post",
+        "summary": "Send OpenTelemetry traces (OTLP/HTTP, JSON only)",
+        "description": "Accepts an OTLP `ExportTraceServiceRequest` encoded as JSON (`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json`). Protobuf is not supported. Spans are grouped by `gen_ai.operation.name`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "OTLP ExportTraceServiceRequest (JSON encoding).",
+                "properties": {
+                  "resourceSpans": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted. `status` is `accepted`, or `partial` when some spans were rejected (see `partial_errors`). A batch whose `batch_id` was already processed returns the original result with `replayed: true`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`UNAUTHENTICATED`: missing bearer token, or an invalid or revoked key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`FORBIDDEN_SCOPE`: the key has `read` scope and cannot write spans. `TENANT_MISMATCH`: the body names a tenant the key is not bound to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Every span in the batch was rejected (a `BatchResponse` with `status: rejected` and per-span `partial_errors`), or the body is malformed (`{\"detail\": \"...\"}`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BatchResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`RATE_LIMITED`, `QUOTA_EXCEEDED`: back off for `Retry-After` seconds and resend the same body with the same `batch_id`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying (integer).",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporarily unable to accept the batch (`status: retry`). Includes `IDEMPOTENCY_UNAVAILABLE`. Resend the same body with the same `batch_id`; it is never double counted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying (integer).",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenant/hmac-key": {
+      "get": {
+        "operationId": "get_tenant_hmac_key_v1_tenant_hmac_key_get",
+        "summary": "Fetch your organization's account hashing key",
+        "description": "Returns the active HMAC-SHA256 key the SDK uses to hash account ids before they leave your process. Always requires a key with `write` or `admin` scope. The response is a secret: do not log it.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The active key and its version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HmacKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`UNAUTHENTICATED`: missing bearer token, or an invalid or revoked key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`FORBIDDEN_SCOPE`: a `read` key cannot fetch key material. `HMAC_EXPORT_DISABLED`: key export is disabled for this organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No key material exists for this organization. Hash nothing and send spans unattributed rather than sending raw ids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The key store could not be reached. Retryable; no key material was returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An ai-tally API key with `write` or `admin` scope, sent as `Authorization: Bearer <key>`."
+      }
+    },
+    "schemas": {
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "UNAUTHENTICATED",
+                  "FORBIDDEN_SCOPE",
+                  "TENANT_MISMATCH",
+                  "HMAC_EXPORT_DISABLED",
+                  "QUOTA_EXCEEDED",
+                  "RATE_LIMITED",
+                  "IDEMPOTENCY_UNAVAILABLE",
+                  "INVALID_SCHEMA",
+                  "PII_DETECTED",
+                  "PAYLOAD_TOO_LARGE",
+                  "UNKNOWN_FEATURE_TAG"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "PartialError": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "UNAUTHENTICATED",
+              "FORBIDDEN_SCOPE",
+              "TENANT_MISMATCH",
+              "HMAC_EXPORT_DISABLED",
+              "QUOTA_EXCEEDED",
+              "RATE_LIMITED",
+              "IDEMPOTENCY_UNAVAILABLE",
+              "INVALID_SCHEMA",
+              "PII_DETECTED",
+              "PAYLOAD_TOO_LARGE",
+              "UNKNOWN_FEATURE_TAG"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "BatchResponse": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "partial",
+              "rejected",
+              "retry"
+            ]
+          },
+          "accepted_spans": {
+            "type": "integer"
+          },
+          "partial_errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartialError"
+            }
+          },
+          "server_hints": {
+            "type": "object",
+            "properties": {
+              "flush_interval_ms": {
+                "type": "integer"
+              },
+              "max_batch_size": {
+                "type": "integer"
+              },
+              "sample_rate_override": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "retry_after_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RateLimited": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "rejected"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "RATE_LIMITED",
+                  "QUOTA_EXCEEDED"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          },
+          "retry_after_ms": {
+            "type": "integer"
+          }
+        }
+      },
+      "BatchRequest": {
+        "type": "object",
+        "description": "The ai-tally batch format (tally.wire.BatchRequest). Unknown fields are tolerated. With key auth the key decides the tenant, so `tenant_id` may be empty.",
+        "required": [
+          "tenant_id"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string",
+            "description": "Idempotency key for the batch."
+          },
+          "sdk_version": {
+            "type": "string"
+          },
+          "client_send_ts_ns": {
+            "type": "integer"
+          },
+          "resource_spans": {
+            "type": "array",
+            "description": "Flat span objects whose keys are `gen_ai.*` attributes. Prompt, completion and other body fields are never stored.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "business_events": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "identity_links": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "sampling": {
+            "type": "object",
+            "properties": {
+              "head_sample_rate": {
+                "type": "number"
+              },
+              "sampling_strategy": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "HmacKey": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "key_version",
+          "key_material_b64",
+          "algorithm"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string"
+          },
+          "key_version": {
+            "type": "string",
+            "description": "Key version, like `v1`."
+          },
+          "key_material_b64": {
+            "type": "string",
+            "description": "Treat as a secret."
+          },
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "HMAC-SHA256"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

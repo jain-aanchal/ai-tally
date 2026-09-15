@@ -1,0 +1,507 @@
+{
+  "generated_from": "sdk/python/src/tally",
+  "sdk_version": "0.0.1",
+  "install": "pip install \"git+https://github.com/jain-aanchal/ai-tally#subdirectory=sdk/python\"",
+  "functions": [
+    {
+      "name": "tally.init",
+      "source": "tally.init",
+      "signature": "init(key: 'str | None' = None, *, endpoint: 'str | None' = None, feature_tag: 'str | None' = None, instrument: 'bool' = True, instrument_stream_usage: 'bool' = False, flush_interval_s: 'float' = 1.0, catalog: 'PriceCatalog | None' = None) -> 'TallyClient'",
+      "parameters": [
+        {
+          "name": "key",
+          "kind": "positional_or_keyword",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "endpoint",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "feature_tag",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "instrument",
+          "kind": "keyword_only",
+          "annotation": "bool",
+          "default": "True",
+          "required": false
+        },
+        {
+          "name": "instrument_stream_usage",
+          "kind": "keyword_only",
+          "annotation": "bool",
+          "default": "False",
+          "required": false
+        },
+        {
+          "name": "flush_interval_s",
+          "kind": "keyword_only",
+          "annotation": "float",
+          "default": "1.0",
+          "required": false
+        },
+        {
+          "name": "catalog",
+          "kind": "keyword_only",
+          "annotation": "PriceCatalog | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "TallyClient",
+      "docstring": "Connect the process to ai-tally in one line. Idempotent, non-blocking, never raises.\n\nArgs mirror the spec (CTO-260 \u00a73). ``key`` falls back to ``TALLY_KEY``; ``endpoint`` to\n``TALLY_ENDPOINT`` then the hosted default. Returns the process-global client (also usable\ndirectly, though the module-level ``record_*`` helpers make that unnecessary)."
+    },
+    {
+      "name": "tally.flush",
+      "source": "tally.flush",
+      "signature": "flush(timeout: 'float' = 5.0) -> 'None'",
+      "parameters": [
+        {
+          "name": "timeout",
+          "kind": "positional_or_keyword",
+          "annotation": "float",
+          "default": "5.0",
+          "required": false
+        }
+      ],
+      "returns": "None",
+      "docstring": "Drain buffered spans to the gateway synchronously (bounded). Safe no-op before init."
+    },
+    {
+      "name": "tally.uninstrument",
+      "source": "tally.uninstrument",
+      "signature": "uninstrument() -> 'None'",
+      "parameters": [],
+      "returns": "None",
+      "docstring": "Reverse all provider patches and tear down the process-global client (CTO-260 \u00a74.1).\n\nTests call this between cases to avoid cross-test leakage; a subsequent :func:`init` starts\nfresh."
+    },
+    {
+      "name": "tally.get_client",
+      "source": "tally.get_client",
+      "signature": "get_client() -> 'TallyClient | None'",
+      "parameters": [],
+      "returns": "TallyClient | None",
+      "docstring": "The process-global client, or ``None`` before :func:`init`."
+    },
+    {
+      "name": "tally.with_account",
+      "source": "tally.with_account",
+      "signature": "with_account(account_id: 'str | None', *, label: 'str | None' = None) -> 'Iterator[TraceContext]'",
+      "parameters": [
+        {
+          "name": "account_id",
+          "kind": "positional_or_keyword",
+          "annotation": "str | None",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "Iterator[TraceContext]",
+      "docstring": "Scope an account to a block without touching the trace (CTO-181).\n\nThe intended shape for a web app: resolve the customer once in a request middleware, wrap the\nhandler, and every span emitted inside the request carries the account. Nothing else about the\ncontext changes, so this composes with an already-active trace and with :func:`start_trace`\nin either order.\n\n``account_id`` is the RAW id. It is HMAC'd per tenant at emit time and only the digest travels.\nPassing ``None`` clears the account for the block, which is how a background job that must not\ninherit a caller's account opts out.\n\n``label`` is optional and is carried on the wire for the gateway to upsert into its label\nstore. It is never written to the span row in ClickHouse, so a tenant that wants no customer\nnames in the telemetry store simply omits it and everything still works off the hash."
+    },
+    {
+      "name": "tally.start_trace",
+      "source": "tally.start_trace",
+      "signature": "start_trace(*, feature_tag: 'str | None' = None, session_id: 'str | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None) -> 'AbstractContextManager[TraceContext]'",
+      "parameters": [
+        {
+          "name": "feature_tag",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "session_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "AbstractContextManager[TraceContext]",
+      "docstring": "Begin a fresh trace (always a new trace_id). Returns the context manager.\n\n``account_id`` / ``account_label`` are here for the common case where the trace and the\naccount are both known at the same boundary (CTO-181). ``inherit=False`` means an outer\naccount is deliberately not carried in: a fresh trace is a fresh attribution."
+    },
+    {
+      "name": "tally.with_trace_context",
+      "source": "tally.with_trace_context",
+      "signature": "with_trace_context(*, trace_id: 'str | None' = None, feature_tag: 'str | None' = None, session_id: 'str | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None, inherit: 'bool' = True) -> 'Iterator[TraceContext]'",
+      "parameters": [
+        {
+          "name": "trace_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "feature_tag",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "session_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "inherit",
+          "kind": "keyword_only",
+          "annotation": "bool",
+          "default": "True",
+          "required": false
+        }
+      ],
+      "returns": "Iterator[TraceContext]",
+      "docstring": "Set the trace context for the duration of the block, then restore prior values.\n\nThis is both the normal entrypoint and the manual escape hatch when automatic propagation\ncan't carry context (e.g. across a process/queue boundary - re-establish it on the far side).\n\nArgs:\n    trace_id: explicit id; if ``None`` and no active trace, a new one is generated.\n    feature_tag / session_id: optional tags.\n    account_id: raw id of the tenant's own customer (CTO-181). Hashed at emit time.\n    account_label: optional display name for that account. Wire-only.\n    inherit: when True, unset fields fall back to the currently-active context."
+    },
+    {
+      "name": "tally.hash_account",
+      "source": "tally.hash_account",
+      "signature": "hash_account(account_id: 'str', *, key: 'str | None' = None, endpoint: 'str | None' = None) -> 'str'",
+      "parameters": [
+        {
+          "name": "account_id",
+          "kind": "positional_or_keyword",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "key",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "endpoint",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "str",
+      "docstring": "Return the HMAC-SHA256 hex of ``account_id`` under the tenant's active key.\n\nReuses the process-global registry from :func:`tally.init` when available; else bootstraps once\nfrom ``key`` (or ``TALLY_KEY``) and ``endpoint`` (or ``TALLY_ENDPOINT``). Raises ``ValueError``\nwhen no key is available or the id is empty, and propagates a bootstrap/network error to the\ncaller: this helper is a deliberate, explicit call, not the never-raise customer hot path."
+    },
+    {
+      "name": "tally.record_llm_call",
+      "source": "tally.client.TallyClient.record_llm_call (tally.record_llm_call forwards its keyword arguments)",
+      "signature": "record_llm_call(*, provider: 'str', model: 'str', usage: 'Usage', signals: 'TraceSignals | None' = None, at: 'date | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None) -> 'LlmCallResult'",
+      "parameters": [
+        {
+          "name": "provider",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "model",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "usage",
+          "kind": "keyword_only",
+          "annotation": "Usage",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "signals",
+          "kind": "keyword_only",
+          "annotation": "TraceSignals | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "at",
+          "kind": "keyword_only",
+          "annotation": "date | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "LlmCallResult",
+      "docstring": "Record an LLM call end-to-end. Never raises.\n\n``provider`` is a free-form string used verbatim as ``gen_ai.system`` and as the\ncatalog lookup key; there is no provider allowlist, so any provider the catalog\nprices (``\"openai\"``, ``\"anthropic\"``, ``\"google\"``, ...) works. Gemini / Vertex AI\ncallers pass ``provider=\"google\"`` and map the Google usage fields onto ``Usage``:\n``promptTokenCount`` -> ``input_tokens``, ``candidatesTokenCount`` -> ``output_tokens``,\n``cachedContentTokenCount`` -> ``cached_input_tokens`` (CTO-149).\n\nSteps (all inside the safety boundary):\n  1. read trace context (note a drop if no active trace),\n  2. count the trace for billing at HEAD (before sampling),\n  3. estimate cost from the catalog,\n  4. build a conformant span,\n  5. make the sampling decision; emit the span only if kept,\n  6. return a :class:`LlmCallResult` for the caller.\n\n``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the\naccount set by :func:`~tally.context.with_account` for the surrounding scope applies;\npass it to override that for this one call. It is hashed with the tenant's HMAC key and\nnever travels raw. ``account_label`` is optional, wire-only, and only carried when a\nhash was produced."
+    },
+    {
+      "name": "tally.record_tool_call",
+      "source": "tally.client.TallyClient.record_tool_call (tally.record_tool_call forwards its keyword arguments)",
+      "signature": "record_tool_call(*, provider: 'str', tool: 'str', cost_micro_usd: 'int | None' = None, input_tokens: 'int | None' = None, output_tokens: 'int | None' = None, latency_ms: 'int | None' = None, call_id: 'str | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None) -> 'None'",
+      "parameters": [
+        {
+          "name": "provider",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "tool",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "cost_micro_usd",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "input_tokens",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "output_tokens",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "latency_ms",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "call_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "None",
+      "docstring": "Record a tool call so the span lands in the gateway's ``tools`` cost-layer bucket.\n\nBucketing is keyed off ``gen_ai.operation.name == 'tool'``. The tool's cost rides on\n``gen_ai.tool.cost_micro_usd``; the gateway promotes it into the span's canonical cost\n(``gen_ai.cost.estimated_micro_usd``, the ``EstimatedCost`` column) during enrichment,\npreferring its own catalog price where it has one (CTO-243).\nWhen ``cost_micro_usd`` is omitted we resolve the rate from\nthe versioned price catalog (CTO-141) under ``PriceType.TOOL_CALL`` and stamp\n``price_catalog_version`` on the span; an unknown ``(provider, tool)`` pair (or no catalog)\ndefaults to 0 with a one-time WARN. A caller-supplied ``cost_micro_usd`` always overrides.\nNever raises.\n\n``latency_ms`` is accepted for API symmetry with future span timing but is not yet emitted\nas a schema attribute (no latency key exists in the conformant set).\n\n``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the\naccount set by :func:`~tally.context.with_account` for the surrounding scope applies;\npass it to override that for this one call. It is hashed with the tenant's HMAC key and\nnever travels raw. ``account_label`` is optional, wire-only, and only carried when a\nhash was produced."
+    },
+    {
+      "name": "tally.record_vector_call",
+      "source": "tally.client.TallyClient.record_vector_call (tally.record_vector_call forwards its keyword arguments)",
+      "signature": "record_vector_call(*, provider: 'str', index: 'str', operation: 'str', cost_micro_usd: 'int | None' = None, record_count: 'int | None' = None, latency_ms: 'int | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None) -> 'None'",
+      "parameters": [
+        {
+          "name": "provider",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "index",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "operation",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "cost_micro_usd",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "record_count",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "latency_ms",
+          "kind": "keyword_only",
+          "annotation": "int | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "None",
+      "docstring": "Record a vector-DB call so the span lands in the gateway's ``vector`` cost-layer bucket.\n\nBucketing is keyed off ``gen_ai.operation.name == 'vector'``. The call's cost rides on\n``gen_ai.tool.cost_micro_usd`` (same carrier as ``record_tool_call``, and the gateway\npromotes it into the span's canonical cost during enrichment, CTO-243). The tool-name slot\nencodes ``{provider}.{index}.{operation}``, and the gateway prices off the last segment.\nWhen ``cost_micro_usd`` is omitted we resolve the rate from the versioned price catalog\n(CTO-141) under ``PriceType.VECTOR_CALL`` keyed by ``(provider, operation)`` and stamp\n``price_catalog_version`` on the span; an unknown pair (or no catalog) defaults to 0 with a\none-time WARN. A caller-supplied ``cost_micro_usd`` always overrides. Never raises.\n\n``record_count`` and ``latency_ms`` are accepted for API symmetry with future span fields\nbut are not yet emitted as schema attributes (no conformant key exists for them).\n\n``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the\naccount set by :func:`~tally.context.with_account` for the surrounding scope applies;\npass it to override that for this one call. It is hashed with the tenant's HMAC key and\nnever travels raw. ``account_label`` is optional, wire-only, and only carried when a\nhash was produced."
+    },
+    {
+      "name": "tally.record_embedding_call",
+      "source": "tally.client.TallyClient.record_embedding_call (tally.record_embedding_call forwards its keyword arguments)",
+      "signature": "record_embedding_call(*, provider: 'str', model: 'str', input_tokens: 'int', at: 'date | None' = None, account_id: 'str | None' = None, account_label: 'str | None' = None) -> 'EmbeddingCallResult'",
+      "parameters": [
+        {
+          "name": "provider",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "model",
+          "kind": "keyword_only",
+          "annotation": "str",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "input_tokens",
+          "kind": "keyword_only",
+          "annotation": "int",
+          "default": null,
+          "required": true
+        },
+        {
+          "name": "at",
+          "kind": "keyword_only",
+          "annotation": "date | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_id",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        },
+        {
+          "name": "account_label",
+          "kind": "keyword_only",
+          "annotation": "str | None",
+          "default": "None",
+          "required": false
+        }
+      ],
+      "returns": "EmbeddingCallResult",
+      "docstring": "Record an embedding call so the span lands in the gateway's ``embeddings`` bucket.\n\nBucketing is keyed off ``gen_ai.operation.name == 'embeddings'``. Cost is estimated from\nthe catalog (input-side only). Unknown provider/model \u2192 cost stays None/0 with a one-time\nWARN. Never raises.\n\n``account_id`` tags the span with the tenant's own customer (CTO-181). Omit it and the\naccount set by :func:`~tally.context.with_account` for the surrounding scope applies;\npass it to override that for this one call. It is hashed with the tenant's HMAC key and\nnever travels raw. ``account_label`` is optional, wire-only, and only carried when a\nhash was produced."
+    }
+  ],
+  "types": [
+    {
+      "name": "tally.pricing.Usage",
+      "fields": [
+        {
+          "name": "input_tokens",
+          "annotation": "int",
+          "default": "0"
+        },
+        {
+          "name": "output_tokens",
+          "annotation": "int",
+          "default": "0"
+        },
+        {
+          "name": "cached_input_tokens",
+          "annotation": "int",
+          "default": "0"
+        }
+      ],
+      "docstring": "Usage(input_tokens: 'int' = 0, output_tokens: 'int' = 0, cached_input_tokens: 'int' = 0)"
+    }
+  ]
+}
