@@ -13,6 +13,7 @@ import {
 } from "@/lib/connectors";
 import { queryCostConnectorConfigs } from "@/lib/costConnectors";
 import { DOCS_LINKS } from "@/lib/docsLinks";
+import { resolveTenantId } from "@/lib/getTenant";
 import { queryRevenueUploads } from "@/lib/revenueUpload";
 import type { SourceState } from "@/lib/dataState";
 import { queryEnabledConnectors } from "@/lib/tenant";
@@ -35,12 +36,19 @@ const SECTIONS: { category: ConnectorCategory; title: string; blurb: string }[] 
 ];
 
 export default async function ConnectorsPage() {
-  const [{ connectors, activity }, enabledLayers, costConfigs, revenueUploads] = await Promise.all([
-    apiGet<ConnectorsPayload>("/api/connectors"),
-    queryEnabledConnectors(),
-    queryCostConnectorConfigs(),
-    queryRevenueUploads(),
-  ]);
+  const [{ connectors, activity }, enabledLayers, costConfigs, revenueUploads, organizationId] =
+    await Promise.all([
+      apiGet<ConnectorsPayload>("/api/connectors"),
+      queryEnabledConnectors(),
+      queryCostConnectorConfigs(),
+      queryRevenueUploads(),
+      // CTO-381: the gateway assumes a customer's role with this id as sts:ExternalId, and it was
+      // shown nowhere. A failed resolve renders an honest blank in the form, never a guess.
+      resolveTenantId().catch(() => null),
+    ]);
+  // ai-tally's AWS account id, the trust-policy principal. Deployment config, not a constant here,
+  // so the form never shows an account id nobody configured.
+  const awsAccountId = process.env.TALLY_AWS_ACCOUNT_ID?.trim() || null;
   // `null` means the gateway is unreachable. Render the forms anyway (they report their own
   // errors on submit) rather than hiding the only way to configure anything.
   const configs = costConfigs ?? [];
@@ -65,6 +73,8 @@ export default async function ConnectorsPage() {
               enabledLayers={enabledLayers}
               configs={configs}
               activityUnavailable={activity === "unavailable"}
+              organizationId={organizationId}
+              awsAccountId={awsAccountId}
             />
           </Card>
         );
@@ -125,8 +135,9 @@ export default async function ConnectorsPage() {
       */}
       <Card title="Revenue upload: CSV">
         <RevenueUpload snapshots={revenueUploads ?? []} unreachable={revenueUploads === null} />
-        {/* CTO-379: only this card links to the docs. The cloud cost connectors have no docs page
-            yet, because per-tenant credential resolution is not wired (see the docs PR). */}
+        {/* CTO-379: only this card links to the docs. The cloud cost connectors have no public docs
+            page yet; per-tenant credential resolution landed in CTO-381, so the setup is now
+            described in the connect form itself (organization id and trust policy). */}
         <p className="mt-3 text-xs text-muted">
           <a
             href={DOCS_LINKS.revenueUpload}

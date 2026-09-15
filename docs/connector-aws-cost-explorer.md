@@ -61,13 +61,38 @@ the emitter checks `span_exists` before inserting. Re-running a day is safe.
 
 ## Auth
 
-`credentials_ref` is a Secret Manager, KMS, or ARN pointer. Raw keys never appear in the database,
-in this module, or in logs. The column is length-bounded so a fat-fingered raw key is more likely to
-trip the check than land silently.
+`credentials_ref` is an IAM role ARN in the customer's account (`arn:aws:iam::<account>:role/<name>`).
+Raw keys never appear in the database, in this module, or in logs. The column is length-bounded so a
+fat-fingered raw key is more likely to trip the check than land silently.
 
-The literal value `aws-default-chain` means "use the ambient AWS credential chain" (instance role,
-env, SSO). Any other value is treated as an assumable role ARN and passed through for the
-deployment's STS wiring to resolve.
+The gateway resolves it through `gateway.connectors.credentials` (CTO-381): STS `AssumeRole` with the
+gateway's own AWS identity, `ExternalId` set to the organization id (the tenant UUID), and a session
+name that carries the tenant id. Temporary credentials are cached per (tenant, role) until shortly
+before they expire. The customer's role needs Cost Explorer read access and this trust policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<ai-tally AWS account id>:root" },
+      "Action": "sts:AssumeRole",
+      "Condition": { "StringEquals": { "sts:ExternalId": "<your organization id>" } }
+    }
+  ]
+}
+```
+
+The external id is what stops another organization pointing ai-tally at the same role. The
+`/connectors` form shows the organization id and this policy. The deployment's task role template
+(`deploy/aws/ecs/iam/task-role-policy.json`) only grants `sts:AssumeRole` on roles named
+`ai-tally-connector-*`, so name the role accordingly.
+
+The literal `aws-default-chain` is honoured only when the gateway sets
+`TALLY_CONNECTORS_SELF_HOSTED_SINGLE_TENANT=true`. On a hosted gateway it is refused when the
+connector is saved (422) and fails the job if a row already holds it, because the ambient chain there
+is ai-tally's identity, not the customer's.
 
 ## Failure behavior
 

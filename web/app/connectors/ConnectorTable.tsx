@@ -58,7 +58,13 @@ export function ConnectorTable({
   enabledLayers,
   configs,
   activityUnavailable = false,
+  organizationId = null,
+  awsAccountId = null,
 }: {
+  /** CTO-381: the tenant UUID the connect form shows as the sts:ExternalId. */
+  organizationId?: string | null;
+  /** CTO-381: ai-tally's AWS account id for the trust policy principal, when configured. */
+  awsAccountId?: string | null;
   rows: readonly ConnectorStatus[];
   enabledLayers: readonly string[];
   /**
@@ -144,6 +150,8 @@ export function ConnectorTable({
               configured={configByConnector.get(r.id)?.configured ?? false}
               credentialsRef={configByConnector.get(r.id)?.credentialsRef ?? null}
               details={configByConnector.get(r.id)?.details ?? {}}
+              organizationId={organizationId}
+              awsAccountId={awsAccountId}
             />
           ) : (
             <Blank
@@ -172,7 +180,7 @@ export function ConnectorTable({
     // activityUnavailable is read inside the records column's render, so it belongs here. Without
     // it the memo keeps the reason string from the render it was first built in, and a source that
     // became unreadable would go on claiming it delivered no records.
-    [configByConnector, enabledLayers, activityUnavailable],
+    [configByConnector, enabledLayers, activityUnavailable, organizationId, awsAccountId],
   );
 
   return (

@@ -11,9 +11,10 @@ recorded fixtures, and the SDK-touching clients (:class:`AwsCostExplorerClient`,
 google-cloud-bigquery) are imported LAZILY inside the clients so the gateway, and the whole test
 suite, imports this module without those deps installed. Tests inject a fake ``BillingClient``.
 
-Credentials by reference only: the clients resolve ``config.credentials_ref`` (a Secret Manager /
-KMS / ARN pointer, or ``'aws-default-chain'`` for the ambient AWS credential chain); raw keys never
-appear in the DB, in this module, or in logs.
+Credentials by reference only: the AWS client resolves ``config.credentials_ref`` through
+:mod:`gateway.connectors.credentials` (an IAM role ARN assumed with the tenant UUID as ExternalId;
+``'aws-default-chain'`` only on a self-hosted single-tenant gateway). There is no ambient fallback
+for a tenant (CTO-381). Raw keys never appear in the DB, in this module, or in logs.
 """
 
 from __future__ import annotations
@@ -29,6 +30,11 @@ from gateway.connectors.base import (
     CloudBillingConnector,
     ConnectorConfig,
     DailyCost,
+)
+from gateway.connectors.credentials import (
+    GCP_HOSTED_UNSUPPORTED,
+    CredentialResolutionError,
+    TenantCredentials,
 )
 
 # Default cost-allocation tag set when a tenant hasn't overridden tag_filter. Scopes the AWS billing
@@ -128,27 +134,29 @@ def parse_gcp_billing_rows(rows: list[dict[str, object]]) -> list[DailyCost]:
     return [DailyCost(day=d, cost_micro_usd=m) for d, m in sorted(per_day.items())]
 
 
-class AwsCostExplorerClient:
-    """AWS Cost Explorer fetcher. boto3 imported lazily; credentials resolved by reference.
+def aws_client_for(credentials: TenantCredentials | None, config: ConnectorConfig, service: str):
+    """The tenant's AWS client, or a failed run. Shared by the compute and egress AWS fetchers.
 
-    ``credentials_ref == 'aws-default-chain'`` uses the ambient AWS credential chain (instance role
-    / env / SSO). Any other value is treated as an assumable-role ARN, resolved by the deployment's
-    STS wiring, which is out of scope here; we pass it through so the prod wrapper can assume it.
+    CTO-381: with no resolver wired this used to build ``boto3.Session()``, which is ai-tally's own
+    identity. A missing resolver is now a wiring bug that fails the run, never an ambient fallback.
+    """
+    if credentials is None:
+        raise CredentialResolutionError("no credential resolver is wired for this connector")
+    return credentials.aws_client(config, service)
+
+
+class AwsCostExplorerClient:
+    """AWS Cost Explorer fetcher, acting as the tenant through its resolved role (CTO-381).
+
+    ``credentials`` is the run's :class:`gateway.connectors.credentials.TenantCredentials` (or any
+    object with the same ``aws_client(config, service)`` method, which is how tests inject a fake).
     """
 
-    def __init__(self, session_factory=None) -> None:
-        # session_factory injectable purely so integration harnesses can supply a pre-built session;
-        # unit tests use a fake BillingClient instead and never construct this.
-        self._session_factory = session_factory
+    def __init__(self, credentials: TenantCredentials | None = None) -> None:
+        self._credentials = credentials
 
     def _client(self, config: ConnectorConfig):
-        if self._session_factory is not None:
-            session = self._session_factory(config.credentials_ref)
-        else:  # pragma: no cover - exercised only against live AWS
-            import boto3  # lazy: keep boto3 out of the base install / test path
-
-            session = boto3.Session()
-        return session.client("ce")
+        return aws_client_for(self._credentials, config, "ce")
 
     @staticmethod
     def _filter(tag_filter: dict[str, str]) -> dict:
@@ -231,8 +239,9 @@ class GcpCloudBillingClient:
       Integration harnesses may supply one; unit tests use ``query_runner`` instead.
 
     With neither injected, the live path lazily imports ``google-cloud-bigquery`` and constructs a
-    ``bigquery.Client`` from ADC / Workload Identity (``project`` optional): raw credentials never
-    appear here; ``credentials_ref`` is a Secret Manager pointer the deployment resolves out of band.
+    ``bigquery.Client`` from ADC / Workload Identity (``project`` optional). ADC is the GATEWAY's
+    identity, so :func:`build_billing_client` only hands out this live path on a self-hosted
+    single-tenant gateway; a hosted tenant gets :class:`UnsupportedBillingClient` instead (CTO-381).
     """
 
     def __init__(self, *, query_runner=None, bq_client=None, project: str | None = None) -> None:
@@ -279,14 +288,41 @@ class ComputeCostConnector(CloudBillingConnector):
         return self._client.get_daily_costs(config, start_day=start_day, end_day=end_day)
 
 
-def build_billing_client(provider: str, *, gcp_project: str | None = None) -> BillingClient:
+class UnsupportedBillingClient:
+    """A fetcher that always fails with an honest, storable reason (CTO-381).
+
+    Used where the gateway has no way to act as the tenant. Raising inside ``get_daily_costs`` means
+    the base connector records ``failed`` and emits no span, exactly like any other failed fetch.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def get_daily_costs(
+        self, config: ConnectorConfig, *, start_day: date, end_day: date
+    ) -> list[DailyCost]:
+        raise CredentialResolutionError(self._reason)
+
+
+def build_billing_client(
+    provider: str,
+    *,
+    gcp_project: str | None = None,
+    credentials: TenantCredentials | None = None,
+) -> BillingClient:
     """Factory: the live :class:`BillingClient` for a provider. Used by the cron/backfill entrypoints.
 
     ``gcp_project`` (from ``TALLY_COMPUTE_GCP_BQ_PROJECT``) sets the BigQuery job project for the GCP
     source; ``None`` falls back to the ADC-resolved default project. Ignored for AWS.
+
+    ``credentials`` is the run's tenant credential context (CTO-381). GCP runs on ADC only when that
+    context says the gateway is self-hosted single-tenant; otherwise it fails honestly, because ADC
+    would be ai-tally's identity rather than the tenant's.
     """
     if provider == "aws":
-        return AwsCostExplorerClient()
+        return AwsCostExplorerClient(credentials=credentials)
     if provider == "gcp":
+        if credentials is None or not credentials.resolver.self_hosted_single_tenant:
+            return UnsupportedBillingClient(GCP_HOSTED_UNSUPPORTED)
         return GcpCloudBillingClient(project=gcp_project or None)
     raise ValueError(f"unsupported cloud_provider {provider!r} (aws|gcp only)")

@@ -117,14 +117,26 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
 
 from gateway.config import Settings
-from gateway.connectors.base import BillingClient, RunRecorder, SpanSink, synthetic_span_id
+from gateway.connectors.base import (
+    BillingClient,
+    ConnectorConfig,
+    RunRecorder,
+    SpanSink,
+    synthetic_span_id,
+)
 from gateway.connectors.compute import ComputeCostConnector, build_billing_client
 from gateway.connectors.config_store import (
     TenantComputeConfigStore,
     TenantEgressConfigStore,
     TenantVercelConfigStore,
 )
-from gateway.connectors.egress import EgressCostConnector, build_egress_client
+from gateway.connectors.credentials import (
+    CredentialResolver,
+    TenantCredentials,
+    build_resolver,
+    reference_kind,
+)
+from gateway.connectors.egress import EgressConfig, EgressCostConnector, build_egress_client
 from gateway.connectors.vercel import (
     VERCEL_PROVIDER,
     VercelCostConnector,
@@ -298,10 +310,11 @@ class CostConnectorJob:
         egress_store: TenantEgressConfigStore | None = None,
         vercel_store: TenantVercelConfigStore | None = None,
         store_factory: Callable[[], ClickHouseStore] | None = None,
-        compute_client_factory: Callable[[str], BillingClient] = build_billing_client,
-        egress_client_factory: Callable[[str], BillingClient] = build_egress_client,
-        usage_client_factory: Callable[[], VercelUsageClient] = build_vercel_usage_client,
+        compute_client_factory: Callable[[str], BillingClient] | None = None,
+        egress_client_factory: Callable[[str], BillingClient] | None = None,
+        usage_client_factory: Callable[[], VercelUsageClient] | None = None,
         now: Callable[[], datetime] = _utcnow,
+        resolver: CredentialResolver | None = None,
     ) -> None:
         self._settings = settings
         self._compute_store = (
@@ -319,10 +332,73 @@ class CostConnectorJob:
         self._store_factory = (
             store_factory if store_factory is not None else lambda: ClickHouseStore(settings)
         )
+        # Injected factories (tests) take precedence. When absent, the live clients are built per
+        # run with that tenant's credential context (CTO-381); see _factories_for.
         self._compute_client_factory = compute_client_factory
         self._egress_client_factory = egress_client_factory
         self._usage_client_factory = usage_client_factory
         self._now = now
+        # One resolver per process so the per-(tenant, role) STS cache survives across ticks. Built
+        # lazily: a test that injects every factory never needs one, and passes settings=None.
+        self._resolver = resolver
+
+    def _credentials(
+        self,
+        tenant_id: str,
+        compute_config: ConnectorConfig | None,
+        egress_configs: Sequence[EgressConfig],
+    ) -> TenantCredentials:
+        """This tenant's credential context for one run (CTO-381).
+
+        The role ARN is taken from the tenant's own AWS connector rows only, so Vercel and Cloudflare
+        token secrets are read behind the same ExternalId guard. A tenant with no AWS role gets
+        ``role_ref=None`` and the resolver's tenant-scoped secret-name rule applies instead.
+        """
+        if self._resolver is None:
+            self._resolver = build_resolver(self._settings)
+        candidates = [compute_config] if compute_config is not None else []
+        candidates += [c for c in egress_configs if c.cloud_provider == "aws"]
+        role = next(
+            (
+                c.credentials_ref
+                for c in candidates
+                if c.cloud_provider == "aws" and reference_kind(c.credentials_ref) == "role_arn"
+            ),
+            None,
+        )
+        return TenantCredentials(resolver=self._resolver, tenant_id=tenant_id, role_ref=role)
+
+    def _factories_for(
+        self,
+        tenant_id: str,
+        compute_config: ConnectorConfig | None,
+        egress_configs: Sequence[EgressConfig],
+    ) -> tuple[
+        Callable[[str], BillingClient],
+        Callable[[str], BillingClient],
+        Callable[[], VercelUsageClient],
+    ]:
+        if (
+            self._compute_client_factory is not None
+            and self._egress_client_factory is not None
+            and self._usage_client_factory is not None
+        ):
+            return (
+                self._compute_client_factory,
+                self._egress_client_factory,
+                self._usage_client_factory,
+            )
+        creds = self._credentials(tenant_id, compute_config, egress_configs)
+        gcp_project = getattr(self._settings, "compute_gcp_bq_project", "") or None
+        api_base = getattr(self._settings, "vercel_api_base", "") or "https://api.vercel.com"
+        return (
+            self._compute_client_factory
+            or (lambda p: build_billing_client(p, gcp_project=gcp_project, credentials=creds)),
+            self._egress_client_factory
+            or (lambda p: build_egress_client(p, credentials=creds)),
+            self._usage_client_factory
+            or (lambda: build_vercel_usage_client(api_base, token_provider=creds.token_for)),
+        )
 
     def __call__(self, tenant_id: str) -> None:
         """Bill every configured connector for ``tenant_id``. Raises if any of them failed.
@@ -347,6 +423,9 @@ class CostConnectorJob:
             raise JobSkipped(f"tenant {tenant_id} has no cost connector configured")
 
         newest = target_day(self._now())
+        compute_factory, egress_factory, usage_factory = self._factories_for(
+            tenant_id, compute_config, egress_configs
+        )
         failures: list[str] = []
         # Only for the error message: each connector bills its own window, so there is no single
         # day to name if they have drifted apart.
@@ -373,7 +452,7 @@ class CostConnectorJob:
                         ComputeCostConnector(
                             store=store,
                             recorder=self._compute_store,
-                            billing_client=self._compute_client_factory(cfg.cloud_provider),
+                            billing_client=compute_factory(cfg.cloud_provider),
                         )
                         .run_backfill(cfg, start_day=s, end_day=e)
                         .status
@@ -401,7 +480,7 @@ class CostConnectorJob:
                         EgressCostConnector(
                             store=store,
                             recorder=self._egress_store.recorder_for(cfg.cloud_provider),
-                            billing_client=self._egress_client_factory(cfg.cloud_provider),
+                            billing_client=egress_factory(cfg.cloud_provider),
                         )
                         .run_backfill(cfg, start_day=s, end_day=e)
                         .status
@@ -431,7 +510,7 @@ class CostConnectorJob:
                     run=lambda cfg=vercel_config, s=start, e=end: _vercel_statuses(
                         VercelCostConnector(
                             store=store,
-                            usage_client=self._usage_client_factory(),
+                            usage_client=usage_factory(),
                             recorder=vercel_recorder,
                         ).run_backfill(cfg, start_day=s, end_day=e)
                     ),

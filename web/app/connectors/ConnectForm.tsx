@@ -5,10 +5,15 @@
 // say "configured in the backend connector runner"; config rows had to be inserted into Postgres
 // by hand. The form posts through a server action to the gateway, which owns all field validation.
 //
-// Credentials are references, never raw keys. The field asks for a Secret Manager / KMS / ARN
-// pointer and the gateway rejects anything shaped like an actual secret, so a pasted key fails at
-// the edge instead of landing in a column.
+// Credentials are references, never raw keys. The gateway rejects anything shaped like an actual
+// secret, so a pasted key fails at the edge instead of landing in a column. CTO-381: the gateway
+// now resolves each reference as the organization (an IAM role assumed with the organization id as
+// sts:ExternalId, or a Secrets Manager ARN), so the form asks for those shapes and shows the
+// organization id and trust policy the customer needs to set that up.
 import { useState, useTransition } from "react";
+
+import { Blank } from "@/components/HonestValue";
+import { credentialHelp, credentialKind, trustPolicy } from "@/lib/connectorCredentials";
 
 import { connectCostConnectorAction, disconnectCostConnectorAction } from "./costConnectorActions";
 
@@ -26,9 +31,9 @@ const FIELDS: Record<string, FieldDef[]> = {
   aws_cost_explorer: [
     {
       name: "credentials_ref",
-      label: "Credential reference",
-      placeholder: "arn:aws:iam::123456789012:role/tally-cost-reader",
-      hint: "A role ARN or secret reference. Use 'aws-default-chain' for the ambient credential chain.",
+      label: "IAM role ARN",
+      placeholder: "arn:aws:iam::123456789012:role/ai-tally-connector-cost-reader",
+      hint: credentialHelp("aws_cost_explorer") ?? undefined,
       required: true,
     },
     {
@@ -43,7 +48,7 @@ const FIELDS: Record<string, FieldDef[]> = {
       name: "credentials_ref",
       label: "Credential reference",
       placeholder: "projects/my-proj/secrets/tally-billing-sa",
-      hint: "Secret Manager reference, or rely on Workload Identity / ADC in your deployment.",
+      hint: credentialHelp("gcp_billing") ?? undefined,
       required: true,
     },
     {
@@ -63,9 +68,9 @@ const FIELDS: Record<string, FieldDef[]> = {
   vercel: [
     {
       name: "access_token_ref",
-      label: "Access token reference",
-      placeholder: "projects/my-proj/secrets/vercel-token",
-      hint: "Reference to the Vercel access token. Never the token itself.",
+      label: "Access token secret ARN",
+      placeholder: "arn:aws:secretsmanager:us-east-1:123456789012:secret:vercel-token-AbCdEf",
+      hint: credentialHelp("vercel") ?? undefined,
       required: true,
     },
     { name: "team_id", label: "Team id", placeholder: "team_xxx", hint: "Public identifier, not a secret." },
@@ -80,8 +85,9 @@ const FIELDS: Record<string, FieldDef[]> = {
   cloudflare: [
     {
       name: "credentials_ref",
-      label: "API token reference",
-      placeholder: "vault:secret/cloudflare#analytics-token",
+      label: "API token secret ARN",
+      placeholder: "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloudflare-token-AbCdEf",
+      hint: credentialHelp("cloudflare") ?? undefined,
       required: true,
     },
     { name: "resource_id", label: "Zone id", placeholder: "023e105f4ecef8ad9ca31a8372d0c353", required: true },
@@ -96,9 +102,9 @@ const FIELDS: Record<string, FieldDef[]> = {
   aws_egress: [
     {
       name: "credentials_ref",
-      label: "Credential reference",
-      placeholder: "aws-default-chain",
-      hint: "Same Cost Explorer access as compute, filtered to DataTransfer-Out-Bytes.",
+      label: "IAM role ARN",
+      placeholder: "arn:aws:iam::123456789012:role/ai-tally-connector-cost-reader",
+      hint: `${credentialHelp("aws_egress")} Same Cost Explorer access as compute, filtered to DataTransfer-Out-Bytes.`,
       required: true,
     },
     { name: "resource_id", label: "Account id", placeholder: "123456789012" },
@@ -106,8 +112,9 @@ const FIELDS: Record<string, FieldDef[]> = {
   vercel_egress: [
     {
       name: "credentials_ref",
-      label: "Access token reference",
-      placeholder: "projects/my-proj/secrets/vercel-token",
+      label: "Access token secret ARN",
+      placeholder: "arn:aws:secretsmanager:us-east-1:123456789012:secret:vercel-token-AbCdEf",
+      hint: credentialHelp("vercel_egress") ?? undefined,
       required: true,
     },
     { name: "resource_id", label: "Team id", placeholder: "team_xxx" },
@@ -119,6 +126,48 @@ interface Props {
   configured: boolean;
   credentialsRef: string | null;
   details: Record<string, unknown>;
+  /** The tenant UUID, which is the sts:ExternalId the gateway sends. Null when it could not be resolved. */
+  organizationId?: string | null;
+  /** ai-tally's AWS account id for the trust policy principal. Null when the deployment has not set it. */
+  awsAccountId?: string | null;
+}
+
+/** CTO-381: the organization id and, for AWS, the trust policy the customer's role needs. */
+function CredentialSetup({
+  connector,
+  organizationId,
+  awsAccountId,
+}: {
+  connector: string;
+  organizationId: string | null;
+  awsAccountId: string | null;
+}) {
+  return (
+    <div className="mb-3 space-y-2 text-[10px] leading-snug text-muted">
+      <p>
+        Organization id (your external id):{" "}
+        {organizationId ? (
+          <code className="select-all break-all text-fg">{organizationId}</code>
+        ) : (
+          <Blank reason="the organization id could not be resolved for this session" />
+        )}
+      </p>
+      {credentialKind(connector) === "aws_role" && organizationId && (
+        <div>
+          <p>
+            Trust policy for the role
+            {awsAccountId ? "" : " (ask ai-tally for its AWS account id; it is not configured here)"}:
+          </p>
+          <pre
+            data-testid="trust-policy"
+            className="mt-1 max-h-40 overflow-auto rounded border border-edge bg-bg p-2 text-[10px]"
+          >
+            {trustPolicy(awsAccountId, organizationId)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function initialValues(connector: string, details: Record<string, unknown>, ref: string | null) {
@@ -140,7 +189,14 @@ function initialValues(connector: string, details: Record<string, unknown>, ref:
   return vals;
 }
 
-export function ConnectForm({ connector, configured, credentialsRef, details }: Props) {
+export function ConnectForm({
+  connector,
+  configured,
+  credentialsRef,
+  details,
+  organizationId = null,
+  awsAccountId = null,
+}: Props) {
   const fields = FIELDS[connector];
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState(() => initialValues(connector, details, credentialsRef));
@@ -209,6 +265,11 @@ export function ConnectForm({ connector, configured, credentialsRef, details }: 
 
       {open && (
         <div className="mt-2 w-80 rounded-lg border border-edge bg-ink/60 p-3 text-left">
+          <CredentialSetup
+            connector={connector}
+            organizationId={organizationId}
+            awsAccountId={awsAccountId}
+          />
           <div className="space-y-3">
             {fields.map((f) => (
               <div key={f.name}>

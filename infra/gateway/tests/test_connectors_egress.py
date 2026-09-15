@@ -160,7 +160,7 @@ def test_cloudflare_without_rate_fails_soft_no_guess() -> None:
         )
 
 
-def test_aws_egress_client_parses_via_injected_session() -> None:
+def test_aws_egress_client_parses_via_injected_credentials() -> None:
     from gateway.connectors.egress import AwsEgressCostExplorerClient
 
     class _FakeCe:
@@ -170,12 +170,13 @@ def test_aws_egress_client_parses_via_injected_session() -> None:
             assert "DataTransfer-Out-Bytes" in json.dumps(kwargs["Filter"])
             return _fixture("aws_egress_cost_explorer.json")
 
-    class _FakeSession:
-        def client(self, name):
-            assert name == "ce"
+    class _FakeCredentials:
+        # CTO-381: the client acts through the tenant's credential context, never boto3.Session().
+        def aws_client(self, config, service):
+            assert service == "ce"
             return _FakeCe()
 
-    client = AwsEgressCostExplorerClient(session_factory=lambda ref: _FakeSession())
+    client = AwsEgressCostExplorerClient(credentials=_FakeCredentials())
     costs = client.get_daily_costs(_config("aws"), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3))
     assert [c.cost_micro_usd for c in costs] == [4_000_000, 2_750_000]
 

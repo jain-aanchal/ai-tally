@@ -42,6 +42,7 @@ from typing import Any
 import psycopg
 
 from gateway.config import Settings
+from gateway.connectors.credentials import AMBIENT_AWS, GCP_HOSTED_UNSUPPORTED, reference_kind
 from gateway.tenant_lookup import TenantNotFoundError, resolve_tenant_uuid
 
 # Dashboard connector ids this module can configure.
@@ -50,8 +51,11 @@ EGRESS_CONNECTORS = {"cloudflare": "cloudflare", "aws_egress": "aws", "vercel_eg
 VERCEL_CONNECTOR = "vercel"
 ALL_CONNECTORS = frozenset({*COMPUTE_CONNECTORS, *EGRESS_CONNECTORS, VERCEL_CONNECTOR})
 
-# The one non-reference value the schema blesses: the ambient AWS credential chain.
-AMBIENT_AWS = "aws-default-chain"
+# CTO-381: which reference shape each connector's resolver can actually act on.
+AWS_ROLE_CONNECTORS = frozenset({"aws_cost_explorer", "aws_egress"})
+TOKEN_SECRET_CONNECTORS = frozenset({"vercel", "vercel_egress", "cloudflare"})
+# AMBIENT_AWS now lives in gateway.connectors.credentials (CTO-381) and is imported above, so
+# existing `from gateway.connectors.config_admin import AMBIENT_AWS` callers keep working.
 
 # Shapes that are almost certainly a RAW credential rather than a reference. Checked before write so
 # a pasted key never lands in a column (the schema's length bound is the backstop, not the guard).
@@ -103,6 +107,40 @@ def validate_credentials_ref(value: object, *, field: str = "credentials_ref") -
                 f"pass its reference (for example an ARN, a projects/... path, or '{AMBIENT_AWS}')."
             )
     return ref
+
+
+def validate_resolvable_reference(connector: str, ref: str, *, self_hosted: bool) -> None:
+    """Reject, at save time, a reference the connector job could never resolve (CTO-381).
+
+    Before CTO-381 any non-secret-looking string was saved and then silently ran as ai-tally's own
+    identity. Refusing here gives the customer the real reason on the form instead of a connector
+    that only ever records ``failed``. Messages are operator-facing and carry no secret material.
+    """
+    kind = reference_kind(ref)
+    if connector == "gcp_billing":
+        if not self_hosted:
+            raise ConfigError(GCP_HOSTED_UNSUPPORTED)
+        return
+    if connector in AWS_ROLE_CONNECTORS:
+        if kind == "role_arn":
+            return
+        if kind == "ambient":
+            if self_hosted:
+                return
+            raise ConfigError(
+                f"'{AMBIENT_AWS}' is only accepted on a self-hosted single-tenant deployment. "
+                "Create an IAM role that trusts ai-tally's AWS account with your organization id "
+                "as sts:ExternalId, and paste its role ARN (arn:aws:iam::<account>:role/<name>)."
+            )
+        raise ConfigError(
+            "credentials_ref must be an IAM role ARN (arn:aws:iam::<account>:role/<name>) whose "
+            "trust policy allows ai-tally with your organization id as sts:ExternalId."
+        )
+    if connector in TOKEN_SECRET_CONNECTORS and kind != "secret_arn":
+        raise ConfigError(
+            "the token reference must be an AWS Secrets Manager secret ARN "
+            "(arn:aws:secretsmanager:<region>:<account>:secret:<name>)."
+        )
 
 
 def looks_like_reference(ref: str) -> bool:
@@ -205,6 +243,7 @@ class CostConnectorAdmin:
 
     def __init__(self, settings: Settings) -> None:
         self._dsn = settings.postgres_dsn
+        self._self_hosted = bool(getattr(settings, "connectors_self_hosted_single_tenant", False))
 
     # --- reads ---------------------------------------------------------------------------------
 
@@ -322,6 +361,7 @@ class CostConnectorAdmin:
     ) -> dict[str, Any]:
         provider = COMPUTE_CONNECTORS[connector]
         ref = validate_credentials_ref(body.get("credentials_ref"))
+        validate_resolvable_reference(connector, ref, self_hosted=self._self_hosted)
         tag_filter = _clean_tag_filter(body.get("tag_filter"), field="tag_filter")
         label_filter = _clean_tag_filter(body.get("label_filter"), field="label_filter")
         bq_table = _opt_str(body.get("bq_billing_export_table"), field="bq_billing_export_table")
@@ -383,6 +423,7 @@ class CostConnectorAdmin:
     def _upsert_egress(self, tenant_id: str, connector: str, body: dict[str, Any]) -> dict[str, Any]:
         provider = EGRESS_CONNECTORS[connector]
         ref = validate_credentials_ref(body.get("credentials_ref"))
+        validate_resolvable_reference(connector, ref, self_hosted=self._self_hosted)
         resource_id = _opt_str(body.get("resource_id"), field="resource_id")
         usd_per_gb = _clean_usd_per_gb(body.get("usd_per_gb"))
         if provider == "cloudflare":
@@ -422,6 +463,7 @@ class CostConnectorAdmin:
 
     def _upsert_vercel(self, tenant_id: str, body: dict[str, Any]) -> dict[str, Any]:
         ref = validate_credentials_ref(body.get("access_token_ref"), field="access_token_ref")
+        validate_resolvable_reference(VERCEL_CONNECTOR, ref, self_hosted=self._self_hosted)
         team_id = _opt_str(body.get("team_id"), field="team_id")
         project_id = _opt_str(body.get("project_id"), field="project_id")
         emit_egress = bool(body.get("emit_egress", False))

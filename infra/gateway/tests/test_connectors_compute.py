@@ -125,9 +125,9 @@ def test_parse_gcp_billing_rows_sums_same_day() -> None:
     ]
 
 
-def test_aws_client_wrapper_parses_via_injected_session() -> None:
-    # Prove the SDK-touching client never needs boto3: inject a fake ``ce`` client whose
-    # get_cost_and_usage returns the recorded fixture.
+def test_aws_client_wrapper_parses_via_injected_credentials() -> None:
+    # Prove the SDK-touching client never needs boto3: inject a fake tenant credential context
+    # (CTO-381) whose ``ce`` client returns the recorded fixture.
     from gateway.connectors.compute import AwsCostExplorerClient
 
     class _FakeCe:
@@ -135,12 +135,12 @@ def test_aws_client_wrapper_parses_via_injected_session() -> None:
             assert kwargs["Granularity"] == "DAILY"
             return _fixture("aws_cost_explorer.json")
 
-    class _FakeSession:
-        def client(self, name):
-            assert name == "ce"
+    class _FakeCredentials:
+        def aws_client(self, config, service):
+            assert service == "ce"
             return _FakeCe()
 
-    client = AwsCostExplorerClient(session_factory=lambda ref: _FakeSession())
+    client = AwsCostExplorerClient(credentials=_FakeCredentials())
     costs = client.get_daily_costs(_config(), start_day=date(2026, 7, 1), end_day=date(2026, 7, 3))
     assert [c.cost_micro_usd for c in costs] == [12_500_000, 8_250_000]
 
