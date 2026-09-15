@@ -15,6 +15,8 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { OrganizationSwitcher, UserButton, useOrganization } from "@clerk/nextjs";
 
+import { DOCS_LINKS } from "@/lib/docsLinks";
+
 interface NavItem {
   label: string;
   href: string;
@@ -210,8 +212,18 @@ export function Shell({
             <UserButton />
           </div>
         )}
-        <div className="border-t border-edge px-5 py-3 text-[11px] text-muted">
-          Cost-and-value observability
+        <div className="flex items-center justify-between gap-2 border-t border-edge px-5 py-3 text-[11px] text-muted">
+          <span>Cost-and-value observability</span>
+          {/* CTO-379: the docs are a separate site, so this is a plain external link, not a nav item
+              that would suggest a page inside the app. */}
+          <a
+            href={DOCS_LINKS.home}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-muted hover:text-fg"
+          >
+            Docs
+          </a>
         </div>
       </aside>
 
