@@ -28,10 +28,13 @@ from tally.sampling import Sampler, SamplingConfig
 from tally.schema import TRACE_ID_KEY, TRACE_ID_SYNTHETIC_KEY, GenAI
 from tally.wire import BatchRequest, encode_request
 
+import pytest
 from gateway.app import app
+from gateway.config import get_settings
 from gateway.mapping import COLUMNS
 
 _TRACE_COL = COLUMNS.index("TraceId")
+_ATTRS_COL = COLUMNS.index("SpanAttributes")
 
 
 class FakeStore:
@@ -161,3 +164,61 @@ def test_feature_tags_on_trace_less_spans_are_still_metered() -> None:
         usage = app.state.metering.usage(tenant)
         assert usage.trace_count == 0
         assert usage.feature_count == 1
+
+
+def test_the_stored_marker_is_pythons_True_not_json_true() -> None:
+    """Pins the stored spelling so the footgun cannot drift silently (CTO-401 review).
+
+    The marker rides into the ``SpanAttributes`` Map(String, String) through ``str(value)``, which
+    renders a bool as ``'True'``. A ClickHouse query written the natural way, ``= 'true'``, matches
+    nothing and returns an empty result indistinguishable from "no synthetic spans". Documented in
+    ``gateway.mapping`` and ``tally.schema``; asserted here so the documentation cannot go stale.
+    """
+    spans = [
+        {
+            TRACE_ID_KEY: "syn-1",
+            "span_id": "sp-1",
+            TRACE_ID_SYNTHETIC_KEY: True,
+            GenAI.SYSTEM: "openai",
+            GenAI.OPERATION_NAME: "chat",
+            GenAI.USAGE_INPUT_TOKENS: 10,
+        }
+    ]
+    with _client() as (c, store):
+        assert _post(c, "t-cto401-spelling", spans).status_code == 200
+        attrs = store.spans[0][_ATTRS_COL]
+        assert attrs[TRACE_ID_SYNTHETIC_KEY] == "True"
+        assert attrs[TRACE_ID_SYNTHETIC_KEY] != "true"
+
+
+# --- the cap is wired from settings, and bounded from below (CTO-401 review) -----------------------
+
+
+def test_the_meter_cap_comes_from_settings_not_from_the_module_default() -> None:
+    """Pins the app.py wiring: delete it and the meter silently reverts to the module default.
+
+    Nothing asserted this, so removing ``max_ids_per_period=settings.metering_max_ids_per_period``
+    left the whole suite green while the knob quietly stopped doing anything. The value here is
+    deliberately neither the module default (250,000) nor a number below the plan ceiling.
+    """
+    settings = get_settings()
+    original = settings.metering_max_ids_per_period
+    settings.metering_max_ids_per_period = 300_000
+    try:
+        with TestClient(app):
+            assert app.state.metering._traces.max_ids_per_period == 300_000
+            assert app.state.metering._features.max_ids_per_period == 300_000
+    finally:
+        settings.metering_max_ids_per_period = original
+
+
+def test_a_cap_below_the_plan_ceiling_refuses_to_boot() -> None:
+    """An operator trimming memory must not silently disable limit enforcement fleet-wide."""
+    settings = get_settings()
+    original = settings.metering_max_ids_per_period
+    settings.metering_max_ids_per_period = 5
+    try:
+        with pytest.raises(ValueError, match="TALLY_METERING_MAX_IDS_PER_PERIOD"), TestClient(app):
+            pass  # pragma: no cover - the lifespan raises on entry
+    finally:
+        settings.metering_max_ids_per_period = original

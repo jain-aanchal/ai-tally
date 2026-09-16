@@ -17,6 +17,7 @@ import pytest
 from gateway.config import Settings
 from gateway.metering import PlanLimit, UsageRecord
 from gateway.usage_store import (
+    CommittedUsageStore,
     DurableUsageRollup,
     UsageUnavailable,
     build_usage_rollup,
@@ -425,3 +426,38 @@ def test_a_failed_probe_still_leaves_the_committed_store_attached() -> None:
     )
     with pytest.raises(UsageUnavailable):
         rollup.usage(T, "2026-05")
+
+
+# --- a floor must not be frozen as if it were the figure (CTO-401 review) --------------------------
+
+
+def _record(*, trace_exact: bool = True, feature_exact: bool = True) -> UsageRecord:
+    return UsageRecord(
+        tenant_id=T, period="2026-05", trace_count=250_000, feature_count=7,
+        trace_commitment=None, feature_commitment=None, plan="free",
+        trace_limit=None, feature_limit=None, closed=True,
+        trace_count_exact=trace_exact, feature_count_exact=feature_exact,
+    )
+
+
+def test_committing_a_saturated_period_is_refused() -> None:
+    """tenant_usage_periods has no exactness column, so an inexact row reads back as exact forever.
+
+    The table is immutable by design, which is exactly what makes this unrecoverable: a floor stored
+    as a plain number becomes a permanent, confident figure that nobody can later tell apart from a
+    real one, in a row that cannot be corrected. Refusing keeps the schema honest without adding a
+    column for a record the durable path (an exact ClickHouse uniqExact) never produces.
+    """
+    store = CommittedUsageStore(Settings(postgres_dsn=_UNREACHABLE))
+    with pytest.raises(ValueError, match="floor"):
+        store.commit(_record(trace_exact=False))
+    with pytest.raises(ValueError, match="floor"):
+        store.commit(_record(feature_exact=False))
+
+
+def test_an_exact_record_passes_the_guard_and_reaches_postgres() -> None:
+    """The guard rejects the inexact case only. An exact record gets as far as the connection,
+    which is what proves the refusal above is about exactness and not about refusing everything."""
+    store = CommittedUsageStore(Settings(postgres_dsn=_UNREACHABLE))
+    with pytest.raises(UsageUnavailable):
+        store.commit(_record())

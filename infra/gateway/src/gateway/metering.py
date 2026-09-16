@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import blake2b
@@ -136,6 +137,44 @@ class PlanLimit:
 DEFAULT_PLAN_LIMIT = PlanLimit(plan="free", trace_limit=100_000, feature_limit=25)
 
 
+def validate_max_ids_per_period(
+    max_ids_per_period: int,
+    *,
+    plan_limits: Iterable[PlanLimit] = (DEFAULT_PLAN_LIMIT,),
+) -> None:
+    """Refuse a meter cap that cannot decide the overage it is measured against (CTO-401 review).
+
+    The cap makes the count a FLOOR once a bucket saturates. That is honest and survivable while the
+    cap sits far above every plan ceiling, because a floor above the ceiling still proves the
+    overage. It stops being either the moment the cap drops to or below a ceiling: saturation then
+    pins the count AT OR BELOW the limit forever, ``trace_count > trace_limit`` can never become
+    true, and limit enforcement is silently off for every tenant on that plan. A cap of 0 is the
+    extreme of the same bug, a head meter that counts nothing while reporting a clean zero.
+
+    Nothing bounded this knob before, so an operator trimming replica memory could turn enforcement
+    off across the fleet with no error, no warning and no visible change in the numbers. Strictly
+    greater than the largest ceiling rather than equal to it: at equality the count saturates exactly
+    at the limit and the strict ``>`` comparison the overage uses is unreachable.
+
+    Raises :class:`ValueError`, which the gateway lifespan turns into a refusal to start.
+    """
+    if max_ids_per_period < 1:
+        raise ValueError(
+            f"metering_max_ids_per_period must be >= 1, got {max_ids_per_period}: a cap of 0 "
+            "disables the head meter entirely while it goes on reporting a count of 0 "
+            "(TALLY_METERING_MAX_IDS_PER_PERIOD)"
+        )
+    ceilings = [p.trace_limit for p in plan_limits if p.trace_limit is not None]
+    largest = max(ceilings, default=0)
+    if max_ids_per_period <= largest:
+        raise ValueError(
+            f"metering_max_ids_per_period ({max_ids_per_period}) is not above the largest "
+            f"configured plan trace_limit ({largest}), so a saturated period can never exceed its "
+            "limit and limit enforcement would be silently disabled for those tenants. Raise "
+            "TALLY_METERING_MAX_IDS_PER_PERIOD above the largest plan ceiling"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class UsageRecord:
     """Per-tenant per-period usage, the unit the dashboard and billing both consume (CTO-86)."""
@@ -163,12 +202,37 @@ class UsageRecord:
     feature_count_exact: bool = True
 
     @property
-    def over_trace_limit(self) -> bool:
-        return self.trace_limit is not None and self.trace_count > self.trace_limit
+    def over_trace_limit(self) -> bool | None:
+        """True / False / None, where None means "the count is a floor and it has not passed yet".
+
+        CTO-401 review. This used to compute a confident bool from a count it knew might be a floor.
+        A saturated period under its limit answered False, which reads as "this tenant is within
+        their plan" when the truth is "we stopped counting and cannot say". That is the
+        honest-under-uncertainty invariant broken in the exact way it names: an unknown rendered as a
+        definite answer. Note the asymmetry, which is what keeps this useful rather than merely
+        cautious:
+
+          * OVER is still decidable from a floor. If the floor already exceeds the limit, the real
+            count exceeds it too, so True is safe.
+          * UNDER is not. A floor below the limit says nothing about where the real count sits.
+
+        So only the under-and-inexact case becomes None. An exact count answers False as before, and
+        an unlimited plan answers False because unlimited genuinely cannot be exceeded.
+        """
+        if self.trace_limit is None:
+            return False
+        if self.trace_count > self.trace_limit:
+            return True
+        return False if self.trace_count_exact else None
 
     @property
-    def over_feature_limit(self) -> bool:
-        return self.feature_limit is not None and self.feature_count > self.feature_limit
+    def over_feature_limit(self) -> bool | None:
+        """As :attr:`over_trace_limit`, for the distinct feature-tag ceiling (CTO-85)."""
+        if self.feature_limit is None:
+            return False
+        if self.feature_count > self.feature_limit:
+            return True
+        return False if self.feature_count_exact else None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -257,6 +321,14 @@ class UsageRollup:
 
         Empty/None ids are ignored. This is intentionally called *before* any sampling or
         backpressure shed so neither can reduce the billable count.
+
+        The ``trace_id_synthetic`` flag is CLIENT-ASSERTED, NOT CORROBORATED: it arrives on the wire
+        and the gateway cannot verify it, because a minted id and a real one are both random hex and
+        differ in nothing but this claim. Suppressing a count on an unverified client assertion is
+        safe while the head meter only feeds a usage display and a plan-limit check, and is NOT safe
+        the moment it feeds an invoice, where it becomes a field a client can set to bill themselves
+        for nothing. Wiring this meter to billing requires corroboration first: see CTO-410, which
+        blocks CTO-399.
 
         CTO-401: a SYNTHETIC trace id is not a billable trace. CTO-396 started stamping a fresh
         trace id on every span an SDK emitted outside a ``start_trace``, so spans that used to reach

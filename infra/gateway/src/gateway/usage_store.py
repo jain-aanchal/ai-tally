@@ -58,6 +58,25 @@ It is a cache and behaves like one: a miss goes to the durable source, and a dur
 cannot answer produces an error rather than a stale or empty entry. A committed period is cached
 without expiry, because immutable is exactly what it is.
 
+WHAT THIS TABLE DOES NOT STORE, AND WHY THAT IS A REFUSAL RATHER THAN A COLUMN (CTO-401 review).
+``tenant_usage_periods`` has no exactness column, so a :class:`~gateway.metering.UsageRecord` whose
+count is a FLOOR (the head meter's id set saturated its cap, ``trace_count_exact=False``) would be
+written as a plain number and read back by :meth:`CommittedUsageStore.get` as exact, which
+reconstructs the record with the ``True`` default. The floor would become a permanent, confident
+figure in a table that is immutable by design, and immutable is exactly what makes that
+unrecoverable: the row cannot be corrected later.
+
+The two ways out were a new nullable column or a refusal to commit at all. This module takes the
+REFUSAL, because the column would be dead weight on a path that should never produce such a record
+in the first place: the durable count is a ClickHouse ``uniqExact``, which is exact by construction,
+so the only producer of an inexact record is the in-process head meter, and that meter is not what
+``/v1/usage`` or a closing job reads. Storing an unknown-quality figure permanently, to support a
+caller that should not exist, is the worse of the two. :meth:`CommittedUsageStore.commit` therefore
+raises on an inexact record and the closing job records a failure and emits nothing, which is the
+same shape every other job here takes under uncertainty. The fix for a tenant hitting it is to raise
+``TALLY_METERING_MAX_IDS_PER_PERIOD``, which :func:`gateway.metering.validate_max_ids_per_period`
+already bounds from below at boot.
+
 FOLLOW-UP, stated plainly rather than half-wired: nothing calls :meth:`CommittedUsageStore.commit`
 on a schedule yet. Closing a period is a billing-cycle job (a scheduler job in the CTO-213 registry),
 and it is deliberately not in this change. Until it lands, every period reads live from ClickHouse,
@@ -217,7 +236,23 @@ class CommittedUsageStore:
 
         Raises :class:`UsageUnavailable` if Postgres cannot answer, so a closing job records a
         failure and emits nothing rather than reporting a period closed that is not.
+
+        Raises :class:`ValueError` on a record whose counts are a FLOOR rather than the figure
+        (CTO-401 review). ``tenant_usage_periods`` has no exactness column, so such a row would be
+        stored as a plain number and read back as exact by :meth:`get`, freezing an
+        unknown-quality count into a table that cannot be corrected. Refusing is the honest move and
+        costs nothing real: the durable count is a ClickHouse ``uniqExact`` and is exact by
+        construction, so only the in-process head meter can produce an inexact record. See this
+        module's docstring for why this is a refusal and not a new column.
         """
+        if not (record.trace_count_exact and record.feature_count_exact):
+            raise ValueError(
+                f"refusing to commit period {record.period} for {record.tenant_id}: its counts are "
+                "a floor, not the figure (the head meter's id set saturated its cap), and "
+                "tenant_usage_periods cannot record that qualification. Raise "
+                "TALLY_METERING_MAX_IDS_PER_PERIOD and recount rather than freezing a number "
+                "nobody can later tell apart from an exact one"
+            )
         try:
             with psycopg.connect(self._dsn, **self._connect_kwargs) as conn, conn.cursor() as cur:
                 cur.execute(

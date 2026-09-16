@@ -56,7 +56,7 @@ from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_pa
 from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
-from gateway.metering import ClosedPeriodError, UsageRollup
+from gateway.metering import ClosedPeriodError, UsageRollup, validate_max_ids_per_period
 from gateway.usage_store import (
     USAGE_UNAVAILABLE_CODE,
     DurableUsageRollup,
@@ -444,6 +444,11 @@ async def lifespan(app: FastAPI):
     # CTO-401: the head meter's per-(tenant, period) id sets are bounded. Nothing closes a period on
     # a schedule yet (that is the CTO-213 scheduler's job), so without a ceiling these sets only ever
     # grow and a tenant emitting spans at volume walks a replica into an OOM.
+    # Fail CLOSED at boot (CTO-401 review): a cap at or below a plan's trace_limit pins the
+    # saturated count at or below the ceiling, so the overage comparison can never fire and limit
+    # enforcement is silently off for every tenant on that plan. A silently disabled enforcement
+    # path is worse than a process that refuses to start and says why.
+    validate_max_ids_per_period(settings.metering_max_ids_per_period)
     app.state.metering = UsageRollup(
         max_ids_per_period=settings.metering_max_ids_per_period
     )

@@ -235,6 +235,13 @@ def span_to_row(
             continue
         if _is_body_key(str(k)):
             continue
+        # CTO-401 review: str() is PYTHON's spelling, so a bool lands here as 'True'/'False', not
+        # 'true'/'false'. gen_ai.trace_id_synthetic is the first bool-valued attribute to reach this
+        # map, and a query written as SpanAttributes['gen_ai.trace_id_synthetic'] = 'true' matches
+        # nothing and returns an empty result that looks exactly like "no synthetic spans". Left as
+        # str() deliberately: normalising here would change the stored spelling of every long-tail
+        # value for one key's benefit, and rows already written would keep the old spelling, so the
+        # ambiguity would survive the fix. Documented, and pinned by a test, instead. Match 'True'.
         extra[str(k)] = str(v)
 
     return (

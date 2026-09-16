@@ -14,7 +14,12 @@ from tally.client import MemoryExporter, TallyClient
 from tally.context import start_trace
 from tally.pricing import Usage, seed_catalog
 from tally.sampling import Sampler, SamplingConfig
-from tally.schema import SPAN_ID_KEY, TRACE_ID_KEY, TRACE_ID_SYNTHETIC_KEY
+from tally.schema import (
+    SPAN_ID_KEY,
+    TRACE_ID_KEY,
+    TRACE_ID_SYNTHETIC_KEY,
+    validate_span_attributes,
+)
 
 
 def _client() -> tuple[TallyClient, MemoryExporter]:
@@ -67,3 +72,25 @@ def test_caller_supplied_ids_are_left_alone_and_unmarked() -> None:
     (span,) = exporter.spans
     assert span[TRACE_ID_KEY] == "tr-caller"
     assert TRACE_ID_SYNTHETIC_KEY not in span
+
+
+def test_the_sdks_own_trace_less_span_passes_its_own_schema_validator() -> None:
+    """The marker is a schema key, not an undeclared extra (CTO-401 review).
+
+    ``TRACE_ID_SYNTHETIC_KEY`` was defined but was in neither the attribute allowlist nor the
+    structural-key set, so the SDK emitted a span its OWN validator called a violation
+    (``unknown attribute key: 'gen_ai.trace_id_synthetic'``). The gateway tolerates unknown keys
+    under the additive-only CTO-31 contract, so ingest never noticed, which is precisely what made
+    it a trap: the first thing to break would have been an unrelated test asserting a clean span.
+    """
+    client, exporter = _client()
+    client.record_llm_call(provider="openai", model="gpt-5-mini", usage=Usage(10, 5))
+    (span,) = exporter.spans
+    assert span[TRACE_ID_SYNTHETIC_KEY] is True
+    assert validate_span_attributes(span) == []
+
+
+def test_the_marker_must_be_a_real_bool() -> None:
+    """The gateway matches on ``is True``, so the string "false" would sail past as marked."""
+    violations = validate_span_attributes({TRACE_ID_SYNTHETIC_KEY: "true"})
+    assert violations == [f"{TRACE_ID_SYNTHETIC_KEY} must be bool, got str"]
