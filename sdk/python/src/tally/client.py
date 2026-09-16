@@ -80,6 +80,14 @@ class LlmCallResult:
     cost_micro_usd: int | None
     kept: bool
     sample_rate: float
+    #: The span that was emitted, ids and timestamp included, as a COPY: mutating it never reaches
+    #: the span on its way to storage (CTO-404).
+    #:
+    #: The shape deliberately differs between a kept and a sampled-out call. When ``kept`` is True
+    #: this names the stored span. When it is False no span exists, so this is the pre-stamp
+    #: attribute set with no ``trace_id``/``span_id``/``timestamp_ns`` in it, and ``trace_id``
+    #: above is the context's own (``None`` when there is none). Inventing ids for a span that was
+    #: never sent would be the dishonest direction, so branch on ``kept``, not on key presence.
     attributes: dict[str, object]
 
 
@@ -252,9 +260,14 @@ class TallyClient:
                 # dict with no ids in it, for a span the gateway stored under a real synthetic
                 # trace id: a customer logging result.trace_id to correlate with the dashboard was
                 # given a value that matches nothing there.
-                stamped_trace = emitted.get(TRACE_ID_KEY)
-                result_trace = stamped_trace if isinstance(stamped_trace, str) else trace_id
-                result_attrs = emitted
+                result_trace = str(emitted[TRACE_ID_KEY])
+                # A COPY, deliberately. ``_emit`` returns the dict it enqueued, so handing that
+                # object to the caller would let a customer's own bookkeeping
+                # (``result.attributes["my.note"] = prompt``) write into a span that is already
+                # queued for export and already past SDK-side validation. A body-shaped string
+                # would then ride the long-tail attribute map into storage, which is the
+                # no-bodies-in-telemetry invariant reachable through a public API (CTO-404).
+                result_attrs = dict(emitted)
             else:
                 # Sampled out, so no span exists to describe. Reporting the context's own trace id
                 # (None when there is none) stays honest rather than inventing an id for a span
@@ -436,12 +449,11 @@ class TallyClient:
             # Same correction as record_llm_call: the result names the span that was sent, ids
             # included, rather than the pre-stamp copy (CTO-404). Embeddings always emit, so there
             # is no sampled-out branch here.
-            stamped_trace = emitted.get(TRACE_ID_KEY)
-
             return EmbeddingCallResult(
-                trace_id=stamped_trace if isinstance(stamped_trace, str) else trace_id,
+                trace_id=str(emitted[TRACE_ID_KEY]),
                 cost_micro_usd=cost_micro,
-                attributes=emitted,
+                # A copy, for the reason spelled out in record_llm_call (CTO-404).
+                attributes=dict(emitted),
             )
 
         result = _do()
@@ -593,6 +605,10 @@ class TallyClient:
         Returning it is what lets a caller-facing result describe what LANDED rather than what was
         built: the stamping happens on a copy, so before CTO-404 the result and the stored span
         disagreed about both ids and the timestamp.
+
+        The returned dict IS the enqueued span, not a copy of it. Anything that hands it onward to
+        customer code has to copy it first, or the customer can mutate a span that is already
+        queued and already validated.
         """
         span = _with_span_ids(attributes)
         if self._processor is not None:
@@ -627,8 +643,9 @@ def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
 
     Ids and timestamp the caller already set (either spelling) are left alone: an OTel-shaped
     producer feeding ``ingest_span`` owns its identity and its clock, and we must not overwrite
-    either. A copy is returned so nothing the caller still holds, such as
-    ``LlmCallResult.attributes``, is mutated behind its back.
+    either. A copy is returned so the dict the caller passed in is never mutated behind its back.
+    That copy is the span that gets enqueued, though, so whoever passes it on to customer code has
+    to copy it again: see ``_emit`` and ``LlmCallResult.attributes``.
     """
     has_trace = bool(attributes.get(TRACE_ID_KEY) or attributes.get("TraceId"))
     has_span = bool(attributes.get(SPAN_ID_KEY) or attributes.get("SpanId"))

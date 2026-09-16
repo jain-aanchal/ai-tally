@@ -250,6 +250,14 @@ def note_context_drop(
        no-arg call path (``note_context_drop(obs, where="record_llm_call")``) keeps working
        and bumps :attr:`SelfObservability.context_drop_count`.
 
+       RETIRED as of CTO-404: nothing in the SDK reaches this path any more. The four ``record_*``
+       entrypoints were its only callers and they now call :func:`note_synthetic_trace`, because a
+       trace-less span is stored under a trace id we invented rather than dropped. The path and the
+       counter are kept for any external caller that still means the original thing, but
+       ``context_drop_count`` is structurally 0 for SDK-internal traffic, and
+       :meth:`SelfObservability.snapshot` still exports it. Read it as a retired key, not as a
+       measurement that happens to be zero.
+
     2. **Context-window drop** - caller trimmed messages before sending to the model to
        fit the context window. Pass ``dropped_messages`` (count), ``dropped_tokens``
        (total tokens of trimmed content), and ``window_used_pct`` (0..1 - how close the

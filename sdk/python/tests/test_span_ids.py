@@ -374,3 +374,33 @@ def test_a_sampled_out_call_invents_no_span_identity() -> None:
     assert exporter.spans == []
     assert result.trace_id is None
     assert SPAN_ID_KEY not in result.attributes
+
+
+def test_a_result_cannot_mutate_the_span_it_describes() -> None:
+    """The direction ``test_result_attributes_are_not_mutated_by_emit`` does not cover (CTO-404).
+
+    That test pins the caller's own dict against ``_emit``. This pins the reverse: ``_emit`` returns
+    the very dict it enqueued, so handing that object straight to the result let a customer's own
+    bookkeeping (``result.attributes["my.note"] = prompt``) write into a span already queued for
+    export and already past SDK-side validation. A body-shaped string would then reach storage
+    through a public API, which the no-bodies-in-telemetry invariant forbids.
+    """
+    exporter = MemoryExporter()
+    client = _client(exporter=exporter)
+    with start_trace(feature_tag="f"):
+        result = client.record_llm_call(provider="openai", model="gpt-5-mini", usage=Usage(10, 5))
+        embedding = client.record_embedding_call(
+            provider="openai", model="text-embedding-3-small", input_tokens=10
+        )
+
+    llm_span, embedding_span = exporter.spans[0], exporter.spans[1]
+    # It still has to DESCRIBE the emitted span; a copy, not a different span.
+    assert result.attributes[SPAN_ID_KEY] == llm_span[SPAN_ID_KEY]
+    assert embedding.attributes[SPAN_ID_KEY] == embedding_span[SPAN_ID_KEY]
+    assert result.attributes is not llm_span
+    assert embedding.attributes is not embedding_span
+
+    result.attributes["my.note"] = "customer prompt text here"
+    embedding.attributes["my.note"] = "customer prompt text here"
+    assert "my.note" not in llm_span
+    assert "my.note" not in embedding_span
