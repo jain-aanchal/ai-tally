@@ -29,6 +29,8 @@
 // callers, so a client never has to import this module to get them.
 import "server-only";
 
+import { NextResponse } from "next/server";
+
 import { ORG_ADMIN_ROLE, type ResolvedTenant } from "./tenantShared";
 
 // Re-exported so server callers keep a single import site (`@/lib/getTenant`). Clients import these
@@ -166,6 +168,38 @@ export function canManage(tenant: ResolvedTenant): boolean {
     return true;
   }
   return tenant.orgRole === ORG_ADMIN_ROLE;
+}
+
+/**
+ * The outcome of {@link requireAdmin}: the resolved tenant, or the refusal in both shapes its two
+ * kinds of caller need. A Route Handler returns `response`; a server action, which answers with a
+ * result object rather than an HTTP status, returns `error`.
+ */
+export type AdminGate =
+  | { ok: true; tenant: ResolvedTenant }
+  | { ok: false; error: string; response: NextResponse };
+
+/**
+ * Gate a control-plane MUTATION on the admin role (CTO-392).
+ *
+ * `canManage` above was already the policy, but only the key and proxy routes ever asked it. Every
+ * other mutating handler and server action resolved the tenant with `getTenant()` and wrote with the
+ * privileged gateway service token, so any organization member could change guardrail caps, LTV/CAC
+ * bands, budgets, value-event mappings and connector credentials. The gateway cannot tell an admin
+ * from a member (it sees the service token and a resolved tenant, never the human), which is exactly
+ * why the distinction has to be made here, once, and why every mutation now goes through this rather
+ * than calling `getTenant()` directly.
+ *
+ * `action` completes "admin role required to ...", the message shape the keys and proxy routes
+ * already returned, so every refusal reads the same to the UI.
+ */
+export async function requireAdmin(action: string): Promise<AdminGate> {
+  const tenant = await getTenant();
+  if (canManage(tenant)) {
+    return { ok: true, tenant };
+  }
+  const error = `admin role required to ${action}`;
+  return { ok: false, error, response: NextResponse.json({ error }, { status: 403 }) };
 }
 
 /** The active Clerk user id (for key `created_by` audit), or null on the dev escape hatch. */

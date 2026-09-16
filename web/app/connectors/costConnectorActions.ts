@@ -12,11 +12,16 @@ import {
   disconnectCostConnector,
   isConfigurable,
 } from "@/lib/costConnectors";
+import { requireAdmin } from "@/lib/getTenant";
 
 export async function connectCostConnectorAction(
   connector: string,
   fields: Record<string, string>,
 ): Promise<ConnectResult> {
+  // CTO-392: a server action is a public endpoint. Pointing the tenant's billing at a different
+  // credential reference is admin-only, checked here and not only in the form that calls it.
+  const gate = await requireAdmin("change connector settings");
+  if (!gate.ok) return { ok: false, error: gate.error };
   if (!isConfigurable(connector)) {
     return { ok: false, error: `unknown connector: ${connector}` };
   }
@@ -48,6 +53,8 @@ export async function connectCostConnectorAction(
 }
 
 export async function disconnectCostConnectorAction(connector: string): Promise<ConnectResult> {
+  const gate = await requireAdmin("change connector settings");
+  if (!gate.ok) return { ok: false, error: gate.error };
   if (!isConfigurable(connector)) {
     return { ok: false, error: `unknown connector: ${connector}` };
   }

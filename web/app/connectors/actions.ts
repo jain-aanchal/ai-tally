@@ -7,6 +7,7 @@
 import { revalidatePath } from "next/cache";
 
 import { LAYERS, type Layer } from "@/lib/cost";
+import { requireAdmin } from "@/lib/getTenant";
 import { setConnectorEnabled } from "@/lib/tenant";
 
 export interface ToggleResult {
@@ -19,6 +20,10 @@ export async function toggleConnectorAction(
   layer: string,
   enabled: boolean,
 ): Promise<ToggleResult> {
+  // CTO-392: a server action is a public endpoint, so the role is checked here rather than only in
+  // the UI that renders the toggle. Disabling a layer changes what the partial-data banner counts.
+  const gate = await requireAdmin("change connector settings");
+  if (!gate.ok) return { ok: false, error: gate.error };
   if (!(LAYERS as readonly string[]).includes(layer)) {
     return { ok: false, error: `unknown layer: ${layer}` };
   }

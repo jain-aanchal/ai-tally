@@ -13,6 +13,7 @@ import {
   queryFeatureValueEvents,
 } from "@/lib/clickhouse";
 import { type SourceState, readState } from "@/lib/dataState";
+import { canManage, getTenant } from "@/lib/getTenant";
 import { sampleDataAllowed } from "@/lib/mock";
 
 // Read live data per request (never statically cached). A read that fails says so; it is not
@@ -25,13 +26,23 @@ export interface FeaturesResponse {
   /** null when the diagnostics read failed. `sources.diagnostics` says which state this is. */
   diagnostics: AttributionDiagnostics | null;
   sources: { features: SourceState; diagnostics: SourceState };
+  /**
+   * CTO-392: whether this caller may pin a feature's value event. POST /api/features/value-events
+   * refuses a member, and the value-event CTA lives inside a client component several levels below
+   * the server boundary (Cost explorer -> FeatureDetail -> FeatureValueEvents), so it rides along
+   * with the data that component already fetches rather than being threaded through as a prop.
+   */
+  canManage: boolean;
 }
 
 export async function GET() {
-  const [liveFeatures, liveDiagnostics, valueEvents] = await Promise.all([
+  const [liveFeatures, liveDiagnostics, valueEvents, editable] = await Promise.all([
     queryFeatureEconomics(),
     queryAttributionDiagnostics(),
     queryFeatureValueEvents(),
+    getTenant()
+      .then(canManage)
+      .catch(() => false),
   ]);
 
   // Overlay the tenant's configured value events (CTO-140) so a just-configured feature reflects its
@@ -48,6 +59,7 @@ export async function GET() {
       features: overlay(features),
       diagnostics,
       sources: { features: "sample", diagnostics: "sample" },
+      canManage: editable,
     } satisfies FeaturesResponse);
   }
 
@@ -60,5 +72,6 @@ export async function GET() {
       features: readState(liveFeatures, (f) => f.length === 0),
       diagnostics: liveDiagnostics.state,
     },
+    canManage: editable,
   } satisfies FeaturesResponse);
 }

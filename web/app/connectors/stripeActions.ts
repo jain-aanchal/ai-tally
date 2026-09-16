@@ -6,6 +6,7 @@
 // to the client; the gateway returns a fingerprint, which is what the UI shows from then on.
 import { revalidatePath } from "next/cache";
 
+import { requireAdmin } from "@/lib/getTenant";
 import { connectStripe } from "@/lib/stripeConnector";
 
 export interface ConnectStripeResult {
@@ -18,6 +19,10 @@ export async function connectStripeAction(
   webhookSecret: string,
   stripeAccountId: string | null,
 ): Promise<ConnectStripeResult> {
+  // CTO-392: a server action is a public endpoint, and this one stores the signing secret that
+  // decides which webhooks are trusted as the tenant's revenue.
+  const gate = await requireAdmin("change connector settings");
+  if (!gate.ok) return { ok: false, error: gate.error };
   const result = await connectStripe(webhookSecret, stripeAccountId);
   if (!result.ok) return { ok: false, error: result.error };
   // The connectors page is what shows the connected state; revalidate so a hard refresh

@@ -42,6 +42,9 @@ interface FeaturesDetailPayload {
   /** null when the reconciler status could not be read, or has never run (#364). */
   diagnostics: AttributionDiagnostics | null;
   sources: { features: SourceState; diagnostics: SourceState };
+  /** CTO-392: whether this caller may pin a value event. Absent on an older cached payload, which
+   *  is read as "no": the route refuses the write anyway, so hiding the CTA is the safe default. */
+  canManage?: boolean;
 }
 
 type FetchStatus = "loading" | "ready" | "unavailable";
@@ -145,7 +148,7 @@ export function FeatureDetail({ feature }: { feature: string }) {
           inline value-event config CTA + POST path, reused verbatim from /features. A single-element
           list yields exactly this one feature's row, so the value/user and payback honest blanks and
           the "configure value event →" flow are preserved unchanged (CTO-242). */}
-      <FeatureValueEvents initialFeatures={[selected]} />
+      <FeatureValueEvents initialFeatures={[selected]} canEdit={data.canManage === true} />
 
       <Card title="Attribution diagnostics">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

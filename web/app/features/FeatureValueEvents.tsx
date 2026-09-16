@@ -24,7 +24,15 @@ interface ObservedEvent {
 
 type SaveState = "idle" | "saving" | "error";
 
-export function FeatureValueEvents({ initialFeatures }: { initialFeatures: FeatureEconomics[] }) {
+export function FeatureValueEvents({
+  initialFeatures,
+  canEdit = true,
+}: {
+  initialFeatures: FeatureEconomics[];
+  /** CTO-392: false for a non-admin. POST /api/features/value-events refuses the write either way;
+   *  this only stops the table offering a CTA that is always refused. */
+  canEdit?: boolean;
+}) {
   const router = useRouter();
   const [features, setFeatures] = useState<FeatureEconomics[]>(initialFeatures);
 
@@ -100,7 +108,11 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
   return (
     <>
       {unconfigured.length > 0 && (
-        <FinishSetupBanner count={unconfigured.length} onStart={openFinishSetup} />
+        <FinishSetupBanner
+          count={unconfigured.length}
+          onStart={openFinishSetup}
+          canEdit={canEdit}
+        />
       )}
 
       <Card title="Unit economics: per feature">
@@ -140,13 +152,17 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
                     </td>
                     <td className="py-2 pl-3">
                       {f.valueEvent === null ? (
-                        <button
-                          type="button"
-                          onClick={() => openSingle(f.feature)}
-                          className="text-warn text-xs hover:underline"
-                        >
-                          configure value event →
-                        </button>
+                        canEdit ? (
+                          <button
+                            type="button"
+                            onClick={() => openSingle(f.feature)}
+                            className="text-warn text-xs hover:underline"
+                          >
+                            configure value event →
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted">not configured</span>
+                        )
                       ) : (
                         <span className="font-mono text-xs text-muted">{f.valueEvent}</span>
                       )}
@@ -179,7 +195,15 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
   );
 }
 
-function FinishSetupBanner({ count, onStart }: { count: number; onStart: () => void }) {
+function FinishSetupBanner({
+  count,
+  onStart,
+  canEdit,
+}: {
+  count: number;
+  onStart: () => void;
+  canEdit: boolean;
+}) {
   const noun = count === 1 ? "feature" : "features";
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
@@ -190,13 +214,19 @@ function FinishSetupBanner({ count, onStart }: { count: number; onStart: () => v
           until you pick one.
         </span>
       </div>
-      <button
-        type="button"
-        onClick={onStart}
-        className="inline-flex items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25"
-      >
-        Finish setup
-      </button>
+      {canEdit ? (
+        <button
+          type="button"
+          onClick={onStart}
+          className="inline-flex items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25"
+        >
+          Finish setup
+        </button>
+      ) : (
+        <span className="text-xs text-warn/90">
+          Ask an organization admin to pick one.
+        </span>
+      )}
     </div>
   );
 }

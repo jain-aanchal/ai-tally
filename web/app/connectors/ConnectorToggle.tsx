@@ -12,9 +12,11 @@ interface Props {
   layer: string;
   /** Initial enabled state from the gateway, used to seed the toggle on first render. */
   initialEnabled: boolean;
+  /** CTO-392: false for a non-admin. toggleConnectorAction refuses the write either way. */
+  canEdit?: boolean;
 }
 
-export function ConnectorToggle({ layer, initialEnabled }: Props) {
+export function ConnectorToggle({ layer, initialEnabled, canEdit = true }: Props) {
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
@@ -39,7 +41,8 @@ export function ConnectorToggle({ layer, initialEnabled }: Props) {
       <button
         type="button"
         onClick={onClick}
-        disabled={pending}
+        disabled={pending || !canEdit}
+        title={canEdit ? undefined : "Admins only"}
         aria-pressed={enabled}
         className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium transition ${
           enabled

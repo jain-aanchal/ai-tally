@@ -8,6 +8,7 @@
 import { Card } from "@/components/Card";
 import { PageHeader } from "@/components/PageHeader";
 import { apiGet } from "@/lib/api";
+import { canManage, getTenant } from "@/lib/getTenant";
 import {
   type GuardrailRule,
   GUARDRAIL_MODES,
@@ -37,6 +38,10 @@ function CountTile({ label, value, accent }: { label: string; value: number; acc
 export default async function GuardrailsPage() {
   const { rules, configRefreshSeconds } = await apiGet<GuardrailsPayload>("/api/guardrails");
   const summary = summarize(rules);
+  // CTO-392: /api/guardrails refuses a member's POST, so the row renders its controls disabled
+  // rather than offering an edit that is always refused. The route is the enforcement point; this
+  // only decides what is worth showing.
+  const editable = canManage(await getTenant());
 
   return (
     <div className="space-y-6">
@@ -73,11 +78,16 @@ export default async function GuardrailsPage() {
             </thead>
             <tbody>
               {rules.map((rule) => (
-                <GuardrailRow key={rule.id} initialRule={rule} />
+                <GuardrailRow key={rule.id} initialRule={rule} canEdit={editable} />
               ))}
             </tbody>
           </table>
         </div>
+        {!editable && (
+          <p className="mt-3 text-xs text-muted">
+            You have read-only access. Ask an organization admin to change a rule.
+          </p>
+        )}
         <p className="mt-3 text-xs text-muted">
           Modes (weakest → strongest):{" "}
           {GUARDRAIL_MODES.map((m) => m.label).join(" · ")}. Only{" "}

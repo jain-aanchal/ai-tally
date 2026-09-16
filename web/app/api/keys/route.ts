@@ -6,7 +6,7 @@
 // and never stored here.
 import { NextResponse } from "next/server";
 
-import { canManage, controlPlaneHeaders, currentUserId, getTenant } from "@/lib/getTenant";
+import { controlPlaneHeaders, currentUserId, getTenant, requireAdmin } from "@/lib/getTenant";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
@@ -21,15 +21,14 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  const tenant = await getTenant();
-  if (!canManage(tenant)) {
-    return NextResponse.json({ error: "admin role required to mint keys" }, { status: 403 });
-  }
+  // CTO-392: the same gate as before, now the shared one every mutation goes through.
+  const gate = await requireAdmin("mint keys");
+  if (!gate.ok) return gate.response;
   const input = await req.json().catch(() => ({}));
   const userId = await currentUserId();
   const res = await fetch(`${GATEWAY_URL}/v1/tenant/keys`, {
     method: "POST",
-    headers: controlPlaneHeaders(tenant.tenantId, {
+    headers: controlPlaneHeaders(gate.tenant.tenantId, {
       "content-type": "application/json",
       ...(userId ? { "x-clerk-user-id": userId } : {}),
     }),

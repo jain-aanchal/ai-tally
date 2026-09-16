@@ -13,7 +13,7 @@ import {
 } from "@/lib/connectors";
 import { queryCostConnectorConfigs } from "@/lib/costConnectors";
 import { DOCS_LINKS } from "@/lib/docsLinks";
-import { resolveTenantId } from "@/lib/getTenant";
+import { canManage, getTenant, resolveTenantId } from "@/lib/getTenant";
 import { queryRevenueUploads } from "@/lib/revenueUpload";
 import type { SourceState } from "@/lib/dataState";
 import { queryEnabledConnectors } from "@/lib/tenant";
@@ -49,6 +49,12 @@ export default async function ConnectorsPage() {
   // ai-tally's AWS account id, the trust-policy principal. Deployment config, not a constant here,
   // so the form never shows an account id nobody configured.
   const awsAccountId = process.env.TALLY_AWS_ACCOUNT_ID?.trim() || null;
+  // CTO-392: every write on this page goes through a server action that refuses a member, so the
+  // forms and toggles render read-only rather than offering a save that is always refused. A failed
+  // resolve is treated as "not an admin": the page still renders, minus controls nobody can use.
+  const editable = await getTenant()
+    .then(canManage)
+    .catch(() => false);
   // `null` means the gateway is unreachable. Render the forms anyway (they report their own
   // errors on submit) rather than hiding the only way to configure anything.
   const configs = costConfigs ?? [];
@@ -75,6 +81,7 @@ export default async function ConnectorsPage() {
               activityUnavailable={activity === "unavailable"}
               organizationId={organizationId}
               awsAccountId={awsAccountId}
+              canEdit={editable}
             />
           </Card>
         );
@@ -134,7 +141,11 @@ export default async function ConnectorsPage() {
         wrapping it in a "sample data" frame would suggest otherwise.
       */}
       <Card title="Revenue upload: CSV">
-        <RevenueUpload snapshots={revenueUploads ?? []} unreachable={revenueUploads === null} />
+        <RevenueUpload
+          snapshots={revenueUploads ?? []}
+          unreachable={revenueUploads === null}
+          canEdit={editable}
+        />
         {/* CTO-379: only this card links to the docs. The cloud cost connectors have no public docs
             page yet; per-tenant credential resolution landed in CTO-381, so the setup is now
             described in the connect form itself (organization id and trust policy). */}

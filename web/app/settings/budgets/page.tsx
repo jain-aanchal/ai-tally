@@ -16,6 +16,7 @@ import Link from "next/link";
 
 import { Card } from "@/components/Card";
 import { queryBudgets } from "@/lib/budgets";
+import { canManage, getTenant } from "@/lib/getTenant";
 
 import { BudgetManager } from "./BudgetManager";
 
@@ -23,6 +24,9 @@ export const dynamic = "force-dynamic";
 
 export default async function BudgetSettingsPage() {
   const { budgets, configured, periods, scopeKinds, reachable, error } = await queryBudgets();
+  // CTO-392: saveBudgetAction / deleteBudgetAction refuse a member, so the table renders without
+  // the write affordances rather than offering buttons that are always refused.
+  const editable = canManage(await getTenant());
 
   return (
     <div className="space-y-6">
@@ -67,6 +71,7 @@ export default async function BudgetSettingsPage() {
           periods={periods}
           scopeKinds={scopeKinds}
           reachable={reachable}
+          canEdit={editable}
         />
       </Card>
 

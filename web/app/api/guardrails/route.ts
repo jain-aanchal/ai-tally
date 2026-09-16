@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, requireAdmin, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -66,6 +66,11 @@ export async function GET(req: Request) {
 // validate and echo the rule back (the client treats the echo as the saved state) so the prototype
 // works without infra; the SDK picks the change up on its next config-refresh window.
 export async function POST(req: Request) {
+  // CTO-392: a rule's caps and mode decide what live traffic is allowed to spend, so editing one is
+  // admin-only. Gated before the body is read, so a member's request never reaches the gateway.
+  const gate = await requireAdmin("change guardrail rules");
+  if (!gate.ok) return gate.response;
+
   let rule: Partial<GuardrailRule>;
   try {
     rule = (await req.json()) as Partial<GuardrailRule>;
@@ -102,7 +107,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
       method: "POST",
-      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
+      headers: controlPlaneHeaders(gate.tenant.tenantId, { "content-type": "application/json" }),
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

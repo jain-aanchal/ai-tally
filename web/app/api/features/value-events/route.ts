@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, requireAdmin } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import { queryDistinctBusinessEventNames, queryFeatureValueEvents } from "@/lib/clickhouse";
@@ -33,6 +33,11 @@ export async function GET() {
 // gateway is unreachable we still validate and echo the mapping back (the client treats the echo as
 // the saved state) so the prototype works without infra.
 export async function POST(req: Request) {
+  // CTO-392: the value event a feature is measured against decides what its ROI means, so pinning
+  // one is admin-only. Gated before the body is read.
+  const gate = await requireAdmin("configure feature value events");
+  if (!gate.ok) return gate.response;
+
   let body: { feature?: string; eventName?: string; notes?: string };
   try {
     body = (await req.json()) as { feature?: string; eventName?: string; notes?: string };
@@ -56,7 +61,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
       method: "POST",
-      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
+      headers: controlPlaneHeaders(gate.tenant.tenantId, { "content-type": "application/json" }),
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
@@ -79,6 +84,10 @@ export async function POST(req: Request) {
 // DELETE /api/features/value-events: clear a feature's value-event mapping. Forwards to the
 // gateway's idempotent delete with a client-supplied change_id.
 export async function DELETE(req: Request) {
+  // CTO-392: clearing a mapping silently stops a feature's ROI being attributed, so it is admin-only.
+  const gate = await requireAdmin("configure feature value events");
+  if (!gate.ok) return gate.response;
+
   let body: { feature?: string };
   try {
     body = (await req.json()) as { feature?: string };
@@ -94,7 +103,7 @@ export async function DELETE(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/feature-value-events`, {
       method: "DELETE",
-      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
+      headers: controlPlaneHeaders(gate.tenant.tenantId, { "content-type": "application/json" }),
       body: JSON.stringify({ feature_tag: feature, change_id: changeId }),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

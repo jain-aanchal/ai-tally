@@ -27,9 +27,11 @@ interface Props {
   snapshots: RevenueSnapshot[];
   /** True when the gateway could not be reached. We show why rather than an empty table. */
   unreachable: boolean;
+  /** CTO-392: false for a non-admin. The upload and delete actions refuse the write either way. */
+  canEdit?: boolean;
 }
 
-export function RevenueUpload({ snapshots, unreachable }: Props) {
+export function RevenueUpload({ snapshots, unreachable, canEdit = true }: Props) {
   const [rows, setRows] = useState<RevenueSnapshot[]>(snapshots);
   const [status, setStatus] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [rowErrors, setRowErrors] = useState<UploadRowError[]>([]);
@@ -110,23 +112,29 @@ export function RevenueUpload({ snapshots, unreachable }: Props) {
       ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
-        <label
-          className={`inline-flex cursor-pointer items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25 ${
-            pending ? "pointer-events-none opacity-50" : ""
-          }`}
-        >
-          {pending ? "Uploading…" : "Upload revenue CSV"}
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="sr-only"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void onFile(file);
-            }}
-          />
-        </label>
+        {canEdit ? (
+          <label
+            className={`inline-flex cursor-pointer items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25 ${
+              pending ? "pointer-events-none opacity-50" : ""
+            }`}
+          >
+            {pending ? "Uploading…" : "Upload revenue CSV"}
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="sr-only"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void onFile(file);
+              }}
+            />
+          </label>
+        ) : (
+          <span className="text-xs text-muted">
+            You have read-only access. Ask an organization admin to upload revenue.
+          </span>
+        )}
         <a
           href="/api/revenue-uploads/template"
           className="text-xs text-muted underline hover:text-accent"
@@ -198,14 +206,16 @@ export function RevenueUpload({ snapshots, unreachable }: Props) {
                   </td>
                   <td className="py-2 text-muted">{r.filename ?? "—"}</td>
                   <td className="py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={() => onDelete(r.period)}
-                      disabled={pending}
-                      className="rounded-full border border-edge bg-ink/40 px-2.5 py-1 text-xs font-medium text-muted transition hover:bg-ink/60 disabled:opacity-50"
-                    >
-                      Remove
-                    </button>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => onDelete(r.period)}
+                        disabled={pending}
+                        className="rounded-full border border-edge bg-ink/40 px-2.5 py-1 text-xs font-medium text-muted transition hover:bg-ink/60 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

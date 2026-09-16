@@ -36,6 +36,9 @@ interface Props {
   /** false when the list could not be read. The empty table then means "we could not ask", which
    *  is a different sentence from "no budget set" and has to read as one. */
   reachable: boolean;
+  /** CTO-392: false for a non-admin. The server actions refuse the write either way; this only
+   *  stops the table offering buttons that are always refused. */
+  canEdit?: boolean;
 }
 
 type Status =
@@ -69,7 +72,13 @@ function formFor(budget: Budget): BudgetFormValues {
   };
 }
 
-export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }: Props) {
+export function BudgetManager({
+  initialBudgets,
+  periods,
+  scopeKinds,
+  reachable,
+  canEdit = true,
+}: Props) {
   const [budgets, setBudgets] = useState<Budget[]>(initialBudgets);
   const [form, setForm] = useState<BudgetFormValues | null>(null);
   /** Non-null while editing an existing row: the budget_id is then fixed. */
@@ -141,7 +150,7 @@ export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }
   // Built inline rather than memoized: the action cells close over `pending` and `confirmDelete`,
   // and a memo whose deps have to list every one of those is a stale-button bug waiting to happen.
   // A budget list is a handful of rows, so there is nothing here worth caching.
-  const columns: Column<Budget>[] = [
+  const columns: (Column<Budget> | null)[] = [
     {
       key: "budgetId",
       header: "Budget",
@@ -188,7 +197,9 @@ export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }
           <span className="text-muted">Open-ended</span>
         ),
     },
-    {
+    // CTO-392: a member gets no actions column at all rather than buttons whose only outcome is a
+    // refusal from the server action behind them.
+    !canEdit ? null : {
       key: "actions",
       header: "",
       align: "right",
@@ -229,7 +240,7 @@ export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }
   return (
     <div className="space-y-4">
       <DataTable
-        columns={columns}
+        columns={columns.filter((c): c is Column<Budget> => c !== null)}
         rows={budgets}
         rowKey={(b) => b.budgetId}
         pageSize={25}
@@ -250,13 +261,19 @@ export function BudgetManager({ initialBudgets, periods, scopeKinds, reachable }
       />
 
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={openCreate}
-          className="rounded-full border border-accent/50 bg-accent/15 px-3 py-1 text-xs font-medium text-accent transition hover:bg-accent/25"
-        >
-          Set a budget
-        </button>
+        {canEdit ? (
+          <button
+            type="button"
+            onClick={openCreate}
+            className="rounded-full border border-accent/50 bg-accent/15 px-3 py-1 text-xs font-medium text-accent transition hover:bg-accent/25"
+          >
+            Set a budget
+          </button>
+        ) : (
+          <span className="text-[11px] text-muted">
+            You have read-only access. Ask an organization admin to set a budget.
+          </span>
+        )}
         {status && (
           <span
             className={`text-[11px] ${status.tone === "ok" ? "text-good" : "text-warn"}`}
