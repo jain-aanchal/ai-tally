@@ -30,11 +30,42 @@ jobs:
       - name: Test
         run: uv run pytest
 
+  # CTO-394: this job provisions Postgres, and that is the whole point of the service block below.
+  #
+  # `tests/test_batch_idempotency_pg.py` (8 tests) and `tests/test_adopt_org_pg.py` (10 tests) are
+  # gated on `TALLY_TEST_POSTGRES_DSN`, which nothing ever set here, so all 18 skipped on every pull
+  # request and every release. They were the only conditional suites in the repository, and what they
+  # cover is not incidental: the claim/lease SQL that stops two workers writing one batch's spans
+  # twice (the concurrency property a fake cannot prove), and the DELETE-plus-UPDATE cascade that
+  # org adoption runs in one transaction. Those are exactly the assertions worth having in CI, and
+  # they were the only ones not in it.
   gateway:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: infra/gateway
+    services:
+      postgres:
+        image: postgres:16
+        # Same image and same default credentials as `infra/docker-compose.yml`, so the schema CI
+        # tests against is the schema a developer runs against.
+        env:
+          POSTGRES_USER: tally
+          POSTGRES_PASSWORD: tally
+          POSTGRES_DB: tally
+        ports:
+          - 5432:5432
+        # Steps must not start before the database answers, or the migration step races the boot.
+        options: >-
+          --health-cmd "pg_isready -U tally -d tally"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # The variable the two suites gate on. Setting it is what un-skips them.
+      TALLY_TEST_POSTGRES_DSN: postgresql://tally:tally@localhost:5432/tally
+      # gateway.seed reads this one. Same database, different variable name.
+      TALLY_POSTGRES_DSN: postgresql://tally:tally@localhost:5432/tally
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -43,10 +74,75 @@ jobs:
         run: uv python install 3.12
       - name: Sync (dev)
         run: uv sync --extra dev
+
+      # A service container has no `/docker-entrypoint-initdb.d` mounts, so unlike `make up` nothing
+      # applies the schema on its own. This replays the directory the same way `make pg-migrate`
+      # does: every file, in LC_ALL=C order, with ON_ERROR_STOP so a broken migration fails the job
+      # here rather than as a confusing test error later. Every file is idempotent, so the order only
+      # has to satisfy dependencies, which numbering already does.
+      - name: Apply control-plane migrations
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          for f in $(ls ../../db/postgres/*.sql | LC_ALL=C sort); do
+            echo "applying $(basename "$f")"
+            psql -v ON_ERROR_STOP=1 -q "$TALLY_TEST_POSTGRES_DSN" -f "$f"
+          done
+
+      # Migrations alone are NOT enough, and this step exists because leaving it out fails ten tests.
+      # `usage_limits.plan` and `tenants.plan` are foreign keys onto `plan_tiers`, which 0001 creates
+      # EMPTY: the rows are reference data that provisioning inserts, not schema. So every tenant
+      # `test_adopt_org_pg.py` creates violates `usage_limits_plan_fkey` until a tier exists. This is
+      # the same 'free' tier `gateway/seed.py` inserts (kept as a narrow INSERT rather than a full
+      # `python -m gateway.seed` so CI does not mint and print an API key it has no use for).
+      - name: Seed reference data
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -q "$TALLY_TEST_POSTGRES_DSN" -c \
+            "INSERT INTO plan_tiers (name, max_traces_per_month, max_features, price_micro_usd)
+             VALUES ('free', 1000000, 10, 0) ON CONFLICT (name) DO NOTHING"
+
       - name: Lint
         run: uv run ruff check .
+
       - name: Test
-        run: uv run pytest
+        run: |
+          set -euo pipefail
+          uv run pytest -rs | tee "$RUNNER_TEMP/pytest.txt"
+
+      # THE GUARD. Without it this job silently reverts to the old behaviour the moment the service
+      # container, the DSN or the migration step breaks: the suites would skip, pytest would still
+      # exit 0, and the check would stay green while covering nothing. That is precisely how these 18
+      # tests went dark for as long as they did, so the fix is not complete without making the dark
+      # state loud. A skip is now a job failure, which also means any NEW conditional suite has to be
+      # a deliberate decision rather than something that quietly stops running.
+      - name: Fail if any test was skipped
+        run: |
+          set -euo pipefail
+          if grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest.txt"; then
+            echo "::error::Tests were SKIPPED. The Postgres-gated suites must run in CI (CTO-394)."
+            echo "Skipped tests and their reasons:"
+            grep -E '^SKIPPED' "$RUNNER_TEMP/pytest.txt" || true
+            exit 1
+          fi
+          echo "No tests were skipped."
+
+      # Belt and braces, and it is the line a reviewer can actually read: name the two modules and
+      # show them passing. "Nothing skipped" would also be satisfied by a collection error that
+      # removed them entirely, which this catches and the skip check does not.
+      - name: Prove the Postgres-gated suites executed
+        run: |
+          set -euo pipefail
+          uv run pytest -v tests/test_batch_idempotency_pg.py tests/test_adopt_org_pg.py \
+            | tee "$RUNNER_TEMP/pg-suites.txt"
+          if grep -qE '[0-9]+ (skipped|error)' "$RUNNER_TEMP/pg-suites.txt"; then
+            echo "::error::The Postgres-gated suites did not execute (CTO-394)."
+            exit 1
+          fi
+          grep -E '[0-9]+ passed' "$RUNNER_TEMP/pg-suites.txt"
 
   edge-proxy:
     runs-on: ubuntu-latest
