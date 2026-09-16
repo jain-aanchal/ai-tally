@@ -57,6 +57,12 @@ from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
 from gateway.metering import UsageRollup
+from gateway.usage_store import (
+    USAGE_UNAVAILABLE_CODE,
+    CommittedUsageStore,
+    DurableUsageRollup,
+    UsageUnavailable,
+)
 from gateway.protocol import (
     SUPPORTED_PROTOCOLS,
     capabilities,
@@ -436,6 +442,22 @@ async def lifespan(app: FastAPI):
     # HEAD-path billing meter (CTO-84/85/86): counts distinct traces + feature tags before any
     # sampling/shed so the bill is exact regardless of analytics sample rate.
     app.state.metering = UsageRollup()
+    # CTO-390: /v1/usage answers from a DURABLE, SHARED source, never from the meter above. That
+    # meter is still the HEAD counter for ingest (CTO-84) and still owns plan limits, but it is per
+    # replica and dies with the process, so reading billing off it made every answer a fraction of
+    # actual usage, made two reads of the same dashboard disagree, and reset the count on every
+    # deploy. The open period is now counted with uniqExact over ClickHouse and a closed period is
+    # read from tenant_usage_periods (migration 0034).
+    #
+    # counts_source is a callable so the ClickHouse store is resolved at READ time: app.state.store
+    # is swapped by the test suite and may be replaced on a reconnect, and a captured reference
+    # would go on reading a dead client.
+    app.state.usage = DurableUsageRollup(
+        counts_source=lambda: app.state.store,
+        committed=CommittedUsageStore(settings),
+        plan_limits=app.state.metering.plan_limit_for,
+        cache_ttl_s=settings.usage_cache_ttl_s,
+    )
     app.state.in_flight = 0
     # Ingest burst buffer (CTO-37): when enabled, spans are written to ClickHouse off the hot path by
     # a background drain loop, so a burst can't produce 5xx. Disabled → synchronous write (None).
@@ -1037,10 +1059,15 @@ def get_usage(
 
     Consumed by the dashboard ("usage vs. plan limit") and billing (CTO-86). Tenant resolves from
     the API key when auth is on, else from the ``X-Tenant-Id`` header (local dev).
+
+    Answers from the durable, shared source (CTO-390): ClickHouse for an open period, Postgres for a
+    committed one. It does NOT read the in-process meter, and it does not fall back to it when the
+    durable source is down, because a fraction of a tenant's usage looks exactly like a real small
+    number and nothing downstream could tell the difference.
     """
     settings = app.state.settings
     auth: ApiKeyAuth = app.state.auth
-    metering: UsageRollup = app.state.metering
+    usage_source: DurableUsageRollup = app.state.usage
 
     if settings.require_api_key:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -1054,7 +1081,28 @@ def get_usage(
         if not tenant_id:
             raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
 
-    record = metering.usage(tenant_id, period)
+    try:
+        record = usage_source.usage(tenant_id, period)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except UsageUnavailable:
+        # Honest under uncertainty: an explicit unknown, never a zero and never the in-process
+        # meter's partial view. Retryable, because the durable source being down is transient.
+        logger.exception("usage source unavailable for tenant %s", tenant_id)
+        return JSONResponse(
+            {
+                "tenant_id": tenant_id,
+                "period": period,
+                "trace_count": None,
+                "feature_count": None,
+                "error": {
+                    "code": USAGE_UNAVAILABLE_CODE,
+                    "message": "usage source unavailable; retry",
+                },
+            },
+            status_code=503,
+            headers={"Retry-After": "5"},
+        )
     return JSONResponse(record.as_dict(), status_code=200)
 
 

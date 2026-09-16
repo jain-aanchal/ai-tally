@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     # boots during a Postgres blip would otherwise run without it and nobody would notice.
     idempotency_durable_required: bool = False
 
+    # CTO-390: how long /v1/usage may serve an open period's counts from its in-process cache.
+    #
+    # The counts themselves are durable and shared (ClickHouse for the open period, Postgres for a
+    # committed one); this only bounds how stale a repeated read may be, so that a dashboard poll
+    # does not put a uniqExact over a tenant-month on ClickHouse every few seconds. It is a cache in
+    # front of the truth, never a substitute for it: on a miss the read goes to the durable source,
+    # and if that source cannot answer the request fails rather than serving a stale or empty count.
+    # Seconds, and deliberately short, because usage is the number a tenant watches while they debug
+    # a spike.
+    usage_cache_ttl_s: float = 15.0
+
     # Edge-key delta feed safe-lag window, in seconds (Initiative 2 §6.2 review). The /v1/edge/keys
     # cursor is a keyset watermark over (GREATEST(created_at, revoked_at), id). created_at/revoked_at
     # are stamped at statement time, not commit time, so a slow transaction can commit a row whose

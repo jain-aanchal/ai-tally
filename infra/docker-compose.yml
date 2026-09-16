@@ -150,6 +150,12 @@ services:
       # Per-org switch for the hosted edge proxy, plus the api_keys column that carries a toggle into
       # the proxy's key feed.
       - ../db/postgres/0033_tenant_proxy_config.sql:/docker-entrypoint-initdb.d/0033_tenant_proxy_config.sql:ro
+      # Committed billing usage per (tenant, period) (CTO-390). Usage used to live only in one
+      # gateway process's memory, so with more than one replica every /v1/usage answer was a
+      # fraction of actual, differed per read, and reset on every deploy. The open period is now
+      # computed from ClickHouse and each closed period is frozen here. initdb only fires on a first
+      # boot against an empty volume, so an already-running stack must apply this by hand.
+      - ../db/postgres/0034_tenant_usage_periods.sql:/docker-entrypoint-initdb.d/0034_tenant_usage_periods.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s

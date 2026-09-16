@@ -106,8 +106,13 @@ class UsageRecord:
     period: str
     trace_count: int
     feature_count: int
-    trace_commitment: str
-    feature_commitment: str
+    # CTO-390: ``None`` means "not computed", which is what a count derived from a ClickHouse
+    # aggregate honestly has to say. The commitment is a hash over the whole distinct id set, and
+    # producing it for an open period would mean materialising every id. An empty string here would
+    # be a commitment that reconciles against nothing while looking exactly like one that does, so
+    # the absence is represented as an absence.
+    trace_commitment: str | None
+    feature_commitment: str | None
     plan: str
     trace_limit: int | None
     feature_limit: int | None
@@ -167,6 +172,15 @@ class UsageRollup:
 
     def _limit_for(self, tenant_id: str) -> PlanLimit:
         return self._limits.get(tenant_id, self._default_limit)
+
+    def plan_limit_for(self, tenant_id: str) -> PlanLimit:
+        """Public read of a tenant's ceilings, for callers that count elsewhere (CTO-390).
+
+        The durable usage path derives its counts from ClickHouse and Postgres but still needs the
+        plan those counts are measured against. Plan limits are configuration, not telemetry, so
+        they stay here rather than being duplicated into a second owner that could drift.
+        """
+        return self._limit_for(tenant_id)
 
     # --- metering (HEAD path) ----------------------------------------------------------------
 
