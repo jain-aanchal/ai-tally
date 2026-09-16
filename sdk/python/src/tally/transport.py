@@ -142,6 +142,42 @@ Sender = Callable[[str, dict[str, str], bytes], "int | SendResult"]
 #: counted, never silently treated as "the gateway had nothing to say".
 _MAX_ACK_BYTES = 1024 * 1024
 
+#: Longest body this client will JSON-parse purely to look for a retry hint. A hint is a handful of
+#: bytes, but a hostile or broken endpoint can answer every failing attempt with a body at the full
+#: ack cap, and parsing a megabyte per attempt, repeated for every retry, is work the endpoint gets
+#: to choose for us. Past this we read no hint and fall back to our own bounded backoff, which is
+#: exactly what an absent Retry-After already does, so the degradation is honest (CTO-408).
+_MAX_HINT_BYTES = 64 * 1024
+
+#: Longest per-item code this client will keep. The gateway's own codes are short identifiers
+#: (``IDEMPOTENCY_UNAVAILABLE``, the longest, is 23 characters), so this is generous for anything
+#: real while still bounding what a misconfigured or compromised endpoint can push into a log
+#: record or hold in this client's memory (CTO-408).
+_MAX_CODE_LEN = 64
+
+#: Appended when a code is changed in ANY way, cut or filtered, so an altered string can never
+#: collide with a genuine gateway code. Marking only truncation was not enough: filtering alone
+#: turned ``"‮PII_DETECTED"`` into the real ``PII_DETECTED``, which this client classifies as a
+#: permanent refusal, so a garbage code became a permanent drop of billable spans where before the
+#: hygiene it was merely unknown and therefore retried (CTO-408 review). Itself made of safe
+#: characters, and counted INSIDE the cap above.
+_CODE_ALTERED_MARK = "_ALTERED"
+
+#: How many distinct codes the partial-ack warning names, and the hard ceiling on the joined
+#: summary. Bounding each code bounds nothing in aggregate: 512 distinct 64 character codes, well
+#: inside the 1 MiB ack cap and so reachable in normal operation, joined into a single 34,990
+#: character WARNING record (CTO-408 review). The codes are ranked by count, so the line still
+#: names what actually happened and the tail becomes a "+N more" count.
+_MAX_SUMMARY_CODES = 5
+_MAX_SUMMARY_LEN = 400
+
+#: Characters a code may contain. The gateway's codes are SCREAMING_SNAKE_CASE; the class is a
+#: little wider than that so a plausible future code (a digit, a dotted namespace) survives intact
+#: rather than being mangled into something that looks like a different code.
+_CODE_SAFE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+
 #: How many further sheds of one cause pass before the log speaks about it again. A standing cause
 #: (a rotated ingest key answering 401) sheds a batch per flush for as long as the app runs, so the
 #: first one warns in full and the rest are rolled into one line per this many. Counted by sheds
@@ -221,6 +257,67 @@ def _finite_float(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _safe_code(raw: str) -> str:
+    """Reduce a gateway-supplied item code to something safe to hold and to log. Never raises.
+
+    The ack body is attacker-controlled the moment the endpoint is compromised or simply
+    misconfigured, and this client joins item codes into a WARNING. Unbounded and unfiltered, a
+    code forges a whole log line: 300 characters carrying an embedded ``\\nWARNING injected``
+    produced a 491 character record whose second physical line reads exactly like a real one
+    (CTO-408). This is log INTEGRITY, not disclosure. The realistic attacker is an endpoint
+    poisoning the customer's own log pipeline; the span content and account ids that would be a
+    disclosure problem do not reach the records this function feeds, and this change keeps that
+    true. That is a statement about these records, not about the file: the partial-ack warning
+    does log a gateway-supplied code verbatim, which is exactly why the code is sanitised here.
+
+    Sanitising HERE, at the parse boundary, rather than at the log call, means nothing hostile
+    enters this client's state at all: the same string is also held as a dict key for the whole
+    flush, so the bound caps memory as well as log width.
+
+    Any alteration is MARKED, and truncation is decided on the RAW length. Filtering silently was
+    a behaviour regression: it could rewrite garbage INTO a real code, and a real code is
+    classified. ``"\\u202ePII_DETECTED"`` filtered to ``PII_DETECTED``, a permanent refusal, so
+    spans that were retried before this hygiene existed were dropped for good after it. Deciding
+    truncation on the filtered length had the same shape: ``"RATE_LIMITED" + "!" * 100`` is 112
+    characters of hostile input that strips to exactly ``RATE_LIMITED`` and never trips the cap.
+    A marked code matches nothing in either code set, so it falls through to unknown and is
+    retried, which is the pre-CTO-408 behaviour for a malformed code (CTO-408 review).
+    """
+    cleaned = "".join(c for c in raw if c in _CODE_SAFE_CHARS)
+    # The RAW length decides truncation, so a long hostile code that strips short is still marked.
+    altered = cleaned != raw or len(raw) > _MAX_CODE_LEN
+    keep = _MAX_CODE_LEN - len(_CODE_ALTERED_MARK)
+    if len(cleaned) > keep:
+        cleaned = cleaned[:keep]
+    if not cleaned:
+        # A code made entirely of characters we refuse is still a real outcome the gateway
+        # reported, so it keeps a placeholder rather than vanishing: dropping it would silently
+        # lose an item outcome, and a lost outcome is the class of bug CTO-391 exists to prevent.
+        cleaned, altered = "UNPRINTABLE_CODE", True
+    return cleaned + _CODE_ALTERED_MARK if altered else cleaned
+
+
+def _code_summary(counts: dict[str, int]) -> str:
+    """Render per-code counts for one log line, bounded in AGGREGATE as well as per code.
+
+    Bounding each code bounds nothing here: the line joins every DISTINCT code, and an ack naming
+    512 of them (comfortably inside the ack read cap) produced a single 34,990 character WARNING
+    record. The top codes by count carry the diagnostic value, so they are named and the rest
+    become a count (CTO-408 review).
+    """
+    if not counts:
+        return ""
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    parts = [f"{code}={n}" for code, n in ranked[:_MAX_SUMMARY_CODES]]
+    remaining = len(ranked) - len(parts)
+    if remaining:
+        parts.append(f"+{remaining} more")
+    summary = ", ".join(parts)
+    # Belt and braces: the pieces above are individually bounded, so this cannot trip today, but a
+    # widened code cap or summary count should not be able to unbound the line by accident.
+    return summary if len(summary) <= _MAX_SUMMARY_LEN else summary[:_MAX_SUMMARY_LEN] + "_CUT"
+
+
 def _parse_ack(body: bytes) -> _BatchAck | None:
     """Parse a 2xx ack. Returns ``None`` when the body teaches us nothing. Never raises.
 
@@ -251,7 +348,11 @@ def _parse_ack(body: bytes) -> _BatchAck | None:
                 continue
             item_id, code = entry.get("item_id"), entry.get("code")
             if isinstance(item_id, str) and isinstance(code, str) and code:
-                errors.append((item_id, code))
+                # Bounded and filtered at the boundary, never raw into state or a log (CTO-408).
+                # item_id is deliberately left alone: no log record built here carries it (the
+                # sweep test pins that), it is only ever compared against ids we generated, and
+                # the ack read cap already bounds it.
+                errors.append((item_id, _safe_code(code)))
 
     hints = parsed.get("server_hints")
     hints = hints if isinstance(hints, dict) else {}
@@ -295,7 +396,11 @@ def _retry_hint_ms(headers: object, body: bytes) -> int | None:
                 secs = -1
             if secs >= 0:
                 return secs * 1000
-    if not body:
+    if not body or len(body) > _MAX_HINT_BYTES:
+        # A body too large to be worth parsing for a hint teaches us nothing and costs real CPU on
+        # every failing attempt, so we skip it and use our own backoff (CTO-408). No behaviour is
+        # invented here: "no hint" is a state this function already returns and the caller already
+        # handles.
         return None
     try:
         parsed = json.loads(body.decode("utf-8"))
@@ -779,11 +884,13 @@ class BatchingTransport:
 
         if lost or requeued or discarded:
             # Codes and counts only: an item_id is a trace/span id and a span is the customer's
-            # data, so neither goes near the log (CLAUDE.md, no bodies in telemetry). The buffer
-            # discards are stated separately because they are the one number this line used to get
-            # wrong: it reported "4 re-enqueued, 0 lost" for four spans the buffer cap had just
-            # thrown away (CTO-391 review).
-            summary = ", ".join(f"{code}={n}" for code, n in sorted(codes.items()))
+            # data, so neither goes near the log (CLAUDE.md, no bodies in telemetry). The codes
+            # themselves ARE gateway-supplied text and are logged verbatim, which is why they are
+            # sanitised at the parse boundary and summarized under an aggregate bound here
+            # (CTO-408). The buffer discards are stated separately because they are the one number
+            # this line used to get wrong: it reported "4 re-enqueued, 0 lost" for four spans the
+            # buffer cap had just thrown away (CTO-391 review).
+            summary = _code_summary(codes)
             first, rolled_events, rolled_spans = self._damp_locked("gateway rejected items", lost)
             if first:
                 _log.warning(
