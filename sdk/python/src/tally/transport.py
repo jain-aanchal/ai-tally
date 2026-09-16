@@ -988,8 +988,11 @@ class BatchingTransport:
         if unknown_codes:
             # Its own line and its own damping key. This is the one outcome where the right action
             # is to upgrade the SDK, and it must not be mistaken for either a loss or a success
-            # (CTO-406). Counts only, no code text: see CTO-408 for why a gateway-supplied code is
-            # not safe to put in a log record unbounded.
+            # (CTO-406). This warning carries a count and no code text. That is a property of this
+            # line alone, not of the module: the "gateway rejected items" summary above formats the
+            # codes dict verbatim and an unrecognised code is in that dict, so on a mixed ack the
+            # gateway's string is already logged there. Bounding gateway-supplied code text in a log
+            # record is CTO-408's job, not this one's.
             first, rolled_events, rolled_spans = self._damp_locked(
                 "gateway named an unrecognised code", unknown_codes
             )

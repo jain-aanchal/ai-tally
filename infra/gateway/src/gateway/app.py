@@ -215,6 +215,11 @@ REPLAY_INDEX_PER_TENANT_CAP = 500
 # above then trims each tenant's slice to REPLAY_INDEX_PER_TENANT_CAP.
 REPLAY_HYDRATE_LIMIT = 5000
 
+# The wire spellings of the accepted-but-flagged codes, derived once at import rather than rebuilt
+# per request on the /v1/batches hot path. ACCEPTED_BUT_FLAGGED is a frozenset fixed at import, so
+# there is nothing to recompute (CTO-406).
+_FLAG_ERROR_VALUES = frozenset(c.value for c in ACCEPTED_BUT_FLAGGED)
+
 # Guards _configure_logging so a re-created app (e.g. the test suite spinning up many TestClients in
 # one process) attaches the root handler exactly once and never stacks duplicates. See CTO-218.
 _logging_configured = False
@@ -1167,8 +1172,7 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     # Reads the declared flag set rather than naming one code inline, so a second accepted-but-
     # flagged code added to errors.py is non-fatal here automatically instead of silently turning
     # every flagged batch into a PARTIAL (CTO-406).
-    _flag_values = {c.value for c in ACCEPTED_BUT_FLAGGED}
-    fatal = [e for e in partial_errors if e.code not in _flag_values]
+    fatal = [e for e in partial_errors if e.code not in _FLAG_ERROR_VALUES]
     status = Status.PARTIAL if fatal else Status.ACCEPTED
     resp = BatchResponse(
         batch_id=batch.batch_id,
