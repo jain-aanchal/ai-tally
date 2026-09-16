@@ -43,6 +43,30 @@
 
 import { formatUSD, type MicroUSD } from "./types";
 
+// CTO-395 review: the reasons a blank or an empty page carries, exported so the route and the page
+// state the same fact in the same words. Two of them exist because a read that FAILED and a corpus
+// that does not EXIST are different facts, and the route's own replayDiagnostics docstring already
+// names the rule they were breaking: a wrong reason on a blank is its own honesty failure.
+
+/** No replay has been run for this workload. A measured absence. */
+export const NO_REPLAY_RAN_REASON =
+  "no cross-provider replay has run for this workload, so there is nothing replayed to count or cost";
+
+/** The replay read itself failed, so what has been replayed is genuinely unknown. */
+export const REPLAY_UNREADABLE_REASON =
+  "the replay projection could not be read, so we do not know what has been replayed for this workload";
+
+/**
+ * The incumbent read failed, so the page has no subject and cannot say why in terms of the data.
+ *
+ * This is the sentence that stops a failed tenant resolution reading as "you have no telemetry".
+ * `resolveTenantId()` runs outside every helper's try block and throws on no active org, on the
+ * post-signup provisioning race, and on any non-404 from the gateway, including a 503 that means
+ * provisioning is failing.
+ */
+export const CURRENT_MODEL_UNREADABLE_REASON =
+  "The current model for this workspace could not be read, so we cannot tell whether any traffic exists.";
+
 export interface CandidateMetrics {
   /** display label, e.g. "claude-haiku-4.5" */
   model: string;
@@ -87,6 +111,16 @@ export interface Comparison {
    * subject, and it gets one representation rather than a scatter of nulls the page has to
    * reassemble. Nulling `current` alone would leave `workload` naming a workload nobody ran.
    */
+  /**
+   * Why no comparison could be produced at all, or null when one could (CTO-395 review).
+   *
+   * This is NOT the same as `current: null`. `current: null` means the read succeeded and found no
+   * incumbent, which is a real answer about a new workspace. A non-null `unavailable` means a read
+   * FAILED, so whether traffic exists is unknown, and the page must render SourceUnavailable rather
+   * than the "nothing has arrived" empty state. Collapsing the two is what told a customer in the
+   * post-signup provisioning race that no telemetry had ever reached ai-tally.
+   */
+  unavailable: string | null;
   workload: string | null; // e.g. "research_agent / production / last 7 days"
   /** null when no model has served traffic in the window: there is no incumbent to compare against. */
   current: CandidateMetrics | null;
@@ -120,6 +154,13 @@ export interface Comparison {
      * noise, not information; the row and the field are gone until a source exists.
      */
     replayCostMicroUsd: MicroUSD | null;
+    /**
+     * Why the three counts above are blank, or null when they are real measurements (CTO-395
+     * review). A rejected replay read and an absent replay corpus both arrived as null, so the page
+     * explained both with "no cross-provider replay has run for this workload" even when the truth
+     * was that the read failed. Each case carries its own true reason now.
+     */
+    replayUnavailableReason: string | null;
     contextFidelity: "resolved-context replay (no live retrieval)" | "live retrieval";
     /**
      * Minutes since the reconciler last trued-up the baseline traffic this comparison is built
@@ -193,6 +234,8 @@ export type PopulatedComparison = Comparison & {
 };
 
 export const comparison: PopulatedComparison = {
+  // The fixture is a comparison that was produced, so nothing about it is unavailable.
+  unavailable: null,
   // Fixture label, used only in the unreachable-gateway fallback. Live path calls deriveWorkload.
   workload: "research_agent / production / last 7 days",
   current: {
@@ -250,6 +293,9 @@ export const comparison: PopulatedComparison = {
     samplesReplayed: null,
     samplesAvailable: null,
     replayCostMicroUsd: null,
+    // No replay sits behind this object on any path that ships it, which is a measured absence
+    // rather than a failed read.
+    replayUnavailableReason: NO_REPLAY_RAN_REASON,
     contextFidelity: "resolved-context replay (no live retrieval)",
     reconcilerLastRunMinutesAgo: 18,
   },
