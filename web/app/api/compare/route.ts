@@ -58,6 +58,24 @@ function replayDiagnostics(replay: ReplayProjection | null) {
   };
 }
 
+/**
+ * Unwrap one settled read, mapping a rejection onto the same `null` the helper would have returned
+ * for its own failures (CTO-395).
+ *
+ * allSettled rather than all, so one failing read cannot discard a sibling that answered. Every
+ * helper here already catches an unreachable gateway or a non-2xx and returns null, and null is
+ * this route's established "unknown" on every branch below: it renders explained blanks, never a
+ * figure. A rejection is the same fact arriving by a different route, so it is reported the same
+ * way. What it must never become is a zero, which would read as a measurement.
+ */
+function settled<T>(result: PromiseSettledResult<T>, label: string): T | null {
+  if (result.status === "fulfilled") return result.value;
+  console.warn(
+    `[compare] ${label} read failed: ${(result.reason as Error)?.message}; reporting it as unknown`,
+  );
+  return null;
+}
+
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
 function evalQualityFor(
   evalRows: EvalCandidateRow[] | undefined,
@@ -81,22 +99,31 @@ export async function GET(req: Request) {
 
   // CTO-113: try the real replay projection first. When it returns data, the candidate rows
   // are grounded in actual cross-provider replay outcomes (real cost from the SDK price catalog,
-  // real token counts from replayed calls) — no rescaled mock needed. When it returns null
+  // real token counts from replayed calls), so no rescaled mock is needed. When it returns null
   // (no samples opted-in yet, or gateway unreachable) we drop through to the original
   // current-model-only path below.
-  const replay = await queryReplayCandidates(featureTag);
-  // CTO-114: eval is independent of replay (it consumes replay outcomes but is its own opt-in).
-  // Pull it in parallel so the route doesn't add 30s of latency stacked behind the replay call.
-  const evalProj = await queryEvalCandidates(featureTag);
-
-  // CTO-169: the baseline's freshness signal is the real reconciliation_runs last-run, not the
-  // fixture constant — null (→ `—`) when the reconciler has never run / the source is unavailable.
-  const reconcilerLastRunMinutesAgo = await queryReconcilerLastRun();
-
-  // The "current model" half is the one we can ground in real traffic today: most-trafficked
-  // model over the last 7 days. Quality/latency on `current` stay mocked because we don't yet
-  // have an eval harness — flagged honestly via SyntheticPreviewBanner on the page.
-  const live = await queryCurrentModel();
+  //
+  // CTO-395: these four reads are started together, because none of them consumes another's
+  // result. The comment that used to sit here claimed exactly that ("pull it in parallel so the
+  // route doesn't add 30s of latency stacked behind the replay call") directly above two
+  // sequential awaits with no Promise.all. queryEvalCandidates is a SYNCHRONOUS judge run with a
+  // 600 second timeout (lib/clickhouse.ts), so what the code actually did was queue the replay
+  // behind a potential ten minute eval and add the two together. Eval consumes replay OUTCOMES
+  // from an earlier opt-in pass, not this call's return value, so there is no ordering to respect.
+  const [replayR, evalR, reconcilerR, liveR] = await Promise.allSettled([
+    queryReplayCandidates(featureTag),
+    queryEvalCandidates(featureTag),
+    // CTO-169: the baseline's freshness signal is the real reconciliation_runs last-run, not the
+    // fixture constant. Null when the reconciler has never run / the source is unavailable.
+    queryReconcilerLastRun(),
+    // The "current model" half is the one we can ground in real traffic today: the most-trafficked
+    // model over the last 7 days.
+    queryCurrentModel(),
+  ]);
+  const replay = settled(replayR, "replay");
+  const evalProj = settled(evalR, "eval");
+  const reconcilerLastRunMinutesAgo = settled(reconcilerR, "reconciler last-run");
+  const live = settled(liveR, "current model");
   if (!live && !sampleDataAllowed()) {
     // #364 finished here (CTO-379). Every other fixture fallback in app/api/** was put behind
     // sampleDataAllowed(); this route was missed, so it stayed the one surface that still answered
@@ -222,6 +249,13 @@ export async function GET(req: Request) {
         ...comparison.current,
         model: live.model,
         provider: live.provider,
+        // CTO-395: the note that used to sit at the top of this route said quality and latency on
+        // `current` "stay mocked because we don't yet have an eval harness, flagged honestly via
+        // SyntheticPreviewBanner". Every clause of that had gone stale. The harness exists and is
+        // queried above (CTO-114); qualityScore below is an honest null rather than a mock;
+        // latency and error rate are live otel figures (CTO-115); and the banner wraps the page
+        // body in the empty case only, so it was never what labelled these cells.
+        //
         // CTO-244 follow-up: an unknown incumbent cost now travels as null, not as the 0 that
         // used to stand in as the "no baseline" sentinel. The page's own gate reads null as no
         // baseline (same banner) AND the tile renders the explained blank instead of "$0.00/mo",
@@ -231,8 +265,9 @@ export async function GET(req: Request) {
         // fewer than 50 spans landed — page renders "—" so we never fabricate.
         latencyP95Ms: live.latencyP95Ms,
         errorRate: live.errorRate,
-        // CTO-114: current never gets a fabricated quality — there's no judge pair when the
-        // candidate IS the current model. The page renders "—" in that cell.
+        // CTO-114: current never gets a fabricated quality. A model cannot be judged against
+        // itself, so there is no pair to score and no number to report; the page renders the
+        // blank. This is honest-null by construction, not a placeholder awaiting a harness.
         qualityScore: null,
       },
       candidates,
