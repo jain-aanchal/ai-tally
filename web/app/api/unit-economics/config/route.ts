@@ -8,6 +8,7 @@ import {
   type UnitEconomicsThresholds,
 } from "@/lib/unitEconomics";
 import { queryUnitEconomicsConfig } from "@/lib/unitEconomicsConfig";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Per-tenant LTV/CAC band thresholds live in the control plane (Postgres, CTO-126), reached via the
 // gateway. The reader falls back to `null` (→ hardcoded defaults) when the gateway is unreachable, so
@@ -38,8 +39,8 @@ export async function GET(): Promise<NextResponse<ThresholdConfigPayload>> {
 
 // POST /api/unit-economics/config: persist edited thresholds. Validates the shape, then forwards to
 // the gateway's idempotent upsert with a client-supplied change_id (UUID). When the gateway is
-// unreachable we validate and echo the values back (persisted:false) so the prototype works without
-// infra.
+// unreachable OFF the product path the validated values are echoed back so the prototype works
+// without infra (CTO-393); on the product path that is a failed save and answers 503.
 export async function POST(req: Request) {
   // CTO-392: these cutoffs colour every LTV/CAC and payback band the workspace reads, so changing
   // them is admin-only. Gated before the body is read.
@@ -109,7 +110,16 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: `gateway error ${res.status}` }, { status: 502 });
   } catch {
-    // Gateway unreachable (CI / fresh clone): echo the validated thresholds so the prototype works.
+    // CTO-393: the control plane could not be reached, so the thresholds were NOT stored. This used
+    // to answer 200 with `persisted: false` on every path, and ThresholdSettings checks only
+    // `res.ok`, so it rendered "saved" over cutoffs that still have their old values.
+    if (!controlPlaneEchoAllowed()) {
+      return NextResponse.json(
+        { error: "Not saved: the control plane is unreachable.", persisted: false },
+        { status: 503 },
+      );
+    }
+    // Off the product path (fresh clone / CI): echo the validated thresholds.
     return NextResponse.json({ thresholds: t, changeId, persisted: false });
   }
 }

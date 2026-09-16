@@ -275,6 +275,8 @@ function ConfigureModal({
   const [freeText, setFreeText] = useState("");
   const [useFreeText, setUseFreeText] = useState(false);
   const [save, setSave] = useState<SaveState>("idle");
+  /** CTO-393: why the save failed, so an unreachable control plane says so explicitly. */
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Reset the picker whenever we advance to a different feature in the sequential flow.
   useEffect(() => {
@@ -282,6 +284,7 @@ function ConfigureModal({
     setFreeText("");
     setUseFreeText(false);
     setSave("idle");
+    setSaveError(null);
   }, [feature]);
 
   const chosen = useFreeText ? freeText.trim() : selected;
@@ -291,19 +294,29 @@ function ConfigureModal({
   async function confirm() {
     if (!chosen) return;
     setSave("saving");
+    setSaveError(null);
     try {
       const res = await fetch("/api/features/value-events", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ feature, eventName: chosen }),
       });
-      if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        persisted?: boolean;
+      };
+      // CTO-393: `res.ok` alone used to be the test, so an unreachable control plane closed the
+      // modal and showed the feature as configured while nothing was stored. Whether a feature has
+      // a value event is what decides if its ROI is attributed at all.
+      if (!res.ok || body.persisted === false) {
         setSave("error");
+        setSaveError(body.error ?? "Not saved: the control plane is unreachable.");
         return;
       }
       onSaved(chosen);
     } catch {
       setSave("error");
+      setSaveError("Not saved: the control plane is unreachable.");
     }
   }
 
@@ -395,7 +408,7 @@ function ConfigureModal({
         )}
 
         {save === "error" && (
-          <p className="mt-3 text-xs text-bad">Couldn’t save. Try again.</p>
+          <p className="mt-3 text-xs text-bad">{saveError ?? "Couldn’t save. Try again."}</p>
         )}
 
         <div className="mt-5 flex items-center justify-end gap-2">

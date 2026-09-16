@@ -3,6 +3,7 @@ import { controlPlaneHeaders, requireAdmin } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import { queryDistinctBusinessEventNames, queryFeatureValueEvents } from "@/lib/clickhouse";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Feature value-event config (CTO-140) lives in the control plane (Postgres), reached via the
 // gateway; the observed-events list comes live from ClickHouse `business_events`. Both readers fall
@@ -30,8 +31,8 @@ export async function GET() {
 
 // POST /api/features/value-events: pin a value event to a feature. Validates the shape, then
 // forwards to the gateway's idempotent upsert with a client-supplied change_id (UUID). When the
-// gateway is unreachable we still validate and echo the mapping back (the client treats the echo as
-// the saved state) so the prototype works without infra.
+// gateway is unreachable OFF the product path the validated mapping is echoed back so the prototype
+// works without infra (CTO-393); on the product path that is a failed save and answers 503.
 export async function POST(req: Request) {
   // CTO-392: the value event a feature is measured against decides what its ROI means, so pinning
   // one is admin-only. Gated before the body is read.
@@ -68,7 +69,14 @@ export async function POST(req: Request) {
     });
     if (res.ok) {
       const gw = (await res.json()) as { value_event?: unknown };
-      return NextResponse.json({ feature, eventName, changeId, valueEvent: gw.value_event ?? null });
+      return NextResponse.json({
+        feature,
+        eventName,
+        changeId,
+        valueEvent: gw.value_event ?? null,
+        // CTO-393: stated explicitly so the client never infers "it saved" from a 200 alone.
+        persisted: true,
+      });
     }
     if (res.status >= 400 && res.status < 500) {
       const detail = await res.text();
@@ -76,7 +84,16 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: `gateway error ${res.status}` }, { status: 502 });
   } catch {
-    // Gateway unreachable (CI / fresh clone): echo the validated mapping so the prototype still works.
+    // CTO-393: the control plane could not be reached, so the mapping was NOT stored. The modal
+    // checks only `res.ok`, so this used to close over an unsaved mapping and show the feature as
+    // configured, which is the one thing that decides whether its ROI is attributed at all.
+    if (!controlPlaneEchoAllowed()) {
+      return NextResponse.json(
+        { error: "Not saved: the control plane is unreachable.", persisted: false },
+        { status: 503 },
+      );
+    }
+    // Off the product path (fresh clone / CI): echo the validated mapping.
     return NextResponse.json({ feature, eventName, changeId, persisted: false });
   }
 }
@@ -109,10 +126,18 @@ export async function DELETE(req: Request) {
       signal: AbortSignal.timeout(2000),
     });
     if (res.ok) {
-      return NextResponse.json({ feature, changeId });
+      return NextResponse.json({ feature, changeId, persisted: true });
     }
     return NextResponse.json({ error: `gateway error ${res.status}` }, { status: 502 });
   } catch {
+    // CTO-393: same as the POST. A delete that did not reach the control plane has not happened,
+    // and the mapping is still attributing ROI.
+    if (!controlPlaneEchoAllowed()) {
+      return NextResponse.json(
+        { error: "Not saved: the control plane is unreachable.", persisted: false },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ feature, changeId, persisted: false });
   }
 }

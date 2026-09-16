@@ -53,6 +53,8 @@ export function ThresholdSettings({
 }) {
   const [form, setForm] = useState<UnitEconomicsThresholds>(initial);
   const [state, setState] = useState<SaveState>("idle");
+  /** CTO-393: why the save failed, so an unreachable control plane says so rather than "save failed". */
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [overridden, setOverridden] = useState(hasOverride);
   const err = invalid(form);
   const isDefault =
@@ -75,20 +77,29 @@ export function ThresholdSettings({
   async function save() {
     if (err) return;
     setState("saving");
+    setSaveError(null);
     try {
       const res = await fetch("/api/unit-economics/config", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(form),
       });
-      if (res.ok) {
-        setState("saved");
-        setOverridden(true);
-      } else {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        persisted?: boolean;
+      };
+      // CTO-393: `res.ok` alone used to be the test, so an unreachable control plane (which answered
+      // 200 with persisted:false) set "saved" over cutoffs that still held their old values.
+      if (!res.ok || body.persisted === false) {
         setState("error");
+        setSaveError(body.error ?? "Not saved: the control plane is unreachable.");
+        return;
       }
+      setState("saved");
+      setOverridden(true);
     } catch {
       setState("error");
+      setSaveError("Not saved: the control plane is unreachable.");
     }
   }
 
@@ -155,7 +166,9 @@ export function ThresholdSettings({
         {err && <span className="text-xs text-bad">{err}</span>}
         {!err && state === "saving" && <span className="text-xs text-muted">saving…</span>}
         {!err && state === "saved" && <span className="text-xs text-good">saved ✓</span>}
-        {!err && state === "error" && <span className="text-xs text-bad">save failed</span>}
+        {!err && state === "error" && (
+          <span className="text-xs text-bad">{saveError ?? "save failed"}</span>
+        )}
       </div>
     </section>
   );
