@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 import {
+  CURRENT_MODEL_UNREADABLE_REASON,
+  NO_REPLAY_RAN_REASON,
+  REPLAY_UNREADABLE_REASON,
   comparison,
   deriveRecommendation,
   deriveWorkload,
@@ -49,31 +52,51 @@ const NO_REPLAY_DIAGNOSTICS = {
  * read "no cross-provider replay has run for this workload". A wrong reason on a blank is its own
  * honesty failure, so whenever the projection exists we report what it counted.
  */
-function replayDiagnostics(replay: ReplayProjection | null) {
-  if (!replay) return NO_REPLAY_DIAGNOSTICS;
+function replayDiagnostics(read: Read<ReplayProjection | null>) {
+  // CTO-395 review: a read that FAILED and a corpus that does not EXIST both arrived here as null,
+  // so the page explained both with "no cross-provider replay has run for this workload". That is
+  // the exact failure this function's own docstring names, on the blank it was written to protect.
+  if (!read.ok) {
+    return { ...NO_REPLAY_DIAGNOSTICS, replayUnavailableReason: REPLAY_UNREADABLE_REASON };
+  }
+  if (!read.value) {
+    return { ...NO_REPLAY_DIAGNOSTICS, replayUnavailableReason: NO_REPLAY_RAN_REASON };
+  }
   return {
-    samplesReplayed: replay.per_candidate.reduce((s, c) => s + c.samples_replayed, 0),
-    samplesAvailable: replay.samples_available,
-    replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
+    samplesReplayed: read.value.per_candidate.reduce((s, c) => s + c.samples_replayed, 0),
+    samplesAvailable: read.value.samples_available,
+    replayCostMicroUsd: read.value.diagnostics.replay_cost_micro_usd,
+    replayUnavailableReason: null,
   };
 }
 
+/** One settled read: the value it produced, or the failure that stopped it producing one. */
+type Read<T> = { ok: true; value: T } | { ok: false; error: string };
+
 /**
- * Unwrap one settled read, mapping a rejection onto the same `null` the helper would have returned
- * for its own failures (CTO-395).
+ * Unwrap one settled read, KEEPING the distinction between "it answered null" and "it threw"
+ * (CTO-395, corrected on review).
  *
- * allSettled rather than all, so one failing read cannot discard a sibling that answered. Every
- * helper here already catches an unreachable gateway or a non-2xx and returns null, and null is
- * this route's established "unknown" on every branch below: it renders explained blanks, never a
- * figure. A rejection is the same fact arriving by a different route, so it is reported the same
- * way. What it must never become is a zero, which would read as a measurement.
+ * allSettled rather than all, so one failing read cannot discard a sibling that answered. What this
+ * originally got wrong was the next step: it mapped every rejection onto `null`, and `null` on the
+ * `live` read is this route's "this workspace has no traffic" signal. So a failure to identify or
+ * reach the tenant was reported to the customer as a measured fact about their telemetry.
+ *
+ * That is not a theoretical path. `resolveTenantId()` runs OUTSIDE the try in `tryLive`, and
+ * outside the try in `queryReplayCandidates` and `queryEvalCandidates`, and it throws
+ * NoActiveOrgError, throws TenantNotProvisionedError on the documented post-signup provisioning
+ * race, and rethrows on any non-404 from `/v1/tenant/by-clerk-org`, including the 503 that means
+ * provisioning is failing. A customer who beat the webhook opened /compare and was told nothing had
+ * ever arrived.
+ *
+ * A null value still means unknown and still renders explained blanks. A rejection now says so as a
+ * failed read. Neither may become a zero, which would read as a measurement.
  */
-function settled<T>(result: PromiseSettledResult<T>, label: string): T | null {
-  if (result.status === "fulfilled") return result.value;
-  console.warn(
-    `[compare] ${label} read failed: ${(result.reason as Error)?.message}; reporting it as unknown`,
-  );
-  return null;
+function settled<T>(result: PromiseSettledResult<T>, label: string): Read<T> {
+  if (result.status === "fulfilled") return { ok: true, value: result.value };
+  const error = (result.reason as Error)?.message ?? "unknown error";
+  console.warn(`[compare] ${label} read failed: ${error}; reporting it as unknown`);
+  return { ok: false, error };
 }
 
 /** Look up a candidate's eval row; return null when no row exists or sample count too small. */
@@ -120,10 +143,39 @@ export async function GET(req: Request) {
     // model over the last 7 days.
     queryCurrentModel(),
   ]);
-  const replay = settled(replayR, "replay");
-  const evalProj = settled(evalR, "eval");
-  const reconcilerLastRunMinutesAgo = settled(reconcilerR, "reconciler last-run");
-  const live = settled(liveR, "current model");
+  const replayRead = settled(replayR, "replay");
+  const evalRead = settled(evalR, "eval");
+  const reconcilerRead = settled(reconcilerR, "reconciler last-run");
+  const liveRead = settled(liveR, "current model");
+
+  const replay = replayRead.ok ? replayRead.value : null;
+  const evalProj = evalRead.ok ? evalRead.value : null;
+  const reconcilerLastRunMinutesAgo = reconcilerRead.ok ? reconcilerRead.value : null;
+
+  // CTO-395 review: a FAILED incumbent read is not a workspace with no traffic.
+  //
+  // This branch has to come before the empty-state branch below, because both used to be reached
+  // through the same `!live`. The page renders SourceUnavailable for this, which says nothing about
+  // whether data exists; the empty state below says data does not exist, and only a successful read
+  // earns that sentence. A demo build is unaffected: it keeps its labelled fixture, as before.
+  if (!liveRead.ok && !sampleDataAllowed()) {
+    return NextResponse.json({
+      ...comparison,
+      unavailable: CURRENT_MODEL_UNREADABLE_REASON,
+      workload: null,
+      current: null,
+      candidates: [],
+      recommendation: null,
+      diagnostics: {
+        ...comparison.diagnostics,
+        ...replayDiagnostics(replayRead),
+        reconcilerLastRunMinutesAgo,
+      },
+      replay_source: "none",
+    });
+  }
+
+  const live = liveRead.ok ? liveRead.value : null;
   if (!live && !sampleDataAllowed()) {
     // #364 finished here (CTO-379). Every other fixture fallback in app/api/** was put behind
     // sampleDataAllowed(); this route was missed, so it stayed the one surface that still answered
@@ -142,7 +194,7 @@ export async function GET(req: Request) {
       recommendation: null,
       diagnostics: {
         ...comparison.diagnostics,
-        ...replayDiagnostics(replay),
+        ...replayDiagnostics(replayRead),
         reconcilerLastRunMinutesAgo,
       },
       replay_source: "none",
@@ -170,7 +222,7 @@ export async function GET(req: Request) {
       // not need a current-model cost row), and those counts are real, so they are reported.
       diagnostics: {
         ...comparison.diagnostics,
-        ...replayDiagnostics(replay),
+        ...replayDiagnostics(replayRead),
         reconcilerLastRunMinutesAgo,
       },
       // #329: "mock" describes the candidate rows above, which are the fixture's on this branch
@@ -277,6 +329,8 @@ export async function GET(req: Request) {
         samplesReplayed: totalReplayed,
         samplesAvailable: replay.samples_available,
         replayCostMicroUsd: replay.diagnostics.replay_cost_micro_usd,
+        // Real measurements, so nothing to explain away.
+        replayUnavailableReason: null,
         contextFidelity:
           (replay.diagnostics.context_fidelity as
             | "resolved-context replay (no live retrieval)"
@@ -370,7 +424,13 @@ export async function GET(req: Request) {
     // #320: this branch has a live current model and rescaled-mock candidates, and no replay at
     // all. It is the branch the issue was reported against: nine spans in the stack, "$42.30 /
     // 4,200 traces replayed / 87,400 prod traces" on screen. All four counts are null now.
-    diagnostics: { ...comparison.diagnostics, ...NO_REPLAY_DIAGNOSTICS, reconcilerLastRunMinutesAgo },
+    // CTO-395 review: replayDiagnostics rather than the bare constant, so a replay read that THREW
+    // here is explained as a failed read instead of as a replay nobody ran.
+    diagnostics: {
+      ...comparison.diagnostics,
+      ...replayDiagnostics(replayRead),
+      reconcilerLastRunMinutesAgo,
+    },
     replay_source: "mock",
   });
 }
