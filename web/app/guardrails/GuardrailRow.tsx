@@ -46,9 +46,18 @@ async function postRule(rule: GuardrailRule): Promise<{ ok: boolean; error?: str
       headers: { "content-type": "application/json" },
       body: JSON.stringify(rule),
     });
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      persisted?: boolean;
+    };
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
       return { ok: false, error: body.error ?? `save failed (${res.status})` };
+    }
+    // CTO-393: a 200 that says nothing was persisted is not a save. The route still echoes off the
+    // product path so a fresh clone keeps working, but an echo must never be rendered as
+    // "Caps updated. Live within the refresh window." over traffic still running the old cap.
+    if (body.persisted === false) {
+      return { ok: false, error: "Not saved: the control plane is unreachable." };
     }
     return { ok: true };
   } catch (err) {

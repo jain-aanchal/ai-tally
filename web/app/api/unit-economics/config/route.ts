@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneEchoAllowed, controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -38,8 +38,8 @@ export async function GET(): Promise<NextResponse<ThresholdConfigPayload>> {
 
 // POST /api/unit-economics/config: persist edited thresholds. Validates the shape, then forwards to
 // the gateway's idempotent upsert with a client-supplied change_id (UUID). When the gateway is
-// unreachable we validate and echo the values back (persisted:false) so the prototype works without
-// infra.
+// unreachable OFF the product path the validated values are echoed back so the prototype works
+// without infra (CTO-393); on the product path that is a failed save and answers 503.
 export async function POST(req: Request) {
   let body: Partial<UnitEconomicsThresholds> & { updatedBy?: string };
   try {
@@ -104,7 +104,16 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: `gateway error ${res.status}` }, { status: 502 });
   } catch {
-    // Gateway unreachable (CI / fresh clone): echo the validated thresholds so the prototype works.
+    // CTO-393: the control plane could not be reached, so the thresholds were NOT stored. This used
+    // to answer 200 with `persisted: false` on every path, and ThresholdSettings checks only
+    // `res.ok`, so it rendered "saved" over cutoffs that still have their old values.
+    if (!controlPlaneEchoAllowed()) {
+      return NextResponse.json(
+        { error: "Not saved: the control plane is unreachable.", persisted: false },
+        { status: 503 },
+      );
+    }
+    // Off the product path (fresh clone / CI): echo the validated thresholds.
     return NextResponse.json({ thresholds: t, changeId, persisted: false });
   }
 }

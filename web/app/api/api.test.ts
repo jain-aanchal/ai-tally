@@ -242,9 +242,18 @@ describe("api routes", () => {
     expect(body.economics).toEqual({});
   });
 
-  it("POST /api/guardrails echoes a valid rule (gateway unreachable), rejects an unconstrained one", async () => {
-    // Gateway isn't running in CI / fresh clone, so POST validates and echoes the rule back with a
-    // client-supplied change_id rather than blocking on the control plane.
+  it("POST /api/guardrails echoes a valid rule on the DEV path (gateway unreachable), rejects an unconstrained one", async () => {
+    // CTO-393 CHANGED THIS EXPECTATION. It used to read "echoes a valid rule (gateway unreachable)"
+    // with no mention of which path, because the echo was unconditional: the route answered 200 with
+    // `persisted: false` to everyone, including a signed-in customer whose save had just failed.
+    //
+    // The echo is kept, but only where its stated reason holds: a fresh clone with no infra, which
+    // is what the dev escape hatch marks. This suite sets TALLY_DEV_TENANT (vitest.config.ts), so it
+    // is on the dev path and the echo still applies. The product-path 503 is pinned in
+    // honest-save-failures.test.ts, over a cleared escape hatch and a mocked Clerk org.
+    //
+    // `persisted` is asserted explicitly now: a 200 alone no longer means the rule was stored, and
+    // that distinction is the whole ticket.
     const ok = await GuardrailsPOST(
       new Request("http://test/x", {
         method: "POST",
@@ -252,8 +261,9 @@ describe("api routes", () => {
       }),
     );
     expect(ok.status).toBe(200);
-    const okBody = await json<{ changeId: string }>(ok);
+    const okBody = await json<{ changeId: string; persisted: boolean }>(ok);
     expect(okBody.changeId).toBeTypeOf("string");
+    expect(okBody.persisted).toBe(false);
 
     const bad = await GuardrailsPOST(
       new Request("http://test/x", {
