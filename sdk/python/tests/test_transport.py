@@ -3,11 +3,35 @@
 
 from __future__ import annotations
 
+import logging
 import threading
+from contextlib import contextmanager
 
 from tally.egress import BackoffPolicy
 from tally.transport import BatchingTransport, SendResult, _retry_hint_ms
 from tally.wire import decode_request
+
+
+class _Collector(logging.Handler):
+    def __init__(self, records: list[logging.LogRecord]) -> None:
+        super().__init__(level=logging.WARNING)
+        self._records = records
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._records.append(record)
+
+
+@contextmanager
+def caplog_at_warning():
+    """Collect the tally logger's WARNING records without mutating global logging config."""
+    records: list[logging.LogRecord] = []
+    logger = logging.getLogger("tally")
+    handler = _Collector(records)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
 
 
 class _RecordingSender:
@@ -239,6 +263,7 @@ def test_503_retry_hint_zero_succeeds_on_attempt_two():
     assert t.shed_counts() == {
         "undelivered_span_count": 0,
         "rejected_span_count": 0,
+        "rejected_by_gateway_span_count": 0,
         "buffer_overflow_span_count": 0,
     }
 
@@ -434,5 +459,211 @@ def test_buffer_overflow_count_is_not_polluted_by_another_component(caplog):
     assert t.shed_counts() == {
         "undelivered_span_count": 0,
         "rejected_span_count": 2,
+        "rejected_by_gateway_span_count": 0,
         "buffer_overflow_span_count": 1,
     }
+
+
+# --- CTO-391: spans the gateway rejects INSIDE a 200 ---
+
+
+def _ack(accepted: int, errors: tuple = (), *, hints: dict | None = None) -> bytes:
+    """The gateway's ack body (gateway/app.py ``_response_dict``), as bytes on the wire."""
+    import json
+
+    return json.dumps(
+        {
+            "batch_id": "b-1",
+            "status": "partial" if errors else "accepted",
+            "accepted_spans": accepted,
+            "partial_errors": [
+                {"item_id": item_id, "code": code, "message": "shed under load"}
+                for item_id, code in errors
+            ],
+            "server_hints": {
+                "flush_interval_ms": 5_000,
+                "max_batch_size": 1_000,
+                "sample_rate_override": None,
+                "retry_after_ms": 0,
+                **(hints or {}),
+            },
+            "replayed": False,
+        }
+    ).encode("utf-8")
+
+
+class _StubGateway:
+    """A stub gateway that admits the first ``keep`` items of every batch and sheds the rest as
+    RATE_LIMITED inside a 200, which is exactly what backpressure does (gateway/app.py)."""
+
+    def __init__(self, keep: int) -> None:
+        self.keep = keep
+        self.batches: list[list[int]] = []
+
+    def __call__(self, url: str, headers: dict, body: bytes) -> SendResult:
+        spans = decode_request(body.decode("utf-8")).resource_spans
+        self.batches.append([int(s["n"]) for s in spans])
+        shed = tuple((f"#{i}", "RATE_LIMITED") for i in range(self.keep, len(spans)))
+        return SendResult(200, None, _ack(min(self.keep, len(spans)), shed))
+
+
+def test_rate_limited_items_in_a_200_are_requeued_and_land_on_the_next_flush():
+    # The reproduction: a 4-span batch, 2 accepted, 2 shed as RATE_LIMITED inside a 200. Before
+    # CTO-391 this read as a clean success and two spans of billable spend vanished.
+    gw = _StubGateway(keep=2)
+    t = _transport(gw, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    for i in range(4):
+        t.export({"n": i})
+    assert t.flush_once() is True
+    assert gw.batches[0] == [0, 1, 2, 3]
+    assert t.pending() == 2  # exactly the shed spans are held, not the whole batch
+    assert t.requeued_span_count == 2
+
+    assert t.flush_once() is True
+    # Exactly the rejected spans go again: an accepted span is never sent twice.
+    assert gw.batches[1] == [2, 3]
+    assert t.pending() == 0
+    assert t.shed_counts() == {
+        "undelivered_span_count": 0,
+        "rejected_span_count": 0,
+        "rejected_by_gateway_span_count": 0,
+        "buffer_overflow_span_count": 0,
+    }
+
+
+def test_partial_ack_warns_once_and_paces_the_resend():
+    gw = _StubGateway(keep=1)
+    t = _transport(gw, backoff=BackoffPolicy(base_ms=250, max_ms=1_000, jitter=0.0))
+    for i in range(3):
+        t.export({"n": i})
+    with caplog_at_warning() as records:
+        t.flush_once()
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "accepted 1 of 3" in message
+    assert "RATE_LIMITED=2" in message
+    assert "2 re-enqueued" in message
+    # A delivered-but-partial flush still owes a wait: the gateway just said it is shedding.
+    assert t.current_backoff_ms() == 250
+
+
+def test_permanently_invalid_items_are_counted_and_never_retried():
+    sender = _ScriptedSender([SendResult(200, None, _ack(1, (("#1", "PII_DETECTED"),)))])
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+    assert t.flush_once() is True
+    assert t.pending() == 0  # a resend would only buy a second refusal
+    assert t.shed_counts()["rejected_by_gateway_span_count"] == 1
+    assert t.shed_counts()["undelivered_span_count"] == 0
+    assert t.requeued_span_count == 0
+    assert t.obs.dropped_span_count == 1
+    t.flush_once()
+    assert len(sender.calls) == 1  # nothing was re-sent
+
+
+def test_unknown_feature_tag_is_a_flag_not_a_loss():
+    # Accepted-but-flagged: the span landed. Counting it as rejected would invent a loss.
+    sender = _ScriptedSender([SendResult(200, None, _ack(2, (("#0", "UNKNOWN_FEATURE_TAG"),)))])
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+    assert records == []
+    assert t.pending() == 0
+    assert t.requeued_span_count == 0
+    assert t.shed_counts() == {
+        "undelivered_span_count": 0,
+        "rejected_span_count": 0,
+        "rejected_by_gateway_span_count": 0,
+        "buffer_overflow_span_count": 0,
+    }
+
+
+def test_clean_200_clears_the_batch_with_no_warning():
+    sender = _ScriptedSender([SendResult(200, None, _ack(2))])
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+    assert records == []
+    assert t.pending() == 0
+    assert t.requeued_span_count == 0
+    assert all(v == 0 for v in t.shed_counts().values())
+
+
+def test_endless_shedding_is_bounded_and_counted_not_retried_forever():
+    # A gateway that accepts nothing must not make the client trade the same spans back and forth
+    # forever: the re-enqueue is bounded by retry_max and the remainder is counted, honestly.
+    gw = _StubGateway(keep=0)
+    t = _transport(gw, retry_max=3, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    t.export({"n": 0})
+    for _ in range(10):
+        t.flush_once()
+    assert t.pending() == 0
+    assert len(gw.batches) == 4  # 1 send + 3 bounded resends
+    assert t.shed_counts()["undelivered_span_count"] == 1
+
+
+def test_no_span_content_or_account_id_reaches_any_log_record(caplog):
+    import logging
+
+    secret_account = "acct_live_CUSTOMER_4KZ"
+    sender = _ScriptedSender(
+        [SendResult(200, None, _ack(0, (("#0", "PII_DETECTED"), ("#1", "RATE_LIMITED"))))]
+    )
+    t = _transport(sender)
+    t.export({"gen_ai.system": "openai", "gen_ai.tally.account_id_hash": secret_account, "n": 0})
+    t.export({"gen_ai.system": "anthropic", "n": 1})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert blob  # the warning did fire, so this is a real assertion and not a vacuous one
+    for leak in (secret_account, "openai", "anthropic", "account_id_hash", "#0", "item_id"):
+        assert leak not in blob
+
+
+def test_server_hints_lower_the_batch_ceiling_but_never_raise_it():
+    overloaded = _ScriptedSender([SendResult(200, None, _ack(1, hints={"max_batch_size": 250}))])
+    t = _transport(overloaded, max_batch_size=512)
+    t.export({"n": 0})
+    t.flush_once()
+    assert t.max_batch_size == 250  # the gateway asked us to send less; obeyed
+    assert t.last_server_hints["max_batch_size"] == 250
+
+    healthy = _ScriptedSender([SendResult(200, None, _ack(1, hints={"max_batch_size": 1_000}))])
+    t2 = _transport(healthy, max_batch_size=512)
+    t2.export({"n": 0})
+    t2.flush_once()
+    # A hint is a ceiling, not a target: it must not enlarge the caller's deliberate 512.
+    assert t2.max_batch_size == 512
+
+
+def test_unreadable_ack_degrades_safely():
+    # Malformed, empty and absent bodies must never raise and must never invent a loss.
+    sender = _ScriptedSender(
+        [SendResult(200, None, b"<html>gateway behind a proxy"), SendResult(200, None, b""), 200]
+    )
+    t = _transport(sender)
+    for i in range(3):
+        t.export({"n": i})
+        assert t.flush_once() is True
+    assert t.pending() == 0
+    assert all(v == 0 for v in t.shed_counts().values())
+
+
+def test_item_ids_map_back_through_the_gateways_dedup():
+    # The gateway numbers items AFTER intra-batch dedup, and names a span by trace:span when it has
+    # one. Numbering the raw list instead would re-enqueue the wrong span.
+    sent = [
+        {"trace_id": "t1", "span_id": "s1"},
+        {"trace_id": "t1", "span_id": "s1"},  # duplicate: dropped before the gateway numbers
+        {"trace_id": "t2", "span_id": "s2"},
+        {"n": 9},  # no ids: falls back to the #index form
+    ]
+    positions = BatchingTransport._item_positions(sent)
+    assert positions["t1:s1"] == 0
+    assert positions["t2:s2"] == 2
+    assert positions["#2"] == 3
