@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from "next/server";
 
-import { requireAdmin, resolveTenantId } from "@/lib/getTenant";
+import { resolveTenantId } from "@/lib/getTenant";
 import { FUNNEL_STAGES, type FunnelStage } from "@/lib/onboarding";
 import { getCreds, getFunnel, getProgress, hasFunnelStage, recordFunnel } from "@/lib/onboardingStore";
 
@@ -27,13 +27,13 @@ export async function GET() {
 // and not when. A noticed stage is recorded once and never stamps a progress timestamp, so nothing
 // downstream can read the moment we spotted it as the moment it happened.
 export async function POST(req: Request) {
-  // CTO-392: the funnel record is per-TENANT, not per-user (#358), so a member writing it changes
-  // what the whole organization's activation checklist says. The stakes are low next to guardrails
-  // or budgets, but the rule is the same one, and the client treats this call as best-effort, so a
-  // member's page simply stops recording rather than showing an error.
-  const gate = await requireAdmin("record onboarding progress");
-  if (!gate.ok) return gate.response;
-
+  // CTO-392 deliberately does NOT gate this on the admin role, unlike every other mutation.
+  //
+  // This is internal activation telemetry, not spend-governing configuration: nothing downstream
+  // reads it to decide what traffic may cost. The funnel record is per-tenant (#358), so gating it
+  // would not protect a member from anything; it would only mean that any milestone a member
+  // happened to reach first went permanently unrecorded, because the client fires this once and
+  // ignores the answer. A silently incomplete funnel is worse than a member writing to it.
   let body: { stage?: string; noticed?: boolean };
   try {
     body = (await req.json()) as { stage?: string; noticed?: boolean };
@@ -45,7 +45,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "unknown funnel stage" }, { status: 400 });
   }
   const noticed = body.noticed === true;
-  const tenantId = gate.tenant.tenantId;
+  const tenantId = await resolveTenantId();
   // A polled observation repeats on every page load, so only the first report is kept.
   if (noticed && hasFunnelStage(tenantId, stage)) {
     return NextResponse.json({ event: null, progress: getProgress(tenantId) });

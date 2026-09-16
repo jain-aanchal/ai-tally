@@ -39,6 +39,7 @@ export function ThresholdSettings({
   defaults,
   hasOverride,
   canEdit = true,
+  accessUnknown = false,
 }: {
   initial: UnitEconomicsThresholds;
   defaults: UnitEconomicsThresholds;
@@ -46,6 +47,9 @@ export function ThresholdSettings({
   /** CTO-392: false for a non-admin. The route refuses the write either way; this only stops the
    *  panel offering a save that is always refused. */
   canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ, so the panel
+   *  says which of the two it is instead of calling an admin a member. */
+  accessUnknown?: boolean;
 }) {
   const [form, setForm] = useState<UnitEconomicsThresholds>(initial);
   const [state, setState] = useState<SaveState>("idle");
@@ -137,11 +141,17 @@ export function ThresholdSettings({
         >
           Save thresholds
         </button>
-        {!canEdit && (
-          <span className="text-xs text-muted">
-            Read-only. Ask an organization admin to change these cutoffs.
-          </span>
-        )}
+        {!canEdit &&
+          (accessUnknown ? (
+            <span className="text-xs text-warn">
+              Your access could not be checked, so saving is turned off. That is not a statement
+              that you lack permission: the control plane did not answer.
+            </span>
+          ) : (
+            <span className="text-xs text-muted">
+              Read-only. Ask an organization admin to change these cutoffs.
+            </span>
+          ))}
         {err && <span className="text-xs text-bad">{err}</span>}
         {!err && state === "saving" && <span className="text-xs text-muted">saving…</span>}
         {!err && state === "saved" && <span className="text-xs text-good">saved ✓</span>}

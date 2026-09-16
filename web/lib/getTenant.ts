@@ -31,11 +31,11 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { ORG_ADMIN_ROLE, type ResolvedTenant } from "./tenantShared";
+import { type EditAccess, ORG_ADMIN_ROLE, type ResolvedTenant } from "./tenantShared";
 
 // Re-exported so server callers keep a single import site (`@/lib/getTenant`). Clients import these
 // from `@/lib/tenantShared` directly, never from here.
-export { ORG_ADMIN_ROLE, type ResolvedTenant };
+export { type EditAccess, ORG_ADMIN_ROLE, type ResolvedTenant };
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
@@ -171,13 +171,63 @@ export function canManage(tenant: ResolvedTenant): boolean {
 }
 
 /**
+ * Whether the caller may perform admin-only control-plane writes, WITHOUT throwing (CTO-392).
+ *
+ * `canManage(await getTenant())` throws when the org resolve fails, which takes a whole server page
+ * into the error boundary over a question it only asked in order to decide which controls to draw.
+ * Pages that are built to render a degraded state (lib/budgets.ts documents the rule: an
+ * unreachable gateway is reported, not raised) ask this instead, and say which of the three answers
+ * they got rather than rendering `unknown` as a definite "no".
+ */
+export async function editAccess(): Promise<EditAccess> {
+  try {
+    return canManage(await getTenant()) ? "allowed" : "denied";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * The outcome of {@link requireAdmin}: the resolved tenant, or the refusal in both shapes its two
  * kinds of caller need. A Route Handler returns `response`; a server action, which answers with a
  * result object rather than an HTTP status, returns `error`.
+ *
+ * `kind` separates the two reasons a mutation is refused, because they are different facts:
+ * `forbidden` is a definite answer about the human, `unresolved` means we never established who
+ * they were acting for.
  */
 export type AdminGate =
   | { ok: true; tenant: ResolvedTenant }
-  | { ok: false; error: string; response: NextResponse };
+  | { ok: false; kind: "forbidden" | "unresolved"; error: string; response: NextResponse };
+
+/**
+ * The refusal for a caller whose tenant could not be resolved at all (CTO-393).
+ *
+ * Resolving the tenant is itself a gateway call, and `getTenant()` throws when it fails. That throw
+ * used to land inside each route's own try, where an unreachable control plane became an honest
+ * "Not saved: the control plane is unreachable"; gating a mutation ABOVE that try turns the same
+ * failure into a bare 500, which tells the customer nothing about whether their change was stored.
+ *
+ * Each reason is reported as itself. A provisioning race self-heals and is worth retrying, an
+ * unreachable gateway is the retryable 503, and no active org is a definite answer about the
+ * session, so none of the three is dressed up as another. `persisted: false` is stated explicitly
+ * because every caller of this gate is a mutation, and a client must never have to infer from a
+ * status alone whether the write landed.
+ */
+function unresolvedTenant(err: unknown): AdminGate {
+  const [error, status]: [string, number] =
+    err instanceof NoActiveOrgError
+      ? ["Not saved: this session has no active organization.", 403]
+      : err instanceof TenantNotProvisionedError
+        ? ["Not saved: this workspace is still being provisioned. Try again in a moment.", 503]
+        : ["Not saved: the control plane is unreachable.", 503];
+  return {
+    ok: false,
+    kind: "unresolved",
+    error,
+    response: NextResponse.json({ error, persisted: false }, { status }),
+  };
+}
 
 /**
  * Gate a control-plane MUTATION on the admin role (CTO-392).
@@ -194,12 +244,22 @@ export type AdminGate =
  * already returned, so every refusal reads the same to the UI.
  */
 export async function requireAdmin(action: string): Promise<AdminGate> {
-  const tenant = await getTenant();
+  let tenant: ResolvedTenant;
+  try {
+    tenant = await getTenant();
+  } catch (err) {
+    return unresolvedTenant(err);
+  }
   if (canManage(tenant)) {
     return { ok: true, tenant };
   }
   const error = `admin role required to ${action}`;
-  return { ok: false, error, response: NextResponse.json({ error }, { status: 403 }) };
+  return {
+    ok: false,
+    kind: "forbidden",
+    error,
+    response: NextResponse.json({ error }, { status: 403 }),
+  };
 }
 
 /** The active Clerk user id (for key `created_by` audit), or null on the dev escape hatch. */

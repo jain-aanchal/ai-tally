@@ -13,7 +13,7 @@ import {
   queryFeatureValueEvents,
 } from "@/lib/clickhouse";
 import { type SourceState, readState } from "@/lib/dataState";
-import { canManage, getTenant } from "@/lib/getTenant";
+import { type EditAccess, editAccess } from "@/lib/getTenant";
 import { sampleDataAllowed } from "@/lib/mock";
 
 // Read live data per request (never statically cached). A read that fails says so; it is not
@@ -31,18 +31,20 @@ export interface FeaturesResponse {
    * refuses a member, and the value-event CTA lives inside a client component several levels below
    * the server boundary (Cost explorer -> FeatureDetail -> FeatureValueEvents), so it rides along
    * with the data that component already fetches rather than being threaded through as a prop.
+   *
+   * Three states, not a boolean. Resolving the role is a gateway call that can fail, and this
+   * surface is the one that shows no read-only note at all, so collapsing a failed resolve into
+   * "denied" left an admin looking at "not configured" with nothing to explain it.
    */
-  canManage: boolean;
+  manageAccess: EditAccess;
 }
 
 export async function GET() {
-  const [liveFeatures, liveDiagnostics, valueEvents, editable] = await Promise.all([
+  const [liveFeatures, liveDiagnostics, valueEvents, access] = await Promise.all([
     queryFeatureEconomics(),
     queryAttributionDiagnostics(),
     queryFeatureValueEvents(),
-    getTenant()
-      .then(canManage)
-      .catch(() => false),
+    editAccess(),
   ]);
 
   // Overlay the tenant's configured value events (CTO-140) so a just-configured feature reflects its
@@ -59,7 +61,7 @@ export async function GET() {
       features: overlay(features),
       diagnostics,
       sources: { features: "sample", diagnostics: "sample" },
-      canManage: editable,
+      manageAccess: access,
     } satisfies FeaturesResponse);
   }
 
@@ -72,6 +74,6 @@ export async function GET() {
       features: readState(liveFeatures, (f) => f.length === 0),
       diagnostics: liveDiagnostics.state,
     },
-    canManage: editable,
+    manageAccess: access,
   } satisfies FeaturesResponse);
 }

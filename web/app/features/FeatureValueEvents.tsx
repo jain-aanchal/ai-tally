@@ -27,11 +27,16 @@ type SaveState = "idle" | "saving" | "error";
 export function FeatureValueEvents({
   initialFeatures,
   canEdit = true,
+  accessUnknown = false,
 }: {
   initialFeatures: FeatureEconomics[];
   /** CTO-392: false for a non-admin. POST /api/features/value-events refuses the write either way;
    *  this only stops the table offering a CTA that is always refused. */
   canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ. Without this
+   *  the table shows an admin a bare "not configured" during a blip, which reads as a statement
+   *  about their permissions and is the one thing this surface must not say. */
+  accessUnknown?: boolean;
 }) {
   const router = useRouter();
   const [features, setFeatures] = useState<FeatureEconomics[]>(initialFeatures);
@@ -112,6 +117,7 @@ export function FeatureValueEvents({
           count={unconfigured.length}
           onStart={openFinishSetup}
           canEdit={canEdit}
+          accessUnknown={accessUnknown}
         />
       )}
 
@@ -173,6 +179,16 @@ export function FeatureValueEvents({
             </tbody>
           </table>
         </div>
+        {/* CTO-392: the row cell says only "not configured", which is a fact about the feature. Why
+            there is no way to change it is a different fact, and an unread role must not be
+            presented as a role that was read and refused. */}
+        {!canEdit && (
+          <p className={`mt-3 text-xs ${accessUnknown ? "text-warn" : "text-muted"}`}>
+            {accessUnknown
+              ? "Your access could not be checked, so value-event setup is turned off here. That is not a statement that you lack permission: the control plane did not answer."
+              : "You have read-only access. Ask an organization admin to pick a value event."}
+          </p>
+        )}
       </Card>
 
       {activeFeature && (
@@ -199,10 +215,12 @@ function FinishSetupBanner({
   count,
   onStart,
   canEdit,
+  accessUnknown,
 }: {
   count: number;
   onStart: () => void;
   canEdit: boolean;
+  accessUnknown: boolean;
 }) {
   const noun = count === 1 ? "feature" : "features";
   return (
@@ -222,6 +240,11 @@ function FinishSetupBanner({
         >
           Finish setup
         </button>
+      ) : accessUnknown ? (
+        <span className="text-xs text-warn/90">
+          Your access could not be checked, so setup is turned off here. That is not a statement
+          that you lack permission: the control plane did not answer.
+        </span>
       ) : (
         <span className="text-xs text-warn/90">
           Ask an organization admin to pick one.

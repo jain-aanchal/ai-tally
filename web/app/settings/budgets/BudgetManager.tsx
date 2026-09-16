@@ -39,6 +39,9 @@ interface Props {
   /** CTO-392: false for a non-admin. The server actions refuse the write either way; this only
    *  stops the table offering buttons that are always refused. */
   canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ. The page draws
+   *  the same read-only table either way, but must not tell an admin they are a member. */
+  accessUnknown?: boolean;
 }
 
 type Status =
@@ -78,6 +81,7 @@ export function BudgetManager({
   scopeKinds,
   reachable,
   canEdit = true,
+  accessUnknown = false,
 }: Props) {
   const [budgets, setBudgets] = useState<Budget[]>(initialBudgets);
   const [form, setForm] = useState<BudgetFormValues | null>(null);
@@ -269,6 +273,11 @@ export function BudgetManager({
           >
             Set a budget
           </button>
+        ) : accessUnknown ? (
+          <span className="text-[11px] text-warn">
+            Your access could not be checked, so setting a budget is turned off here. That is not a
+            statement that you lack permission: the control plane did not answer.
+          </span>
         ) : (
           <span className="text-[11px] text-muted">
             You have read-only access. Ask an organization admin to set a budget.
