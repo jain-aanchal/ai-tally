@@ -53,8 +53,11 @@ Egress column with each counted once.
 
 ## Auth
 
-`credentials_ref` is a Secret Manager, KMS, or ARN pointer to the Cloudflare API token. Never a raw
-token. The column is length-bounded to catch a pasted credential.
+`credentials_ref` is an AWS Secrets Manager secret ARN holding the Cloudflare API token. Never a raw
+token. The column is length-bounded to catch a pasted credential. The token is resolved exactly as
+for Vercel (see `connector-vercel.md`): through the organization's assumed AWS role when it has one,
+otherwise with the gateway's identity from a secret named `ai-tally/connectors/<organization id>/...`
+(CTO-381).
 
 ## Failure behavior
 

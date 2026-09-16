@@ -35,9 +35,10 @@ recorder). Structure mirrors the sibling connectors: a PURE parse function unit-
 recorded fixture, and thin fetch-then-parse clients with the HTTP dep imported LAZILY so the gateway
 and the whole test suite import without ``requests``. Tests inject a fake fetcher, no network.
 
-Credentials by reference only: ``access_token_ref`` is a Secret Manager reference the prod wrapper
-resolves; the raw Vercel token never appears in the DB, this module, or logs. Honest-under-uncertainty:
-a failed fetch records a ``failed`` run and emits NO span.
+Credentials by reference only: ``access_token_ref`` is an AWS Secrets Manager secret ARN, resolved per
+request by :mod:`gateway.connectors.credentials` (CTO-381); the raw Vercel token never appears in the
+DB, this module, or logs. Honest-under-uncertainty: a failed fetch (including an unresolvable token
+reference) records a ``failed`` run and emits NO span.
 """
 
 from __future__ import annotations
@@ -55,7 +56,10 @@ from gateway.connectors.compute import ComputeCostConnector, _to_micro
 from gateway.connectors.egress import (
     EgressConfig,
     EgressCostConnector,
+    TokenProvider,
+    Transport,
     VercelBandwidthClient,
+    bearer_request,
 )
 
 #: Fixed provider label for Vercel synthetic spans (``GenAiSystem``). Matches CTO-144's egress
@@ -141,21 +145,27 @@ def parse_vercel_compute(response: dict[str, object]) -> list[DailyCost]:
 class VercelUsageClient:
     """Fetches the raw Vercel usage/billing payload for a team/project window. Injectable for tests.
 
-    ``http_getter`` is the seam tests use to supply a recorded payload; when absent (prod), ``requests``
-    is imported LAZILY and the Vercel access token is resolved from ``config.credentials_ref`` by the
-    deployment's Secret Manager wiring (out of scope here; the token never lands in this module).
+    ``http_getter`` is the seam tests use to supply a recorded payload. When absent (prod), the Vercel
+    access token is resolved from ``config.credentials_ref`` by ``token_provider`` for this one
+    request (CTO-381) and sent as a Bearer header; ``transport`` replaces only the HTTP call.
     """
 
-    def __init__(self, http_getter=None, *, api_base: str = "https://api.vercel.com") -> None:
+    def __init__(
+        self,
+        http_getter=None,
+        *,
+        api_base: str = "https://api.vercel.com",
+        token_provider: TokenProvider | None = None,
+        transport: Transport | None = None,
+    ) -> None:
         self._http_getter = http_getter
         self._api_base = api_base
+        self._token_provider = token_provider
+        self._transport = transport
 
     def fetch(self, config: ConnectorConfig, start_day: date, end_day: date) -> dict[str, object]:
         if self._http_getter is not None:
             return self._http_getter(config, start_day, end_day)
-        # pragma: no cover - exercised only against the live Vercel API
-        import requests  # lazy: keep requests off the base install / test path
-
         team = getattr(config, "team_id", "")
         project = getattr(config, "project_id", "")
         params = {"from": start_day.isoformat(), "to": end_day.isoformat()}
@@ -163,13 +173,15 @@ class VercelUsageClient:
             params["teamId"] = team
         if project:
             params["projectId"] = project
-        resp = requests.get(
+        return bearer_request(
+            "Vercel usage API",
+            "GET",
             f"{self._api_base}/v1/usage",
+            config=config,
+            token_provider=self._token_provider,
+            transport=self._transport,
             params=params,
-            timeout=30,
         )
-        resp.raise_for_status()
-        return resp.json()
 
 
 class VercelComputeClient:
@@ -269,9 +281,14 @@ class VercelCostConnector:
         return VercelRunResult(compute=compute, egress=egress)
 
 
-def build_vercel_usage_client(api_base: str = "https://api.vercel.com") -> VercelUsageClient:
-    """Factory: the live usage client for the cron/backfill entrypoints."""
-    return VercelUsageClient(api_base=api_base)
+def build_vercel_usage_client(
+    api_base: str = "https://api.vercel.com", *, token_provider: TokenProvider | None = None
+) -> VercelUsageClient:
+    """Factory: the live usage client for the cron/backfill entrypoints.
+
+    Without a ``token_provider`` every live fetch fails honestly (CTO-381).
+    """
+    return VercelUsageClient(api_base=api_base, token_provider=token_provider)
 
 
 def build_vercel_compute_client(usage_client: VercelUsageClient) -> BillingClient:

@@ -29,9 +29,11 @@ SDK-touching clients that fetch-then-parse with the vendor SDK/HTTP imported LAZ
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from tally.schema import usd_to_micro
 
@@ -44,7 +46,66 @@ from gateway.connectors.base import (
 
 # Reuse compute's AWS Cost Explorer response parser verbatim: an egress query is the same
 # get_cost_and_usage shape, only the Filter (usage type) differs.
-from gateway.connectors.compute import _to_micro, parse_aws_cost_response
+from gateway.connectors.compute import _to_micro, aws_client_for, parse_aws_cost_response
+from gateway.connectors.credentials import CredentialResolutionError, TenantCredentials
+
+#: ``(config) -> token``: resolves a tenant's API token from its Secrets Manager reference (CTO-381).
+TokenProvider = Callable[[ConnectorConfig], str]
+#: ``(method, url, *, headers, params, json, timeout) -> dict``: the HTTP seam, raising on failure.
+Transport = Callable[..., Any]
+
+
+class ConnectorFetchError(RuntimeError):
+    """A provider API call failed. The message carries a status code only, never a body or token."""
+
+
+def _requests_transport(
+    method: str, url: str, *, headers, params=None, json=None, timeout: float = 30
+):  # pragma: no cover - exercised only against live provider APIs
+    import requests  # lazy: keep requests off the base install / test path
+
+    resp = requests.request(method, url, headers=headers, params=params, json=json, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def bearer_request(
+    label: str,
+    method: str,
+    url: str,
+    *,
+    config: ConnectorConfig,
+    token_provider: TokenProvider | None,
+    transport: Transport | None = None,
+    params: dict | None = None,
+    json_body: dict | None = None,
+) -> Any:
+    """One authenticated provider call for a tenant (CTO-381).
+
+    Before CTO-381 the live Vercel and Cloudflare calls sent no Authorization header at all: the
+    token reference was never resolved. The token is resolved here, used for this one request and
+    dropped. A failure is re-raised as :class:`ConnectorFetchError` carrying only the HTTP status
+    (or exception type): provider error text and HTTP-library messages can echo request headers,
+    and whatever this raises is logged and routed to stored run errors.
+    """
+    if token_provider is None:
+        raise CredentialResolutionError("no credential resolver is wired for this connector")
+    token = token_provider(config)
+    try:
+        return (transport or _requests_transport)(
+            method,
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            json=json_body,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 - never let the provider's error text through
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
+        raise ConnectorFetchError(f"{label} request failed ({detail})") from None
+    finally:
+        del token
 
 # One GiB in bytes, the unit ``usd_per_gb`` is quoted in.
 _BYTES_PER_GB = Decimal(1024 * 1024 * 1024)
@@ -166,33 +227,41 @@ def parse_cloudflare_bytes(response: dict[str, object]) -> dict[date, int]:
 class VercelBandwidthClient:
     """Vercel billing/usage fetcher. HTTP client imported lazily; credentials by reference.
 
-    ``credentials_ref`` points at the Vercel API token (Secret Manager ref); the prod wrapper
-    resolves it. Unit tests inject a fake ``BillingClient`` and never construct this.
+    ``credentials_ref`` is a Secrets Manager ARN for the Vercel API token, resolved per request by
+    ``token_provider`` (CTO-381). ``http_getter`` replaces the whole fetch in unit tests;
+    ``transport`` replaces only the HTTP call, so tests can exercise the authenticated path.
     """
 
-    def __init__(self, http_getter=None) -> None:
+    def __init__(
+        self,
+        http_getter=None,
+        *,
+        token_provider: TokenProvider | None = None,
+        transport: Transport | None = None,
+    ) -> None:
         self._http_getter = http_getter
+        self._token_provider = token_provider
+        self._transport = transport
 
     def get_daily_costs(
         self, config: ConnectorConfig, *, start_day: date, end_day: date
     ) -> list[DailyCost]:
         if self._http_getter is not None:
             response = self._http_getter(config, start_day, end_day)
-        else:  # pragma: no cover - exercised only against the live Vercel API
-            import requests  # lazy: keep requests off the base install / test path
-
-            team = getattr(config, "resource_id", "")
-            resp = requests.get(
+        else:
+            response = bearer_request(
+                "Vercel usage API",
+                "GET",
                 "https://api.vercel.com/v1/usage",
+                config=config,
+                token_provider=self._token_provider,
+                transport=self._transport,
                 params={
-                    "teamId": team,
+                    "teamId": getattr(config, "resource_id", ""),
                     "from": start_day.isoformat(),
                     "to": end_day.isoformat(),
                 },
-                timeout=30,
             )
-            resp.raise_for_status()
-            response = resp.json()
         costs = parse_vercel_usage(response)
         return [c for c in costs if start_day <= c.day <= end_day]
 
@@ -201,27 +270,36 @@ class CloudflareAnalyticsClient:
     """Cloudflare GraphQL analytics fetcher: bytes-out priced at the tenant's ``usd_per_gb`` rate.
 
     Client imported lazily. ``resource_id`` is the zone id; ``usd_per_gb`` MUST be set on the config
-    or the fetch fails soft (no guessed price).
+    or the fetch fails soft (no guessed price). The API token comes from ``token_provider`` per
+    request (CTO-381); ``graphql_runner`` replaces the whole fetch in unit tests.
     """
 
-    def __init__(self, graphql_runner=None) -> None:
+    def __init__(
+        self,
+        graphql_runner=None,
+        *,
+        token_provider: TokenProvider | None = None,
+        transport: Transport | None = None,
+    ) -> None:
         self._graphql_runner = graphql_runner
+        self._token_provider = token_provider
+        self._transport = transport
 
     def get_daily_costs(
         self, config: ConnectorConfig, *, start_day: date, end_day: date
     ) -> list[DailyCost]:
         if self._graphql_runner is not None:
             response = self._graphql_runner(config, start_day, end_day)
-        else:  # pragma: no cover - exercised only against live Cloudflare
-            import requests  # lazy import
-
-            resp = requests.post(
+        else:
+            response = bearer_request(
+                "Cloudflare GraphQL API",
+                "POST",
                 "https://api.cloudflare.com/client/v4/graphql",
-                json={"query": _cloudflare_query(config, start_day, end_day)},
-                timeout=30,
+                config=config,
+                token_provider=self._token_provider,
+                transport=self._transport,
+                json_body={"query": _cloudflare_query(config, start_day, end_day)},
             )
-            resp.raise_for_status()
-            response = resp.json()
         rate = getattr(config, "usd_per_gb", None)
         per_day = parse_cloudflare_bytes(response)
         out: list[DailyCost] = []
@@ -248,22 +326,16 @@ def _cloudflare_query(config: ConnectorConfig, start_day: date, end_day: date) -
 class AwsEgressCostExplorerClient:
     """AWS Cost Explorer fetcher scoped to bytes-out egress. Mirrors compute's client pattern.
 
-    boto3 imported lazily; credentials resolved by reference (``'aws-default-chain'`` uses the ambient
-    chain). The Filter narrows ``get_cost_and_usage`` to the ``DataTransfer-Out-Bytes`` usage type so
-    only egress lands in this layer.
+    Acts as the tenant through its resolved IAM role (CTO-381), never ai-tally's ambient identity.
+    The Filter narrows ``get_cost_and_usage`` to the ``DataTransfer-Out-Bytes`` usage type so only
+    egress lands in this layer.
     """
 
-    def __init__(self, session_factory=None) -> None:
-        self._session_factory = session_factory
+    def __init__(self, credentials: TenantCredentials | None = None) -> None:
+        self._credentials = credentials
 
     def _client(self, config: ConnectorConfig):
-        if self._session_factory is not None:
-            session = self._session_factory(config.credentials_ref)
-        else:  # pragma: no cover - exercised only against live AWS
-            import boto3  # lazy: keep boto3 out of the base install / test path
-
-            session = boto3.Session()
-        return session.client("ce")
+        return aws_client_for(self._credentials, config, "ce")
 
     @staticmethod
     def _filter() -> dict:
@@ -313,12 +385,19 @@ class EgressCostConnector(CloudBillingConnector):
         return self._client.get_daily_costs(config, start_day=start_day, end_day=end_day)
 
 
-def build_egress_client(provider: str) -> BillingClient:
-    """Factory: the live :class:`BillingClient` for an egress provider. Used by cron/backfill."""
+def build_egress_client(
+    provider: str, *, credentials: TenantCredentials | None = None
+) -> BillingClient:
+    """Factory: the live :class:`BillingClient` for an egress provider. Used by cron/backfill.
+
+    ``credentials`` is the run's tenant credential context (CTO-381); without it every live fetch
+    fails honestly rather than calling a provider unauthenticated or as ai-tally.
+    """
+    token_provider = credentials.token_for if credentials is not None else None
     if provider == "vercel":
-        return VercelBandwidthClient()
+        return VercelBandwidthClient(token_provider=token_provider)
     if provider == "cloudflare":
-        return CloudflareAnalyticsClient()
+        return CloudflareAnalyticsClient(token_provider=token_provider)
     if provider == "aws":
-        return AwsEgressCostExplorerClient()
+        return AwsEgressCostExplorerClient(credentials=credentials)
     raise ValueError(f"unsupported egress_provider {provider!r} (vercel|cloudflare|aws only)")

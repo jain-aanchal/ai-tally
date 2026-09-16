@@ -45,9 +45,16 @@ one row. A double-count is structurally impossible, not just unlikely.
 
 ## Auth
 
-`access_token_ref` is a Secret Manager or KMS reference to the Vercel access token, never the raw
-token, and the column is length-bounded to catch a pasted token. `team_id` and `project_id` are
+`access_token_ref` is an AWS Secrets Manager secret ARN
+(`arn:aws:secretsmanager:<region>:<account>:secret:<name>`) holding the Vercel access token, never the
+raw token, and the column is length-bounded to catch a pasted token. `team_id` and `project_id` are
 public Vercel identifiers that scope the query, not secrets.
+
+The gateway reads the secret per fetch and sends it as a Bearer header (CTO-381). When the
+organization has an AWS connector with an IAM role ARN, the secret is read through that assumed role
+(so the role needs `secretsmanager:GetSecretValue` on it). Otherwise it is read with the gateway's
+own identity, and only a secret named `ai-tally/connectors/<organization id>/...` is accepted, since
+a resource policy cannot check an external id. The token is never cached, logged or stored.
 
 `enabled` (default `true`) lets a tenant keep the row but pause the connector.
 

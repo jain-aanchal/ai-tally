@@ -63,6 +63,12 @@
       "Resource": "arn:aws:iam::*:role/ai-tally-connector-*"
     },
     {
+      "Sid": "TenantConnectorTokenSecrets",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:ai-tally/connectors/*"
+    },
+    {
       "Sid": "CostExplorerRead",
       "Effect": "Allow",
       "Action": [

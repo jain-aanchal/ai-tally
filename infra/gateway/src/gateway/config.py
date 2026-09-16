@@ -201,6 +201,17 @@ class Settings(BaseSettings):
     vercel_connector_enabled: bool = False
     # Vercel API base (override for a proxy / test double). No credentials in the URL.
     vercel_api_base: str = "https://api.vercel.com"
+    # CTO-381. Whether this gateway is a self-hosted, SINGLE-TENANT deployment. Only then is the
+    # ambient credential chain (`aws-default-chain`, GCP ADC) the tenant's own identity. On a hosted
+    # gateway the ambient chain is ai-tally's identity, so it is refused when a connector is saved and
+    # fails the job if a row already holds it. Default off: the fail-closed direction.
+    connectors_self_hosted_single_tenant: bool = False
+    # CTO-381. Name prefix for connector token secrets the gateway reads with its OWN AWS identity
+    # (a tenant with no IAM role). The tenant UUID must follow it, `ai-tally/connectors/<uuid>/...`,
+    # because a Secrets Manager resource policy cannot check an ExternalId: the tenant-scoped name is
+    # what stops one tenant referencing another's secret. The gateway task role's GetSecretValue
+    # grant should be scoped to the same prefix.
+    connector_secret_name_prefix: str = "ai-tally/connectors/"
     # Egress double-count reconciliation with CTO-144 (default off): when false, Vercel egress flows
     # solely through the CTO-144 egress connector and this connector emits ONLY compute spans. A
     # per-tenant ``tenant_vercel_config.emit_egress`` flag can opt a tenant into egress here instead;
