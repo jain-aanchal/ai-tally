@@ -24,8 +24,21 @@ class Settings(BaseSettings):
     clickhouse_user: str = "tally"
     clickhouse_password: str = "tally"
 
+    # CTO-390 review: bounds on how long a ClickHouse call may hang. Without these,
+    # clickhouse-connect waits on its own generous defaults, and /v1/usage runs in a SYNC handler on
+    # the threadpool: a black-holed dependency (a dropped connection with no RST, a hung LB) would
+    # pin a worker indefinitely and the endpoint would never reach the explicit-unknown 503 it
+    # promises. An honest error needs a deadline to arrive by. Seconds.
+    clickhouse_connect_timeout_s: int = 5
+    clickhouse_query_timeout_s: int = 30
+
     # Postgres (control plane): used for API-key auth lookups.
     postgres_dsn: str = "postgresql://tally:tally@localhost:5432/tally"
+    # CTO-390 review: the same deadline argument for the committed-usage read, which opens a
+    # connection per call. connect_timeout bounds the handshake; statement_timeout bounds a query
+    # that connected and then stalled. Both are needed: either one alone leaves a way to hang.
+    postgres_connect_timeout_s: int = 5
+    postgres_statement_timeout_ms: int = 10_000
 
     # Deployment environment (CTO-268, gateway half). The gateway had NO notion of one, which is why
     # PR #345 could guard the web tier's auth escape hatch (NODE_ENV=production is free there) and
@@ -115,6 +128,19 @@ class Settings(BaseSettings):
     # Seconds, and deliberately short, because usage is the number a tenant watches while they debug
     # a spike.
     usage_cache_ttl_s: float = 15.0
+
+    # CTO-390 review: how far back the LIVE ClickHouse count can be trusted, in days. Must match the
+    # raw-span DELETE in db/clickhouse/otel_spans.sql (90 days), which has no aggregate-on-expire.
+    # Past this horizon otel_spans no longer holds the period's rows, so a live uniqExact returns a
+    # number that shrinks every day and is served as ordinary open data. A period older than this is
+    # therefore an explicit unknown until the closing job commits it, never a decayed count.
+    usage_live_count_retention_days: int = 90
+
+    # CTO-390 review: make a missing tenant_usage_periods table a startup failure instead of a boot
+    # WARNING, the way idempotency_durable_required does for migration 0032. Worth setting in any
+    # deployment that reads /v1/usage, because docker-entrypoint-initdb.d only fires on a first boot
+    # against an empty volume, so every already-running stack lacks the table until 0034 is applied.
+    usage_durable_required: bool = False
 
     # Edge-key delta feed safe-lag window, in seconds (Initiative 2 §6.2 review). The /v1/edge/keys
     # cursor is a keyset watermark over (GREATEST(created_at, revoked_at), id). created_at/revoked_at

@@ -43,6 +43,12 @@ class ClickHouseStore:
                 username=self._settings.clickhouse_user,
                 password=self._settings.clickhouse_password,
                 database=self._settings.clickhouse_db,
+                # CTO-390 review: bounded, because an unbounded wait is how an "honest error" turns
+                # into a hang. /v1/usage runs on the threadpool, so a dependency that accepts a
+                # connection and then never answers would pin a worker rather than reaching the
+                # explicit-unknown 503 the endpoint promises.
+                connect_timeout=self._settings.clickhouse_connect_timeout_s,
+                send_receive_timeout=self._settings.clickhouse_query_timeout_s,
             )
         return self._client
 

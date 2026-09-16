@@ -44,28 +44,64 @@ class _FakeStore:
         pass
 
 
-class _FakeCounts:
-    """The durable, shared count /v1/usage reads (ClickHouse in production)."""
+class _SharedUsageTable:
+    """The durable, shared storage both "replicas" read: ClickHouse spans plus committed periods.
+
+    Split from the clients on purpose (CTO-390 review). A restart or a second replica has to be
+    modelled as a NEW client over this SAME table; re-using one fake object across both would pass
+    for any implementation that just reads whatever it was handed, which is the property these tests
+    exist to prove.
+    """
 
     def __init__(self) -> None:
         self.traces = 0
         self.features = 0
+        self.committed: dict[tuple[str, str], object] = {}
+
+
+class _FakeCounts:
+    """One replica's client over the shared span table (ClickHouse in production)."""
+
+    def __init__(self, shared: _SharedUsageTable) -> None:
+        self.shared = shared
         self.unavailable = False
+
+    @property
+    def traces(self) -> int:
+        return self.shared.traces
+
+    @traces.setter
+    def traces(self, value: int) -> None:
+        self.shared.traces = value
+
+    @property
+    def features(self) -> int:
+        return self.shared.features
+
+    @features.setter
+    def features(self, value: int) -> None:
+        self.shared.features = value
 
     def usage_counts(
         self, tenant_id: str, *, period_start: datetime, period_end: datetime
     ) -> tuple[int, int]:
         if self.unavailable:
             raise RuntimeError("clickhouse unreachable")
-        return self.traces, self.features
+        return self.shared.traces, self.shared.features
 
 
 class _FakeCommitted:
-    def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], object] = {}
+    """One replica's client over the shared committed-period table."""
+
+    def __init__(self, shared: _SharedUsageTable) -> None:
+        self.shared = shared
+
+    @property
+    def rows(self) -> dict[tuple[str, str], object]:
+        return self.shared.committed
 
     def get(self, tenant_id: str, period: str):  # noqa: ANN201 - mirrors the real store's return
-        return self.rows.get((tenant_id, period))
+        return self.shared.committed.get((tenant_id, period))
 
 
 @dataclass
@@ -73,6 +109,7 @@ class _Harness:
     client: TestClient
     counts: _FakeCounts
     committed: _FakeCommitted
+    shared: _SharedUsageTable
 
 
 def _wire_usage(counts: _FakeCounts, committed: _FakeCommitted) -> None:
@@ -93,9 +130,10 @@ def h() -> Iterator[_Harness]:
         app.state.store = _FakeStore()
         app.state.metering = UsageRollup()
         app.state.idempotency = IdempotencyCache(ttl_seconds=3600)
-        counts, committed = _FakeCounts(), _FakeCommitted()
+        shared = _SharedUsageTable()
+        counts, committed = _FakeCounts(shared), _FakeCommitted(shared)
         _wire_usage(counts, committed)
-        yield _Harness(client=c, counts=counts, committed=committed)
+        yield _Harness(client=c, counts=counts, committed=committed, shared=shared)
 
 
 def _span(trace_id: str, feature_tag: str) -> dict[str, object]:
@@ -177,14 +215,20 @@ def test_usage_does_not_read_the_in_process_meter(h: _Harness) -> None:
 
 
 def test_usage_survives_a_restart(h: _Harness) -> None:
-    """Re-enter the lifespan (a redeployed worker) and read the same figures from the same store."""
+    """Re-enter the lifespan (a redeployed worker) and read the same figures from the same store.
+
+    The restarted worker is wired with BRAND NEW client objects over the same shared table, which is
+    what a redeploy actually is. Re-handing it the same fakes would prove only that the endpoint
+    reads whatever object it was given, which no implementation could fail.
+    """
     h.counts.traces, h.counts.features = 77, 3
     before = h.client.get("/v1/usage", headers={"X-Tenant-Id": T}).json()
 
     with TestClient(app) as restarted:
         app.state.store = _FakeStore()
         app.state.metering = UsageRollup()
-        _wire_usage(h.counts, h.committed)  # same durable store, brand new process state
+        # Same durable table, brand new process state and brand new clients over it.
+        _wire_usage(_FakeCounts(h.shared), _FakeCommitted(h.shared))
         after = restarted.get("/v1/usage", headers={"X-Tenant-Id": T}).json()
 
     assert before["trace_count"] == after["trace_count"] == 77
@@ -203,6 +247,48 @@ def test_an_unavailable_source_is_an_explicit_unknown_not_a_zero(h: _Harness) ->
     assert body["error"]["code"] == "USAGE_UNAVAILABLE"
     assert body["trace_count"] is None
     assert body["feature_count"] is None
+
+
+def test_the_error_body_has_the_same_shape_as_the_success_body(h: _Harness) -> None:
+    """CTO-390 review. Every key the 200 body carries is present and explicitly null.
+
+    A consumer reading over_trace_limit, plan or closed off a 503 would otherwise get an ABSENT key,
+    which JavaScript reads as undefined and Python as a KeyError-or-default: "we do not know" turns
+    back into "no" one layer down, which is the exact substitution this ticket exists to prevent.
+    """
+    h.shared.traces, h.shared.features = 4321, 12
+    ok = h.client.get("/v1/usage", headers={"X-Tenant-Id": T}).json()
+
+    h.counts.unavailable = True
+    failed = h.client.get("/v1/usage", headers={"X-Tenant-Id": T}).json()
+
+    assert set(ok).issubset(set(failed))  # nothing the caller could read simply vanishes
+    for key in set(ok) - {"tenant_id", "period"}:
+        assert failed[key] is None, f"{key} must be an explicit null, not absent or a value"
+    assert failed["tenant_id"] == T
+
+
+def test_the_error_body_names_the_period_even_when_none_was_asked_for(h: _Harness) -> None:
+    """It used to echo the raw query parameter, so an omitted ?period= answered "period": null and
+    the caller could not tell which period had failed."""
+    h.counts.unavailable = True
+
+    body = h.client.get("/v1/usage", headers={"X-Tenant-Id": T}).json()
+
+    assert body["period"] is not None
+    assert len(body["period"]) == 7 and body["period"][4] == "-"  # a real YYYY-MM
+
+
+def test_a_period_past_the_retention_horizon_is_an_explicit_unknown(h: _Harness) -> None:
+    """Raw spans are dropped at 90 days and nothing commits a period yet, so an old month would
+    otherwise be answered with a live count that shrinks every day, served as open data."""
+    h.shared.traces, h.shared.features = 3, 1
+
+    resp = h.client.get("/v1/usage?period=2020-01", headers={"X-Tenant-Id": T})
+
+    assert resp.status_code == 503
+    assert resp.json()["trace_count"] is None
+    assert resp.json()["period"] == "2020-01"
 
 
 def test_a_committed_period_is_served_frozen(h: _Harness) -> None:

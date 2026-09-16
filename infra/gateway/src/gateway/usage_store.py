@@ -22,6 +22,28 @@ THE SHAPE, and why it is two sources rather than one.
 :class:`UsageRollup` keeps its job as the HEAD meter on the ingest path (CTO-84) and as the owner of
 plan limits, which are configuration rather than telemetry. It is no longer what ``/v1/usage`` reads.
 
+THE CTO-84 HEAD-COUNT PROPERTY, per ingest mode, because it is NOT preserved in both and an earlier
+draft of this module claimed it was. CTO-84 requires that sampling analytics down must never reduce
+the billed count.
+
+  * SYNCHRONOUS ingest (the default): preserved. ``head_sample_rate`` is only stamped onto the
+    written row and never drops a span at the gateway, backpressure shedding and per-item validation
+    both run BEFORE the head measurement, and spans dropped by client-side sampling never reach the
+    gateway at all. Nothing removes a span between the head measurement and the ClickHouse write, so
+    a ``uniqExact`` over what was written equals what the head meter counted.
+  * BUFFERED ingest (``TALLY_INGEST_BUFFERED=true``): NOT preserved, in both directions. Rows past
+    the buffer's high-water mark are shed after the head meter has seen them, and the in-memory
+    buffer is lost outright on a restart, so spans the head meter counted may never reach
+    ``otel_spans`` and ``uniqExact`` UNDER-reports against CTO-84. What the number means in this
+    mode is "distinct traces that reached storage", which is the honest thing to bill for but is not
+    the same quantity the head meter reports. The two legitimately disagree here and reconciling
+    them is its own piece of work, not this module's.
+
+The general caveat behind both: this equivalence rests on nothing dropping a span between the head
+meter and the durable write. If tail sampling or drop-on-write is introduced, the ClickHouse count
+starts undercounting the bill on every path and the head meter would have to become the persisted
+source instead.
+
 WHAT HAPPENS WHEN A SOURCE IS UNAVAILABLE. :class:`UsageUnavailable` propagates and the endpoint
 answers 503 with explicit nulls. It never falls back to the in-process meter and never returns 0.
 This is the whole point of the ticket: a small wrong number is indistinguishable from a real small
@@ -49,7 +71,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import psycopg
@@ -114,6 +136,35 @@ class CommittedUsageStore:
 
     def __init__(self, settings: Settings) -> None:
         self._dsn = settings.postgres_dsn
+        # CTO-390 review: every connect here is bounded. This store opens a connection per call from
+        # a SYNC endpoint handler running on the threadpool, so an unbounded connect or an unbounded
+        # query against a black-holed Postgres would pin a worker and the promised explicit-unknown
+        # 503 would never arrive. connect_timeout bounds the handshake and statement_timeout bounds a
+        # query that connected and then stalled; one without the other still leaves a way to hang.
+        self._connect_kwargs: dict[str, object] = {
+            "connect_timeout": settings.postgres_connect_timeout_s,
+            "options": f"-c statement_timeout={int(settings.postgres_statement_timeout_ms)}",
+        }
+
+    def probe(self) -> str | None:
+        """``None`` if ``tenant_usage_periods`` is readable, else a one-line reason why not.
+
+        CTO-390 review. Without this the first symptom of a missing migration 0034 is an
+        undifferentiated 503 from ``/v1/usage`` with the cause only in a log line nobody is reading.
+        ``docker-entrypoint-initdb.d`` fires only on a first boot against an empty volume, so EVERY
+        already-running stack lacks this table until 0034 is applied by hand, which makes "the table
+        is simply not there" the common case rather than an exotic one. Mirrors
+        :func:`gateway.batch_idempotency.build_batch_idempotency`, which probes at boot and states
+        its mode.
+        """
+        try:
+            with psycopg.connect(self._dsn, **self._connect_kwargs) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM tenant_usage_periods LIMIT 1")
+                cur.fetchone()
+                conn.commit()
+        except psycopg.Error as exc:
+            return str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+        return None
 
     def get(self, tenant_id: str, period: str) -> UsageRecord | None:
         """The committed record for a period, or ``None`` if the period was never committed.
@@ -126,7 +177,7 @@ class CommittedUsageStore:
         whether this period is frozen" is not the same as "it is not frozen".
         """
         try:
-            with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            with psycopg.connect(self._dsn, **self._connect_kwargs) as conn, conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT trace_count, feature_count, trace_commitment, feature_commitment,
@@ -168,7 +219,7 @@ class CommittedUsageStore:
         failure and emits nothing rather than reporting a period closed that is not.
         """
         try:
-            with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            with psycopg.connect(self._dsn, **self._connect_kwargs) as conn, conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO tenant_usage_periods
@@ -208,6 +259,8 @@ class DurableUsageRollup:
         committed: CommittedUsageStore | None,
         plan_limits: Callable[[str], PlanLimit] | None = None,
         cache_ttl_s: float = 15.0,
+        live_count_retention_days: int = 90,
+        boot_warning: str | None = None,
         now_s: Callable[[], float] | None = None,
         now_ns: Callable[[], int] | None = None,
     ) -> None:
@@ -217,9 +270,40 @@ class DurableUsageRollup:
         self._committed = committed
         self._plan_limits = plan_limits or (lambda _tenant_id: DEFAULT_PLAN_LIMIT)
         self._cache_ttl_s = cache_ttl_s
+        self._retention_days = live_count_retention_days
+        #: Set by :func:`build_usage_rollup` when the boot probe found the committed table missing,
+        #: so a 503 can name the cause instead of being undifferentiated (CTO-390 review).
+        self.boot_warning = boot_warning
         self._now_s = now_s or time.monotonic
         self._now_ns = now_ns or time.time_ns
         self._cache: dict[tuple[str, str], tuple[float, UsageRecord]] = {}
+
+    def current_period(self) -> str:
+        """The period a bare ``/v1/usage`` call means, so a failed read can still name which one."""
+        return billing_period(self._now_ns())
+
+    def _guard_retention(self, period: str, period_start: datetime) -> None:
+        """Refuse to count a period whose raw spans have started aging out (CTO-390 review).
+
+        ``otel_spans`` DELETEs raw rows at 90 days and deliberately does NOT aggregate on expire
+        (``db/clickhouse/otel_spans.sql`` says so: the TTL GROUP BY keys are not a primary-key
+        prefix). Nothing calls :meth:`CommittedUsageStore.commit` on a schedule yet, so an old period
+        has no committed row to fall back to, and a live ``uniqExact`` over it returns a count of
+        whatever rows survive: a number that shrinks a little every day and is served as ordinary
+        open data with ``closed: false``. That is the exact failure this codebase refuses, a real
+        figure decaying silently toward zero, so it is an explicit unknown instead.
+
+        Only the LIVE count is guarded. A committed period is checked first and is answered from the
+        frozen row however old it is, which is the whole reason that row exists.
+        """
+        horizon = datetime.fromtimestamp(self._now_ns() / 1e9, tz=timezone.utc) - timedelta(
+            days=self._retention_days
+        )
+        if period_start < horizon:
+            raise UsageUnavailable(
+                f"period {period} is older than the {self._retention_days}-day raw span retention "
+                "and was never committed, so no exact count exists for it"
+            )
 
     def usage(self, tenant_id: str, period: str | None = None) -> UsageRecord:
         """Usage for ``period`` (defaults to the tenant's current period).
@@ -243,6 +327,7 @@ class DurableUsageRollup:
                 self._cache[key] = (math.inf, frozen)
                 return frozen
 
+        self._guard_retention(period, period_start)
         source = self._counts_source()
         try:
             trace_count, feature_count = source.usage_counts(
@@ -271,11 +356,63 @@ class DurableUsageRollup:
         return record
 
 
+def build_usage_rollup(
+    settings: Settings,
+    *,
+    counts_source: Callable[[], UsageCountSource],
+    plan_limits: Callable[[str], PlanLimit] | None = None,
+) -> DurableUsageRollup:
+    """Wire the usage read path at boot, probing whether the committed table is actually there.
+
+    CTO-390 review. ``CommittedUsageStore`` used to be constructed unconditionally, so a deployment
+    missing migration 0034 discovered it as a 503 from ``/v1/usage`` with the reason buried in a log.
+    That is a bad way to find out, and it is the COMMON case rather than an exotic one:
+    ``docker-entrypoint-initdb.d`` fires only on a first boot against an empty volume, so every
+    already-running stack lacks ``tenant_usage_periods`` until 0034 is applied by hand.
+
+    So this states the mode at boot the way
+    :func:`gateway.batch_idempotency.build_batch_idempotency` does, and carries the reason onto the
+    rollup so the 503 body can name it. ``usage_durable_required`` turns the warning into a startup
+    failure, which is what a deployment that serves ``/v1/usage`` should set.
+
+    The store is still attached when the probe fails. Dropping it would leave the read path unable to
+    tell a frozen period from an open one, and it would answer live counts for already-invoiced
+    months, which is a worse failure than an error.
+    """
+    committed = CommittedUsageStore(settings)
+    reason = committed.probe()
+    if reason is not None:
+        if settings.usage_durable_required:
+            raise RuntimeError(
+                "durable usage is required but tenant_usage_periods is unreachable "
+                f"({reason}); apply db/postgres/0034_tenant_usage_periods.sql"
+            )
+        logger.warning(
+            "committed usage table UNAVAILABLE (%s); GET /v1/usage will answer 503 with explicit "
+            "nulls rather than a number, because without it a live count cannot be told apart from "
+            "an already-invoiced period. Apply db/postgres/0034_tenant_usage_periods.sql (initdb "
+            "only fires on a first boot against an empty volume), and set "
+            "TALLY_USAGE_DURABLE_REQUIRED=true to make this a startup failure instead",
+            reason,
+        )
+    else:
+        logger.info("durable usage enabled (tenant_usage_periods)")
+    return DurableUsageRollup(
+        counts_source=counts_source,
+        committed=committed,
+        plan_limits=plan_limits,
+        cache_ttl_s=settings.usage_cache_ttl_s,
+        live_count_retention_days=settings.usage_live_count_retention_days,
+        boot_warning=reason,
+    )
+
+
 __all__ = [
     "USAGE_UNAVAILABLE_CODE",
     "CommittedUsageStore",
     "DurableUsageRollup",
     "UsageCountSource",
     "UsageUnavailable",
+    "build_usage_rollup",
     "period_bounds",
 ]
