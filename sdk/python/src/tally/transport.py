@@ -883,28 +883,36 @@ class BatchingTransport:
         (wire.py): the gateway numbers items AFTER intra-batch dedup, so numbering the raw list
         would hand back the wrong span for any batch that carried a duplicate.
 
-        One deliberate divergence: a span with no trace/span id is numbered, never skipped. The
-        gateway's dedup keys such a span as ``(None, None)``, so a strict mirror would treat every
-        id-less span after the first as a duplicate and refuse to place any of them, which is
-        exactly the population the SDK emits (spans carry gen_ai.* attributes, not ids). Being
-        tolerant here can only ever place an item the gateway itself named; anything it did not name
-        still falls into the unattributed shortfall and is counted rather than resent, so this
-        cannot resend a span that was accepted (CTO-391).
+        The mirror has to be EXACT, because both rules number the same list and any disagreement
+        shifts every ``#N`` after the point where they diverge. This used to skip a span only when
+        BOTH ids were truthy, while ``deduplicated()`` (CTO-396) drops a duplicate whenever the SPAN
+        id is present, trace id or not. Two spans sharing a span id and carrying no trace id
+        therefore left the gateway numbering one item ahead of us, so its ``#N`` named a different
+        span than ours and a shed item re-enqueued a span the gateway had ACCEPTED: a double send of
+        billable spend, which nothing downstream can undo (#311), plus an uncounted loss of the span
+        actually shed. The one case where the no-double-send guarantee really broke (CTO-407).
+
+        A span with NO span id is still numbered rather than skipped, and that is the exact mirror
+        too, not a tolerance: ``deduplicated()`` passes every such span through, because a missing
+        id is not an identity to dedup on. That is the population the SDK itself emits when a
+        caller builds spans by hand (spans carry gen_ai.* attributes, not ids).
         """
         positions: dict[str, int] = {}
-        seen: set[tuple[object, object]] = set()
+        seen: set[tuple[object, str]] = set()
         index = 0
         for pos, span in enumerate(sent):
             if isinstance(span, dict):
                 trace = span.get("TraceId") or span.get("trace_id")
                 span_id = span.get("SpanId") or span.get("span_id")
-                if trace and span_id:
-                    if (trace, span_id) in seen:
+                if isinstance(span_id, str) and span_id:
+                    # Keyed exactly as wire.deduplicated(): on (trace_id, span_id) whenever the span
+                    # id is a real string, so an absent trace id cannot switch dedup off here while
+                    # it stays on there (CTO-407).
+                    key = (trace, span_id)
+                    if key in seen:
                         continue  # the gateway dropped this one before numbering
-                    seen.add((trace, span_id))
-                    item_id = f"{trace}:{span_id}"
-                else:
-                    item_id = f"#{index}"
+                    seen.add(key)
+                item_id = f"{trace}:{span_id}" if (trace and span_id) else f"#{index}"
             else:
                 item_id = f"#{index}"
             positions.setdefault(item_id, pos)

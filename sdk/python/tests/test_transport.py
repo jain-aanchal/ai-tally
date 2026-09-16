@@ -21,7 +21,7 @@ from tally.transport import (
     _parse_ack,
     _retry_hint_ms,
 )
-from tally.wire import decode_request
+from tally.wire import BatchRequest, decode_request
 
 
 class _Collector(logging.Handler):
@@ -1009,3 +1009,107 @@ def test_non_retryable_item_codes_match_the_gateways_own_set():
     assert {wire_value[m] for m in non_retryable_members} == set(_NON_RETRYABLE_ITEM_CODES)
     # And the accepted-but-flagged codes are real codes, not a spelling this client invented.
     assert set(_FLAG_ITEM_CODES) <= set(wire_value.values())
+
+
+# --- CTO-407: the item-id mirror and the wire's own dedup must not drift apart ---
+
+
+def _gateway_item_ids(spans: list[dict]) -> list[str]:
+    """Number a batch the way the gateway does: ``span_item_id`` over ``deduplicated()``.
+
+    Stated in the SDK's own terms, over the SDK's own ``wire.deduplicated()``, rather than imported
+    from the gateway: this client depends on no gateway code, and the numbering rule itself
+    (trace:span when both are present, else the post-dedup position) is two lines. What makes it a
+    pin is the ``deduplicated()`` call, which is the very function ``_item_positions`` claims to
+    mirror, so editing either rule alone fails the other.
+    """
+    deduped = BatchRequest(
+        tenant_id="", sdk_version="0.0.1", resource_spans=list(spans)
+    ).deduplicated()
+    ids: list[str] = []
+    for index, span in enumerate(deduped.resource_spans):
+        trace = span.get("TraceId") or span.get("trace_id")
+        span_id = span.get("SpanId") or span.get("span_id")
+        ids.append(f"{trace}:{span_id}" if (trace and span_id) else f"#{index}")
+    return ids
+
+
+@pytest.mark.parametrize(
+    "spans",
+    [
+        pytest.param([{"n": 0}, {"n": 1}, {"n": 2}], id="no_ids_at_all"),
+        pytest.param(
+            [{"span_id": "s1", "n": 0}, {"span_id": "s1", "n": 1}, {"n": 2}],
+            id="duplicate_span_id_no_trace_id_the_cto_407_reproduction",
+        ),
+        pytest.param(
+            [
+                {"trace_id": "t1", "span_id": "s1", "n": 0},
+                {"trace_id": "t1", "span_id": "s1", "n": 1},
+                {"trace_id": "t1", "span_id": "s2", "n": 2},
+            ],
+            id="duplicate_full_ids",
+        ),
+        pytest.param(
+            [
+                {"trace_id": "t1", "span_id": "s1", "n": 0},
+                {"trace_id": "t2", "span_id": "s1", "n": 1},
+            ],
+            id="same_span_id_different_traces_is_not_a_duplicate",
+        ),
+        pytest.param(
+            [{"trace_id": "t1", "n": 0}, {"trace_id": "t1", "n": 1}],
+            id="trace_id_only_is_never_deduped",
+        ),
+        pytest.param(
+            [{"span_id": "", "n": 0}, {"span_id": "", "n": 1}],
+            id="empty_span_id_is_not_an_identity",
+        ),
+        pytest.param(
+            [{"span_id": "s1", "n": 0}, {"n": 1}, {"span_id": "s1", "n": 2}, {"n": 3}],
+            id="a_dedup_in_the_middle_shifts_every_later_number",
+        ),
+    ],
+)
+def test_the_item_id_mirror_numbers_a_batch_exactly_as_the_wire_dedup_does(spans):
+    """Pins ``_item_positions`` to ``wire.deduplicated()`` in both directions (CTO-407).
+
+    The gateway numbers its ``partial_errors`` AFTER intra-batch dedup, so the two rules must drop
+    the same spans in the same order. They did not: this client deduped only when both ids were
+    truthy while the wire dedups on any real span id, and one extra item on the gateway's side
+    shifts every ``#N`` after it onto the wrong span. Keys, not just values, and in order.
+    """
+    t = _transport(_RecordingSender())
+    assert list(t._item_positions(spans)) == _gateway_item_ids(spans)
+
+
+def test_a_shed_item_re_enqueues_the_shed_span_not_the_accepted_one():
+    """The behaviour the mirror protects (CTO-407).
+
+    Two spans share a span id and carry no trace id, so the gateway dedups one away and its ``#1``
+    is the THIRD span we sent. Numbering that as our second span re-sent a span the gateway had
+    already accepted, double-counting its spend, and left the span it actually shed uncounted.
+    """
+    sent_batches: list[list[int]] = []
+
+    def sender(url: str, headers: dict, body: bytes) -> SendResult:
+        spans = decode_request(body.decode("utf-8")).resource_spans
+        sent_batches.append([int(s["n"]) for s in spans])
+        if len(sent_batches) == 1:
+            # Post-dedup the gateway holds [n=0, n=2] and sheds its own #1, which is n=2.
+            return SendResult(200, None, _ack(1, (("#1", "RATE_LIMITED"),)))
+        return SendResult(200, None, _ack(len(spans)))
+
+    t = _transport(sender, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    t.export({"span_id": "s1", "n": 0})
+    t.export({"span_id": "s1", "n": 1})
+    t.export({"n": 2})
+
+    assert t.flush_once() is True
+    assert sent_batches[0] == [0, 1, 2]
+    assert t.requeued_span_count == 1
+    assert t.flush_once() is True
+    # Exactly the shed span goes again. The accepted span, and the duplicate the gateway dropped
+    # before it ever numbered anything, do not.
+    assert sent_batches[1] == [2]
+    assert t.pending() == 0
