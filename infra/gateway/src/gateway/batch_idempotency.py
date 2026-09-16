@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from datetime import datetime
 from typing import Protocol
 
 import psycopg
@@ -109,6 +111,22 @@ class PostgresIdempotencyStore:
 
     def __init__(self, settings: Settings) -> None:
         self._dsn = settings.postgres_dsn
+        # CTO-389 review: the claim TOKEN for every batch this process currently holds, keyed by
+        # (tenant, batch) and valued by the row's ``updated_at`` at the moment the claim was won.
+        # ``release`` deletes only a row still carrying its token, which is what stops a worker that
+        # stalled past IN_FLIGHT_LEASE_S from deleting a claim someone else has since taken. Guarded
+        # by a lock because the ingest path is threaded (FastAPI runs sync handlers on a threadpool).
+        self._claims: dict[tuple[str, str], datetime] = {}
+        self._claims_lock = threading.Lock()
+
+    def _remember_claim(self, tenant_id: str, batch_id: str, token: datetime) -> None:
+        with self._claims_lock:
+            self._claims[(tenant_id, batch_id)] = token
+
+    def _forget_claim(self, tenant_id: str, batch_id: str) -> datetime | None:
+        """Hand back (and drop) the token for a claim this process holds, if it holds one."""
+        with self._claims_lock:
+            return self._claims.pop((tenant_id, batch_id), None)
 
     def claim(self, tenant_id: str, batch_id: str, ttl_seconds: float) -> BatchResponse | None:
         """Try to take ownership of ``(tenant_id, batch_id)``.
@@ -141,13 +159,17 @@ class PostgresIdempotencyStore:
                         OR (ingest_batch_idempotency.state = 'in_flight'
                             AND ingest_batch_idempotency.updated_at
                                   < now() - make_interval(secs => %s))
-                    RETURNING state
+                    RETURNING updated_at
                     """,
                     (tenant_id, batch_id, float(ttl_seconds), float(IN_FLIGHT_LEASE_S)),
                 )
                 claimed = cur.fetchone()
                 if claimed is not None:
                     conn.commit()
+                    # CTO-389 review: remember WHICH claim we won. ``ON CONFLICT DO UPDATE`` above
+                    # stamps a fresh ``updated_at`` on every successful (re)claim, so this value
+                    # identifies this generation of the claim and nobody else's. See :meth:`release`.
+                    self._remember_claim(tenant_id, batch_id, claimed[0])
                     return None
                 # The conflicting row is live and belongs to someone else. Read it to find out
                 # whether that someone has finished.
@@ -212,6 +234,10 @@ class PostgresIdempotencyStore:
                         (payload, tenant_id, batch_id),
                     )
                     conn.commit()
+                # The claim is now a receipt, so this process no longer holds a releasable claim on
+                # it. Dropping the token here keeps a later stray release from deleting a real
+                # answer (CTO-389 review).
+                self._forget_claim(tenant_id, batch_id)
                 return
             except psycopg.Error as exc:
                 last_error = exc
@@ -241,13 +267,34 @@ class PostgresIdempotencyStore:
 
         Best-effort, and safe when it fails: a row left behind is an ``in_flight`` claim that the
         lease reclaims. That is a delay, never an acceptance, and never a stored wrong answer.
+
+        SCOPED TO THE CLAIM WE ACTUALLY HOLD (CTO-389 review). The DELETE carries the claim token
+        (the ``updated_at`` :meth:`claim` returned) as well as the key. Without it the delete was
+        "whatever in_flight row happens to be here now", and :meth:`claim` resets the row to a fresh
+        lease via ``ON CONFLICT DO UPDATE``: a worker that stalled past :data:`IN_FLIGHT_LEASE_S`
+        would then delete a claim another worker had since taken, leaving both free to write the
+        same spans. With the token a stale release matches no row and does nothing, which is exactly
+        right, because a stalled worker has no claim left to give up.
+
+        Holding no token means we cannot prove the row is ours, so nothing is deleted. That costs
+        the lease, which is a delay and never a double write.
         """
+        token = self._forget_claim(tenant_id, batch_id)
+        if token is None:
+            logger.warning(
+                "no claim token held for batch %s; leaving the row alone rather than deleting a "
+                "claim that may now belong to another worker. It stays in_flight until its lease "
+                "expires, which delays the client's retry but accepts nothing",
+                batch_id,
+            )
+            return
         try:
             with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM ingest_batch_idempotency "
-                    "WHERE tenant_id = %s AND batch_id = %s AND state = 'in_flight'",
-                    (tenant_id, batch_id),
+                    "WHERE tenant_id = %s AND batch_id = %s AND state = 'in_flight' "
+                    "  AND updated_at = %s",
+                    (tenant_id, batch_id, token),
                 )
                 conn.commit()
         except psycopg.Error:

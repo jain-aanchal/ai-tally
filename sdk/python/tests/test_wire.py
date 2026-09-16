@@ -137,6 +137,22 @@ def test_release_of_an_unseen_batch_is_a_no_op():
     cache.release(BatchRequest(tenant_id="t", sdk_version="v"))
 
 
+def test_release_leaves_a_recorded_outcome_for_the_same_batch_standing():
+    """CTO-389 review. A release must never delete a real receipt, only a reservation.
+
+    An unconditional pop would re-admit a batch that has already been answered, which is exactly the
+    duplicate write this cache exists to prevent.
+    """
+    cache = IdempotencyCache()
+    req = BatchRequest(tenant_id="t", sdk_version="v")
+    cache.check_or_store(req)
+    cache.record(req, BatchResponse(batch_id=req.batch_id, accepted_spans=3))
+    cache.release(req)
+    replay = cache.check_or_store(req)
+    assert replay is not None
+    assert replay.accepted_spans == 3
+
+
 def test_release_does_not_touch_a_recorded_outcome_for_another_batch():
     cache = IdempotencyCache()
     kept = BatchRequest(tenant_id="t", sdk_version="v")

@@ -120,6 +120,54 @@ def test_an_unreachable_store_raises_rather_than_returning_none(monkeypatch) -> 
         broken.claim("t1", "b1", 3600)
 
 
+def test_release_gives_up_the_claim_it_holds(store: PostgresIdempotencyStore) -> None:
+    """CTO-389. A retryable failure frees the batch immediately rather than burning the lease."""
+    tenant = _tenant()
+    assert store.claim(tenant, "b1", 3600) is None
+    store.release(tenant, "b1")
+    assert store.claim(tenant, "b1", 3600) is None  # claimable, so the retry re-runs the write
+
+
+def test_release_never_deletes_a_recorded_receipt(store: PostgresIdempotencyStore) -> None:
+    """A receipt is an answer. A stray release after one was recorded must leave it standing."""
+    tenant = _tenant()
+    assert store.claim(tenant, "b1", 3600) is None
+    store.record(tenant, "b1", BatchResponse(batch_id="b1", accepted_spans=4))
+    store.release(tenant, "b1")
+    replay = store.claim(tenant, "b1", 3600)
+    assert replay is not None
+    assert replay.accepted_spans == 4
+
+
+def test_release_only_deletes_the_claim_generation_it_owns(store: PostgresIdempotencyStore) -> None:
+    """CTO-389 review. A stalled worker must not delete a claim another worker now owns.
+
+    Worker A claims and then stalls past :data:`IN_FLIGHT_LEASE_S`. Worker B reclaims, so the row is
+    B's. A's late release carries A's claim token, matches nothing, and deletes nothing. Without the
+    token it would delete B's row on (tenant, batch) alone, and both workers would then be free to
+    write the same spans concurrently.
+    """
+    tenant = _tenant()
+    worker_a = store
+    worker_b = PostgresIdempotencyStore(Settings(postgres_dsn=DSN))
+    assert worker_a.claim(tenant, "b1", 3600) is None
+    with psycopg.connect(DSN) as conn, conn.cursor() as cur:  # age A's lease out by hand
+        cur.execute(
+            "UPDATE ingest_batch_idempotency "
+            "SET updated_at = now() - make_interval(secs => %s) "
+            "WHERE tenant_id = %s AND batch_id = %s",
+            (float(IN_FLIGHT_LEASE_S + 60), tenant, "b1"),
+        )
+        conn.commit()
+    assert worker_b.claim(tenant, "b1", 3600) is None  # B now owns the claim
+
+    worker_a.release(tenant, "b1")
+
+    held = worker_b.claim(tenant, "b1", 3600)
+    assert held is not None
+    assert held.status is Status.RETRY  # B's claim survived, so no third writer gets in
+
+
 def test_prune_removes_only_aged_out_receipts(store: PostgresIdempotencyStore) -> None:
     tenant = _tenant()
     store.claim(tenant, "keep", 3600)
