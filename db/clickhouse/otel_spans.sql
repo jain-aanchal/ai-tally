@@ -164,6 +164,24 @@ CREATE TABLE IF NOT EXISTS otel_spans
 --      client timestamp, or one whose skew assessment clamps against server receive time, can land
 --      on a different Timestamp on the replay and will NOT collapse. Nothing here can repair that;
 --      only preventing the duplicate write can.
+--   4. A span the producer sent NO ids for can collapse two genuinely distinct spans, deleting one
+--      permanently along with its spend. CTO-402 stopped the gateway stamping a fresh RANDOM
+--      TraceId/SpanId on an id-less span (which made a retried batch un-collapsible, duplicating
+--      spend at full batch scale) and derives them from content instead: a blake2b over the tenant,
+--      the effective timestamp, the span's position in the batch as posted, and the posted span's
+--      own attributes (gateway/mapping.py, _derive_span_ids). The consequence is the mirror image
+--      of the bug it fixes. Two spans that agree on ALL of those really are indistinguishable to
+--      this table, so they get one sorting key and a merge keeps one and drops the other. The
+--      trigger is ordinary, not exotic: a coarse clock (Date.now() * 1e6 is millisecond-resolution),
+--      two replicas making the same repeated call (a cache warm, a health check, an embedding of a
+--      fixed string), and single-span flushes, which put every span at batch position 0. This is
+--      information-theoretically unavoidable without a producer-supplied id: nothing is left to tell
+--      the two apart. It is a deliberate trade against limitation 2 above, where the duplicate is
+--      permanent in the rollups instead, and it is the strongest argument for a producer sending
+--      real span ids. Unlike 1-3 this one LOSES data rather than over-counting it, so it is called
+--      out loudly. It is pinned by a test (infra/gateway/tests/test_idless_span_identity.py,
+--      test_known_collapse_identical_spans_at_the_same_instant_and_index) so a later change cannot
+--      quietly alter it, and no read can detect it after the fact: the dropped row is simply gone.
 ENGINE = ReplacingMergeTree
 PARTITION BY toDate(Timestamp)
 ORDER BY (TenantId, FeatureTag, ServiceName, SpanName, Timestamp, TraceId, SpanId)
