@@ -896,6 +896,8 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     validator: SpanValidator = app.state.validator
     metering: UsageRollup = app.state.metering
     rows: list[tuple[object, ...]] = []
+    # CTO-405: item ids for `rows`, index for index. See the append below.
+    row_item_ids: list[str] = []
     # CTO-389: HEAD metering measurements for this batch, held until the write succeeds. See the
     # comment at the point of measurement below for why holding them does not weaken CTO-84.
     metered_spans: list[tuple[str | None, str | None, int]] = []
@@ -948,6 +950,11 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
                 sample_rate=batch.sampling.head_sample_rate,
             )
         )
+        # CTO-405: the client-facing name of the span this row came from, kept in lockstep with
+        # `rows` so a row shed by the buffer can be reported under the SAME id every other shed
+        # path uses. Built here rather than recomputed later because only this loop still has the
+        # span a row was built from.
+        row_item_ids.append(item_id)
         # CTO-237: mirror this accepted span into a replay SampleCandidate. The envelope carries
         # ONLY token counts + resolved-context metadata, never a prompt/completion body (the SDK
         # never sends one and the validator rejects bodies), so the no-bodies-in-telemetry posture
@@ -1019,10 +1026,19 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         # the buffer's high-water mark is shed as retryable partial errors: backpressure, not failure.
         produced = buffer.produce_rows(batch.tenant_id, rows)
         accepted = produced.accepted
-        for i in range(produced.rejected):
+        # CTO-405: name the shed items the way every other shed path names them, with
+        # validation.span_item_id ("trace:span", else "#index"), so the client can map each one
+        # back to the span it sent. These used to be named "#buffer-overflow-N" by internal
+        # overflow position, which identifies nothing the client has ever seen: the items are
+        # RATE_LIMITED and retryable by contract, but the SDK correctly refuses to guess a mapping
+        # and counted them as unmapped loss instead, so a client lost billable spend permanently on
+        # a path that was supposed to be retryable. produce_rows sheds a known SUFFIX of `rows`
+        # (it accepts everything up to the high-water mark), and row_item_ids was built in the same
+        # order over the same list, so the shed tail lines up element for element.
+        for shed_item_id in row_item_ids[accepted:]:
             partial_errors.append(
                 PartialError(
-                    item_id=f"#buffer-overflow-{i}",
+                    item_id=shed_item_id,
                     code=ErrorCode.RATE_LIMITED.value,
                     message="ingest buffer at capacity; retry",
                 )
