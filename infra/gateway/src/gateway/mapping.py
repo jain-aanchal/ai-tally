@@ -8,11 +8,12 @@ attributes are promoted to typed columns; everything else lands in the ``SpanAtt
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import blake2b
 
 from tally.schema import GenAI, micro_to_usd
-from tally.wire import uuid7
 
 # gen_ai.* keys that get promoted to typed columns (so they don't also duplicate into the map).
 _PROMOTED_GENAI = frozenset(
@@ -198,17 +199,85 @@ def _f(v: object | None) -> float:
     return f
 
 
+# CTO-402: personalisation strings that domain-separate the two derived ids. The same material is
+# hashed twice, so without this a span's TraceId and SpanId would be the same digest truncated
+# differently and would carry no independent identity.
+_TRACE_ID_PERSON = b"tally-trace"
+_SPAN_ID_PERSON = b"tally-span"
+
+
+def _derive_span_ids(
+    span: dict[str, object],
+    *,
+    tenant_id: str,
+    effective_ts_ns: int,
+    batch_index: int,
+) -> tuple[str, str]:
+    """Derive a DETERMINISTIC ``(trace_id, span_id)`` for a span that arrived without them (CTO-402).
+
+    These used to be fresh random uuids minted at row-build time, which meant two writes of the same
+    logical span got different sorting-key values and the ReplacingMergeTree backstop
+    (db/clickhouse/otel_spans.sql, ORDER BY (..., Timestamp, TraceId, SpanId)) could never collapse
+    them. Since CTO-396 stopped ``deduplicated()`` collapsing id-less spans, an id-less producer
+    retrying a batch under a new batch id wrote 500 + 500 rows where it previously wrote 1 + 1, and
+    the rollup materialized views fire on INSERT, so the duplicate is permanent in the rollups.
+    Deriving the id from content gives the backstop an identity to collapse on without
+    re-introducing the intra-batch collapse that CTO-396 fixed.
+
+    WHAT GOES INTO THE HASH, and why each part has to:
+
+    * ``tenant_id``: two tenants' spans can never share a derived id, so one tenant's traffic can
+      never collapse another's. The sorting key starts with TenantId anyway, but an id that repeats
+      across tenants would still be wrong on every other read path.
+    * ``effective_ts_ns``: distinct moments stay distinct, so a genuinely repeated call (the same
+      span content, later) is a different span rather than a collapsed one. It also keeps a derived
+      id from repeating across billing periods.
+    * ``batch_index``: the span's position in the batch as posted. This is what separates 500
+      genuinely distinct-but-identical spans in one batch, which is exactly the traffic CTO-396
+      stopped discarding. A retry of the same batch presents the same spans in the same order and
+      so reproduces the same ids; the batch id is deliberately NOT in the material, because it is
+      the thing that differs between a first attempt and its retry.
+    * the span's own attributes: two spans that differ in any attribute get different ids.
+
+    NO CUSTOMER DATA IS EXPOSED. The material is hashed, never stored, and every attribute in it is
+    already stored on the very row this id is attached to. Identifiers in it are HMAC hashes by the
+    time they reach here (CTO-118/182), and a body-shaped attribute never gets this far (the
+    validator rejects it and the map below drops it).
+    """
+    material = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "effective_ts_ns": effective_ts_ns,
+            "batch_index": batch_index,
+            "span": span,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    # Widths match what the random fallback produced: 32 hex for a trace, 16 for a span.
+    trace_id = blake2b(material, digest_size=16, person=_TRACE_ID_PERSON).hexdigest()
+    span_id = blake2b(material, digest_size=8, person=_SPAN_ID_PERSON).hexdigest()
+    return trace_id, span_id
+
+
 def span_to_row(
     span: dict[str, object],
     *,
     tenant_id: str,
     effective_ts_ns: int,
     sample_rate: float = 1.0,
+    batch_index: int = 0,
 ) -> tuple[object, ...]:
     """Translate one enriched span attribute dict into an ``otel_spans`` row tuple.
 
     ``effective_ts_ns`` is the skew-clamped timestamp from :func:`tally.timekeeping.assess`. Cost is
     converted from integer micro-USD back to a :class:`~decimal.Decimal` for the Decimal64(8) column.
+
+    ``batch_index`` is the span's position in the batch as posted, and only matters for a span that
+    arrived without ids: it is part of the material their deterministic replacement is derived from
+    (CTO-402, see :func:`_derive_span_ids`). A caller mapping a single span outside a batch can
+    leave it at its default.
     """
     ts = datetime.fromtimestamp(effective_ts_ns / 1e9, tz=timezone.utc)
 
@@ -237,11 +306,26 @@ def span_to_row(
             continue
         extra[str(k)] = str(v)
 
+    # CTO-402: an id the producer sent is always kept; only a missing one is derived, and it is
+    # derived rather than randomised so that re-writing the same logical span reproduces the same
+    # sorting key and the ReplacingMergeTree backstop can collapse it.
+    trace_id = _pick(span, "TraceId", "trace_id")
+    span_id = _pick(span, "SpanId", "span_id")
+    if not trace_id or not span_id:
+        derived_trace_id, derived_span_id = _derive_span_ids(
+            span,
+            tenant_id=tenant_id,
+            effective_ts_ns=effective_ts_ns,
+            batch_index=batch_index,
+        )
+        trace_id = trace_id or derived_trace_id
+        span_id = span_id or derived_span_id
+
     return (
         tenant_id,
         ts,
-        _s(_pick(span, "TraceId", "trace_id") or uuid7().replace("-", "")),
-        _s(_pick(span, "SpanId", "span_id") or uuid7().replace("-", "")[:16]),
+        _s(trace_id),
+        _s(span_id),
         _s(_pick(span, "ParentSpanId", "parent_span_id")),
         _s(_pick(span, "ServiceName", "service_name") or "unknown"),
         _s(_pick(span, "SpanName", "span_name") or span.get(GenAI.OPERATION_NAME) or "llm.call"),
