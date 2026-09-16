@@ -156,15 +156,20 @@ jobs:
           import sys
           import xml.etree.ElementTree as ET
 
-          # Every test that needs the service container, and how many of each there must be. The
+          # Every test that needs the service container, and the FLOOR each must not drop below. The
           # scheduler files hold fakes too, so those two count only their live `test_live_*` tests.
-          # Bump a number when you add or remove one of these: that edit is the deliberate decision
-          # this guard exists to force (CTO-394).
+          #
+          # A floor, not an exact count: the failure this guard exists to catch is a gated test
+          # silently NOT running, which always shows up as the number going DOWN (a skip, a
+          # deselection, a rename, a removal). An exact count also failed when a PR legitimately
+          # ADDED coverage, which is how CTO-389 turned main red minutes after CTO-394 landed: 11
+          # tests ran, all passing, and the guard rejected them. Raise a floor when you add tests
+          # you want protected; nothing breaks if you forget.
           #
           # Keyed on the dotted module, because pytest's default `xunit2` JUnit family does not
           # write the `file` attribute that `xunit1` did; `classname` is what survives.
           EXPECTED = {
-              "tests.test_batch_idempotency_pg": (8, ""),
+              "tests.test_batch_idempotency_pg": (11, ""),
               "tests.test_adopt_org_pg": (10, ""),
               "tests.test_scheduler_locking": (4, "test_live_"),
               "tests.test_scheduler_pooling": (1, "test_live_"),
@@ -191,12 +196,13 @@ jobs:
 
           failed = False
           for module, (count, prefix) in EXPECTED.items():
-              if ran[module] != count:
+              if ran[module] < count:
                   failed = True
                   what = f"{prefix}* tests" if prefix else "tests"
                   print(
-                      f"::error::{path_of(module)}: {ran[module]} {what} ran, expected {count}. A "
-                      "Postgres-gated test was skipped, deselected, renamed or removed (CTO-394)."
+                      f"::error::{path_of(module)}: {ran[module]} {what} ran, fewer than the floor "
+                      f"of {count}. A Postgres-gated test was skipped, deselected, renamed or "
+                      "removed (CTO-394)."
                   )
           for problem in problems:
               failed = True
@@ -209,8 +215,12 @@ jobs:
               )
               sys.exit(1)
 
-          total = sum(count for count, _ in EXPECTED.values())
-          print(f"All {total} Postgres-gated tests executed against the service container.")
+          total = sum(ran.values())
+          floor = sum(count for count, _ in EXPECTED.values())
+          print(
+              f"{total} Postgres-gated tests executed against the service container "
+              f"(floor {floor})."
+          )
           PY
 
   edge-proxy:
