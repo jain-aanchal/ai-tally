@@ -215,6 +215,24 @@ def start_trace(
     )
 
 
+def note_synthetic_trace(obs: SelfObservability, *, where: str = "context") -> None:
+    """Record that a span was emitted with no active trace, so its trace id was generated for it.
+
+    Deliberately NOT :func:`note_context_drop` (CTO-404). Before every span carried its own identity
+    (CTO-396), a call with no active trace really did lose its attribution, and
+    ``context_drop_count`` was the honest name for that. It is no longer what happens: the span is
+    emitted with a fresh trace id of its own and stored under it, so counting it as a context drop
+    told the customer's dashboard that telemetry had gone missing while the row was sitting in
+    ClickHouse. A count of spans whose trace this SDK invented is a different statement, and a true
+    one.
+
+    ``where`` is accepted for symmetry with the call sites and for a future breakdown by entrypoint;
+    nothing is routed to ``last_errors``, because an uninstrumented code path calling without a
+    trace is a normal thing to do, not an SDK error.
+    """
+    obs.synthetic_trace_count += 1
+
+
 def note_context_drop(
     obs: SelfObservability,
     *,

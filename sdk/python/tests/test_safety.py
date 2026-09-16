@@ -71,4 +71,11 @@ def test_client_happy_path_exports():
 def test_snapshot_shape():
     obs = SelfObservability()
     snap = obs.snapshot()
-    assert set(snap) == {"internal_error_count", "context_drop_count", "dropped_span_count"}
+    assert set(snap) == {
+        "internal_error_count",
+        "context_drop_count",
+        "dropped_span_count",
+        # CTO-404: spans whose trace id this SDK generated, counted apart from a context DROP
+        # because nothing is dropped; the span is stored under the synthetic id.
+        "synthetic_trace_count",
+    }

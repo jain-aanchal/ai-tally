@@ -9,7 +9,7 @@ from tally.egress import BatchProcessor, MemoryTransport
 from tally.guardrails import CostLimitExceededException, GuardrailConfig, GuardrailState, Mode
 from tally.pricing import Usage, seed_catalog
 from tally.sampling import Sampler, SamplingConfig, TraceSignals
-from tally.schema import GenAI, validate_span_attributes
+from tally.schema import TRACE_ID_KEY, GenAI, validate_span_attributes
 
 
 def _client(**kw):
@@ -68,11 +68,20 @@ def test_records_via_processor_egress():
     assert len(transport.delivered) == 1
 
 
-def test_no_active_trace_notes_drop_but_does_not_raise():
+def test_no_active_trace_synthesises_one_and_says_so():
+    """CTO-404: a trace-less call is not a DROP, and the result names the trace that was stored.
+
+    This used to assert ``r.trace_id is None`` and a bumped ``context_drop_count``, both of which
+    described a span that no longer exists: since CTO-396 the span is emitted under a synthetic
+    trace id and stored under it, so the old result told a customer correlating on trace_id to look
+    for nothing, and the old counter told their dashboard telemetry had gone missing.
+    """
     client = _client(sampler=Sampler(SamplingConfig(body_rate=1.0)))
     r = client.record_llm_call(provider="openai", model="gpt-5-mini", usage=Usage(10, 5))
-    assert r.trace_id is None
-    assert client.observability.context_drop_count == 1
+    assert isinstance(r.trace_id, str) and r.trace_id
+    assert r.attributes[TRACE_ID_KEY] == r.trace_id  # the result describes the emitted span
+    assert client.observability.synthetic_trace_count == 1
+    assert client.observability.context_drop_count == 0  # nothing was dropped
 
 
 def test_record_never_raises_on_bad_catalog():

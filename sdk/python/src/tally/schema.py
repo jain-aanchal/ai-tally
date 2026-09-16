@@ -107,7 +107,18 @@ SPAN_ID_KEY = "span_id"
 #: synthetic spans". Match ``'True'``. The gateway's own head meter never reads the stored string
 #: (it reads the wire value before mapping), so this spelling is a query concern only.
 TRACE_ID_SYNTHETIC_KEY = "gen_ai.trace_id_synthetic"
+
+#: When the span was metered, in nanoseconds since the epoch (CTO-404). Structural like the ids, and
+#: the spelling the gateway already reads: ``gateway.mapping`` lists ``timestamp_ns`` as structural,
+#: and ``gateway.app`` prefers it over the batch's ``client_send_ts_ns``. A span that carries none
+#: inherits the ENVELOPE's send time, which is different in every envelope, so the same span
+#: re-enveloped after a restart lands on a different ClickHouse sorting key and the
+#: ReplacingMergeTree keeps both rows instead of collapsing them.
+TIMESTAMP_NS_KEY = "timestamp_ns"
+
 _STRUCTURAL_KEYS = frozenset({TRACE_ID_KEY, SPAN_ID_KEY})
+#: Structural keys whose value is an integer rather than a string identifier.
+_STRUCTURAL_INT_KEYS = frozenset({TIMESTAMP_NS_KEY})
 
 
 def new_span_id() -> str:
@@ -284,6 +295,15 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
         # CTO-396: the span's own identity rides in this dict alongside the attributes, so the
         # structural keys are conformant rather than "unknown". They must still be real, non-empty
         # strings: an empty id is the same collapse-into-one hazard as no id at all.
+        if key in _STRUCTURAL_INT_KEYS:
+            # CTO-404: the span's own metering time rides in this dict too. A negative or boolean
+            # timestamp is not a time, and a wrong one here silently moves the row into another
+            # rollup bucket, so it is validated rather than trusted.
+            if isinstance(value, bool) or not isinstance(value, int):
+                violations.append(f"{key} must be int, got {type(value).__name__}")
+            elif value < 0:
+                violations.append(f"{key} must be >= 0, got {value}")
+            continue
         if key in _STRUCTURAL_KEYS:
             if not isinstance(value, str):
                 violations.append(f"{key} must be str, got {type(value).__name__}")
