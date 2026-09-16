@@ -260,3 +260,18 @@ class IdempotencyCache:
 
     def record(self, req: BatchRequest, response: BatchResponse) -> None:
         self._store[(req.tenant_id, req.batch_id)] = (self._now(), response)
+
+    def release(self, req: BatchRequest) -> None:
+        """Drop a reservation so the batch can be attempted again (CTO-389).
+
+        The mirror of :meth:`record`, and the other way an attempt can end. ``check_or_store``
+        reserves the key before the outcome is known; when that attempt ends RETRYABLY (a storage
+        failure, which is not a verdict on the batch) the reservation must not be left behind as
+        though it were an answer, or every later attempt is served the stale entry and the spans are
+        never written at all. Nothing is known about this batch, so holding no record is the only
+        honest state.
+
+        Unknown keys are ignored, so a caller may release unconditionally without first checking
+        whether it ever took the reservation.
+        """
+        self._store.pop((req.tenant_id, req.batch_id), None)

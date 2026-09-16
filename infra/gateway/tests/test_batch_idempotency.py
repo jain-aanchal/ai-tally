@@ -54,6 +54,13 @@ class _FakeDurable:
             return  # record is best-effort by design; see the module docstring
         self.rows[(tenant_id, batch_id)] = ("complete", response)
 
+    def release(self, tenant_id: str, batch_id: str) -> None:
+        if self.unavailable:
+            return  # release is best-effort too; the lease reclaims what it could not delete
+        existing = self.rows.get((tenant_id, batch_id))
+        if existing is not None and existing[0] == "in_flight":
+            del self.rows[(tenant_id, batch_id)]
+
 
 def _gate(durable: _FakeDurable | None) -> BatchIdempotency:
     return BatchIdempotency(IdempotencyCache(ttl_seconds=3600), durable, ttl_seconds=3600)
@@ -166,6 +173,24 @@ class _CountingStore:
         pass
 
 
+class _FlakyStore(_CountingStore):
+    """A store whose first ``failures`` span inserts blow up, then recovers.
+
+    Models the CTO-389 reproduction exactly: ClickHouse is briefly unreachable, not permanently
+    broken. What matters is what the gateway remembers about the batch once it comes back.
+    """
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def insert_spans(self, rows: list[tuple[object, ...]]) -> int:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("clickhouse unavailable")
+        return super().insert_spans(rows)
+
+
 def _batch_body(batch_id: str) -> dict[str, object]:
     return {
         "tenant_id": "t1",
@@ -238,3 +263,78 @@ def test_ingest_tells_a_concurrent_double_submit_to_retry() -> None:
     assert resp.status_code == 503
     assert resp.json()["status"] == "retry"
     assert store.spans == 0
+
+
+# --- CTO-389: a transient store failure is not the batch's final answer --------------------------
+
+
+def test_a_retryable_outcome_releases_the_claim_instead_of_recording_it() -> None:
+    """THE BUG, at the gate. A RETRY must leave no receipt for a later attempt to be served."""
+    durable = _FakeDurable()
+    gate = _gate(durable)
+    req = _req("b1")
+    assert gate.check_or_store(req) is None
+    gate.record(req, BatchResponse(batch_id="b1", status=Status.RETRY))
+
+    assert ("t1", "b1") not in durable.rows  # no receipt, in neither layer
+    # Claimable again, which is what lets the retry actually re-run the write.
+    assert gate.check_or_store(req) is None
+
+
+def test_a_terminal_outcome_is_still_recorded_as_the_answer() -> None:
+    """The fix must not turn every outcome into a release: a real replay still needs its receipt."""
+    durable = _FakeDurable()
+    gate = _gate(durable)
+    req = _req("b1")
+    assert gate.check_or_store(req) is None
+    gate.record(req, BatchResponse(batch_id="b1", accepted_spans=3))
+    assert durable.rows[("t1", "b1")][0] == "complete"
+
+
+def test_a_failed_store_does_not_become_the_answer_to_every_retry() -> None:
+    """THE BUG, end to end. ClickHouse fails once; the retry must store the spans, not replay a 503.
+
+    Before CTO-389 the 503 was recorded as the batch's outcome, so every retry for the next 24h was
+    answered from that receipt without touching storage. The spans were lost, permanently, while the
+    client had already been billed for them.
+    """
+    durable = _FakeDurable()
+    store = _FlakyStore(failures=1)
+    with TestClient(app) as client:
+        app.state.store = store
+        app.state.metering = UsageRollup()
+        app.state.idempotency = _gate(durable)
+
+        first = client.post("/v1/batches", json=_batch_body("b1"))
+        assert first.status_code == 503
+        assert first.json()["status"] == "retry"
+        assert store.spans == 0
+
+        second = client.post("/v1/batches", json=_batch_body("b1"))
+
+    assert second.status_code == 200
+    assert second.json()["status"] == "accepted"
+    assert second.json()["replayed"] is False  # re-run, not replayed from a receipt
+    assert store.spans == 1  # the spans actually reached storage
+
+
+def test_a_batch_that_never_reached_storage_is_never_billed() -> None:
+    """Billing follows storage. A batch the store refused is not usage, at any point."""
+    durable = _FakeDurable()
+    store = _FlakyStore(failures=1)
+    with TestClient(app) as client:
+        app.state.store = store
+        app.state.metering = UsageRollup()
+        app.state.idempotency = _gate(durable)
+
+        assert client.post("/v1/batches", json=_batch_body("b1")).status_code == 503
+        failed = client.get("/v1/usage", headers={"X-Tenant-Id": "t1"}).json()
+        assert failed["trace_count"] == 0  # nothing stored, so nothing billable
+        assert failed["feature_count"] == 0
+
+        assert client.post("/v1/batches", json=_batch_body("b1")).status_code == 200
+        stored = client.get("/v1/usage", headers={"X-Tenant-Id": "t1"}).json()
+
+    # Counted exactly once, on the attempt that actually landed: not zero, and not two.
+    assert stored["trace_count"] == 1
+    assert stored["feature_count"] == 1

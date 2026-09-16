@@ -28,9 +28,19 @@ batch. That is deliberate and it is the honest choice of the two available:
 
 Recording an outcome is the mirror image and fails the other way: once the spans are written, a
 failure to persist the receipt must not turn an accepted batch into an error the client will retry
-(that retry is what would duplicate). So :meth:`record` logs and swallows. The consequence, stated
-plainly: that batch's claim stays ``in_flight`` until its lease expires, and a retry inside the
-lease is answered retryable rather than with the original response. Delayed, never doubled.
+(that retry is what would duplicate). So :meth:`record` retries the receipt write and then logs and
+swallows. See :meth:`PostgresIdempotencyStore.record` for exactly what is and is not guaranteed when
+every attempt fails; the short version is that past the in-flight lease the ClickHouse
+ReplacingMergeTree backstop is what contains the residual, not this table.
+
+ONLY A TERMINAL OUTCOME IS EVER RECORDED (CTO-389). ACCEPTED, PARTIAL and REJECTED are answers about
+the batch and are stored. RETRY is not an answer: it says a dependency failed and the batch's fate is
+unknown. Writing one here froze a transient ClickHouse blip into the batch's permanent receipt, so
+every retry for the rest of the idempotency window (24h by default) was replayed that 503 without
+touching storage, and the spans were lost while the client had already been metered for them. A
+retryable outcome therefore RELEASES the claim (:meth:`BatchIdempotency.release`) so the next attempt
+re-runs the write, and :meth:`BatchIdempotency.record` routes a RETRY response there rather than
+trusting every call site to remember.
 
 STARTUP PROBE. The durable layer is enabled only if the table is reachable when the gateway boots
 (see :func:`build_batch_idempotency`). A gateway that cannot see Postgres at boot runs with the
@@ -63,6 +73,15 @@ logger = logging.getLogger("tally.gateway.batch_idempotency")
 #: governs the ``complete`` records.
 IN_FLIGHT_LEASE_S = 300
 
+#: How many times :meth:`PostgresIdempotencyStore.record` tries to persist a receipt before giving up.
+#:
+#: CTO-389. A lost receipt is not harmless: the claim stays ``in_flight``, and once the lease above
+#: expires a retry reclaims the batch and writes its spans a second time. Retrying here narrows that
+#: to "Postgres was unreachable for the whole attempt" instead of "one connection was dropped".
+#: Bounded and immediate, with no sleep between attempts, because an ingest response is held open for
+#: the duration and a slow receipt is itself a way to lose the batch.
+RECEIPT_WRITE_ATTEMPTS = 3
+
 
 class IdempotencyStoreUnavailable(RuntimeError):
     """The durable store could not answer. The caller MUST refuse the batch, never accept it.
@@ -77,6 +96,8 @@ class DurableIdempotencyStore(Protocol):
     def claim(self, tenant_id: str, batch_id: str, ttl_seconds: float) -> BatchResponse | None: ...
 
     def record(self, tenant_id: str, batch_id: str, response: BatchResponse) -> None: ...
+
+    def release(self, tenant_id: str, batch_id: str) -> None: ...
 
 
 class PostgresIdempotencyStore:
@@ -154,26 +175,85 @@ class PostgresIdempotencyStore:
     def record(self, tenant_id: str, batch_id: str, response: BatchResponse) -> None:
         """Persist the outcome so a later replay is answered from it.
 
-        Best-effort BY DESIGN: this runs after the spans are already written, so raising here would
-        turn a successful ingest into an error the client retries, and that retry is the duplicate.
-        A failure leaves the claim ``in_flight`` until its lease expires (see
-        :data:`IN_FLIGHT_LEASE_S`), which delays a replay's answer but never doubles a write.
+        Only ever called with a TERMINAL outcome (ACCEPTED / PARTIAL / REJECTED). A retryable
+        outcome goes to :meth:`release` instead; see the module docstring for why recording one was
+        the CTO-389 bug.
+
+        Never raises: this runs after the spans are already written, so raising would turn a
+        successful ingest into an error the client retries, and that retry is the duplicate. The
+        write is attempted :data:`RECEIPT_WRITE_ATTEMPTS` times and then logged and swallowed.
+
+        WHAT IS AND IS NOT GUARANTEED WHEN EVERY ATTEMPT FAILS. This docstring used to say a failure
+        here "delays a replay's answer but never doubles a write". That was false, and stating a
+        guarantee the code does not provide is worse than the gap itself, so here is the real one.
+        The claim stays ``in_flight``. A replay arriving inside :data:`IN_FLIGHT_LEASE_S` is answered
+        retryable, which is the delay. But once the lease elapses the claim becomes reclaimable, and
+        a retry after that point re-runs the write, so the spans ARE written twice. Postgres cannot
+        prevent that, because the only evidence the first write landed is the receipt that just
+        failed to store.
+
+        What actually contains the residual is downstream and deliberate: ``otel_spans`` is a
+        ReplacingMergeTree keyed on span identity (``db/clickhouse/otel_spans.sql``), so a
+        byte-identical replay collapses at merge time. The honest statement of this method's own
+        guarantee is therefore: a replay is delayed for the lease, and past the lease correctness
+        rests on the ClickHouse backstop, not on this table.
+        """
+        payload = json.dumps(_encode_response(response))
+        last_error: psycopg.Error | None = None
+        for attempt in range(1, RECEIPT_WRITE_ATTEMPTS + 1):
+            try:
+                with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE ingest_batch_idempotency
+                           SET state = 'complete', response = %s, updated_at = now()
+                         WHERE tenant_id = %s AND batch_id = %s
+                        """,
+                        (payload, tenant_id, batch_id),
+                    )
+                    conn.commit()
+                return
+            except psycopg.Error as exc:
+                last_error = exc
+                logger.warning(
+                    "receipt write %d/%d failed for batch %s: %s",
+                    attempt,
+                    RECEIPT_WRITE_ATTEMPTS,
+                    batch_id,
+                    exc,
+                )
+        logger.error(
+            "could not record idempotency outcome for batch %s after %d attempts; the claim stays "
+            "in_flight, a replay inside the lease is answered retryable, and a retry after the "
+            "lease will re-write these spans and rely on the otel_spans ReplacingMergeTree backstop",
+            batch_id,
+            RECEIPT_WRITE_ATTEMPTS,
+            exc_info=last_error,
+        )
+
+    def release(self, tenant_id: str, batch_id: str) -> None:
+        """Give up a claim whose attempt ended retryably, so the next attempt re-runs the write.
+
+        CTO-389. The row is DELETEd rather than promoted to ``complete``, because the outcome is
+        genuinely unknown and the only honest record of "we do not know" is no record at all.
+        Leaving it ``in_flight`` would also be honest, but it would make the client wait out the
+        whole lease for a failure we already know about, so deleting is the kinder of the two.
+
+        Best-effort, and safe when it fails: a row left behind is an ``in_flight`` claim that the
+        lease reclaims. That is a delay, never an acceptance, and never a stored wrong answer.
         """
         try:
             with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE ingest_batch_idempotency
-                       SET state = 'complete', response = %s, updated_at = now()
-                     WHERE tenant_id = %s AND batch_id = %s
-                    """,
-                    (json.dumps(_encode_response(response)), tenant_id, batch_id),
+                    "DELETE FROM ingest_batch_idempotency "
+                    "WHERE tenant_id = %s AND batch_id = %s AND state = 'in_flight'",
+                    (tenant_id, batch_id),
                 )
                 conn.commit()
         except psycopg.Error:
             logger.exception(
-                "could not record idempotency outcome for batch %s; the claim stays in_flight "
-                "until its lease expires and a replay inside that window is answered retryable",
+                "could not release the idempotency claim for batch %s; it stays in_flight until "
+                "its lease expires, which delays the client's retry but accepts nothing",
                 batch_id,
             )
 
@@ -239,9 +319,30 @@ class BatchIdempotency:
         return None
 
     def record(self, req: BatchRequest, response: BatchResponse) -> None:
+        """Store a TERMINAL outcome as this batch's answer.
+
+        A RETRY response is routed to :meth:`release` instead of being stored (CTO-389). The gate
+        enforces that here rather than trusting each ingest call site to remember, because the cost
+        of forgetting once is a transient failure frozen into the batch's answer for the whole
+        idempotency window, with the spans lost and the client already metered for them.
+        """
+        if response.status is Status.RETRY:
+            self.release(req)
+            return
         self._cache.record(req, response)
         if self._durable is not None:
             self._durable.record(req.tenant_id, req.batch_id, response)
+
+    def release(self, req: BatchRequest) -> None:
+        """Give up the claim on a batch whose attempt ended retryably (CTO-389).
+
+        Both layers, and the cache first. The cache is the one that can answer a later attempt
+        without consulting Postgres, so a stale reservation left there would shadow a perfectly good
+        durable state and keep answering the old provisional entry.
+        """
+        self._cache.release(req)
+        if self._durable is not None:
+            self._durable.release(req.tenant_id, req.batch_id)
 
 
 def build_batch_idempotency(settings: Settings) -> BatchIdempotency:
@@ -345,6 +446,7 @@ def _decode_response(batch_id: str, payload: object) -> BatchResponse:
 
 __all__ = [
     "IN_FLIGHT_LEASE_S",
+    "RECEIPT_WRITE_ATTEMPTS",
     "BatchIdempotency",
     "DurableIdempotencyStore",
     "IdempotencyStoreUnavailable",
