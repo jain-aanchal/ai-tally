@@ -29,7 +29,12 @@ the ingest key as bearer. The design guarantees, all non-negotiable (CLAUDE.md, 
   code (``RATE_LIMITED``, what backpressure sheds) go back on the buffer and ship on a later flush,
   items refused PERMANENTLY (``PII_DETECTED``, ``INVALID_SCHEMA``, ``PAYLOAD_TOO_LARGE``) are
   counted in ``rejected_by_gateway_span_count`` and warned about rather than resent, and
-  ``UNKNOWN_FEATURE_TAG`` is an accepted-but-flagged marker, so it counts as neither.
+  ``UNKNOWN_FEATURE_TAG`` is an accepted-but-flagged marker, so it counts as neither. Items the
+  gateway named under an id that matches no span we sent (its buffer-overflow shed numbers the
+  overflow by ITS position) are retryable loss we cannot act on: counted apart again, in
+  ``unmapped_retryable_span_count``, never booked as a permanent refusal. Anything that leaves this
+  client unsure what landed, an ack past the read cap or one whose own numbers do not add up, fails
+  LOUDLY: a cap that quietly clears a batch is the very bug this fixes (CTO-391 review).
 - **Drains on shutdown.** :meth:`flush` and an ``atexit`` hook drain with a bounded timeout so a
   short-lived script still ships its spans.
 
@@ -76,6 +81,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import threading
 import urllib.error
 import urllib.request
@@ -106,11 +112,17 @@ class SendResult:
     what actually landed live only in the body (CTO-391). It is last and defaulted so every existing
     construction, ``SendResult(503, 0)`` included, keeps working unchanged; a sender that supplies
     nothing teaches this client nothing beyond the status, which is the pre-CTO-391 behaviour.
+
+    ``body_truncated`` says the ack was longer than the sender was willing to read, so ``body`` is a
+    prefix and the outcomes past the cut are unknowable. It is the difference between an ack that
+    taught us nothing and one we KNOW was cut short, which the accounting has to treat differently:
+    the first clears the batch, the second counts it (CTO-391 review).
     """
 
     status: int
     retry_after_ms: int | None = None
     body: bytes = b""
+    body_truncated: bool = False
 
 
 #: Sends one POST. Returns a :class:`SendResult`, or a bare status code (the older shape, still
@@ -118,10 +130,17 @@ class SendResult:
 #: network-level failure. Injectable.
 Sender = Callable[[str, dict[str, str], bytes], "int | SendResult"]
 
-#: Bounds how much of an ingest error body is read to find a retry hint. The ack is a small JSON
-#: object; the cap only stops a misconfigured endpoint that streams from making us buffer without
-#: limit. Nothing from the body is logged or stored: only the integer hint is used.
-_MAX_ACK_BYTES = 64 * 1024
+#: Bounds how much of an ack body is read. The cap only stops a misconfigured endpoint that streams
+#: from making us buffer without limit. Nothing from the body is logged or stored: only counts,
+#: codes and the integer hints are used.
+#:
+#: Sized for the ack that actually matters rather than the common one (CTO-391 review). A shed
+#: 512-span batch, the SDK's default size, names every item with a real ``trace:span`` id and the
+#: gateway's own message text, which measures about 70 KB: the old 64 KiB cap truncated exactly the
+#: ack that says spans were lost, and a truncated body parses to nothing. Raised so the realistic
+#: worst case fits whole. A cap can still be hit, so hitting one is now reported as truncation and
+#: counted, never silently treated as "the gateway had nothing to say".
+_MAX_ACK_BYTES = 1024 * 1024
 
 #: How many further sheds of one cause pass before the log speaks about it again. A standing cause
 #: (a rotated ingest key answering 401) sheds a batch per flush for as long as the app runs, so the
@@ -170,6 +189,38 @@ class _BatchAck:
     retry_after_ms: int | None = None
 
 
+def _read_capped(read: Callable[[int], bytes]) -> tuple[bytes, bool]:
+    """Read an ack under :data:`_MAX_ACK_BYTES`, reporting whether the cap cut it short.
+
+    Reads one byte past the cap so a body that exactly fills it is not mistaken for a truncated one.
+    A cap that silently returns a prefix is indistinguishable from a short ack, which is how an
+    oversized partial ack became a silent batch clear (CTO-391 review). Never raises.
+    """
+    try:
+        raw = read(_MAX_ACK_BYTES + 1)
+    except Exception:  # noqa: BLE001 - an unreadable ack still leaves a valid status
+        return b"", False
+    if len(raw) > _MAX_ACK_BYTES:
+        return raw[:_MAX_ACK_BYTES], True
+    return raw, False
+
+
+def _finite_float(raw: object) -> float | None:
+    """Coerce an ack number to a finite float, or ``None``. Never raises.
+
+    ``float()`` on a JSON integer of a few hundred digits raises ``OverflowError``, which used to
+    escape ``_parse_ack`` (the conversion sat outside the try that wraps ``json.loads``) and make
+    the delivered batch look like a failed send, so it was re-sent identically (CTO-391 review).
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    try:
+        value = float(raw)
+    except (OverflowError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _parse_ack(body: bytes) -> _BatchAck | None:
     """Parse a 2xx ack. Returns ``None`` when the body teaches us nothing. Never raises.
 
@@ -210,14 +261,8 @@ def _parse_ack(body: bytes) -> _BatchAck | None:
         if isinstance(raw_batch, int) and not isinstance(raw_batch, bool) and raw_batch > 0
         else None
     )
-    raw_rate = hints.get("sample_rate_override")
-    sample_rate_override = (
-        float(raw_rate)
-        if isinstance(raw_rate, (int, float))
-        and not isinstance(raw_rate, bool)
-        and 0.0 <= float(raw_rate) <= 1.0
-        else None
-    )
+    rate = _finite_float(hints.get("sample_rate_override"))
+    sample_rate_override = rate if rate is not None and 0.0 <= rate <= 1.0 else None
     raw_wait = hints.get("retry_after_ms")
     retry_after_ms = (
         raw_wait
@@ -281,20 +326,17 @@ def _urllib_sender(
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed endpoint
             # The 2xx body is read, not discarded: a partial batch is a 200 whose refusals are
             # stated only in the body, so dropping it here is what lost the spans in CTO-391. A
-            # body we cannot read costs us the per-item detail, never the send.
-            try:
-                ack = resp.read(_MAX_ACK_BYTES)
-            except Exception:  # noqa: BLE001 - an unreadable ack still leaves a valid status
-                ack = b""
-            return SendResult(int(resp.status), None, ack)
+            # body we cannot read costs us the per-item detail, never the send. A body past the cap
+            # is flagged rather than quietly shortened, so the caller can tell "nothing to say"
+            # from "more than we read".
+            ack, truncated = _read_capped(resp.read)
+            return SendResult(int(resp.status), None, ack, truncated)
     except urllib.error.HTTPError as err:
         try:
-            ack = err.read(_MAX_ACK_BYTES)
-        except Exception:  # noqa: BLE001 - a body we cannot read simply carries no hint
-            ack = b""
+            ack, truncated = _read_capped(err.read)
         finally:
             err.close()
-        return SendResult(int(err.code), _retry_hint_ms(err.headers, ack))
+        return SendResult(int(err.code), _retry_hint_ms(err.headers, ack), b"", truncated)
 
 
 def fetch_hmac_key(
@@ -401,12 +443,29 @@ class BatchingTransport:
         # because the two have different fixes, and merging them would hide which one happened
         # (CTO-391).
         self.rejected_by_gateway_span_count = 0
+        # Spans the gateway refused with a RETRYABLE code under an item_id that matches no span we
+        # sent, so there is nothing to put back. Its buffer-overflow shed names items
+        # "#buffer-overflow-N", numbered by the gateway's own overflow position rather than ours
+        # (gateway/app.py), so these can never be placed. Counted apart from the permanent refusals
+        # because they are NOT permanent: the spans are shed under load and the fix is ingest
+        # capacity, not anything in the caller's code (CTO-391 review).
+        self.unmapped_retryable_span_count = 0
         # Spans handed back to the buffer after a RETRYABLE in-200 refusal. Not a loss, so not in
         # shed_counts(): it is the running total of spans that got a second chance, and it is the
         # figure that says "the gateway is shedding" while every loss counter stays at zero.
         self.requeued_span_count = 0
         # Consecutive flushes that ended in a re-enqueue. Bounds the resend loop: a gateway that
         # sheds forever would otherwise trade the same spans back and forth forever (CTO-391).
+        #
+        # KNOWN LIMIT, stated plainly rather than implied (CTO-391 review): this budget is per
+        # TRANSPORT, not per span. It counts consecutive partial flushes, so a span refused for the
+        # FIRST time during a shedding episode inherits a budget earlier spans already spent and
+        # can be dropped after that single refusal, counted in undelivered_span_count as though its
+        # own retries had run out. Making it per span means carrying a round count with every
+        # buffered span through the pinned-batch path that guarantees no span is sent twice, which
+        # is a larger change than this bug fix and is not attempted here. The bound errs toward
+        # dropping rather than resending forever, and it resets on any flush that re-enqueues
+        # nothing, so the misattribution is confined to a sustained shedding episode.
         self._partial_retry_rounds = 0
         #: Flow-control advice from the last readable ack, exposed for callers who want to see it.
         self.last_server_hints: dict[str, object] | None = None
@@ -497,11 +556,13 @@ class BatchingTransport:
             status: int | None = None
             hint: int | None = None
             ack: _BatchAck | None = None
+            ack_truncated = False
             try:
                 result = self._sender(self._url, headers, body)
                 if isinstance(result, SendResult):
                     status, hint = result.status, result.retry_after_ms
                     ack = _parse_ack(result.body)
+                    ack_truncated = result.body_truncated
                 else:
                     status = int(result)
                 ok = 200 <= status < 300
@@ -517,7 +578,7 @@ class BatchingTransport:
                     # has to go again is re-enqueued by the accounting below rather than left in a
                     # pinned batch that a later resend would ship in full, duplicating the spans
                     # the gateway already accepted.
-                    self._account_ack_locked(batch, ack)
+                    self._account_ack_locked(batch, ack, truncated=ack_truncated)
                     return True
 
                 attempts += 1
@@ -596,7 +657,9 @@ class BatchingTransport:
         return False, 0, 0
 
     # --- CTO-391: per-item outcomes reported inside a 200 ---
-    def _account_ack_locked(self, batch: BatchRequest, ack: _BatchAck | None) -> None:
+    def _account_ack_locked(
+        self, batch: BatchRequest, ack: _BatchAck | None, *, truncated: bool = False
+    ) -> None:
         """Account for what the gateway actually accepted out of a delivered batch.
 
         The gateway answers 200 / ``status: partial`` when only some items were refused, so the
@@ -606,6 +669,39 @@ class BatchingTransport:
         """
         self._apply_hints_locked(ack)
         sent = batch.resource_spans
+        if truncated:
+            # The ack was longer than we were willing to read, so the refusals past the cut are
+            # unknowable and the parse above yielded nothing usable. This is NOT the "we learned
+            # nothing" case below: we know the gateway had more to say about this batch than we
+            # read. Clearing quietly here is precisely the silent loss CTO-391 exists to fix, and
+            # it fires at the SDK's default batch size, so the batch is booked as an unattributed
+            # shortfall and said out loud. Not resent: the gateway may well have written some of
+            # these spans, and a resend would double-count spend nothing downstream can undo
+            # (#311).
+            lost = len(sent)
+            self.rejected_by_gateway_span_count += lost
+            self.obs.dropped_span_count += lost
+            first, rolled_events, rolled_spans = self._damp_locked("ack truncated", lost)
+            if first:
+                _log.warning(
+                    "tally: gateway ack exceeded the %d byte read cap, so %d span(s) of this batch "
+                    "cannot be attributed and are counted as lost (further occurrences are "
+                    "summarized every %d; see shed_counts())",
+                    _MAX_ACK_BYTES,
+                    lost,
+                    _SHED_LOG_EVERY,
+                )
+            elif rolled_events:
+                _log.warning(
+                    "tally: %d more oversized ack(s), %d span(s) unattributed and counted as lost",
+                    rolled_events,
+                    rolled_spans,
+                )
+            self._consecutive_failures = 0
+            self._retry_after_ms = None
+            self._partial_retry_rounds = 0
+            return
+
         if ack is None or ack.accepted_spans is None:
             # An ack we could not read says nothing about what landed. Inventing a loss here would
             # be as dishonest as the silent success this fixes, so the batch clears on the status
@@ -615,23 +711,63 @@ class BatchingTransport:
             self._partial_retry_rounds = 0
             return
 
-        retry_positions, dead_positions, codes = self._classify_rejections(sent, ack)
+        retry_positions, dead_positions, codes, unmapped_retryable, unmapped_dead = (
+            self._classify_rejections(sent, ack)
+        )
+        named = len(retry_positions) + len(dead_positions) + unmapped_retryable + unmapped_dead
+        if ack.accepted_spans + named > len(sent):
+            # An ack claiming more outcomes than the batch had items cannot be reconciled with what
+            # we sent, and acting on its named positions would re-enqueue spans the same ack
+            # claimed to accept: an "accepted_spans: 4" on a 4-span batch that also names #0
+            # RATE_LIMITED used to resend span 0 and double-count its spend. So the no-double-send
+            # guarantee is not left resting on the gateway being self-consistent: an ack whose own
+            # numbers do not add up is distrusted whole and the batch clears on the status alone,
+            # which is the pre-CTO-391 behaviour and cannot duplicate anything (CTO-391 review).
+            first, rolled_events, _ = self._damp_locked("inconsistent ack", 0)
+            if first:
+                _log.warning(
+                    "tally: gateway ack claims %d accepted plus %d named outcome(s) for a %d span "
+                    "batch; distrusting it and clearing on status alone (further occurrences are "
+                    "summarized every %d)",
+                    ack.accepted_spans,
+                    named,
+                    len(sent),
+                    _SHED_LOG_EVERY,
+                )
+            elif rolled_events:
+                _log.warning(
+                    "tally: %d more self-inconsistent ack(s), each cleared on status alone",
+                    rolled_events,
+                )
+            self._consecutive_failures = 0
+            self._retry_after_ms = None
+            self._partial_retry_rounds = 0
+            return
+
         # Spans the gateway neither accepted nor named. They are gone and we cannot tell why, so
         # they are counted with the permanent losses rather than resent: a resend of a span the
         # gateway may in fact have written would double-count spend, which nothing downstream can
         # undo (#311).
-        named = len(retry_positions) + len(dead_positions)
         unattributed = max(0, len(sent) - ack.accepted_spans - named)
-        lost = len(dead_positions) + unattributed
+        lost = len(dead_positions) + unmapped_dead + unattributed
         if lost:
             self.rejected_by_gateway_span_count += lost
             self.obs.dropped_span_count += lost
+        if unmapped_retryable:
+            # Retryable, but named under an id that is none of ours, so there is nothing to put
+            # back. Counted in its own bucket and warned about separately: booking these as
+            # permanent refusals (which is where the unattributed shortfall put them) tells an
+            # operator to go and fix client-side data when the real cause is ingest capacity
+            # (CTO-391 review). Still not resent, and no id is guessed at: a guess could resend a
+            # span the gateway accepted.
+            self.unmapped_retryable_span_count += unmapped_retryable
+            self.obs.dropped_span_count += unmapped_retryable
 
-        requeued = 0
+        requeued = discarded = 0
         if retry_positions:
             if self._partial_retry_rounds < self.retry_max:
                 self._partial_retry_rounds += 1
-                requeued = self._requeue_locked([sent[i] for i in retry_positions])
+                requeued, discarded = self._requeue_locked([sent[i] for i in retry_positions])
             else:
                 # Budget spent. A gateway shedding without end is an ingest availability problem,
                 # which is what undelivered_span_count already means, and a bounded loop is the
@@ -641,25 +777,52 @@ class BatchingTransport:
                 self.obs.dropped_span_count += len(retry_positions)
                 self._partial_retry_rounds = 0
 
-        if lost or requeued:
+        if lost or requeued or discarded:
             # Codes and counts only: an item_id is a trace/span id and a span is the customer's
-            # data, so neither goes near the log (CLAUDE.md, no bodies in telemetry).
+            # data, so neither goes near the log (CLAUDE.md, no bodies in telemetry). The buffer
+            # discards are stated separately because they are the one number this line used to get
+            # wrong: it reported "4 re-enqueued, 0 lost" for four spans the buffer cap had just
+            # thrown away (CTO-391 review).
             summary = ", ".join(f"{code}={n}" for code, n in sorted(codes.items()))
             first, rolled_events, rolled_spans = self._damp_locked("gateway rejected items", lost)
             if first:
                 _log.warning(
                     "tally: gateway accepted %d of %d span(s) inside a 200 (%s); %d re-enqueued, "
-                    "%d lost (further occurrences are summarized every %d; see shed_counts())",
+                    "%d dropped by the buffer cap, %d lost (further occurrences are summarized "
+                    "every %d; see shed_counts())",
                     ack.accepted_spans,
                     len(sent),
                     summary or "no codes named",
                     requeued,
+                    discarded,
                     lost,
                     _SHED_LOG_EVERY,
                 )
             elif rolled_events:
                 _log.warning(
                     "tally: %d more partial ack(s), %d span(s) lost, gateway still rejecting items",
+                    rolled_events,
+                    rolled_spans,
+                )
+
+        if unmapped_retryable:
+            # Its own line and its own damping key: this is a retryable shed we could not act on,
+            # not a refusal, and the two want different responses from whoever reads the log.
+            first, rolled_events, rolled_spans = self._damp_locked(
+                "gateway shed items we cannot place", unmapped_retryable
+            )
+            if first:
+                _log.warning(
+                    "tally: gateway shed %d span(s) with a retryable code under item id(s) that "
+                    "match no span in this batch, so they could not be re-enqueued and are counted "
+                    "as retryable loss, not as a permanent refusal (further occurrences are "
+                    "summarized every %d; see shed_counts())",
+                    unmapped_retryable,
+                    _SHED_LOG_EVERY,
+                )
+            elif rolled_events:
+                _log.warning(
+                    "tally: %d more ack(s) shedding %d span(s) we could not place",
                     rolled_events,
                     rolled_spans,
                 )
@@ -676,29 +839,41 @@ class BatchingTransport:
 
     def _classify_rejections(
         self, sent: list[dict[str, object]], ack: _BatchAck
-    ) -> tuple[list[int], list[int], dict[str, int]]:
+    ) -> tuple[list[int], list[int], dict[str, int], int, int]:
         """Split the ack's refusals into retryable and permanent positions in ``sent``.
 
-        A code we cannot place (an item_id that is not ours) is counted in ``codes`` for the log but
-        not resent: guessing which span it meant could resend one the gateway accepted.
+        Returns ``(retry_positions, dead_positions, codes, unmapped_retryable,
+        unmapped_permanent)``.
+
+        A code we cannot place (an item_id that is not ours) is never resent: guessing which span it
+        meant could resend one the gateway accepted. It is still COUNTED, and counted according to
+        its own code, because an unplaceable id is not evidence that the loss was permanent: the
+        gateway's buffer-overflow shed is retryable and names every item this way (CTO-391 review).
         """
         positions = self._item_positions(sent)
         retry: dict[int, None] = {}
         dead: dict[int, None] = {}
         codes: dict[str, int] = {}
+        unmapped_retryable = 0
+        unmapped_permanent = 0
         for item_id, code in ack.errors:
             if code in _FLAG_ITEM_CODES:
                 continue  # accepted-but-flagged: advice about the span, not a loss of it
             codes[code] = codes.get(code, 0) + 1
+            permanent = code in _NON_RETRYABLE_ITEM_CODES
             pos = positions.get(item_id)
             if pos is None:
+                if permanent:
+                    unmapped_permanent += 1
+                else:
+                    unmapped_retryable += 1
                 continue
-            if code in _NON_RETRYABLE_ITEM_CODES:
+            if permanent:
                 retry.pop(pos, None)  # one permanent verdict settles the item
                 dead[pos] = None
             elif pos not in dead:
                 retry[pos] = None
-        return list(retry), list(dead), codes
+        return list(retry), list(dead), codes, unmapped_retryable, unmapped_permanent
 
     @staticmethod
     def _item_positions(sent: list[dict[str, object]]) -> dict[str, int]:
@@ -736,21 +911,38 @@ class BatchingTransport:
             index += 1
         return positions
 
-    def _requeue_locked(self, spans: list[dict[str, object]]) -> int:
+    def _requeue_locked(self, spans: list[dict[str, object]]) -> tuple[int, int]:
         """Put refused-but-retryable spans back at the FRONT of the buffer. Caller holds _lock.
+
+        Returns ``(requeued, discarded)``: how many survived the buffer cap, and how many the cap
+        threw away on the way in.
 
         Front, because they were metered before everything still queued and ordering keeps the next
         batch contiguous. The buffer cap still wins: a re-enqueue that would exceed it drops oldest
         and counts, exactly as export() does, so a shedding gateway can never grow this buffer past
-        the bound the caller set.
+        the bound the caller set. Drop-oldest is kept rather than trimming the other end, because
+        these spans ARE the oldest and reversing that for one path would quietly change the
+        documented backpressure policy for everyone else.
+
+        What changed is the counting (CTO-391 review). These spans sit at the front, so they are the
+        very first thing the cap discards, and counting all of them as re-enqueued before the trim
+        made the warning claim "4 re-enqueued, 0 lost" about four spans that had just been thrown
+        away. Only the survivors are counted as re-enqueued; the discards are counted where every
+        other buffer-cap drop is counted, and returned so the log can say so.
         """
         self._buf.extendleft(reversed(spans))
+        discarded = 0
         while len(self._buf) > self.max_buffer:
             self._buf.popleft()
             self.obs.dropped_span_count += 1
             self.buffer_overflow_span_count += 1
-        self.requeued_span_count += len(spans)
-        return len(spans)
+            discarded += 1
+        # The buffer held at most max_buffer before the insert, so every discard came out of this
+        # re-enqueue; clamped anyway rather than trusting that arithmetic to stay true.
+        discarded = min(discarded, len(spans))
+        requeued = len(spans) - discarded
+        self.requeued_span_count += requeued
+        return requeued, discarded
 
     def _apply_hints_locked(self, ack: _BatchAck | None) -> None:
         """Honour the flow-control advice a 200 carries. Caller holds _lock.
@@ -785,6 +977,7 @@ class BatchingTransport:
                 "undelivered_span_count": self.undelivered_span_count,
                 "rejected_span_count": self.rejected_span_count,
                 "rejected_by_gateway_span_count": self.rejected_by_gateway_span_count,
+                "unmapped_retryable_span_count": self.unmapped_retryable_span_count,
                 "buffer_overflow_span_count": self.buffer_overflow_span_count,
             }
 

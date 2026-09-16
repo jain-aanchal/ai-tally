@@ -3,12 +3,24 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import threading
 from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
 
 from tally.egress import BackoffPolicy
-from tally.transport import BatchingTransport, SendResult, _retry_hint_ms
+from tally.transport import (
+    _FLAG_ITEM_CODES,
+    _MAX_ACK_BYTES,
+    _NON_RETRYABLE_ITEM_CODES,
+    BatchingTransport,
+    SendResult,
+    _parse_ack,
+    _retry_hint_ms,
+)
 from tally.wire import decode_request
 
 
@@ -264,6 +276,7 @@ def test_503_retry_hint_zero_succeeds_on_attempt_two():
         "undelivered_span_count": 0,
         "rejected_span_count": 0,
         "rejected_by_gateway_span_count": 0,
+        "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
     }
 
@@ -460,6 +473,7 @@ def test_buffer_overflow_count_is_not_polluted_by_another_component(caplog):
         "undelivered_span_count": 0,
         "rejected_span_count": 2,
         "rejected_by_gateway_span_count": 0,
+        "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 1,
     }
 
@@ -467,8 +481,19 @@ def test_buffer_overflow_count_is_not_polluted_by_another_component(caplog):
 # --- CTO-391: spans the gateway rejects INSIDE a 200 ---
 
 
-def _ack(accepted: int, errors: tuple = (), *, hints: dict | None = None) -> bytes:
-    """The gateway's ack body (gateway/app.py ``_response_dict``), as bytes on the wire."""
+def _ack(
+    accepted: int,
+    errors: tuple = (),
+    *,
+    hints: dict | None = None,
+    message: str = "shed under load",
+) -> bytes:
+    """The gateway's ack body (gateway/app.py ``_response_dict``), as bytes on the wire.
+
+    ``message`` is the gateway's own text for the shed. It is a parameter because the ack's SIZE is
+    load-bearing for the read cap: the buffered path says "ingest buffer at capacity; retry", which
+    is what pushes a full-batch shed past 64 KiB (CTO-391 review).
+    """
     import json
 
     return json.dumps(
@@ -477,7 +502,7 @@ def _ack(accepted: int, errors: tuple = (), *, hints: dict | None = None) -> byt
             "status": "partial" if errors else "accepted",
             "accepted_spans": accepted,
             "partial_errors": [
-                {"item_id": item_id, "code": code, "message": "shed under load"}
+                {"item_id": item_id, "code": code, "message": message}
                 for item_id, code in errors
             ],
             "server_hints": {
@@ -527,6 +552,7 @@ def test_rate_limited_items_in_a_200_are_requeued_and_land_on_the_next_flush():
         "undelivered_span_count": 0,
         "rejected_span_count": 0,
         "rejected_by_gateway_span_count": 0,
+        "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
     }
 
@@ -577,6 +603,7 @@ def test_unknown_feature_tag_is_a_flag_not_a_loss():
         "undelivered_span_count": 0,
         "rejected_span_count": 0,
         "rejected_by_gateway_span_count": 0,
+        "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
     }
 
@@ -654,16 +681,331 @@ def test_unreadable_ack_degrades_safely():
     assert all(v == 0 for v in t.shed_counts().values())
 
 
-def test_item_ids_map_back_through_the_gateways_dedup():
-    # The gateway numbers items AFTER intra-batch dedup, and names a span by trace:span when it has
-    # one. Numbering the raw list instead would re-enqueue the wrong span.
-    sent = [
-        {"trace_id": "t1", "span_id": "s1"},
-        {"trace_id": "t1", "span_id": "s1"},  # duplicate: dropped before the gateway numbers
-        {"trace_id": "t2", "span_id": "s2"},
-        {"n": 9},  # no ids: falls back to the #index form
-    ]
-    positions = BatchingTransport._item_positions(sent)
-    assert positions["t1:s1"] == 0
-    assert positions["t2:s2"] == 2
-    assert positions["#2"] == 3
+def test_a_span_named_by_trace_id_is_the_span_that_goes_again():
+    # Behavioural, through a real flush: this used to assert only on _item_positions' return dict,
+    # with no transport involved, so it proved nothing about which span comes back (CTO-391 review).
+    # The gateway names a span by trace:span when it has one, and numbers items AFTER intra-batch
+    # dedup, so numbering the raw list would re-enqueue the WRONG span.
+    sent: list[list[int]] = []
+
+    def gw(url: str, headers: dict, body: bytes) -> SendResult:
+        spans = decode_request(body.decode("utf-8")).resource_spans
+        sent.append([int(s["n"]) for s in spans])
+        if len(sent) == 1:
+            return SendResult(200, None, _ack(2, (("t2:s2", "RATE_LIMITED"),)))
+        return SendResult(200, None, _ack(len(spans)))
+
+    t = _transport(gw, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    t.export({"trace_id": "t1", "span_id": "s1", "n": 0})
+    t.export({"trace_id": "t1", "span_id": "s1", "n": 1})  # duplicate ids: deduped before numbering
+    t.export({"trace_id": "t2", "span_id": "s2", "n": 2})
+    assert t.flush_once() is True
+    assert sent[0] == [0, 1, 2]
+    assert t.pending() == 1
+    assert t.flush_once() is True
+    # Exactly the named span, not the one that sits at the same raw index.
+    assert sent[1] == [2]
+
+
+def test_only_the_refused_spans_go_again_and_they_go_as_a_fresh_batch():
+    # A behavioural regression test that survives the signature (CTO-391 review): most of the
+    # CTO-391 tests fail on a revert only through TypeError, because the old SendResult had no body
+    # field, which catches deletion but not damage. This one catches a plausible WRONG fix that
+    # keeps every signature: re-enqueueing by leaving the batch PINNED. That would resend the
+    # accepted spans as well, and resend them under the SAME batch_id, which the gateway's
+    # (tenant_id, batch_id) idempotency store answers as a replay, so the refused spans would be
+    # silently dropped a second time while the client believed it had recovered them.
+    delivered: list[tuple[str, list[int]]] = []
+
+    def gw(url: str, headers: dict, body: bytes) -> SendResult:
+        req = decode_request(body.decode("utf-8"))
+        spans = [int(s["n"]) for s in req.resource_spans]
+        delivered.append((req.batch_id, spans))
+        shed = tuple((f"#{i}", "RATE_LIMITED") for i in range(2, len(spans)))
+        return SendResult(200, None, _ack(min(2, len(spans)), shed))
+
+    t = _transport(gw, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    for i in range(4):
+        t.export({"n": i})
+    assert t.flush_once() is True
+    assert t.flush_once() is True
+
+    first_id, first_spans = delivered[0]
+    second_id, second_spans = delivered[1]
+    assert first_spans == [0, 1, 2, 3]
+    assert second_spans == [2, 3]  # only the refused ones
+    # The accepted spans are never put on the wire twice: that is the double-counted spend.
+    assert first_spans.count(0) + second_spans.count(0) == 1
+    assert first_spans.count(1) + second_spans.count(1) == 1
+    # And the resend is a NEW batch, not a replay of one the gateway has already recorded.
+    assert first_id != second_id
+
+
+# --- CTO-391 review: an ack bigger than the read cap ---
+
+
+def _shed_ack_bytes(n_spans: int) -> bytes:
+    """An ack shedding a whole ``n_spans`` batch, sized as it really is on the wire: every item
+    named with a 32-hex trace id and a 16-hex span id, carrying the gateway's own message text."""
+    errors = tuple((f"{'a' * 32}:{'b' * 16}", "RATE_LIMITED") for _ in range(n_spans))
+    return _ack(0, errors, message="ingest buffer at capacity; retry")
+
+
+def test_the_ack_read_cap_fits_a_whole_default_batch_worth_of_sheds():
+    # The SDK's default max_batch_size is 512. A gateway shedding all of them names every item, and
+    # that ack measures ~70 KB: over the 64 KiB the client used to read. The cap truncated exactly
+    # the ack that says spans were lost (CTO-391 review).
+    body = _shed_ack_bytes(512)
+    assert len(body) > 64 * 1024
+    assert len(body) <= _MAX_ACK_BYTES
+
+
+def test_an_ack_that_hit_the_read_cap_is_counted_and_warned_not_cleared_silently():
+    # A truncated body parses to nothing, which took the "we learned nothing" branch and cleared
+    # the batch, silently reintroducing the exact loss CTO-391 fixes, at the default batch size.
+    # Truncation is KNOWN: the gateway had more to say about this batch than we read.
+    truncated = _shed_ack_bytes(512)[:_MAX_ACK_BYTES]
+    sender = _ScriptedSender([SendResult(200, None, truncated, True)])
+    t = _transport(sender)
+    for i in range(4):
+        t.export({"n": i})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+    assert t.pending() == 0  # not resent: the gateway may well have written some of them
+    assert t.shed_counts()["rejected_by_gateway_span_count"] == 4
+    assert t.obs.dropped_span_count == 4
+    assert len(records) == 1
+    assert "cannot be attributed" in records[0].getMessage()
+    t.flush_once()
+    assert len(sender.calls) == 1
+
+
+def test_the_default_sender_flags_a_body_that_hit_the_cap(monkeypatch):
+    # The flag has to come from the sender that actually reads the socket; without it the
+    # accounting can never tell a short ack from one the cap cut short.
+    import tally.transport as transport_mod
+
+    class _Resp:
+        status = 200
+
+        def read(self, n: int) -> bytes:
+            return b"x" * n  # always gives back everything asked for: an endless body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+    monkeypatch.setattr(transport_mod.urllib.request, "urlopen", lambda req, timeout=None: _Resp())
+    result = transport_mod._urllib_sender("http://gw.test", {}, b"{}")
+    assert result.body_truncated is True
+    assert len(result.body) == _MAX_ACK_BYTES  # capped, and the cap is reported
+
+    class _Small(_Resp):
+        def read(self, n: int) -> bytes:
+            return b"{}"
+
+    monkeypatch.setattr(transport_mod.urllib.request, "urlopen", lambda req, timeout=None: _Small())
+    assert transport_mod._urllib_sender("http://gw.test", {}, b"{}").body_truncated is False
+
+
+# --- CTO-391 review: retryable sheds the gateway names under ids that are not ours ---
+
+
+def test_buffer_overflow_sheds_are_counted_as_retryable_loss_not_permanent():
+    # The buffered ingest path names its shed items "#buffer-overflow-N", numbered by the GATEWAY's
+    # overflow position (gateway/app.py), so they match no id we sent and nothing can be put back.
+    # They are still RATE_LIMITED: shed under load, retryable by contract. Booking them in the
+    # permanent-loss counter sent an operator looking for bad client-side data when the real cause
+    # was ingest capacity.
+    errors = (("#buffer-overflow-0", "RATE_LIMITED"), ("#buffer-overflow-1", "RATE_LIMITED"))
+    sender = _ScriptedSender([SendResult(200, None, _ack(2, errors))])
+    t = _transport(sender)
+    for i in range(4):
+        t.export({"n": i})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+    counts = t.shed_counts()
+    assert counts["unmapped_retryable_span_count"] == 2
+    assert counts["rejected_by_gateway_span_count"] == 0  # NOT a permanent refusal
+    assert counts["undelivered_span_count"] == 0
+    assert t.requeued_span_count == 0  # no id maps to a span, and none is guessed at
+    blob = "\n".join(r.getMessage() for r in records)
+    assert "retryable loss" in blob
+    assert "buffer-overflow" not in blob  # item ids still never reach the log
+
+
+# --- CTO-391 review: parsing an ack must never raise ---
+
+
+def test_a_huge_hint_integer_neither_raises_nor_forces_a_resend():
+    # float(raw_rate) sat outside the try that wraps json.loads, so a JSON integer of a few hundred
+    # digits raised OverflowError out of _parse_ack. flush_once caught that as a send failure and
+    # re-sent a batch the gateway had already accepted.
+    body = b'{"accepted_spans": 1, "server_hints": {"sample_rate_override": ' + b"9" * 400 + b"}}"
+    ack = _parse_ack(body)
+    assert ack is not None
+    assert ack.accepted_spans == 1
+    assert ack.sample_rate_override is None  # unusable, so unknown; never a fabricated rate
+
+    sender = _ScriptedSender([SendResult(200, None, body)])
+    t = _transport(sender)
+    t.export({"n": 0})
+    assert t.flush_once() is True
+    assert t.pending() == 0
+    t.flush_once()
+    assert len(sender.calls) == 1  # delivered once, not re-sent
+
+
+# --- CTO-391 review: the no-double-send guarantee must not rest on the gateway being consistent ---
+
+
+def test_a_self_inconsistent_ack_is_distrusted_rather_than_resending_an_accepted_span():
+    # accepted_spans=4 on a 4-span batch that ALSO names #0 retryable cannot both be true. Acting
+    # on the named position resent span 0, double-counting spend nothing downstream can undo.
+    sent: list[list[int]] = []
+
+    def gw(url: str, headers: dict, body: bytes) -> SendResult:
+        sent.append([int(s["n"]) for s in decode_request(body.decode("utf-8")).resource_spans])
+        return SendResult(200, None, _ack(4, (("#0", "RATE_LIMITED"),)))
+
+    t = _transport(gw, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    for i in range(4):
+        t.export({"n": i})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+    assert sent == [[0, 1, 2, 3]]
+    assert t.pending() == 0
+    assert t.requeued_span_count == 0
+    t.flush_once()
+    assert sent == [[0, 1, 2, 3]]  # span 0 was NOT put on the wire a second time
+    assert "distrusting" in records[0].getMessage()
+
+
+# --- CTO-391 review: the buffer cap discards re-enqueued spans first ---
+
+
+class _RefillingGateway:
+    """Sheds every item as RATE_LIMITED, and refills the client's buffer to its cap mid-send.
+
+    Models the real race: spans keep arriving on the hot path while a batch is in flight, so the
+    re-enqueue lands on a buffer that is already full.
+    """
+
+    def __init__(self, refill: int) -> None:
+        self.refill = refill
+        self.transport: BatchingTransport | None = None
+
+    def __call__(self, url: str, headers: dict, body: bytes) -> SendResult:
+        spans = decode_request(body.decode("utf-8")).resource_spans
+        assert self.transport is not None
+        for j in range(self.refill):
+            self.transport.export({"n": 100 + j})
+        shed = tuple((f"#{i}", "RATE_LIMITED") for i in range(len(spans)))
+        return SendResult(200, None, _ack(0, shed))
+
+
+def test_requeued_spans_the_buffer_cap_discards_are_counted_and_logged_honestly():
+    # _requeue_locked inserts at the front and trims with popleft, so the re-enqueued spans are the
+    # very first thing the cap throws away, and requeued_span_count had already counted all of them.
+    # The warning read "4 re-enqueued, 0 lost" about four spans that were gone (CTO-391 review).
+    gw = _RefillingGateway(refill=4)
+    t = _transport(gw, max_buffer=4)
+    gw.transport = t
+    for i in range(4):
+        t.export({"n": i})
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+
+    assert t.requeued_span_count == 0  # none of them survived the cap
+    assert t.buffer_overflow_span_count == 4
+    message = records[0].getMessage()
+    assert "0 re-enqueued" in message
+    assert "4 dropped by the buffer cap" in message
+
+    # And what is actually in the buffer is what arrived during the send, not the re-enqueued spans.
+    survivors: list[list[int]] = []
+
+    def capture(url: str, headers: dict, body: bytes) -> SendResult:
+        spans = decode_request(body.decode("utf-8")).resource_spans
+        survivors.append([int(s["n"]) for s in spans])
+        return SendResult(200, None, _ack(len(spans)))
+
+    t._sender = capture
+    t.flush_once()
+    assert survivors == [[100, 101, 102, 103]]
+
+
+def test_the_partial_retry_bound_is_per_transport_not_per_span():
+    """Pins the KNOWN LIMIT documented on ``_partial_retry_rounds`` (CTO-391 review).
+
+    This test characterizes current behaviour rather than a fix. The budget counts consecutive
+    partial flushes for the whole transport, so a span refused for the FIRST time during a shedding
+    episode inherits a budget earlier spans spent, and is dropped after that single refusal and
+    counted as though its own retries had run out. Making it per span means carrying a round count
+    with every buffered span through the pinned-batch path that guarantees no span is sent twice,
+    which is a larger change than this bug fix. The limit is pinned here so it is visible, and so a
+    later per-span fix has an assertion to flip deliberately rather than discovering this by
+    accident.
+    """
+    gw = _StubGateway(keep=0)
+    t = _transport(gw, retry_max=3, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    t.export({"n": 0})
+    for _ in range(3):
+        t.flush_once()  # span 0 spends the shared budget; it is still buffered
+    assert t.shed_counts()["undelivered_span_count"] == 0
+
+    t.export({"n": 999})  # a fresh span, never refused by anyone
+    t.flush_once()
+    assert t.pending() == 0
+    # Both dropped, and the fresh span is booked against a retry budget it never had.
+    assert t.shed_counts()["undelivered_span_count"] == 2
+
+
+# --- CTO-391 review: the mirrored code set must not drift from the gateway's own ---
+
+
+def test_non_retryable_item_codes_match_the_gateways_own_set():
+    """The SDK mirrors ``gateway/errors.py`` ``NON_RETRYABLE`` as a literal, because it depends on
+    no gateway code. Nothing pinned the two together, so a reclassification on the gateway side
+    would silently make this client retry an item that can never be accepted, or permanently drop
+    one that would have been (CTO-391 review).
+
+    Textual, via ast: there is no gateway import to be had, and textual is enough to catch the
+    failure that actually happens, which is somebody editing one set and not the other.
+    """
+    errors_py = (
+        Path(__file__).resolve().parents[3]
+        / "infra"
+        / "gateway"
+        / "src"
+        / "gateway"
+        / "errors.py"
+    )
+    if not errors_py.exists():
+        pytest.skip("gateway source not in this checkout")
+
+    tree = ast.parse(errors_py.read_text(encoding="utf-8"))
+    wire_value: dict[str, str] = {}  # ErrorCode member -> the string that goes on the wire
+    non_retryable_members: set[str] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "ErrorCode":
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and isinstance(stmt.targets[0], ast.Name)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    wire_value[stmt.targets[0].id] = stmt.value.value
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "NON_RETRYABLE":
+            non_retryable_members = {
+                n.attr for n in ast.walk(node.value) if isinstance(n, ast.Attribute)
+            }
+
+    assert wire_value, "could not read ErrorCode from the gateway source"
+    assert non_retryable_members, "could not read NON_RETRYABLE from the gateway source"
+    assert {wire_value[m] for m in non_retryable_members} == set(_NON_RETRYABLE_ITEM_CODES)
+    # And the accepted-but-flagged codes are real codes, not a spelling this client invented.
+    assert set(_FLAG_ITEM_CODES) <= set(wire_value.values())
