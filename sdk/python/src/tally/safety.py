@@ -45,8 +45,17 @@ class SelfObservability:
     """
 
     internal_error_count: int = 0
+    #: Retired for SDK-internal traffic as of CTO-404: the four ``record_*`` entrypoints were the
+    #: only things bumping it and they now count ``synthetic_trace_count`` instead. Still exported
+    #: by :meth:`snapshot` and still meaningful for an external caller of
+    #: :func:`tally.context.note_context_drop`, but a 0 here is a retired key, not a measurement.
     context_drop_count: int = 0
     dropped_span_count: int = 0
+    #: Spans emitted outside any trace context, so their trace id was generated here (CTO-404).
+    #: Kept apart from ``context_drop_count`` because nothing is dropped: the span is stored under
+    #: the synthetic id, and counting it as a drop told the dashboard telemetry had gone missing
+    #: while the row was sitting in ClickHouse.
+    synthetic_trace_count: int = 0
     #: optional sink for the last few error reprs (bounded), for debugging
     last_errors: list[str] = field(default_factory=list)
     _max_errors: int = 20
@@ -65,6 +74,7 @@ class SelfObservability:
             "internal_error_count": self.internal_error_count,
             "context_drop_count": self.context_drop_count,
             "dropped_span_count": self.dropped_span_count,
+            "synthetic_trace_count": self.synthetic_trace_count,
         }
 
 

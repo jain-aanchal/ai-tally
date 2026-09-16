@@ -13,11 +13,12 @@ framework to catch); ``record_llm_call`` itself never raises.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
-from tally.context import current_context, new_trace_id, note_context_drop
+from tally.context import current_context, new_trace_id, note_synthetic_trace
 from tally.egress import BatchProcessor
 from tally.guardrails import GuardrailConfig, GuardrailEngine, GuardrailState, Verdict
 from tally.hmac_keys import HmacKeyRegistry
@@ -33,6 +34,7 @@ from tally.safety import SelfObservability, safe
 from tally.sampling import BillingMeter, Sampler, TraceSignals
 from tally.schema import (
     SPAN_ID_KEY,
+    TIMESTAMP_NS_KEY,
     TRACE_ID_KEY,
     TRACE_ID_SYNTHETIC_KEY,
     SpanFields,
@@ -78,6 +80,14 @@ class LlmCallResult:
     cost_micro_usd: int | None
     kept: bool
     sample_rate: float
+    #: The span that was emitted, ids and timestamp included, as a COPY: mutating it never reaches
+    #: the span on its way to storage (CTO-404).
+    #:
+    #: The shape deliberately differs between a kept and a sampled-out call. When ``kept`` is True
+    #: this names the stored span. When it is False no span exists, so this is the pre-stamp
+    #: attribute set with no ``trace_id``/``span_id``/``timestamp_ns`` in it, and ``trace_id``
+    #: above is the context's own (``None`` when there is none). Inventing ids for a span that was
+    #: never sent would be the dishonest direction, so branch on ``kept``, not on key presence.
     attributes: dict[str, object]
 
 
@@ -200,7 +210,7 @@ class TallyClient:
             ctx = current_context()
             trace_id = ctx.trace_id
             if trace_id is None:
-                note_context_drop(self.obs, where="record_llm_call")
+                note_synthetic_trace(self.obs, where="record_llm_call")
 
             # Billing counts at HEAD, before sampling (CTO-50/CTO-84).
             if trace_id is not None:
@@ -244,14 +254,32 @@ class TallyClient:
             # NB: sample_rate travels at the batch level (wire Sampling, §12.2), not as a span
             # attribute, so the span stays schema-conformant. It's returned in the result.
             if decision.keep:
-                self._emit(attrs)
+                emitted = self._emit(attrs)
+                # The result describes the span that was actually SENT (CTO-404). The ids are
+                # stamped on a copy, so this used to hand back a trace_id of None and an attribute
+                # dict with no ids in it, for a span the gateway stored under a real synthetic
+                # trace id: a customer logging result.trace_id to correlate with the dashboard was
+                # given a value that matches nothing there.
+                result_trace = str(emitted[TRACE_ID_KEY])
+                # A COPY, deliberately. ``_emit`` returns the dict it enqueued, so handing that
+                # object to the caller would let a customer's own bookkeeping
+                # (``result.attributes["my.note"] = prompt``) write into a span that is already
+                # queued for export and already past SDK-side validation. A body-shaped string
+                # would then ride the long-tail attribute map into storage, which is the
+                # no-bodies-in-telemetry invariant reachable through a public API (CTO-404).
+                result_attrs = dict(emitted)
+            else:
+                # Sampled out, so no span exists to describe. Reporting the context's own trace id
+                # (None when there is none) stays honest rather than inventing an id for a span
+                # that was never sent.
+                result_trace, result_attrs = trace_id, attrs
 
             return LlmCallResult(
-                trace_id=trace_id,
+                trace_id=result_trace,
                 cost_micro_usd=cost_micro,
                 kept=decision.keep,
                 sample_rate=decision.sample_rate,
-                attributes=attrs,
+                attributes=result_attrs,
             )
 
         result = _do()
@@ -299,7 +327,7 @@ class TallyClient:
         def _do() -> None:
             ctx = current_context()
             if ctx.trace_id is None:
-                note_context_drop(self.obs, where="record_tool_call")
+                note_synthetic_trace(self.obs, where="record_tool_call")
 
             resolved_cost = cost_micro_usd
             catalog_version: str | None = None
@@ -375,7 +403,7 @@ class TallyClient:
             ctx = current_context()
             trace_id = ctx.trace_id
             if trace_id is None:
-                note_context_drop(self.obs, where="record_embedding_call")
+                note_synthetic_trace(self.obs, where="record_embedding_call")
 
             cost_micro: int | None = None
             catalog_version: str | None = None
@@ -417,12 +445,15 @@ class TallyClient:
                 account_label=acct_label,
             )
             attrs = build_span_attributes(fields)
-            self._emit(attrs)
-
+            emitted = self._emit(attrs)
+            # Same correction as record_llm_call: the result names the span that was sent, ids
+            # included, rather than the pre-stamp copy (CTO-404). Embeddings always emit, so there
+            # is no sampled-out branch here.
             return EmbeddingCallResult(
-                trace_id=trace_id,
+                trace_id=str(emitted[TRACE_ID_KEY]),
                 cost_micro_usd=cost_micro,
-                attributes=attrs,
+                # A copy, for the reason spelled out in record_llm_call (CTO-404).
+                attributes=dict(emitted),
             )
 
         result = _do()
@@ -468,7 +499,7 @@ class TallyClient:
         def _do() -> None:
             ctx = current_context()
             if ctx.trace_id is None:
-                note_context_drop(self.obs, where="record_vector_call")
+                note_synthetic_trace(self.obs, where="record_vector_call")
 
             resolved_cost = cost_micro_usd
             catalog_version: str | None = None
@@ -568,12 +599,23 @@ class TallyClient:
         _warned_account_tenants.add(self.tenant_id)
         _log.warning(msg, *args)
 
-    def _emit(self, attributes: dict[str, object]) -> None:
+    def _emit(self, attributes: dict[str, object]) -> dict[str, object]:
+        """Stamp the span's identity and emit it. Returns the span that was actually sent.
+
+        Returning it is what lets a caller-facing result describe what LANDED rather than what was
+        built: the stamping happens on a copy, so before CTO-404 the result and the stored span
+        disagreed about both ids and the timestamp.
+
+        The returned dict IS the enqueued span, not a copy of it. Anything that hands it onward to
+        customer code has to copy it first, or the customer can mutate a span that is already
+        queued and already validated.
+        """
         span = _with_span_ids(attributes)
         if self._processor is not None:
             self._processor.enqueue(span)
         else:
             self._exporter.export(span)
+        return span
 
 
 def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
@@ -591,13 +633,28 @@ def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
     nothing: unattributed to a trace is honest, sharing an id with every other trace-less span is
     not. Both ids are random and encode nothing about the request or the customer.
 
-    Ids the caller already set (either spelling) are left alone: an OTel-shaped producer feeding
-    ``ingest_span`` owns its identity and we must not overwrite it. A copy is returned so nothing
-    the caller still holds, such as ``LlmCallResult.attributes``, is mutated behind its back.
+    The span's own ``timestamp_ns`` is stamped here too, and for the same reason (CTO-404). A span
+    that carries no timestamp inherits the ENVELOPE's ``client_send_ts_ns`` at the gateway, and
+    that is a different number in every envelope. So the same spans re-enveloped in a NEW
+    ``BatchRequest`` carried identical ids but a different time, which is part of the ClickHouse
+    sorting key: the ReplacingMergeTree then had two rows it could never collapse, and the spend
+    was counted twice.
+    Stamping it at emit makes a span fully self-describing, so a re-send is genuinely the same row.
+
+    Ids and timestamp the caller already set (either spelling) are left alone: an OTel-shaped
+    producer feeding ``ingest_span`` owns its identity and its clock, and we must not overwrite
+    either. A copy is returned so the dict the caller passed in is never mutated behind its back.
+    That copy is the span that gets enqueued, though, so whoever passes it on to customer code has
+    to copy it again: see ``_emit`` and ``LlmCallResult.attributes``.
     """
     has_trace = bool(attributes.get(TRACE_ID_KEY) or attributes.get("TraceId"))
     has_span = bool(attributes.get(SPAN_ID_KEY) or attributes.get("SpanId"))
-    if has_trace and has_span:
+    # Not a truthiness test: a timestamp of 0 is a real (if improbable) value, and re-stamping it
+    # would be exactly the overwrite the paragraph above forbids.
+    has_ts = (
+        attributes.get(TIMESTAMP_NS_KEY) is not None or attributes.get("Timestamp") is not None
+    )
+    if has_trace and has_span and has_ts:
         return attributes
     span = dict(attributes)
     if not has_trace:
@@ -615,4 +672,6 @@ def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
             span[TRACE_ID_KEY] = ctx_trace
     if not has_span:
         span[SPAN_ID_KEY] = new_span_id()
+    if not has_ts:
+        span[TIMESTAMP_NS_KEY] = time.time_ns()
     return span
