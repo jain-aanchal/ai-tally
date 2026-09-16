@@ -65,6 +65,11 @@ def billable_traces(store: FakeStore) -> int:
 
     The in-test mirror of ``ClickHouseStore.usage_counts``' ``uniqExactIf(TraceId,
     notEmpty(TraceId))``. Exact, not approximate, and an empty id is not a trace.
+
+    It deliberately models only the counting, not the ``TenantId`` and ``Timestamp`` predicates:
+    every fixture here posts one tenant's spans in one instant, so those predicates select all rows
+    and modelling them would add nothing. They are pinned instead by
+    :func:`test_the_mirror_matches_the_production_query`, which asserts the whole statement.
     """
     return len({row[_TRACE_COL] for row in store.spans if row[_TRACE_COL]})
 
@@ -107,10 +112,15 @@ def _post_sdk(c: TestClient, spans: list[dict]):
 
 
 def _proxy_span(i: int) -> dict:
-    """One edge-proxy span: its own random trace and span id, one request's worth of work.
+    """One edge-proxy span: its own trace and span id, one request's worth of work.
 
-    Mirrors ``infra/edge-proxy/internal/telemetry/telemetry.go``, which stamps ``trace_id`` and
-    ``span_id`` per intercepted request and posts one span per batch.
+    Hand-written to match ``infra/edge-proxy/internal/telemetry/telemetry.go``, which stamps a fresh
+    ``trace_id`` and ``span_id`` per intercepted request and posts one span per batch. It is NOT the
+    Go encoder's output, so what the proxy tests below pin is the DOCUMENT'S CLAIM about the proxy,
+    not the proxy itself: if ``telemetry.go`` ever reused a trace id across requests, these tests
+    would stay green while ``docs/billable-trace-definition.md``'s proxy row became wrong. Nothing
+    in this Python suite can close that gap across the language boundary; the Go side is pinned by
+    its own tests.
     """
     return {
         "trace_id": f"{i:032x}",
@@ -128,7 +138,7 @@ def _proxy_span(i: int) -> dict:
 def test_five_spans_in_one_start_trace_are_one_billable_trace() -> None:
     """The endorsed unit: one ``start_trace`` scope is one trace, whatever it contains.
 
-    Before CTO-396 this billed five, because every stored row carried the mapper's random per-row
+    Before CTO-396 this billed five, because every stored row carried the mapper's per-row ``uuid7``
     fallback id. A change that puts it back to five is a five-fold invoice rise for traced SDK
     tenants and needs to be a decision, not a side effect.
     """
@@ -183,8 +193,8 @@ def test_two_traces_bill_as_two_however_the_spans_are_batched() -> None:
 
 def test_proxy_spans_bill_one_trace_per_request() -> None:
     """The proxy stamps a fresh trace id per intercepted request and sends one span per batch, so
-    five requests are five billable traces. This is the unit nearly all metered traffic bills on,
-    and it is NOT the SDK's unit for the same workload (docs/billable-trace-definition.md)."""
+    five requests are five billable traces, which is NOT the SDK's unit for the same workload
+    (docs/billable-trace-definition.md). How much real traffic arrives this way is unmeasured."""
     with _client() as (c, store):
         for i in range(1, 6):
             assert _post(c, [_proxy_span(i)]).status_code == 200
@@ -243,7 +253,7 @@ def test_otlp_spans_bill_by_the_callers_own_trace_ids() -> None:
 
 
 def test_a_client_that_sends_no_ids_bills_one_trace_per_span() -> None:
-    """``mapping.span_to_row`` gives an id-less span a fresh random trace id per ROW, so a
+    """``mapping.span_to_row`` gives an id-less span a fresh ``uuid7`` trace id per ROW, so a
     third-party or hand-rolled client bills per span. This is the fallback SDK traffic relied on
     before CTO-396, and it is still the rule for everyone else."""
     span = {
@@ -260,28 +270,53 @@ def test_a_client_that_sends_no_ids_bills_one_trace_per_span() -> None:
 # --- the mirror ---------------------------------------------------------------------------------
 
 
+_EXPECTED_USAGE_SQL = (
+    "SELECT uniqExactIf(TraceId, notEmpty(TraceId)), "
+    "uniqExactIf(FeatureTag, notEmpty(FeatureTag)) "
+    "FROM otel_spans "
+    "WHERE TenantId = %(t)s AND Timestamp >= %(s)s AND Timestamp < %(e)s"
+)
+
+
 def test_the_mirror_matches_the_production_query() -> None:
     """These tests count rows the way the invoice counts them, so the mirror must not drift.
 
     If ``usage_counts`` stops counting distinct non-empty ``TraceId``, every assertion above is
     measuring something the bill no longer uses, and this is the test that says so.
+
+    The whole normalised statement is asserted, not a substring of it. A substring check passes
+    through exactly the changes that matter here: swapping the two SELECT columns (every assertion
+    above would then be measuring feature tags), reading a different table, loosening the window to
+    closed on both ends, dropping the tenant predicate, or the divergence
+    ``docs/billable-trace-definition.md`` predicts, an added ``WHERE`` term teaching the invoice
+    about the CTO-401 synthetic marker. All of those leave the trace-count expression intact and
+    make the mirror wrong, so all of them have to fail here.
     """
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     class _Result:
-        result_rows = [(0, 0)]
+        # Distinguishable values, so which SELECT column becomes the trace count is pinned by the
+        # return value and not only by the SQL text.
+        result_rows = [(7, 3)]
 
     class _Client:
         def query(self, sql: str, parameters: dict | None = None) -> _Result:
-            captured["sql"] = sql
+            captured["sql"] = " ".join(sql.split())
+            captured["parameters"] = parameters
             return _Result()
 
     store = ClickHouseStore.__new__(ClickHouseStore)
     store._client = _Client()  # type: ignore[attr-defined]
     store._settings = None  # type: ignore[attr-defined]
-    store.usage_counts(
-        TENANT,
-        period_start=datetime(2026, 9, 1, tzinfo=timezone.utc),
-        period_end=datetime(2026, 10, 1, tzinfo=timezone.utc),
-    )
-    assert "uniqExactIf(TraceId, notEmpty(TraceId))" in captured["sql"]
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    traces, features = store.usage_counts(TENANT, period_start=start, period_end=end)
+
+    sql = captured["sql"]
+    assert sql == _EXPECTED_USAGE_SQL  # table, both columns, order, and the whole WHERE clause
+    # Column position, asserted separately so a swap fails with a message about the swap: the trace
+    # count must be SELECT column 0, which is the one usage_counts returns first.
+    assert sql.startswith("SELECT uniqExactIf(TraceId, notEmpty(TraceId)), ")
+    assert (traces, features) == (7, 3)
+    # Tenant scoping and the half-open window, which billable_traces above does not model.
+    assert captured["parameters"] == {"t": TENANT, "s": start, "e": end}

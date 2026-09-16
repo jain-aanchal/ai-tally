@@ -31,8 +31,9 @@ Three consequences follow from the literal rule and are worth stating because ea
    path stored and accepted are the same set; on the buffered path (`TALLY_INGEST_BUFFERED=true`,
    off everywhere today) they are not, which is the CTO-399 gap.
 2. **Whoever sets `TraceId` sets the unit.** The gateway does not group spans itself. It counts the
-   ids the client put on the wire, and `gateway.mapping.span_to_row` invents a fresh random id per
-   row for any span that arrives without one.
+   ids the client put on the wire, and `gateway.mapping.span_to_row` mints a fresh id per row for
+   any span that arrives without one (`tally.wire.uuid7`: a 48-bit millisecond timestamp plus random
+   bytes, so unique per row but time-ordered rather than uniformly random).
 3. **The period window is per span, not per trace.** A trace whose spans straddle midnight on the
    first of a month contributes a billable trace to both months.
 
@@ -45,8 +46,11 @@ a fresh random `trace_id` and `span_id` on it, and posts it as a single-span bat
 trace is therefore **one metered LLM request**. The proxy has no notion of a user journey, so it
 never joins two requests into one trace.
 
-This is a coherent unit, and it is the unit almost all real metered traffic is billed on today. It
-is not the same unit as the SDK's traced path, which is the problem below.
+This is a coherent unit, and it is not the same unit as the SDK's traced path, which is the problem
+below. How much real traffic arrives this way is not something this document can say: there is no
+production access here, and the local corpus holds no edge-proxy spans at all (`ServiceName LIKE
+'%proxy%'` returns nothing), so any figure for the proxy's share of metered traffic would be an
+expectation and not a measurement.
 
 ### SDK with an explicit `start_trace`
 
@@ -59,7 +63,8 @@ This is the unit the product's language implies and the one this document endors
 
 ### SDK with no `start_trace`
 
-A span emitted outside a trace gets its own fresh trace id, so one billable trace is **one span**.
+A span emitted outside a trace gets its own fresh trace id (`tally.context.new_trace_id`, a uuid4),
+so one billable trace is **one span**.
 
 The definition does not endorse this. A per-span charge is being counted under the name of a trace,
 which means the same five model calls cost five units when the caller did not open a trace and one
@@ -70,16 +75,25 @@ there reach the invoice differently:
 
 - Leave the trace id empty for a trace-less span: `notEmpty(TraceId)` then excludes those spans from
   the invoice entirely, and a tenant who never calls `start_trace` bills zero traces while still
-  costing storage and query.
-- Keep the id but mark it synthetic: the invoice query has to learn about the marking, or it goes on
-  billing one per span.
+  costing storage and query. This one moves the invoice.
+- Keep the id on the wire and mark it synthetic: the stored row still carries its own distinct
+  non-empty `TraceId`, so the count above is exactly what it was, and only the in-process head meter
+  skips the marked id. This one leaves the invoice as it is.
 
-Either way the invoice moves, so CTO-401 and this definition have to be settled together.
+CTO-401 (#409) took the second option. It changes `gateway/metering.py`, `gateway/app.py` and the
+SDK, and does not touch `ClickHouseStore.usage_counts` or `gateway.mapping`. Measured on both trees,
+300 trace-less spans give 300 stored rows and 300 distinct non-empty `TraceId` on main and under
+#409 alike, while the head meter count goes from 300 to 0. So the ClickHouse-derived number this
+document describes is unchanged by CTO-401.
+
+That leaves the question open rather than answered: whether the invoice query should also stop
+billing a synthetic id per span is a decision for this definition, and it would have to be made
+here, not inherited from CTO-401.
 
 ### Any other id-less client
 
 A client that posts spans with no ids at all (a curl, a third-party exporter, a homegrown script)
-gets `mapping.span_to_row`'s random per-row fallback, so it bills one trace per span, the same as
+gets `mapping.span_to_row`'s per-row `uuid7` fallback, so it bills one trace per span, the same as
 the trace-less SDK path and for the same reason. This fallback is what SDK traffic relied on before
 CTO-396.
 
@@ -114,15 +128,17 @@ trace per worker process bills one trace for a day of work.
 - **Re-ingest of id-less spans re-bills them.** Batch idempotency (`gateway.batch_idempotency`)
   catches a replayed batch by batch id, and a genuine duplicate span with real ids collapses in
   `BatchRequest.deduplicated()`. A client that re-sends the same work as a fresh id-less batch gets
-  fresh random ids per row and a fresh charge. The protection is at the batch level, not at the
+  fresh `uuid7` ids per row and a fresh charge. The protection is at the batch level, not at the
   work level.
 
 ## Measured before and after
 
 **What this is.** A fixed synthetic workload put through the real SDK span-build path and the real
 `/v1/batches` handler with a fake store, at two commits: `a010a15` (the merge before CTO-396) and
-`768c77e` (main, after it). `billable_traces` is computed exactly as the invoice query computes it,
-as the count of distinct non-empty `TraceId` among the rows that reached the store.
+`768c77e` (main after it; CTO-391/#400 also merged in that window, so the two commits differ by more
+than CTO-396 alone, though nothing in #400 touches trace ids). `billable_traces` is computed exactly
+as the invoice query computes it, as the count of distinct non-empty `TraceId` among the rows that
+reached the store.
 
 **What this is not.** It is not a real tenant-month. I have no production access, and the local
 stack holds no SDK-originated spans at all: every row in it came from `make seed` or from
@@ -142,14 +158,16 @@ Read the rows rather than the headline. The direction of the invoice change depe
 shape, which depends on how many spans a customer's app produced inside one flush interval:
 
 - **Multi-span batches, traced (row 1).** The count did not move. Before CTO-396 the batch collapsed
-  to one stored row carrying one random fallback id, which coincidentally equals the one real trace
-  id it bills as now. What changed is that 400 of the 500 spans, and the spend on them, were being
-  thrown away. The bill was right by accident on top of data that was wrong.
+  to one stored row carrying one `uuid7` fallback id from the mapper; now five rows are stored, all
+  carrying the caller's own trace id. What coincides is the COUNT, one distinct id per journey then
+  and one distinct id per journey now, not the id value: the fallback id is minted per row by the
+  gateway and is not the caller's trace id. What changed is that 400 of the 500 spans, and the spend
+  on them, were being thrown away. The bill was right by accident on top of data that was wrong.
 - **Multi-span batches, trace-less (row 2).** Five times higher, because the spans that were being
   dropped are now stored and each carries its own id.
 - **One span per batch, traced (row 3).** Five times lower. Nothing was being collapsed here, so
-  every span used to bill as its own trace under the mapper's fallback id, and five of them now
-  share one real id.
+  every span used to bill as its own mapper-minted fallback id, and five of them now share one real
+  id.
 
 CTO-403 states the traced case as a five-fold fall. That is true for row 3 and not for row 1, so
 the real exposure for any given tenant depends on their flush behaviour and cannot be settled from
