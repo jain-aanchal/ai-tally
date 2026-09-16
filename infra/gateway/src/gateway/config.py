@@ -162,6 +162,18 @@ class Settings(BaseSettings):
     # Per-span payload cap (bytes) for boundary validation (CTO-34).
     max_span_bytes: int = 64 * 1024
 
+    # CTO-401: ceiling on the distinct ids the in-process head meter keeps per (tenant, period).
+    # Nothing evicts those sets yet, so this is what stops one busy tenant's month from growing a
+    # replica's memory without limit. See gateway.metering.DEFAULT_MAX_IDS_PER_PERIOD for why the
+    # default sits far above every plan ceiling the count is compared against.
+    #
+    # CTO-401 review: this has a LOWER BOUND and the gateway refuses to start below it. Trimming it
+    # under a plan's trace_limit pins the saturated count at or below that limit forever, so the
+    # overage comparison can never fire and limit enforcement is silently off for those tenants; 0
+    # disables the meter outright while it still reports a clean zero. The boot check lives in
+    # gateway.metering.validate_max_ids_per_period, which explains both halves.
+    metering_max_ids_per_period: int = 250_000
+
     # Backpressure (CTO-36): concurrent in-flight ingest requests at/above which the gateway
     # tightens client flow-control hints and sheds the overflow of a batch as retryable.
     backpressure_soft_limit: int = 64

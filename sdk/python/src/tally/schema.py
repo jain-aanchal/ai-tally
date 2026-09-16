@@ -89,6 +89,24 @@ class GenAI:
 #: proxied span and an SDK span land in the same columns.
 TRACE_ID_KEY = "trace_id"
 SPAN_ID_KEY = "span_id"
+
+#: CTO-401: True only on a span whose trace id this SDK MINTED because the caller had no active
+#: trace. CTO-396 gave every trace-less span its own fresh trace id so it would stop colliding with
+#: every other trace-less span on the wire, which is right for storage and wrong for the head meter:
+#: a per-span id is not a trace a customer started, and counting one billable trace per trace-less
+#: span turned traffic that contributed zero into traffic that contributes one each. The id stays on
+#: the wire (the ClickHouse-derived invoice count is unchanged); this flag is what lets the gateway
+#: head meter tell a real trace from a synthetic one instead of guessing from the id's shape.
+#: Absent on spans carrying a caller's real trace id, so its absence means "real", not "unknown".
+#:
+#: STORED SPELLING (CTO-401 review). This is a long-tail attribute, so the gateway writes it
+#: into the ClickHouse ``SpanAttributes`` Map(String, String) through ``str(value)``
+#: (``gateway.mapping.span_to_row``), which renders a Python ``True`` as the string ``'True'``,
+#: NOT ``'true'``. A query written as ``SpanAttributes['gen_ai.trace_id_synthetic'] = 'true'``
+#: therefore matches nothing and returns a clean empty result, which looks exactly like "no
+#: synthetic spans". Match ``'True'``. The gateway's own head meter never reads the stored string
+#: (it reads the wire value before mapping), so this spelling is a query concern only.
+TRACE_ID_SYNTHETIC_KEY = "gen_ai.trace_id_synthetic"
 _STRUCTURAL_KEYS = frozenset({TRACE_ID_KEY, SPAN_ID_KEY})
 
 
@@ -152,7 +170,12 @@ _STR_KEYS = frozenset(
 # Allowed values for the stratum string. The validator rejects anything else so we don't end up
 # with a long-tail of free-text strata polluting the DQ table.
 _SAMPLING_STRATA = frozenset({"body", "mid", "tail"})
-_ALL_KEYS = _INT_KEYS | _STR_KEYS | _FLOAT_KEYS
+# Bool keys (CTO-401). The first of its kind, which is why there was no such category before:
+# every other attribute is a count, a rate or a string. ``_INT_KEYS`` deliberately REJECTS bool
+# (a bool is an int in Python and a token count of ``True`` is a bug), so a bool key needs its
+# own bucket rather than riding along in that one.
+_BOOL_KEYS = frozenset({TRACE_ID_SYNTHETIC_KEY})
+_ALL_KEYS = _INT_KEYS | _STR_KEYS | _FLOAT_KEYS | _BOOL_KEYS
 
 _MICRO = Decimal(1_000_000)
 
@@ -285,6 +308,12 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
                 violations.append(f"{key} must be float, got {type(value).__name__}")
             elif not (0.0 <= float(value) <= 1.0):
                 violations.append(f"{key} must be in [0, 1], got {value}")
+        elif key in _BOOL_KEYS:
+            # A real bool, not a truthy string: the gateway matches on ``is True`` and the string
+            # "false" would sail past that as a marked span. Absence is how "not synthetic" is
+            # spelled, so an explicit False is permitted but means exactly what absence means.
+            if not isinstance(value, bool):
+                violations.append(f"{key} must be bool, got {type(value).__name__}")
 
     op = attrs.get(GenAI.OPERATION_NAME)
     if isinstance(op, str) and op and op != op.lower():

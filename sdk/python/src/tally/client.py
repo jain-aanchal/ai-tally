@@ -34,6 +34,7 @@ from tally.sampling import BillingMeter, Sampler, TraceSignals
 from tally.schema import (
     SPAN_ID_KEY,
     TRACE_ID_KEY,
+    TRACE_ID_SYNTHETIC_KEY,
     SpanFields,
     build_span_attributes,
     new_span_id,
@@ -600,7 +601,18 @@ def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
         return attributes
     span = dict(attributes)
     if not has_trace:
-        span[TRACE_ID_KEY] = current_context().trace_id or new_trace_id()
+        ctx_trace = current_context().trace_id
+        if ctx_trace is None:
+            # CTO-401: a minted trace id is marked as minted. The id itself is indistinguishable
+            # from a real one by construction (both are random hex), so without this the gateway
+            # head meter has no way to tell "the customer started a trace" from "we invented an id
+            # so this span would have an identity", and it counted one billable trace per
+            # trace-less span. The id still travels, so the stored row and the ClickHouse-derived
+            # invoice count are exactly what CTO-396 made them.
+            span[TRACE_ID_KEY] = new_trace_id()
+            span[TRACE_ID_SYNTHETIC_KEY] = True
+        else:
+            span[TRACE_ID_KEY] = ctx_trace
     if not has_span:
         span[SPAN_ID_KEY] = new_span_id()
     return span
