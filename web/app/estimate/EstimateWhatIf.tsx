@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Card } from "@/components/Card";
 import { Diag } from "@/components/Diag";
+import { Blank, Money } from "@/components/HonestValue";
 import { pctDelta, type Projection, type WhatIfProjection } from "@/lib/estimate";
-import { formatUSD } from "@/lib/types";
 
 // A small hardcoded candidate list keeps the picker simple (CTO-128 out-of-scope: model catalog).
 const CANDIDATES = [
@@ -17,10 +17,22 @@ const CANDIDATES = [
 
 type Proposed = WhatIfProjection["proposed"];
 
-const EM_DASH = "—";
+// CTO-298: the reasons behind the blanks on this page. Each says what is missing and why, because a
+// blank whose reason a reader cannot find reads as a bug rather than as an honest unknown.
+const NO_BASELINE = "no priced baseline traffic for this workload yet";
+const NO_COST_DISTRIBUTION =
+  "p99 cost per run needs a full cost distribution; the replay executor returns per-call totals only, so no percentile is available yet";
+const NO_LATENCY_DISTRIBUTION =
+  "mean latency needs a full latency distribution; replay returns a p50 only, and a median is not a mean";
+const NO_RISK =
+  "blow-up risk is the probability that p99 cost more than doubles, which needs the p99 distribution replay does not return yet";
+// CTO-298 follow-up: this row rendered a literal 0 whenever no replay had been attempted, which
+// reads as "we replayed and used none of it". Nothing was replayed and nothing was counted.
+const NO_SAMPLES_USED =
+  "no replay has been attempted for this workload, so no samples were used and none were counted";
 
-function fmtCost(v: number | null): string {
-  return v === null ? EM_DASH : formatUSD(v);
+function Latency({ ms, reason }: { ms: number | null; reason: string }) {
+  return ms === null ? <Blank reason={reason} /> : <>{ms} ms</>;
 }
 
 export function EstimateWhatIf({ initial }: { initial: Projection }) {
@@ -30,10 +42,14 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
   const [systemPromptOverride, setSystemPromptOverride] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Start from the mock projection's proposed numbers (GET); POST replaces them.
+  // Start from whatever the GET returned; POST replaces them.
   const [proposed, setProposed] = useState<Proposed>(initial.proposed);
-  const [sampleUsed, setSampleUsed] = useState(initial.sample.used);
+  const [sampleUsed, setSampleUsed] = useState<number | null>(initial.sample.used);
   const [grounded, setGrounded] = useState<number | null>(null);
+  // Separate from `grounded`, which is now nullable in its own right: a null grounded count means
+  // "a replay was requested and none ran", which is a different fact from "nothing has been
+  // requested yet" and has to be sayable (CTO-298 follow-up).
+  const [estimated, setEstimated] = useState(false);
 
   async function onEstimate() {
     setPending(true);
@@ -57,6 +73,7 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
       setProposed(body.proposed);
       setSampleUsed(body.sample.used);
       setGrounded(body.groundedSamples);
+      setEstimated(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -68,7 +85,13 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
   const p99Delta = pctDelta(current.p99CostMicroUsd, proposed.p99CostMicroUsd);
   const latDelta = pctDelta(current.meanLatencyMs, proposed.meanLatencyMs);
   const riskSeverity =
-    initial.blowUpRisk >= 0.3 ? "bad" : initial.blowUpRisk >= 0.1 ? "warn" : "good";
+    initial.blowUpRisk === null
+      ? undefined
+      : initial.blowUpRisk >= 0.3
+        ? "bad"
+        : initial.blowUpRisk >= 0.1
+          ? "warn"
+          : "good";
 
   return (
     <div className="space-y-6">
@@ -112,10 +135,16 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
               {pending ? "Estimating…" : "Estimate"}
             </button>
             {error && <span className="text-bad">{error}</span>}
-            {grounded !== null && !error && (
+            {estimated && !error && (
               <span className="text-muted">
-                grounded on {grounded} replayed sample{grounded === 1 ? "" : "s"}
-                {proposed.monthlyCostMicroUsd === null && " (too few, showing —)"}
+                {grounded === null ? (
+                  "no replay ran for this workload, so nothing grounds this estimate"
+                ) : (
+                  <>
+                    grounded on {grounded} replayed sample{grounded === 1 ? "" : "s"}
+                    {proposed.monthlyCostMicroUsd === null && " (too few to report a cost)"}
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -125,64 +154,114 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Kpi
           label="Cost / month"
-          current={formatUSD(current.monthlyCostMicroUsd)}
-          proposed={fmtCost(proposed.monthlyCostMicroUsd)}
+          current={<Money micro={current.monthlyCostMicroUsd} reason={NO_BASELINE} />}
+          proposed={
+            <Money micro={proposed.monthlyCostMicroUsd} reason="no replayed samples ground a projected cost yet" />
+          }
           delta={costDelta}
           betterWhenNegative
         />
         <Kpi
           label="p99 cost / run"
-          current={formatUSD(current.p99CostMicroUsd)}
-          proposed={fmtCost(proposed.p99CostMicroUsd)}
+          current={<Money micro={current.p99CostMicroUsd} reason={NO_COST_DISTRIBUTION} />}
+          proposed={<Money micro={proposed.p99CostMicroUsd} reason={NO_COST_DISTRIBUTION} />}
           delta={p99Delta}
           betterWhenNegative
           headline
         />
         <Kpi
           label="Blow-up risk"
-          current={EM_DASH}
-          proposed={`${Math.round(initial.blowUpRisk * 100)}%`}
+          current={<Blank reason="the current model is the baseline; there is no risk of it changing relative to itself" />}
+          proposed={
+            initial.blowUpRisk === null ? (
+              <Blank reason={NO_RISK} />
+            ) : (
+              `${Math.round(initial.blowUpRisk * 100)}%`
+            )
+          }
           severity={riskSeverity}
           hint="P(p99 > 2× current)"
         />
         <Kpi
           label="Mean latency"
-          current={`${current.meanLatencyMs} ms`}
-          proposed={proposed.meanLatencyMs === null ? EM_DASH : `${proposed.meanLatencyMs} ms`}
+          current={<Latency ms={current.meanLatencyMs} reason={NO_LATENCY_DISTRIBUTION} />}
+          proposed={<Latency ms={proposed.meanLatencyMs} reason={NO_LATENCY_DISTRIBUTION} />}
           delta={latDelta}
           betterWhenNegative
         />
       </div>
 
       <Card title="Driver breakdown">
-        <ul className="space-y-2 text-sm">
-          {initial.drivers.map((d) => (
-            <li key={d.reason} className="flex items-baseline justify-between gap-3">
-              <span className="text-muted">{d.reason}</span>
-              <span
-                className={`tabular-nums font-medium ${d.delta > 0 ? "text-bad" : "text-good"}`}
-              >
-                {d.delta > 0 ? "+" : ""}
-                {formatUSD(d.delta)}/mo
-              </span>
-            </li>
-          ))}
-        </ul>
+        {initial.drivers.length === 0 ? (
+          // CTO-298: no drivers is a real answer, and it is not a breakdown that sums to zero. The
+          // fixture's three (a longer system prompt, a new tool call, cached input recapture) used
+          // to render here for every tenant.
+          <p className="text-sm text-muted">
+            No cost drivers attributed yet. Drivers are computed from a replayed corpus, and nothing
+            has been replayed for this workload.
+          </p>
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {initial.drivers.map((d) => (
+              <li key={d.reason} className="flex items-baseline justify-between gap-3">
+                <span className="text-muted">{d.reason}</span>
+                <span
+                  className={`tabular-nums font-medium ${d.delta > 0 ? "text-bad" : "text-good"}`}
+                >
+                  {d.delta > 0 ? "+" : ""}
+                  <Money micro={d.delta} />
+                  /mo
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
 
       <Card title="Sample diagnostics">
         <dl className="grid grid-cols-1 gap-y-1.5 text-sm sm:grid-cols-2">
-          <Diag k="samples used" v={`${sampleUsed}`} />
+          <Diag
+            k="samples used"
+            v={
+              sampleUsed === null ? (
+                <Blank reason={NO_SAMPLES_USED} />
+              ) : (
+                sampleUsed.toLocaleString()
+              )
+            }
+          />
           <Diag
             k="pathological runs included"
-            v={initial.sample.pathologicalIncluded.toString()}
-            good
+            v={
+              initial.sample.pathologicalIncluded === null ? (
+                <Blank reason="no corpus has been sampled, so no pathological runs were selected or excluded" />
+              ) : (
+                initial.sample.pathologicalIncluded.toString()
+              )
+            }
+            good={initial.sample.pathologicalIncluded !== null}
           />
           <Diag
             k="confidence interval (on p99)"
-            v={`±${Math.round(initial.sample.ciHalfWidthPct * 100)}%`}
+            v={
+              initial.sample.ciHalfWidthPct === null ? (
+                <Blank reason={NO_COST_DISTRIBUTION} />
+              ) : (
+                `±${Math.round(initial.sample.ciHalfWidthPct * 100)}%`
+              )
+            }
           />
-          <Diag k="sampling strategy" v="tail-weighted (recommended)" good />
+          <Diag
+            k="sampling strategy"
+            v={
+              initial.sample.tailWeighted === null ? (
+                <Blank reason="no sampling strategy has run for this workload yet" />
+              ) : (
+                "tail-weighted (recommended)"
+              )
+            }
+            good={initial.sample.tailWeighted !== null}
+          />
         </dl>
       </Card>
     </div>
@@ -200,8 +279,8 @@ function Kpi({
   hint,
 }: {
   label: string;
-  current: string;
-  proposed: string;
+  current: ReactNode;
+  proposed: ReactNode;
   delta?: number | null;
   betterWhenNegative?: boolean;
   headline?: boolean;

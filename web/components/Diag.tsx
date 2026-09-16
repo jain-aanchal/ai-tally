@@ -8,6 +8,11 @@
 //   - row: wraps the pair in a flex row, for a `space-y` <dl> (cost/FeatureDetail) where each entry
 //     is one spaced-out line.
 
+import type { ReactNode } from "react";
+
+// `v` is a node rather than a string so a caller can pass the shared `Blank` primitive for a value
+// it does not have (CTO-298). A diagnostics row whose number is unknown has to be able to say so
+// with its reason attached, the same way every other honest blank in the app does.
 export function Diag({
   k,
   v,
@@ -15,7 +20,7 @@ export function Diag({
   row,
 }: {
   k: string;
-  v: string;
+  v: ReactNode;
   good?: boolean;
   row?: boolean;
 }) {
