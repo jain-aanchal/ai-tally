@@ -57,6 +57,49 @@ def test_intra_batch_span_dedup():
     assert len(dd.resource_spans) == 2
 
 
+def test_spans_without_ids_are_never_treated_as_duplicates():
+    """CTO-396: the regression. Id-less spans all keyed to (None, None) and collapsed to one."""
+    req = BatchRequest(
+        tenant_id="t",
+        sdk_version="v",
+        resource_spans=[{"gen_ai.system": "openai"} for _ in range(5)],
+    )
+    assert len(req.deduplicated().resource_spans) == 5
+
+
+def test_spans_with_a_trace_id_but_no_span_id_are_not_collapsed():
+    # A shared trace id is not an identity: without a span id these are five different spans.
+    req = BatchRequest(
+        tenant_id="t",
+        sdk_version="v",
+        resource_spans=[{"trace_id": "tr"} for _ in range(5)],
+    )
+    assert len(req.deduplicated().resource_spans) == 5
+
+
+def test_empty_string_span_id_is_not_an_identity():
+    req = BatchRequest(
+        tenant_id="t",
+        sdk_version="v",
+        resource_spans=[{"trace_id": "tr", "span_id": ""} for _ in range(3)],
+    )
+    assert len(req.deduplicated().resource_spans) == 3
+
+
+def test_genuine_duplicate_still_collapses_alongside_id_less_spans():
+    req = BatchRequest(
+        tenant_id="t",
+        sdk_version="v",
+        resource_spans=[
+            {"trace_id": "tr", "span_id": "s1"},
+            {"trace_id": "tr", "span_id": "s1"},  # genuine duplicate
+            {"gen_ai.system": "openai"},  # id-less, kept
+            {"gen_ai.system": "anthropic"},  # id-less, kept
+        ],
+    )
+    assert len(req.deduplicated().resource_spans) == 3
+
+
 def test_intra_batch_event_and_link_dedup():
     req = BatchRequest(
         tenant_id="t",

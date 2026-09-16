@@ -9,8 +9,9 @@ idempotency, and dedup semantics now.
 
 Idempotency: a batch carries a client-generated ``batch_id`` (UUIDv7, time-ordered). The gateway
 dedupes on ``(tenant_id, batch_id)`` for 24h; a replayed batch returns the original response
-without re-processing. Within a batch, spans dedupe on ``(trace_id, span_id)``, business events on
-``business_event_id``, identity links on ``(identity_a, identity_b, source)``.
+without re-processing. Within a batch, spans dedupe on ``(trace_id, span_id)`` and only when the
+span actually carries an id (CTO-396), business events on ``business_event_id``, identity links on
+``(identity_a, identity_b, source)``.
 
 :class:`IdempotencyCache` below is IN-PROCESS and its record dies with the process, so on its own it
 does NOT provide the 24h guarantee above across a gateway restart. It is the fast path in front of
@@ -103,10 +104,21 @@ class BatchRequest:
 
     def deduplicated(self) -> BatchRequest:
         """Return a copy with intra-batch duplicates removed (spans, events, identity links)."""
-        seen_spans: set[tuple[object, object]] = set()
+        seen_spans: set[tuple[object, str]] = set()
         spans: list[dict[str, object]] = []
         for s in self.resource_spans:
-            key = (s.get("TraceId") or s.get("trace_id"), s.get("SpanId") or s.get("span_id"))
+            span_id = s.get("SpanId") or s.get("span_id")
+            # CTO-396: an id-less span is NOT a duplicate of the next id-less span. This used to key
+            # on (trace_id, span_id) unconditionally, so every span from a client that sends no ids
+            # keyed to (None, None) and all but the first were dropped here, before validation and
+            # before the write, with an accepted_spans=1 ack that told the client nothing was lost.
+            # In a cost product that is spend that silently disappears. Dedup needs a real identity
+            # and a missing id is not one, so an id-less span is always passed through; the write
+            # path then gives it a unique row identity (gateway.mapping.span_to_row).
+            if not isinstance(span_id, str) or not span_id:
+                spans.append(s)
+                continue
+            key = (s.get("TraceId") or s.get("trace_id"), span_id)
             if key in seen_spans:
                 continue
             seen_spans.add(key)

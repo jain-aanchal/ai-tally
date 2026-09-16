@@ -17,6 +17,7 @@ Implements CTO-47.
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -79,6 +80,26 @@ class GenAI:
     # surface compute per-stratum confidence bands without inferring them from cost histograms.
     SAMPLING_STRATUM = "gen_ai.sampling.stratum"  # str, "body" | "mid" | "tail"
     SAMPLING_RATE = "gen_ai.sampling.rate"  # float, 0..1
+
+
+#: Structural wire keys for the span's identity (CTO-396). These are not ``gen_ai.*`` attributes:
+#: they identify the span itself, travel in the same dict, and the gateway promotes them to the
+#: ``otel_spans`` TraceId / SpanId columns (``gateway.mapping.span_to_row``). The spelling matches
+#: what the edge proxy already sends (``infra/edge-proxy/internal/telemetry/telemetry.go``) so a
+#: proxied span and an SDK span land in the same columns.
+TRACE_ID_KEY = "trace_id"
+SPAN_ID_KEY = "span_id"
+_STRUCTURAL_KEYS = frozenset({TRACE_ID_KEY, SPAN_ID_KEY})
+
+
+def new_span_id() -> str:
+    """Generate a span id: 8 crypto-random bytes as lowercase hex (CTO-396).
+
+    Same shape and same source of randomness as the edge proxy's ``randomHex(8)``. A span id only
+    has to be unique; it carries no meaning and must encode nothing about the request or the
+    customer, which is why this is raw randomness rather than a hash of anything.
+    """
+    return secrets.token_hex(8)
 
 
 # Known operation names (open set; unknown values are allowed but should be lowercase tokens).
@@ -237,6 +258,15 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
     violations: list[str] = []
 
     for key, value in attrs.items():
+        # CTO-396: the span's own identity rides in this dict alongside the attributes, so the
+        # structural keys are conformant rather than "unknown". They must still be real, non-empty
+        # strings: an empty id is the same collapse-into-one hazard as no id at all.
+        if key in _STRUCTURAL_KEYS:
+            if not isinstance(value, str):
+                violations.append(f"{key} must be str, got {type(value).__name__}")
+            elif value == "":
+                violations.append(f"{key} must be non-empty")
+            continue
         if key not in _ALL_KEYS:
             violations.append(f"unknown attribute key: {key!r}")
             continue

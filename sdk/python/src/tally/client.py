@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
-from tally.context import current_context, note_context_drop
+from tally.context import current_context, new_trace_id, note_context_drop
 from tally.egress import BatchProcessor
 from tally.guardrails import GuardrailConfig, GuardrailEngine, GuardrailState, Verdict
 from tally.hmac_keys import HmacKeyRegistry
@@ -31,7 +31,13 @@ from tally.pricing import (
 )
 from tally.safety import SelfObservability, safe
 from tally.sampling import BillingMeter, Sampler, TraceSignals
-from tally.schema import SpanFields, build_span_attributes
+from tally.schema import (
+    SPAN_ID_KEY,
+    TRACE_ID_KEY,
+    SpanFields,
+    build_span_attributes,
+    new_span_id,
+)
 
 _log = logging.getLogger("tally")
 
@@ -562,7 +568,39 @@ class TallyClient:
         _log.warning(msg, *args)
 
     def _emit(self, attributes: dict[str, object]) -> None:
+        span = _with_span_ids(attributes)
         if self._processor is not None:
-            self._processor.enqueue(attributes)
+            self._processor.enqueue(span)
         else:
-            self._exporter.export(attributes)
+            self._exporter.export(span)
+
+
+def _with_span_ids(attributes: dict[str, object]) -> dict[str, object]:
+    """Return the span with its structural ``(trace_id, span_id)`` pair filled in (CTO-396).
+
+    Every span leaving this SDK needs its own identity, because the ingest contract is keyed on one:
+    the wire envelope dedupes spans within a batch on ``(trace_id, span_id)`` and the write path
+    keys the ClickHouse row on the same pair. Emitting none of it made every span in a batch
+    indistinguishable, so all but the first were discarded as duplicates and a customer's spend
+    disappeared without an error anywhere. The edge proxy has always sent both fields, which is why
+    only SDK-metered traffic was affected.
+
+    The trace id is the one the caller's context already tracks, so spans of one trace stay joined.
+    A span emitted with no active trace still gets a fresh trace id and its own span id rather than
+    nothing: unattributed to a trace is honest, sharing an id with every other trace-less span is
+    not. Both ids are random and encode nothing about the request or the customer.
+
+    Ids the caller already set (either spelling) are left alone: an OTel-shaped producer feeding
+    ``ingest_span`` owns its identity and we must not overwrite it. A copy is returned so nothing
+    the caller still holds, such as ``LlmCallResult.attributes``, is mutated behind its back.
+    """
+    has_trace = bool(attributes.get(TRACE_ID_KEY) or attributes.get("TraceId"))
+    has_span = bool(attributes.get(SPAN_ID_KEY) or attributes.get("SpanId"))
+    if has_trace and has_span:
+        return attributes
+    span = dict(attributes)
+    if not has_trace:
+        span[TRACE_ID_KEY] = current_context().trace_id or new_trace_id()
+    if not has_span:
+        span[SPAN_ID_KEY] = new_span_id()
+    return span
