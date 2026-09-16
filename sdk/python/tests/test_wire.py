@@ -121,6 +121,49 @@ def test_same_batch_id_different_tenant_isolated():
     assert cache.check_or_store(b) is None
 
 
+def test_release_makes_a_reserved_batch_processable_again():
+    """CTO-389. A reservation whose attempt failed must not stand in for an answer."""
+    cache = IdempotencyCache()
+    req = BatchRequest(tenant_id="t", sdk_version="v")
+    assert cache.check_or_store(req) is None  # reserved, outcome not yet known
+    cache.release(req)
+    # Without the release this returns the provisional entry, and the batch is never processed.
+    assert cache.check_or_store(req) is None
+
+
+def test_release_of_an_unseen_batch_is_a_no_op():
+    """Callers release unconditionally on a failure path, including one that never reserved."""
+    cache = IdempotencyCache()
+    cache.release(BatchRequest(tenant_id="t", sdk_version="v"))
+
+
+def test_release_leaves_a_recorded_outcome_for_the_same_batch_standing():
+    """CTO-389 review. A release must never delete a real receipt, only a reservation.
+
+    An unconditional pop would re-admit a batch that has already been answered, which is exactly the
+    duplicate write this cache exists to prevent.
+    """
+    cache = IdempotencyCache()
+    req = BatchRequest(tenant_id="t", sdk_version="v")
+    cache.check_or_store(req)
+    cache.record(req, BatchResponse(batch_id=req.batch_id, accepted_spans=3))
+    cache.release(req)
+    replay = cache.check_or_store(req)
+    assert replay is not None
+    assert replay.accepted_spans == 3
+
+
+def test_release_does_not_touch_a_recorded_outcome_for_another_batch():
+    cache = IdempotencyCache()
+    kept = BatchRequest(tenant_id="t", sdk_version="v")
+    dropped = BatchRequest(tenant_id="t", sdk_version="v")
+    cache.check_or_store(kept)
+    cache.record(kept, BatchResponse(batch_id=kept.batch_id, accepted_spans=2))
+    cache.check_or_store(dropped)
+    cache.release(dropped)
+    assert cache.check_or_store(kept).accepted_spans == 2
+
+
 def test_peek_does_not_reserve_the_key() -> None:
     """CTO-245: the gateway's durable layer needs a READ, not a read-that-claims.
 

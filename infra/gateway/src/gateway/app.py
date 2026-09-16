@@ -56,7 +56,7 @@ from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_pa
 from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
-from gateway.metering import UsageRollup
+from gateway.metering import ClosedPeriodError, UsageRollup
 from gateway.protocol import (
     SUPPORTED_PROTOCOLS,
     capabilities,
@@ -872,6 +872,9 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     validator: SpanValidator = app.state.validator
     metering: UsageRollup = app.state.metering
     rows: list[tuple[object, ...]] = []
+    # CTO-389: HEAD metering measurements for this batch, held until the write succeeds. See the
+    # comment at the point of measurement below for why holding them does not weaken CTO-84.
+    metered_spans: list[tuple[str | None, str | None, int]] = []
     # CTO-237: candidates for the opt-in replay corpus, collected in lockstep with the written
     # rows. Building these is cheap and body-free (token counts + resolved-context metadata only);
     # the tenant's replay config gates whether any are actually sampled/persisted, in
@@ -897,13 +900,21 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         skew = assess(client_ts_ns, server_recv_ns)
         # Meter at HEAD, before the analytics sampling decision, so the billable trace count is
         # exact regardless of sample_rate (CTO-84/85). Drops/sampling must never lower the bill.
+        #
+        # CTO-389: HEAD means "before any sampling decision", not "before the write". The meter used
+        # to be APPLIED right here, so a batch whose ClickHouse write then failed was billed for
+        # spans that were never stored, and the client was charged for telemetry it cannot see. The
+        # measurement is still taken here, on exactly the spans that are about to be written and
+        # ahead of every sampling decision; only its application moves, to just after the write
+        # succeeds. Nothing sampled happens in between, so the CTO-84 property is unchanged.
         trace_id = span.get("TraceId") or span.get("trace_id")
         feature_tag = result.attributes.get(GenAI.FEATURE_TAG)
-        metering.record_span(
-            batch.tenant_id,
-            trace_id=trace_id if isinstance(trace_id, str) else None,
-            feature_tag=feature_tag if isinstance(feature_tag, str) else None,
-            ts_ns=skew.effective_ts_ns,
+        metered_spans.append(
+            (
+                trace_id if isinstance(trace_id, str) else None,
+                feature_tag if isinstance(feature_tag, str) else None,
+                skew.effective_ts_ns,
+            )
         )
         rows.append(
             span_to_row(
@@ -960,6 +971,25 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     # --- write ---
     buffer: AsyncIngestBuffer | None = app.state.ingest_buffer
     if buffer is not None:
+        # Business events / identity links are low-volume metadata, not the burst hot path, so they
+        # still write synchronously; a ClickHouse outage on these is surfaced as retryable.
+        #
+        # CTO-389: this runs BEFORE produce_rows, and the ORDER is the point. It used to run after,
+        # so a failure here released the claim and answered 503 while the span rows were already in
+        # the buffer, and the background drain loop wrote them to ClickHouse regardless. The client
+        # then retried the same batch_id and enqueued a second copy: spans stored twice, metered
+        # zero times. Enqueueing last is what makes the release genuinely undo the whole attempt.
+        try:
+            store.insert_business_events(batch.tenant_id, batch.business_events)
+            store.insert_identity_links(batch.tenant_id, batch.identity_links)
+        except Exception:  # noqa: BLE001 - keep the gateway alive
+            logger.exception("clickhouse insert (events/links) failed")
+            resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
+            # CTO-389: RELEASE the claim, never record it. A storage failure is not this batch's
+            # answer; recording it made every retry for the rest of the idempotency window replay
+            # this 503 without touching storage. Nothing was enqueued and nothing is metered.
+            idempotency.release(batch)
+            return JSONResponse(_response_dict(resp), status_code=503)
         # Buffered path (CTO-37): hand spans to the burst buffer (drained to ClickHouse off the hot
         # path) and ack immediately, so a burst or a slow ClickHouse never yields a 5xx. Overflow past
         # the buffer's high-water mark is shed as retryable partial errors: backpressure, not failure.
@@ -973,16 +1003,12 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
                     message="ingest buffer at capacity; retry",
                 )
             )
-        # Business events / identity links are low-volume metadata, not the burst hot path, so they
-        # still write synchronously; a ClickHouse outage on these is surfaced as retryable.
-        try:
-            store.insert_business_events(batch.tenant_id, batch.business_events)
-            store.insert_identity_links(batch.tenant_id, batch.identity_links)
-        except Exception:  # noqa: BLE001 - keep the gateway alive
-            logger.exception("clickhouse insert (events/links) failed")
-            resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
-            idempotency.record(batch, resp)
-            return JSONResponse(_response_dict(resp), status_code=503)
+        # CTO-389: meter only the rows the buffer actually took. produce_rows accepts a PREFIX of
+        # `rows` (everything up to the high-water mark) and sheds the remainder as RATE_LIMITED, and
+        # metered_spans was built in the same order over the same list, so the accepted prefix lines
+        # up element for element. Billing a row that was shed and never stored is this ticket's bug
+        # one layer down, so the shed tail is dropped from the measurement rather than counted.
+        metered_spans = metered_spans[: produced.accepted]
     else:
         try:
             accepted = store.insert_spans(rows)
@@ -991,8 +1017,56 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         except Exception:  # noqa: BLE001 - surface as retryable, keep the gateway alive
             logger.exception("clickhouse insert failed")
             resp = BatchResponse(batch_id=batch.batch_id, status=Status.RETRY, server_hints=hints)
-            idempotency.record(batch, resp)
+            # CTO-389: RELEASE the claim, never record it. See the buffered path above.
+            idempotency.release(batch)
             return JSONResponse(_response_dict(resp), status_code=503)
+
+    # --- meter (CTO-84/85, applied here as of CTO-389) ---
+    # The write has been accepted, so these spans are billable. Applying the meter here rather than
+    # during the validation loop is what stops a batch that failed to store being counted. The
+    # measurements themselves were taken at HEAD (see the loop above), so the billed count is still
+    # independent of the analytics sample rate.
+    #
+    # HOW STRONG THIS IS, per path, because the two are not the same and it would be easy to read
+    # the stronger one onto both:
+    #
+    #   * SYNCHRONOUS path: "billed" and "stored" are the same set by construction. The insert has
+    #     returned before anything here runs, and every row in it is metered exactly once.
+    #   * BUFFERED path (TALLY_INGEST_BUFFERED=true): metering happens on ENQUEUE into an in-memory
+    #     queue, not on a durable write. The rows the buffer took are metered, the rows it shed are
+    #     not (see the slice above), but the drain to ClickHouse is still ahead of them. A process
+    #     that dies with a non-empty buffer has metered spans that will never be stored. That gap is
+    #     inherent to CTO-37's ack-before-write trade, is NOT closed here, and is the reason the
+    #     head meter and a ClickHouse-derived count can legitimately disagree on this path.
+    #
+    # ClosedPeriodError is logged, not raised. The spans are already written or enqueued, so failing
+    # the response now would hand the client a retry that duplicates them, and that trade is never
+    # worth it. Ingest into a closed billing period is a reconciliation problem, surfaced as one.
+    closed_period_spans = 0
+    for metered_trace_id, metered_feature_tag, metered_ts_ns in metered_spans:
+        try:
+            metering.record_span(
+                batch.tenant_id,
+                trace_id=metered_trace_id,
+                feature_tag=metered_feature_tag,
+                ts_ns=metered_ts_ns,
+            )
+        except ClosedPeriodError:
+            # CTO-389: CONTINUE, not break. record_span raises per span, against THAT span's own
+            # billing period, so one span dated into a closed month used to abandon metering for
+            # every span after it in the batch, including stored spans in the open period. Skipping
+            # only the closed-period span is the one version of this that does not silently
+            # under-bill the rest of the batch.
+            closed_period_spans += 1
+    if closed_period_spans:
+        logger.warning(
+            "billing period closed for %d/%d spans of batch %s (tenant %s); those spans are stored "
+            "but not metered, the rest of the batch is metered normally",
+            closed_period_spans,
+            len(metered_spans),
+            batch.batch_id,
+            batch.tenant_id,
+        )
 
     # --- replay capture (CTO-237): populate the opt-in replay corpus from this batch ---
     # Runs AFTER the ClickHouse write and AFTER per-item validation (the no-bodies/PII guard), so a

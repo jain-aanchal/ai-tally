@@ -227,10 +227,12 @@ class IdempotencyCache:
     def __init__(self, ttl_seconds: float = 24 * 3600, now: object = None) -> None:
         self.ttl = ttl_seconds
         self._now = now or time.time
-        self._store: dict[tuple[str, str], tuple[float, BatchResponse]] = {}
+        # The bool is "this entry is still a RESERVATION, not a recorded outcome" (CTO-389). It is
+        # what lets :meth:`release` drop a reservation without ever touching a real receipt.
+        self._store: dict[tuple[str, str], tuple[float, BatchResponse, bool]] = {}
 
     def _purge(self, t: float) -> None:
-        expired = [k for k, (ts, _) in self._store.items() if t - ts > self.ttl]
+        expired = [k for k, (ts, _, _) in self._store.items() if t - ts > self.ttl]
         for k in expired:
             del self._store[k]
 
@@ -255,8 +257,38 @@ class IdempotencyCache:
         if hit is not None:
             return hit[1]
         # reserve the slot with a provisional ACCEPTED; updated by record()
-        self._store[key] = (t, BatchResponse(batch_id=req.batch_id))
+        self._store[key] = (t, BatchResponse(batch_id=req.batch_id), True)
         return None
 
     def record(self, req: BatchRequest, response: BatchResponse) -> None:
-        self._store[(req.tenant_id, req.batch_id)] = (self._now(), response)
+        self._store[(req.tenant_id, req.batch_id)] = (self._now(), response, False)
+
+    def release(self, req: BatchRequest) -> None:
+        """Drop a reservation so the batch can be attempted again (CTO-389).
+
+        The mirror of :meth:`record`, and the other way an attempt can end. ``check_or_store``
+        reserves the key before the outcome is known; when that attempt ends RETRYABLY (a storage
+        failure, which is not a verdict on the batch) the reservation must not be left behind as
+        though it were an answer, or every later attempt is served the stale entry and the spans are
+        never written at all. Nothing is known about this batch, so holding no record is the only
+        honest state.
+
+        Unknown keys are ignored, so a caller may release unconditionally without first checking
+        whether it ever took the reservation.
+
+        ONLY A RESERVATION IS DROPPED (CTO-389 review). An entry carrying a RECORDED outcome is left
+        alone: deleting one would throw away a real receipt and re-admit a batch that has already
+        been answered, which is the duplicate write this cache exists to prevent.
+
+        The narrower race this layer cannot see, stated rather than papered over: two successive
+        reservations of the same key (possible once the first has aged out of the TTL) look
+        identical here, so a late release can drop a newer attempt's reservation. The cost is
+        in-process dedup only. The guarantee across attempts is carried by the durable layer, whose
+        release is scoped to the claim token it actually holds
+        (:meth:`gateway.batch_idempotency.PostgresIdempotencyStore.release`); this cache is
+        explicitly a fast path in front of that, never the thing that settles a race.
+        """
+        key = (req.tenant_id, req.batch_id)
+        entry = self._store.get(key)
+        if entry is not None and entry[2]:
+            del self._store[key]
