@@ -53,7 +53,7 @@ from gateway.batch_idempotency import (
 from gateway.config import get_settings
 from gateway.cost_connector_job import register_cost_connector_job
 from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_param
-from gateway.errors import ErrorCode
+from gateway.errors import ACCEPTED_BUT_FLAGGED, ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
 from gateway.metering import ClosedPeriodError, UsageRollup, validate_max_ids_per_period
@@ -1164,7 +1164,11 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         logger.info("catalog drift on %d/%d spans (batch %s)", drift_count, len(rows), batch.batch_id)
 
     # Some items rejected/flagged but others written → PARTIAL; otherwise clean ACCEPTED.
-    fatal = [e for e in partial_errors if e.code != ErrorCode.UNKNOWN_FEATURE_TAG.value]
+    # Reads the declared flag set rather than naming one code inline, so a second accepted-but-
+    # flagged code added to errors.py is non-fatal here automatically instead of silently turning
+    # every flagged batch into a PARTIAL (CTO-406).
+    _flag_values = {c.value for c in ACCEPTED_BUT_FLAGGED}
+    fatal = [e for e in partial_errors if e.code not in _flag_values]
     status = Status.PARTIAL if fatal else Status.ACCEPTED
     resp = BatchResponse(
         batch_id=batch.batch_id,

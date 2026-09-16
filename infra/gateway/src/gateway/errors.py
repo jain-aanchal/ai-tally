@@ -30,6 +30,15 @@ class ErrorCode(str, Enum):
     UNKNOWN_FEATURE_TAG = "UNKNOWN_FEATURE_TAG"  # accepted-but-flagged (not a rejection)
 
 
+# Codes reported on an item the gateway ACCEPTED: advice about the span, not a rejection of it
+# (validation.py ``Verdict.flags``). Declared as a set, rather than left implicit in a comment on
+# the member and a literal in app.py, so a client can mirror it and pin that mirror to this file.
+# The SDK's partial-ack accounting has to tell an accepted-but-flagged item from a refusal, and one
+# flag code it had not learned was enough to switch that accounting off for a whole ack (CTO-406).
+# Keep this in step with any code added above whose meaning is "accepted, with a note".
+ACCEPTED_BUT_FLAGGED: frozenset[ErrorCode] = frozenset({ErrorCode.UNKNOWN_FEATURE_TAG})
+
+
 # Codes that mean "do not retry this item as-is" (4xx-class). The rest are retryable.
 NON_RETRYABLE: frozenset[ErrorCode] = frozenset(
     {
