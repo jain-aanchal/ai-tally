@@ -28,7 +28,10 @@ interface NavItem {
 //
 // Hidden from the nav until they have real signal end-to-end (pages still render at the URL):
 //   - /settings:         guardrail config only, nothing else wired
-//   - /estimate:         mock fixtures (re-add when CTO-128 lands)
+//   - /estimate:         honest for a real tenant since CTO-298 (the fixture is behind
+//                        sampleDataAllowed(), and a tenant with no replayed corpus gets the empty
+//                        state), but still unlinked: the what-if needs an opted-in replay corpus,
+//                        so the page has nothing to show until that ships. Link it when it does.
 //   - /data-quality:     placeholder rows (re-add when DQ follow-ups land)
 const NAV_GROUPS: { caption: string; items: NavItem[] }[] = [
   {

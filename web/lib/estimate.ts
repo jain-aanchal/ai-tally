@@ -1,64 +1,115 @@
 // SPDX-License-Identifier: Apache-2.0
-// Mock data for the pre-deploy Estimate workflow (CTO-71/72/73).
+// Shapes for the pre-deploy Estimate workflow (CTO-71/72/73), plus the sample fixture the demo
+// path renders (CTO-128).
+//
+// CTO-298: every figure here is nullable now, because /estimate answered a real signed-in tenant
+// with the fixture at the bottom of this file and called it their analysis: a $19,100/mo baseline,
+// a 42% blow-up risk, an invented pull request and three invented cost drivers. The route serves
+// the fixture only where sampleDataAllowed() permits it; every other caller gets
+// EMPTY_PROJECTION, whose nulls the page renders as blanks carrying the reason.
 
 import type { MicroUSD } from "./types";
 
+/** Where a payload's figures came from. `none` is the honest empty answer for a real tenant. */
+export type ReplaySource = "replay" | "mock" | "none";
+
+/**
+ * One side of the comparison.
+ *
+ * Both percentile-ish fields are nullable for the same CTO-298 reason: they were being manufactured
+ * from numbers that do not contain them. `p99CostMicroUsd` was `monthlyCost * 1.4`, a fixture
+ * multiplier wearing a percentile's name, and `meanLatencyMs` was fed straight from the replay
+ * row's p50, which is a median relabelled as a mean. Neither is recoverable from what the replay
+ * executor returns today, so both stay null until it returns a real distribution.
+ */
+export interface Figures {
+  monthlyCostMicroUsd: MicroUSD | null;
+  p99CostMicroUsd: MicroUSD | null;
+  meanLatencyMs: number | null;
+}
+
 export interface Projection {
-  workload: string;
-  pr?: { repo: string; number: number; title: string };
-  current: {
-    monthlyCostMicroUsd: MicroUSD;
-    p99CostMicroUsd: MicroUSD;
-    meanLatencyMs: number;
-  };
-  proposed: {
-    monthlyCostMicroUsd: MicroUSD;
-    p99CostMicroUsd: MicroUSD;
-    meanLatencyMs: number;
-  };
+  workload: string | null;
+  pr?: { repo: string; number: number; title: string } | null;
+  current: Figures;
+  proposed: Figures;
   /** Probability that p99 cost more than doubles under the change (0..1). The headline risk. */
-  blowUpRisk: number;
+  blowUpRisk: number | null;
   drivers: { delta: number; reason: string }[]; // delta in micro-USD/month
   sample: {
+    /** A real count: zero replayed samples is a measurement, not an unknown. */
     used: number;
-    tailWeighted: number;
-    pathologicalIncluded: number;
-    ciHalfWidthPct: number; // on p99
+    tailWeighted: number | null;
+    pathologicalIncluded: number | null;
+    ciHalfWidthPct: number | null; // on p99
   };
   /**
    * Minutes since the reconciler last trued-up the historical window this projection samples.
    * An estimate built on a stale baseline must not be presented as fresh (CTO-80). Sourced from the
    * real reconciliation_runs log on the live path (CTO-169); `null` when the reconciler has never
-   * run / the source is unavailable, rendered as `—` rather than the fixture constant.
+   * run / the source is unavailable, rendered as a blank rather than the fixture constant.
    */
   reconcilerLastRunMinutesAgo: number | null;
+  /**
+   * True only when the figures above are the fixture's.
+   *
+   * CTO-298: the page's SAMPLE DATA banner used to key on `current.monthlyCostMicroUsd === 0`, and
+   * the fixture baseline is 19.1e9, so the one payload the banner existed to label was the one
+   * payload that could never trigger it. Keying on the provenance itself makes the condition true
+   * exactly when the data is synthetic.
+   */
+  synthetic: boolean;
 }
 
 /**
- * What-if projection returned by `POST /api/estimate` (CTO-128). Same shape as {@link Projection}
- * except the `proposed` cost/latency fields may be `null`: when fewer than the grounding floor of
- * samples back the estimate, the route returns `null` rather than fabricate a number, and the page
- * renders `—`. `groundedSamples` carries how many replayed samples actually grounded it.
+ * What-if projection returned by `POST /api/estimate` (CTO-128). `groundedSamples` carries how many
+ * replayed samples actually grounded it; below the route's floor the proposed figures are null and
+ * the page renders blanks rather than a forecast off noise.
  */
-export interface WhatIfProjection extends Omit<Projection, "proposed"> {
-  proposed: {
-    monthlyCostMicroUsd: MicroUSD | null;
-    p99CostMicroUsd: MicroUSD | null;
-    meanLatencyMs: number | null;
-  };
+export interface WhatIfProjection extends Projection {
   candidate: { provider: string; model: string };
   systemPromptOverride?: string;
   groundedSamples: number;
-  replay_source: "replay" | "mock";
+  replay_source: ReplaySource;
 }
 
-export function pctDelta(cur: number, prop: number | null): number | null {
-  if (prop === null) return null;
+export function pctDelta(cur: number | null, prop: number | null): number | null {
+  // CTO-298: an unknown baseline yields an unknown delta. It cannot be treated as zero, because a
+  // "0%" reads as "we measured no change" rather than "we have nothing to compare against".
+  if (cur === null || prop === null) return null;
   if (cur === 0) return 0;
   return (prop - cur) / cur;
 }
 
-export const projection: Projection = {
+/**
+ * The honest answer for a tenant with no replayed corpus behind this workload (CTO-298).
+ *
+ * Every figure is null rather than 0, and `drivers` is empty rather than the fixture's three: a
+ * driver breakdown nobody computed is not a breakdown totalling zero. The page reads `synthetic:
+ * false` plus the null baseline as the new-workspace case and points at setup.
+ */
+export const EMPTY_PROJECTION: Projection = {
+  workload: null,
+  pr: null,
+  current: { monthlyCostMicroUsd: null, p99CostMicroUsd: null, meanLatencyMs: null },
+  proposed: { monthlyCostMicroUsd: null, p99CostMicroUsd: null, meanLatencyMs: null },
+  blowUpRisk: null,
+  drivers: [],
+  sample: { used: 0, tailWeighted: null, pathologicalIncluded: null, ciHalfWidthPct: null },
+  reconcilerLastRunMinutesAgo: null,
+  synthetic: false,
+};
+
+/**
+ * The demo storyline. `satisfies` rather than a type annotation so the literal figures stay
+ * non-null for the fixture's own callers (lib/estimate.test.ts does arithmetic on them) while the
+ * object still has to satisfy the nullable wire shape.
+ *
+ * CTO-298 deliberately keeps this: it is what the sample and demo path renders, behind
+ * sampleDataAllowed() and behind the SAMPLE DATA banner. What changed is that it is no longer
+ * reachable by a tenant who could mistake it for their own numbers.
+ */
+export const projection = {
   workload: "research_agent / production / last 30 days",
   pr: { repo: "jain-aanchal/ai-tally", number: 1284, title: "agent: add web_fetch retries + reranker step" },
   current: {
@@ -84,4 +135,5 @@ export const projection: Projection = {
     ciHalfWidthPct: 0.18,
   },
   reconcilerLastRunMinutesAgo: 18,
-};
+  synthetic: true,
+} satisfies Projection;

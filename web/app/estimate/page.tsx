@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
+  NoDataYet,
   PartialDataBanner,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
+import { Blank } from "@/components/HonestValue";
 import { apiGet } from "@/lib/api";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { type Projection } from "@/lib/estimate";
@@ -11,12 +13,14 @@ import { EstimateWhatIf } from "./EstimateWhatIf";
 
 export default async function EstimatePage() {
   const projection = await apiGet<Projection>("/api/estimate");
-  const { workload, pr, current, sample } = projection;
+  const { workload, pr, current, sample, synthetic } = projection;
 
   // This projection samples a reconciled historical window; surface that window's freshness so a
   // forecast off a stale baseline is never shown as fresh (CTO-80).
   const reconciledThrough = boundaryFromMinutesAgo(projection.reconcilerLastRunMinutesAgo);
-  const noBaseline = current.monthlyCostMicroUsd === 0;
+  // CTO-298: an absent baseline is null, not 0. The old `=== 0` test was never true for the fixture
+  // (whose baseline is $19,100/mo), so the empty state it gated was unreachable.
+  const noBaseline = current.monthlyCostMicroUsd === null;
   const thinSample = sample.used > 0 && sample.pathologicalIncluded === 0;
   const state = deriveDataState({
     isEmpty: noBaseline,
@@ -48,7 +52,12 @@ export default async function EstimatePage() {
         <div>
           <h1 className="text-xl font-semibold">Estimate</h1>
           <p className="mt-1 text-sm text-muted">
-            Workload: <span className="font-mono text-muted">{workload}</span>
+            Workload:{" "}
+            {workload === null ? (
+              <Blank reason="no replayed workload for this workspace yet" />
+            ) : (
+              <span className="font-mono text-muted">{workload}</span>
+            )}
           </p>
         </div>
         {state !== "empty" && asOf && (
@@ -58,8 +67,19 @@ export default async function EstimatePage() {
 
       {state === "partial" && <PartialDataBanner missing="tail-weighted sampling" />}
 
-      {state === "empty" ? (
+      {/*
+        CTO-298: the banner keys on the payload's own provenance. It used to key on a zero baseline,
+        which the fixture could never produce, so the one payload it existed to label never wore it.
+        A real tenant with no baseline gets the new-workspace state instead of a preview of somebody
+        else's research_agent.
+      */}
+      {synthetic ? (
         <SyntheticPreviewBanner workflow="Estimate">{body}</SyntheticPreviewBanner>
+      ) : state === "empty" ? (
+        <NoDataYet
+          what="baseline cost for this workload"
+          detail="An estimate is a projection off a measured baseline, and no priced traffic has reached ai-tally for this workspace yet."
+        />
       ) : (
         body
       )}

@@ -38,6 +38,10 @@ vi.mock("@/lib/clickhouse", () => ({
   queryCurrentModel: vi.fn(),
   queryReplayCandidates: vi.fn(),
   queryEvalCandidates: vi.fn(),
+  // CTO-298: /api/estimate was the last fixture route missing from this suite, which is how its
+  // ungated fallback survived both #364 and CTO-379. It is unlinked from the nav, and that is not
+  // a gate: middleware.ts protects it as an ordinary signed-in route.
+  queryReplayEstimate: vi.fn(),
   queryIntegrationStatus: vi.fn().mockResolvedValue([]),
 }));
 
@@ -52,6 +56,7 @@ vi.mock("@/lib/cac", async (importOriginal) => ({
 import * as ch from "@/lib/clickhouse";
 import { agents as fixtureAgents, runs as fixtureRuns } from "@/lib/agents";
 import { comparison as fixtureComparison } from "@/lib/compare";
+import { projection as fixtureProjection } from "@/lib/estimate";
 import {
   LAYERS,
   costSeries as fixtureSeries,
@@ -71,6 +76,7 @@ import { GET as AttributionGET } from "./attribution/route";
 import { GET as ConnectorsGET } from "./connectors/route";
 import { GET as CompareGET } from "./compare/route";
 import { GET as CacGET } from "./cac/route";
+import { GET as EstimateGET } from "./estimate/route";
 
 const mocked = ch as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -124,6 +130,7 @@ function allEmpty() {
   mocked.queryCurrentModel.mockResolvedValue(null);
   mocked.queryReplayCandidates.mockResolvedValue(null);
   mocked.queryEvalCandidates.mockResolvedValue(null);
+  mocked.queryReplayEstimate.mockResolvedValue(null);
   mocked.queryCostSeries.mockResolvedValue({
     reconciledThrough: "1970-01-01",
     days: Array.from({ length: 30 }, (_, i) => ({
@@ -395,6 +402,13 @@ describe("the sample gate", () => {
     const cac = await body<{ isMock: boolean; periods: unknown[] }>(await CacGET());
     expect(cac.isMock).toBe(true);
     expect(cac.periods.length).toBeGreaterThan(0);
+    // CTO-298: /api/estimate carries its provenance explicitly, because the page's SAMPLE DATA
+    // banner keys on it.
+    const est = await body<{ synthetic: boolean; blowUpRisk: number | null }>(
+      await EstimateGET(new Request("http://test/api/estimate") as never),
+    );
+    expect(est.synthetic).toBe(true);
+    expect(est.blowUpRisk).toBe(fixtureProjection.blowUpRisk);
   });
 
   it("refuses fixtures for a demo build once a real organization resolves the tenant", async () => {
@@ -437,6 +451,29 @@ describe("the sample gate", () => {
     expect(cac.isMock).toBe(false);
     expect(cac.periods).toEqual([]);
     expect(cac.economics).toEqual({});
+
+    // CTO-298: /estimate on the same blank account. It used to present the fixture's analysis as
+    // the tenant's own: a $19,100/mo research_agent baseline, a 42% blow-up risk, three cost
+    // drivers and a pull request that exists in no repository, with no banner anywhere.
+    const est = await body<{
+      synthetic: boolean;
+      workload: unknown;
+      pr: unknown;
+      blowUpRisk: unknown;
+      drivers: unknown[];
+      current: { monthlyCostMicroUsd: number | null };
+    }>(await EstimateGET(new Request("http://test/api/estimate") as never));
+    expect(est.synthetic).toBe(false);
+    expect(est.workload).toBeNull();
+    expect(est.pr).toBeNull();
+    expect(est.blowUpRisk).toBeNull();
+    expect(est.drivers).toEqual([]);
+    // Null, never 0: an unmeasured baseline is unknown, and "$0.00/mo" would be a claim.
+    expect(est.current.monthlyCostMicroUsd).toBeNull();
+    const estWire = JSON.stringify(est);
+    expect(estWire).not.toContain("19100000000");
+    expect(estWire).not.toContain("1284");
+    expect(estWire).not.toContain("0.42");
   });
 
   it("refuses fixtures for the dev escape hatch when demo mode is not switched on", async () => {
