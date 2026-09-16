@@ -15,11 +15,14 @@ from tally.egress import BackoffPolicy
 from tally.transport import (
     _FLAG_ITEM_CODES,
     _MAX_ACK_BYTES,
+    _MAX_CODE_LEN,
+    _MAX_HINT_BYTES,
     _NON_RETRYABLE_ITEM_CODES,
     BatchingTransport,
     SendResult,
     _parse_ack,
     _retry_hint_ms,
+    _safe_code,
 )
 from tally.wire import BatchRequest, decode_request
 
@@ -1113,3 +1116,91 @@ def test_a_shed_item_re_enqueues_the_shed_span_not_the_accepted_one():
     # before it ever numbered anything, do not.
     assert sent_batches[1] == [2]
     assert t.pending() == 0
+
+
+# --- CTO-408: a gateway-supplied code reaches a log record, so it must be bounded and filtered ---
+
+
+def test_a_hostile_item_code_cannot_forge_a_log_line(caplog):
+    """The reproduction (CTO-408).
+
+    A 300 character code carrying an embedded newline and the text "WARNING injected" produced a 491
+    character record with a second physical line that reads exactly like a real warning. The
+    attacker here is the endpoint, and the target is the customer's own log pipeline.
+    """
+    import logging
+
+    hostile = "X" * 150 + "\nWARNING injected" + "X" * 150
+    sender = _ScriptedSender([SendResult(200, None, _ack(1, (("#1", hostile),)))])
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages  # the warning did fire, so this is a real assertion and not a vacuous one
+    for message in messages:
+        # One record is one line: no forged second line, however the record is later formatted.
+        assert "\n" not in message
+        assert "\r" not in message
+        assert "WARNING injected" not in message
+        assert "WARNINGinjected" not in message
+        # And the record stays a readable size rather than carrying the endpoint's payload.
+        assert len(message) < 400
+    # The outcome is still reported, under a code that cannot be mistaken for a real one.
+    assert any("_TRUNCATED" in m for m in messages)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("RATE_LIMITED", "RATE_LIMITED"),
+        ("PAYLOAD_TOO_LARGE", "PAYLOAD_TOO_LARGE"),
+        ("gen.ai-2", "gen.ai-2"),
+        ("BAD\nCODE", "BADCODE"),
+        ("BAD\r\nCODE", "BADCODE"),
+        ("DROP\x00TABLE", "DROPTABLE"),
+        ("\x1b[31mred", "31mred"),
+        ("\x00\x1b\r\n", "UNPRINTABLE_CODE"),
+        ("", "UNPRINTABLE_CODE"),
+    ],
+)
+def test_safe_code_keeps_a_plausible_code_and_strips_the_rest(raw, expected):
+    assert _safe_code(raw) == expected
+
+
+def test_safe_code_is_bounded_however_long_the_input():
+    cut = _safe_code("A" * 10_000)
+    assert len(cut) == _MAX_CODE_LEN
+    assert cut.endswith("_TRUNCATED")  # a cut code cannot pass as a real one
+
+
+def test_every_code_this_client_knows_survives_sanitising_unchanged():
+    """Sanitising must never rewrite a real code: that would silently reclassify an item."""
+    for code in set(_NON_RETRYABLE_ITEM_CODES) | set(_FLAG_ITEM_CODES):
+        assert _safe_code(code) == code
+        assert len(code) <= _MAX_CODE_LEN
+
+
+def test_a_hostile_code_is_bounded_in_state_not_only_in_the_log():
+    """Sanitised at the parse boundary, so the oversized string is never held at all."""
+    ack = _parse_ack(
+        b'{"accepted_spans": 1, "partial_errors": '
+        b'[{"item_id": "#0", "code": "' + b"Z" * 5_000 + b'"}]}'
+    )
+    assert ack is not None
+    assert [len(code) for _, code in ack.errors] == [_MAX_CODE_LEN]
+
+
+def test_an_oversized_body_is_not_json_parsed_for_a_retry_hint():
+    """CTO-408, the second observation: a hint is a handful of bytes, so a megabyte is not read.
+
+    Falling back to our own backoff is a state this function already returns for an absent hint, so
+    nothing new is invented on the degraded path.
+    """
+    padding = b"x" * _MAX_HINT_BYTES
+    huge = b'{"server_hints": {"retry_after_ms": 1000}, "pad": "' + padding + b'"}'
+    assert _retry_hint_ms(None, huge) is None
+    # The same hint in a body of sane size is still honoured.
+    assert _retry_hint_ms(None, b'{"server_hints": {"retry_after_ms": 1000}}') == 1000
