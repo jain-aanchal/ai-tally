@@ -30,11 +30,53 @@ jobs:
       - name: Test
         run: uv run pytest
 
+  # CTO-394: this job provisions Postgres, and that is the whole point of the service block below.
+  #
+  # `tests/test_batch_idempotency_pg.py` (8 tests) and `tests/test_adopt_org_pg.py` (10 tests) are
+  # gated on `TALLY_TEST_POSTGRES_DSN`, which nothing ever set here, so all 18 skipped on every pull
+  # request and every release. What they cover is not incidental: the claim/lease SQL that stops two
+  # workers writing one batch's spans twice (the concurrency property a fake cannot prove), and the
+  # DELETE-plus-UPDATE cascade that org adoption runs in one transaction.
+  #
+  # Five more tests gate on a reachable database rather than on the variable: the four `test_live_*`
+  # in `tests/test_scheduler_locking.py` and one in `tests/test_scheduler_pooling.py`, which fall
+  # back to `localhost:5432` and skip when nothing answers. The service container answers, so this
+  # job runs them too, and that is deliberate rather than incidental: they are the advisory-lock
+  # assertions (two runners take one lock, a killed session releases its lock) and the pooled
+  # connection count, none of which a fake can make. They were measured before being switched on:
+  # 40 consecutive local runs against a `postgres:16` container, 15 of them under 8x CPU
+  # contention, with no failure. CTO-397 already tracks one flaky CI gate and a second would be
+  # expensive, so if any of these five does prove flaky under real runner load, gate them behind an
+  # opt-in marker rather than letting them destabilise every pull request.
   gateway:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: infra/gateway
+    services:
+      postgres:
+        image: postgres:16
+        # Same image and same default credentials as `infra/docker-compose.yml`, so the schema CI
+        # tests against is the schema a developer runs against.
+        env:
+          POSTGRES_USER: tally
+          POSTGRES_PASSWORD: tally
+          POSTGRES_DB: tally
+        ports:
+          - 5432:5432
+        # Steps must not start before the database answers, or the migration step races the boot.
+        options: >-
+          --health-cmd "pg_isready -U tally -d tally"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # The variable the two suites gate on. Setting it is what un-skips them. `TALLY_POSTGRES_DSN`
+      # is deliberately NOT set alongside it (CTO-394): no step here runs `gateway.seed`, and
+      # `Settings` reads `TALLY_*` straight off the environment, so setting it would hand a live
+      # database to every test that builds `Settings()` from the environment, including any that
+      # means to assert a no-database path.
+      TALLY_TEST_POSTGRES_DSN: postgresql://tally:tally@localhost:5432/tally
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -43,10 +85,133 @@ jobs:
         run: uv python install 3.12
       - name: Sync (dev)
         run: uv sync --extra dev
+
+      # A service container has no `/docker-entrypoint-initdb.d` mounts, so unlike `make up` nothing
+      # applies the schema on its own. This replays the directory the same way `make pg-migrate`
+      # does: every file, in LC_ALL=C order, with ON_ERROR_STOP so a broken migration fails the job
+      # here rather than as a confusing test error later. Every file is idempotent, so the order only
+      # has to satisfy dependencies, which numbering already does.
+      #
+      # The glob is deliberately unenumerated, so a new migration needs no edit here: #403's `0034`
+      # is picked up by this loop the moment it lands, in the right position, with no merge conflict
+      # against this file.
+      - name: Apply control-plane migrations
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          for f in $(ls ../../db/postgres/*.sql | LC_ALL=C sort); do
+            echo "applying $(basename "$f")"
+            psql -v ON_ERROR_STOP=1 -q "$TALLY_TEST_POSTGRES_DSN" -f "$f"
+          done
+
+      # Migrations alone are NOT enough, and this step exists because leaving it out fails ten tests.
+      # `usage_limits.plan` and `tenants.plan` are foreign keys onto `plan_tiers`, which 0001 creates
+      # EMPTY: the rows are reference data that provisioning inserts, not schema. So every tenant
+      # `test_adopt_org_pg.py` creates violates `usage_limits_plan_fkey` until a tier exists. This is
+      # the same 'free' tier `gateway/seed.py` inserts (kept as a narrow INSERT rather than a full
+      # `python -m gateway.seed` so CI does not mint and print an API key it has no use for).
+      - name: Seed reference data
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -q "$TALLY_TEST_POSTGRES_DSN" -c \
+            "INSERT INTO plan_tiers (name, max_traces_per_month, max_features, price_micro_usd)
+             VALUES ('free', 1000000, 10, 0) ON CONFLICT (name) DO NOTHING"
+
       - name: Lint
         run: uv run ruff check .
+
       - name: Test
-        run: uv run pytest
+        run: uv run pytest -q -rs
+
+      # THE GUARD, and why it asserts about these tests rather than about the whole run.
+      #
+      # Without a guard this job silently reverts to the old behaviour the moment the service
+      # container, the DSN or the migration step breaks: the gated tests skip, pytest still exits 0,
+      # and the check goes green covering nothing. That is precisely how these tests went dark for as
+      # long as they did, so the fix is not complete without making the dark state loud.
+      #
+      # But "nothing anywhere was skipped" is the wrong assertion, because some skips are correct.
+      # `tests/test_athena_export.py` and `tests/test_bq_export.py` skip when pyarrow, boto3 or
+      # google-cloud-bigquery ARE installed: what they cover is a lazy-import guard that an installed
+      # dependency makes unreachable. The `s3` and `secrets` extras already depend on boto3, so a
+      # whole-run assertion turns this job red for a correct skip the first time a dependency moves,
+      # and the next person weakens the guard to get their pull request green. So the assertion is
+      # about the tests this job provisions a database FOR.
+      #
+      # It reads the JUnit XML rather than grepping the log, so a test id or an `-rs` reason that
+      # contains something like "0 skipped" cannot trip it, and it counts what actually ran per file
+      # so a deselection or a rename fails with its own message instead of as a side effect of some
+      # other check. A module that no longer exists is a pytest usage error, which fails the step
+      # before the XML is read.
+      - name: Prove the Postgres-gated tests executed
+        run: |
+          set -euo pipefail
+          uv run pytest -v -rs --junitxml="$RUNNER_TEMP/pg-tests.xml" \
+            tests/test_batch_idempotency_pg.py tests/test_adopt_org_pg.py \
+            tests/test_scheduler_locking.py tests/test_scheduler_pooling.py
+          python3 - "$RUNNER_TEMP/pg-tests.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # Every test that needs the service container, and how many of each there must be. The
+          # scheduler files hold fakes too, so those two count only their live `test_live_*` tests.
+          # Bump a number when you add or remove one of these: that edit is the deliberate decision
+          # this guard exists to force (CTO-394).
+          #
+          # Keyed on the dotted module, because pytest's default `xunit2` JUnit family does not
+          # write the `file` attribute that `xunit1` did; `classname` is what survives.
+          EXPECTED = {
+              "tests.test_batch_idempotency_pg": (8, ""),
+              "tests.test_adopt_org_pg": (10, ""),
+              "tests.test_scheduler_locking": (4, "test_live_"),
+              "tests.test_scheduler_pooling": (1, "test_live_"),
+          }
+
+          def path_of(module):
+              return module.replace(".", "/") + ".py"
+
+          ran = {module: 0 for module in EXPECTED}
+          problems = []
+          for case in ET.parse(sys.argv[1]).getroot().iter("testcase"):
+              module = case.get("classname") or ""
+              expected = EXPECTED.get(module)
+              name = case.get("name") or ""
+              if expected is None or not name.startswith(expected[1]):
+                  continue
+              ran[module] += 1
+              for outcome in ("skipped", "failure", "error"):
+                  found = case.find(outcome)
+                  if found is not None:
+                      problems.append(
+                          f"{path_of(module)}::{name} {outcome}: {found.get('message') or ''}"
+                      )
+
+          failed = False
+          for module, (count, prefix) in EXPECTED.items():
+              if ran[module] != count:
+                  failed = True
+                  what = f"{prefix}* tests" if prefix else "tests"
+                  print(
+                      f"::error::{path_of(module)}: {ran[module]} {what} ran, expected {count}. A "
+                      "Postgres-gated test was skipped, deselected, renamed or removed (CTO-394)."
+                  )
+          for problem in problems:
+              failed = True
+              print(f"::error::{problem} (CTO-394)")
+          if failed:
+              print(
+                  "::error::The Postgres-gated tests did not all execute against the service "
+                  "container. Check the service container, TALLY_TEST_POSTGRES_DSN, and the "
+                  "migration and seed steps above."
+              )
+              sys.exit(1)
+
+          total = sum(count for count, _ in EXPECTED.values())
+          print(f"All {total} Postgres-gated tests executed against the service container.")
+          PY
 
   edge-proxy:
     runs-on: ubuntu-latest
