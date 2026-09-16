@@ -54,6 +54,19 @@ def commitment(ids: set[str]) -> str:
     return h.hexdigest()
 
 
+# CTO-401: ceiling on the exact id set kept per ``(tenant, period)``. Nothing evicts these sets
+# today (period close is the CTO-213 scheduler's job and does not run on a schedule yet), so an
+# unbounded set interns one live string per distinct id for the lifetime of the process: a tenant
+# emitting 10M distinct ids in a month is ~10M strings per replica and eventually an OOM on a busy
+# tenant.
+#
+# Default is 2.5x the free tier's 100,000 trace ceiling (see DEFAULT_PLAN_LIMIT). That placement is
+# the point: saturation can only happen far ABOVE every plan limit this count is compared against,
+# so the over-limit decision the meter feeds is the same before and after the cap. What saturation
+# costs is the exact figure, and that loss is declared rather than hidden: see ``record``.
+DEFAULT_MAX_IDS_PER_PERIOD = 250_000
+
+
 @dataclass(slots=True)
 class DistinctMeter:
     """Counts distinct ids per ``(tenant, period)`` with a tamper-evident commitment.
@@ -61,16 +74,34 @@ class DistinctMeter:
     The shared engine behind both the head trace-count meter (CTO-84) and the feature-count meter
     (CTO-85). ``record`` is idempotent per id, so counting the same trace/feature twice (e.g. an
     at-least-once redelivery) never inflates the count.
+
+    Memory is bounded per ``(tenant, period)`` by ``max_ids_per_period`` (CTO-401).
     """
 
+    max_ids_per_period: int = DEFAULT_MAX_IDS_PER_PERIOD
     _ids: dict[_TenantPeriod, set[str]] = field(
         default_factory=lambda: defaultdict(set)
     )
+    # Buckets that hit the cap. Tracked separately from the ids so a saturated bucket can still
+    # answer honestly about itself after it has stopped growing.
+    _saturated: set[_TenantPeriod] = field(default_factory=set)
 
     def record(self, tenant_id: str, ident: str, *, period: str) -> bool:
-        """Record ``ident`` for the period. Returns True iff it was newly counted."""
-        bucket = self._ids[(tenant_id, period)]
+        """Record ``ident`` for the period. Returns True iff it was newly counted.
+
+        CTO-401: at ``max_ids_per_period`` distinct ids the bucket stops interning and is marked
+        SATURATED. This is a stated policy, not silent truncation: past the cap the count stops
+        growing and becomes a floor, and the bucket says so (:meth:`exact` is False and
+        :meth:`commitment` returns None rather than a digest over a set that is missing members).
+        A commitment that reconciles against nothing must never look like one that does, so the
+        absence is represented as an absence, exactly as CTO-390 does for an uncomputed one.
+        """
+        key = (tenant_id, period)
+        bucket = self._ids[key]
         if ident in bucket:
+            return False
+        if len(bucket) >= self.max_ids_per_period:
+            self._saturated.add(key)
             return False
         bucket.add(ident)
         return True
@@ -78,7 +109,14 @@ class DistinctMeter:
     def count(self, tenant_id: str, period: str) -> int:
         return len(self._ids.get((tenant_id, period), ()))
 
-    def commitment(self, tenant_id: str, period: str) -> str:
+    def exact(self, tenant_id: str, period: str) -> bool:
+        """False once the bucket has saturated, i.e. :meth:`count` is a floor, not the figure."""
+        return (tenant_id, period) not in self._saturated
+
+    def commitment(self, tenant_id: str, period: str) -> str | None:
+        """Commitment over the distinct ids, or None once the bucket has saturated (CTO-401)."""
+        if not self.exact(tenant_id, period):
+            return None
         return commitment(self._ids.get((tenant_id, period), set()))
 
     def periods(self, tenant_id: str) -> set[str]:
@@ -117,6 +155,12 @@ class UsageRecord:
     trace_limit: int | None
     feature_limit: int | None
     closed: bool
+    # CTO-401: False when the meter's id set for this period saturated its cap, which makes the
+    # matching count a FLOOR rather than the figure. Default True: every other producer of a
+    # UsageRecord (the durable ClickHouse/Postgres path, CTO-390) counts exactly, and a reader must
+    # not have to guess which kind of number it is holding.
+    trace_count_exact: bool = True
+    feature_count_exact: bool = True
 
     @property
     def over_trace_limit(self) -> bool:
@@ -140,6 +184,8 @@ class UsageRecord:
             "trace_commitment": self.trace_commitment,
             "feature_commitment": self.feature_commitment,
             "closed": self.closed,
+            "trace_count_exact": self.trace_count_exact,
+            "feature_count_exact": self.feature_count_exact,
         }
 
 
@@ -157,9 +203,13 @@ class UsageRollup:
         *,
         default_limit: PlanLimit = DEFAULT_PLAN_LIMIT,
         now_ns: object | None = None,
+        max_ids_per_period: int = DEFAULT_MAX_IDS_PER_PERIOD,
     ) -> None:
-        self._traces = DistinctMeter()
-        self._features = DistinctMeter()
+        # CTO-401: both meters are bounded. The feature meter is naturally small (distinct tags),
+        # but it is fed by client-supplied strings, so it gets the same ceiling rather than relying
+        # on a tenant's good behaviour to stay small.
+        self._traces = DistinctMeter(max_ids_per_period=max_ids_per_period)
+        self._features = DistinctMeter(max_ids_per_period=max_ids_per_period)
         self._closed: dict[_TenantPeriod, UsageRecord] = {}
         self._limits: dict[str, PlanLimit] = {}
         self._default_limit = default_limit
@@ -201,13 +251,24 @@ class UsageRollup:
         trace_id: str | None,
         feature_tag: str | None,
         ts_ns: int,
+        trace_id_synthetic: bool = False,
     ) -> None:
         """Meter one span at HEAD: count its (distinct) trace, and its feature tag if present.
 
         Empty/None ids are ignored. This is intentionally called *before* any sampling or
         backpressure shed so neither can reduce the billable count.
+
+        CTO-401: a SYNTHETIC trace id is not a billable trace. CTO-396 started stamping a fresh
+        trace id on every span an SDK emitted outside a ``start_trace``, so spans that used to reach
+        this method with ``trace_id=None`` (and were skipped by the guard below) now arrive with a
+        unique id each and were counted one billable trace per span. That is a per-span meter
+        wearing a per-trace name, and on the free tier's 100,000-trace ceiling it turns a tenant who
+        contributed zero into one who contributes one per span. The id is still written to
+        ClickHouse, so the invoice count derived from stored spans (CTO-390) is untouched; only the
+        head meter's notion of a trace reverts to what it was before CTO-396. The feature tag is
+        metered normally: it is real regardless of how the span's trace id came about.
         """
-        if trace_id:
+        if trace_id and not trace_id_synthetic:
             self.record_trace(tenant_id, trace_id, ts_ns)
         if feature_tag:
             self.record_feature(tenant_id, feature_tag, ts_ns)
@@ -249,4 +310,6 @@ class UsageRollup:
             trace_limit=limit.trace_limit,
             feature_limit=limit.feature_limit,
             closed=closed,
+            trace_count_exact=self._traces.exact(tenant_id, period),
+            feature_count_exact=self._features.exact(tenant_id, period),
         )

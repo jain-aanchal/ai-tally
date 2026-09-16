@@ -89,6 +89,16 @@ class GenAI:
 #: proxied span and an SDK span land in the same columns.
 TRACE_ID_KEY = "trace_id"
 SPAN_ID_KEY = "span_id"
+
+#: CTO-401: True only on a span whose trace id this SDK MINTED because the caller had no active
+#: trace. CTO-396 gave every trace-less span its own fresh trace id so it would stop colliding with
+#: every other trace-less span on the wire, which is right for storage and wrong for the head meter:
+#: a per-span id is not a trace a customer started, and counting one billable trace per trace-less
+#: span turned traffic that contributed zero into traffic that contributes one each. The id stays on
+#: the wire (the ClickHouse-derived invoice count is unchanged); this flag is what lets the gateway
+#: head meter tell a real trace from a synthetic one instead of guessing from the id's shape.
+#: Absent on spans carrying a caller's real trace id, so its absence means "real", not "unknown".
+TRACE_ID_SYNTHETIC_KEY = "gen_ai.trace_id_synthetic"
 _STRUCTURAL_KEYS = frozenset({TRACE_ID_KEY, SPAN_ID_KEY})
 
 

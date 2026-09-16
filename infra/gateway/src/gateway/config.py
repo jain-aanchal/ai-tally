@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     # Per-span payload cap (bytes) for boundary validation (CTO-34).
     max_span_bytes: int = 64 * 1024
 
+    # CTO-401: ceiling on the distinct ids the in-process head meter keeps per (tenant, period).
+    # Nothing evicts those sets yet, so this is what stops one busy tenant's month from growing a
+    # replica's memory without limit. See gateway.metering.DEFAULT_MAX_IDS_PER_PERIOD for why the
+    # default sits far above every plan ceiling the count is compared against.
+    metering_max_ids_per_period: int = 250_000
+
     # Backpressure (CTO-36): concurrent in-flight ingest requests at/above which the gateway
     # tightens client flow-control hints and sheds the overflow of a batch as retryable.
     backpressure_soft_limit: int = 64

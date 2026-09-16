@@ -197,3 +197,92 @@ def test_other_period_still_open_after_close() -> None:
     # June is unaffected by closing May.
     roll.record_trace(T, "trace_2", JUN)
     assert roll.usage(T, "2026-06").trace_count == 1
+
+
+# --- synthetic trace ids are not billable traces (CTO-401) ----------------------------------------
+
+
+def test_synthetic_trace_id_is_not_counted() -> None:
+    roll = UsageRollup()
+    for i in range(300):
+        roll.record_span(
+            T, trace_id=f"syn_{i}", feature_tag=None, ts_ns=MAY, trace_id_synthetic=True
+        )
+    # Exactly the pre-CTO-396 head-meter behaviour for trace-less traffic: contributes nothing.
+    assert roll.usage(T, "2026-05").trace_count == 0
+
+
+def test_synthetic_trace_id_still_meters_its_feature_tag() -> None:
+    roll = UsageRollup()
+    roll.record_span(
+        T, trace_id="syn_1", feature_tag="checkout", ts_ns=MAY, trace_id_synthetic=True
+    )
+    usage = roll.usage(T, "2026-05")
+    assert usage.trace_count == 0
+    assert usage.feature_count == 1
+
+
+def test_real_trace_is_still_counted_alongside_synthetic_ones() -> None:
+    roll = UsageRollup()
+    roll.record_span(T, trace_id="real_1", feature_tag=None, ts_ns=MAY)
+    for i in range(50):
+        roll.record_span(
+            T, trace_id=f"syn_{i}", feature_tag=None, ts_ns=MAY, trace_id_synthetic=True
+        )
+    assert roll.usage(T, "2026-05").trace_count == 1
+
+
+# --- bounded memory (CTO-401) ---------------------------------------------------------------------
+
+
+def test_distinct_meter_memory_is_bounded_for_a_million_ids() -> None:
+    """The set must stop growing at the cap, asserted on the set itself rather than by timing."""
+    cap = 1_000
+    m = DistinctMeter(max_ids_per_period=cap)
+    for i in range(1_000_000):
+        m.record(T, f"syn_{i}", period="2026-05")
+    assert m.count(T, "2026-05") == cap
+    # The bound that matters is the live id set: 1M distinct ids interned exactly `cap` strings.
+    assert len(m._ids[(T, "2026-05")]) == cap
+
+
+def test_saturated_meter_declares_itself_inexact() -> None:
+    m = DistinctMeter(max_ids_per_period=2)
+    m.record(T, "a", period="2026-05")
+    m.record(T, "b", period="2026-05")
+    assert m.exact(T, "2026-05") is True
+    m.record(T, "c", period="2026-05")  # past the cap
+    assert m.exact(T, "2026-05") is False
+    # A commitment over a set that is missing members would reconcile against nothing while looking
+    # exactly like one that does, so it is absent rather than wrong.
+    assert m.commitment(T, "2026-05") is None
+
+
+def test_unsaturated_meter_keeps_its_commitment() -> None:
+    m = DistinctMeter(max_ids_per_period=10)
+    m.record(T, "a", period="2026-05")
+    assert m.commitment(T, "2026-05") == commitment({"a"})
+    assert m.exact(T, "2026-05") is True
+
+
+def test_usage_record_reports_count_exactness() -> None:
+    roll = UsageRollup(max_ids_per_period=1)
+    roll.record_trace(T, "a", MAY)
+    assert roll.usage(T, "2026-05").trace_count_exact is True
+    roll.record_trace(T, "b", MAY)  # saturates
+    usage = roll.usage(T, "2026-05")
+    assert usage.trace_count_exact is False
+    assert usage.trace_commitment is None
+    assert usage.as_dict()["trace_count_exact"] is False
+
+
+def test_saturation_cannot_hide_an_overage() -> None:
+    """The cap sits far above every plan ceiling, so the over-limit decision is unchanged."""
+    roll = UsageRollup(max_ids_per_period=10)
+    roll.set_plan(T, PlanLimit(plan="starter", trace_limit=2, feature_limit=1))
+    for i in range(50):
+        roll.record_trace(T, f"trace_{i}", MAY)
+    usage = roll.usage(T, "2026-05")
+    assert usage.trace_count == 10  # a floor, and it says so
+    assert usage.trace_count_exact is False
+    assert usage.over_trace_limit is True  # still unambiguously over 2
