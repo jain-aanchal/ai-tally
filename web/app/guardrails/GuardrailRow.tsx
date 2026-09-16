@@ -56,7 +56,16 @@ async function postRule(rule: GuardrailRule): Promise<{ ok: boolean; error?: str
   }
 }
 
-export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
+export function GuardrailRow({
+  initialRule,
+  canEdit = true,
+}: {
+  initialRule: GuardrailRule;
+  /** CTO-392: false for a non-admin. The route refuses the write either way; this only stops the
+   *  page offering a control that is always refused. Defaults to true so the audit view and tests
+   *  that render a row on its own are unchanged. */
+  canEdit?: boolean;
+}) {
   const [rule, setRule] = useState(initialRule);
   const [status, setStatus] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
@@ -148,7 +157,8 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
             <button
               type="button"
               onClick={openEdit}
-              disabled={pending}
+              disabled={pending || !canEdit}
+              title={canEdit ? undefined : "Admins only"}
               className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-muted hover:bg-edge hover:text-fg"
             >
               Edit
@@ -180,7 +190,8 @@ export function GuardrailRow({ initialRule }: { initialRule: GuardrailRule }) {
         <td className="py-3 pr-3">
           <select
             value={rule.mode}
-            disabled={pending}
+            disabled={pending || !canEdit}
+            title={canEdit ? undefined : "Admins only"}
             onChange={(e) => onModeChange(e.target.value as GuardrailMode)}
             aria-label={`Mode for ${rule.scope}`}
             className="rounded border border-edge bg-ink/40 px-2 py-1 text-xs text-fg disabled:opacity-50"

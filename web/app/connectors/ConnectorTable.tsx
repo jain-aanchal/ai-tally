@@ -60,7 +60,11 @@ export function ConnectorTable({
   activityUnavailable = false,
   organizationId = null,
   awsAccountId = null,
+  canEdit = true,
 }: {
+  /** CTO-392: false for a non-admin. The server actions behind these controls refuse the write
+   *  either way; this only stops the table offering controls that are always refused. */
+  canEdit?: boolean;
   /** CTO-381: the tenant UUID the connect form shows as the sts:ExternalId. */
   organizationId?: string | null;
   /** CTO-381: ai-tally's AWS account id for the trust policy principal, when configured. */
@@ -152,6 +156,7 @@ export function ConnectorTable({
               details={configByConnector.get(r.id)?.details ?? {}}
               organizationId={organizationId}
               awsAccountId={awsAccountId}
+              canEdit={canEdit}
             />
           ) : (
             <Blank
@@ -167,7 +172,11 @@ export function ConnectorTable({
         render: (r) => {
           const layer = layerOf(r);
           return layer && r.state !== "coming_soon" ? (
-            <ConnectorToggle layer={layer} initialEnabled={enabledLayers.includes(layer)} />
+            <ConnectorToggle
+              layer={layer}
+              initialEnabled={enabledLayers.includes(layer)}
+              canEdit={canEdit}
+            />
           ) : (
             <Blank
               className="text-xs"
@@ -180,7 +189,7 @@ export function ConnectorTable({
     // activityUnavailable is read inside the records column's render, so it belongs here. Without
     // it the memo keeps the reason string from the render it was first built in, and a source that
     // became unreadable would go on claiming it delivered no records.
-    [configByConnector, enabledLayers, activityUnavailable, organizationId, awsAccountId],
+    [configByConnector, enabledLayers, activityUnavailable, organizationId, awsAccountId, canEdit],
   );
 
   return (

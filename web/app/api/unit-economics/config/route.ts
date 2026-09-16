@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, requireAdmin } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -41,6 +41,11 @@ export async function GET(): Promise<NextResponse<ThresholdConfigPayload>> {
 // unreachable we validate and echo the values back (persisted:false) so the prototype works without
 // infra.
 export async function POST(req: Request) {
+  // CTO-392: these cutoffs colour every LTV/CAC and payback band the workspace reads, so changing
+  // them is admin-only. Gated before the body is read.
+  const gate = await requireAdmin("change unit-economics thresholds");
+  if (!gate.ok) return gate.response;
+
   let body: Partial<UnitEconomicsThresholds> & { updatedBy?: string };
   try {
     body = (await req.json()) as Partial<UnitEconomicsThresholds> & { updatedBy?: string };
@@ -87,7 +92,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/unit-economics/config`, {
       method: "POST",
-      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
+      headers: controlPlaneHeaders(gate.tenant.tenantId, { "content-type": "application/json" }),
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),

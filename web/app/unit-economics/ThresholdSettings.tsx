@@ -38,10 +38,18 @@ export function ThresholdSettings({
   initial,
   defaults,
   hasOverride,
+  canEdit = true,
+  accessUnknown = false,
 }: {
   initial: UnitEconomicsThresholds;
   defaults: UnitEconomicsThresholds;
   hasOverride: boolean;
+  /** CTO-392: false for a non-admin. The route refuses the write either way; this only stops the
+   *  panel offering a save that is always refused. */
+  canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ, so the panel
+   *  says which of the two it is instead of calling an admin a member. */
+  accessUnknown?: boolean;
 }) {
   const [form, setForm] = useState<UnitEconomicsThresholds>(initial);
   const [state, setState] = useState<SaveState>("idle");
@@ -98,7 +106,7 @@ export function ThresholdSettings({
         <button
           type="button"
           onClick={resetToDefaults}
-          disabled={isDefault}
+          disabled={isDefault || !canEdit}
           className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
         >
           Reset to defaults
@@ -114,6 +122,7 @@ export function ThresholdSettings({
               type="number"
               step={step}
               min="0"
+              disabled={!canEdit}
               value={Number.isFinite(form[key]) ? form[key] : ""}
               onChange={(e) => patch(key, e.target.value)}
               className="w-full rounded-md border border-edge bg-ink px-2 py-1 text-sm tabular-nums"
@@ -127,11 +136,22 @@ export function ThresholdSettings({
         <button
           type="button"
           onClick={save}
-          disabled={!!err || state === "saving"}
+          disabled={!!err || state === "saving" || !canEdit}
           className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-40"
         >
           Save thresholds
         </button>
+        {!canEdit &&
+          (accessUnknown ? (
+            <span className="text-xs text-warn">
+              Your access could not be checked, so saving is turned off. That is not a statement
+              that you lack permission: the control plane did not answer.
+            </span>
+          ) : (
+            <span className="text-xs text-muted">
+              Read-only. Ask an organization admin to change these cutoffs.
+            </span>
+          ))}
         {err && <span className="text-xs text-bad">{err}</span>}
         {!err && state === "saving" && <span className="text-xs text-muted">saving…</span>}
         {!err && state === "saved" && <span className="text-xs text-good">saved ✓</span>}

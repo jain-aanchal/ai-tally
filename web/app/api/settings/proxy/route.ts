@@ -5,7 +5,7 @@
 import { NextResponse } from "next/server";
 
 import { defaultEndpoints } from "@/lib/connectSnippets";
-import { canManage, controlPlaneHeaders, currentUserId, getTenant } from "@/lib/getTenant";
+import { controlPlaneHeaders, currentUserId, getTenant, requireAdmin } from "@/lib/getTenant";
 import { queryProxyEnabled } from "@/lib/proxySetting";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
@@ -27,13 +27,9 @@ export async function GET(): Promise<NextResponse> {
 
 /** Admins only. Body: `{ enabled: boolean }`. */
 export async function POST(req: Request): Promise<NextResponse> {
-  const tenant = await getTenant();
-  if (!canManage(tenant)) {
-    return NextResponse.json(
-      { error: "admin role required to change the hosted proxy setting" },
-      { status: 403 },
-    );
-  }
+  // CTO-392: the same gate as before, now the shared one every mutation goes through.
+  const gate = await requireAdmin("change the hosted proxy setting");
+  if (!gate.ok) return gate.response;
   // Review of #385, finding 3: refuse rather than store a switch for a proxy that does not exist.
   // Saving it would answer "On. Proxies start accepting this organization's keys", which is false here.
   if (!defaultEndpoints().proxyDeployed) {
@@ -50,7 +46,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   const userId = await currentUserId();
   const res = await fetch(`${GATEWAY_URL}/v1/tenant/proxy/config`, {
     method: "POST",
-    headers: controlPlaneHeaders(tenant.tenantId, {
+    headers: controlPlaneHeaders(gate.tenant.tenantId, {
       "content-type": "application/json",
       ...(userId ? { "x-clerk-user-id": userId } : {}),
     }),

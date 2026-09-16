@@ -22,6 +22,7 @@ import {
   queryBudgets,
   saveBudget,
 } from "@/lib/budgets";
+import { requireAdmin } from "@/lib/getTenant";
 
 export interface BudgetFormValues {
   budgetId: string;
@@ -53,6 +54,10 @@ async function currentBudgets(): Promise<Budget[] | null> {
 }
 
 export async function saveBudgetAction(values: BudgetFormValues): Promise<BudgetActionResult> {
+  // CTO-392: a server action is a public endpoint, so the role is checked here and not only in the
+  // form. A budget is the reference every "versus budget" figure downstream is measured against.
+  const gate = await requireAdmin("manage budgets");
+  if (!gate.ok) return { ok: false, error: gate.error, conflictingBudgetId: null };
   const amount = dollarsToMicro(values.amountDollars);
   if (!amount.ok) return { ok: false, error: amount.error, conflictingBudgetId: null };
 
@@ -74,6 +79,8 @@ export async function saveBudgetAction(values: BudgetFormValues): Promise<Budget
 }
 
 export async function deleteBudgetAction(budgetId: string): Promise<BudgetActionResult> {
+  const gate = await requireAdmin("manage budgets");
+  if (!gate.ok) return { ok: false, error: gate.error, conflictingBudgetId: null };
   const result = await deleteBudget(budgetId);
   if (!result.ok) {
     return { ok: false, error: result.error, conflictingBudgetId: result.conflictingBudgetId };

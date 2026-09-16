@@ -24,7 +24,20 @@ interface ObservedEvent {
 
 type SaveState = "idle" | "saving" | "error";
 
-export function FeatureValueEvents({ initialFeatures }: { initialFeatures: FeatureEconomics[] }) {
+export function FeatureValueEvents({
+  initialFeatures,
+  canEdit = true,
+  accessUnknown = false,
+}: {
+  initialFeatures: FeatureEconomics[];
+  /** CTO-392: false for a non-admin. POST /api/features/value-events refuses the write either way;
+   *  this only stops the table offering a CTA that is always refused. */
+  canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ. Without this
+   *  the table shows an admin a bare "not configured" during a blip, which reads as a statement
+   *  about their permissions and is the one thing this surface must not say. */
+  accessUnknown?: boolean;
+}) {
   const router = useRouter();
   const [features, setFeatures] = useState<FeatureEconomics[]>(initialFeatures);
 
@@ -100,7 +113,12 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
   return (
     <>
       {unconfigured.length > 0 && (
-        <FinishSetupBanner count={unconfigured.length} onStart={openFinishSetup} />
+        <FinishSetupBanner
+          count={unconfigured.length}
+          onStart={openFinishSetup}
+          canEdit={canEdit}
+          accessUnknown={accessUnknown}
+        />
       )}
 
       <Card title="Unit economics: per feature">
@@ -140,13 +158,17 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
                     </td>
                     <td className="py-2 pl-3">
                       {f.valueEvent === null ? (
-                        <button
-                          type="button"
-                          onClick={() => openSingle(f.feature)}
-                          className="text-warn text-xs hover:underline"
-                        >
-                          configure value event →
-                        </button>
+                        canEdit ? (
+                          <button
+                            type="button"
+                            onClick={() => openSingle(f.feature)}
+                            className="text-warn text-xs hover:underline"
+                          >
+                            configure value event →
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted">not configured</span>
+                        )
                       ) : (
                         <span className="font-mono text-xs text-muted">{f.valueEvent}</span>
                       )}
@@ -157,6 +179,16 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
             </tbody>
           </table>
         </div>
+        {/* CTO-392: the row cell says only "not configured", which is a fact about the feature. Why
+            there is no way to change it is a different fact, and an unread role must not be
+            presented as a role that was read and refused. */}
+        {!canEdit && (
+          <p className={`mt-3 text-xs ${accessUnknown ? "text-warn" : "text-muted"}`}>
+            {accessUnknown
+              ? "Your access could not be checked, so value-event setup is turned off here. That is not a statement that you lack permission: the control plane did not answer."
+              : "You have read-only access. Ask an organization admin to pick a value event."}
+          </p>
+        )}
       </Card>
 
       {activeFeature && (
@@ -179,7 +211,17 @@ export function FeatureValueEvents({ initialFeatures }: { initialFeatures: Featu
   );
 }
 
-function FinishSetupBanner({ count, onStart }: { count: number; onStart: () => void }) {
+function FinishSetupBanner({
+  count,
+  onStart,
+  canEdit,
+  accessUnknown,
+}: {
+  count: number;
+  onStart: () => void;
+  canEdit: boolean;
+  accessUnknown: boolean;
+}) {
   const noun = count === 1 ? "feature" : "features";
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
@@ -190,13 +232,24 @@ function FinishSetupBanner({ count, onStart }: { count: number; onStart: () => v
           until you pick one.
         </span>
       </div>
-      <button
-        type="button"
-        onClick={onStart}
-        className="inline-flex items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25"
-      >
-        Finish setup
-      </button>
+      {canEdit ? (
+        <button
+          type="button"
+          onClick={onStart}
+          className="inline-flex items-center rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/25"
+        >
+          Finish setup
+        </button>
+      ) : accessUnknown ? (
+        <span className="text-xs text-warn/90">
+          Your access could not be checked, so setup is turned off here. That is not a statement
+          that you lack permission: the control plane did not answer.
+        </span>
+      ) : (
+        <span className="text-xs text-warn/90">
+          Ask an organization admin to pick one.
+        </span>
+      )}
     </div>
   );
 }

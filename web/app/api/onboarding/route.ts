@@ -27,6 +27,13 @@ export async function GET() {
 // and not when. A noticed stage is recorded once and never stamps a progress timestamp, so nothing
 // downstream can read the moment we spotted it as the moment it happened.
 export async function POST(req: Request) {
+  // CTO-392 deliberately does NOT gate this on the admin role, unlike every other mutation.
+  //
+  // This is internal activation telemetry, not spend-governing configuration: nothing downstream
+  // reads it to decide what traffic may cost. The funnel record is per-tenant (#358), so gating it
+  // would not protect a member from anything; it would only mean that any milestone a member
+  // happened to reach first went permanently unrecorded, because the client fires this once and
+  // ignores the answer. A silently incomplete funnel is worse than a member writing to it.
   let body: { stage?: string; noticed?: boolean };
   try {
     body = (await req.json()) as { stage?: string; noticed?: boolean };

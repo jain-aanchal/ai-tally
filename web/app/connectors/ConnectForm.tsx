@@ -130,6 +130,9 @@ interface Props {
   organizationId?: string | null;
   /** ai-tally's AWS account id for the trust policy principal. Null when the deployment has not set it. */
   awsAccountId?: string | null;
+  /** CTO-392: false for a non-admin. The server actions behind Save / Disconnect refuse the write
+   *  either way; this only stops the form offering them. */
+  canEdit?: boolean;
 }
 
 /** CTO-381: the organization id and, for AWS, the trust policy the customer's role needs. */
@@ -196,6 +199,7 @@ export function ConnectForm({
   details,
   organizationId = null,
   awsAccountId = null,
+  canEdit = true,
 }: Props) {
   const fields = FIELDS[connector];
   const [open, setOpen] = useState(false);
@@ -204,6 +208,14 @@ export function ConnectForm({
   const [pending, startTransition] = useTransition();
 
   if (!fields) return <span className="text-xs text-muted">—</span>;
+  // A member sees the configured state, which is a read, and no way to change it.
+  if (!canEdit) {
+    return (
+      <span className="text-xs text-muted" title="Admins only">
+        {configured ? "Configured" : "Not configured"}
+      </span>
+    );
+  }
 
   const submit = () => {
     setStatus(null);

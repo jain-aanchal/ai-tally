@@ -14,6 +14,7 @@ import { FilterBar } from "@/components/FilterBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile } from "@/components/SummaryTile";
 import { apiGet } from "@/lib/api";
+import { editAccess } from "@/lib/getTenant";
 import type { CacPayload } from "@/app/api/cac/route";
 import type { ThresholdConfigPayload } from "@/app/api/unit-economics/config/route";
 import type { CacPeriod, PeriodEconomics } from "@/lib/cac";
@@ -86,6 +87,10 @@ export default async function UnitEconomicsPage() {
   ]);
   const { periods, economics, isMock } = data;
   const thresholds: UnitEconomicsThresholds = cfg.thresholds;
+  // CTO-392: POST /api/unit-economics/config refuses a member, so the panel renders read-only
+  // rather than offering a save that is always refused. `editAccess` never throws: a failed org
+  // resolve must not take a page of honest-blank economics into the error boundary.
+  const access = await editAccess();
 
   // Headline cards reflect the most recent period for which we have both CAC inputs and economics.
   // Falling to the latest period regardless keeps the CAC flavors visible even when economics is
@@ -170,6 +175,8 @@ export default async function UnitEconomicsPage() {
         initial={thresholds}
         defaults={cfg.defaults}
         hasOverride={cfg.hasOverride}
+        canEdit={access === "allowed"}
+        accessUnknown={access === "unknown"}
       />
 
       <Card title="Monthly history">
