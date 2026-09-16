@@ -178,6 +178,53 @@ real catalog version**. Those stay `0`, and the check names the ambiguous ones a
 (`measured_zero_no_model`, `measured_zero_flat_usage`) rather than implying they are all decided. See "Historical rows stored as
 a priced $0" below.
 
+### Usage and billing counts (CTO-390)
+
+`GET /v1/usage` answers from a durable, shared source: ClickHouse (`uniqExact` over `otel_spans`) for
+an open period, and Postgres (`tenant_usage_periods`, migration 0034) for a period that has been
+closed. It does **not** read the gateway's in-process meter. That meter is per replica and dies with
+the process, so reading billing off it made every answer a fraction of actual usage, made two reads
+of the same dashboard disagree, and reset the count on every deploy.
+
+**Applying migration 0034 to a stack that is already up.** `docker-entrypoint-initdb.d` only fires on
+a first boot against an empty volume, so **every existing stack needs this by hand**, and until it is
+applied `/v1/usage` answers 503:
+
+```bash
+make psql < ../db/postgres/0034_tenant_usage_periods.sql   # from infra/
+```
+
+**Check which mode your gateway is in.** It says so at boot:
+
+```bash
+make logs | grep -i "usage"
+```
+
+`durable usage enabled (tenant_usage_periods)` is the working state. A `WARNING` that the committed
+usage table is unavailable means 0034 has not been applied. Set `TALLY_USAGE_DURABLE_REQUIRED=true`
+to make that a startup failure instead of a warning; any deployment that serves `/v1/usage` should.
+
+**What an unavailable source looks like, and why.** HTTP 503 with `error.code = USAGE_UNAVAILABLE`,
+every field explicitly `null`, and the period named. Never a `0`, and never a fallback to the
+in-process meter: a fraction of a tenant's usage is indistinguishable from a real small number, so
+the failure has to be visible. Postgres being unreachable fails the read even though ClickHouse could
+answer it, because without the committed table the gateway cannot tell whether the period is frozen,
+and a live count that silently contradicts an issued invoice is worse than an error.
+
+**Known gaps, stated plainly.**
+
+* **Nothing closes a period yet.** `CommittedUsageStore.commit` exists and is tested, but no
+  scheduler job calls it (that belongs in the CTO-213 registry). Until it lands, every period is
+  counted live.
+* **Consequently, a period older than the 90-day raw-span TTL is reported as an explicit unknown**,
+  not as a number. `otel_spans` drops raw rows at 90 days with no aggregate-on-expire, so a live
+  count over an old period would shrink a little every day. Answering 503 is the honest alternative;
+  committing periods on a schedule is the real fix.
+* **On the buffered ingest path (`TALLY_INGEST_BUFFERED=true`) this count and the HEAD meter
+  legitimately disagree.** The buffer sheds rows past its high-water mark and is lost on a restart,
+  so spans the head meter counted may never reach ClickHouse. What `/v1/usage` reports in that mode
+  is "distinct traces that reached storage".
+
 ### Batch idempotency (CTO-245)
 
 Re-posting a batch with a `batch_id` the gateway has already accepted returns the original response

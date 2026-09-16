@@ -57,6 +57,12 @@ from gateway.errors import ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
 from gateway.metering import ClosedPeriodError, UsageRollup
+from gateway.usage_store import (
+    USAGE_UNAVAILABLE_CODE,
+    DurableUsageRollup,
+    UsageUnavailable,
+    build_usage_rollup,
+)
 from gateway.protocol import (
     SUPPORTED_PROTOCOLS,
     capabilities,
@@ -436,6 +442,24 @@ async def lifespan(app: FastAPI):
     # HEAD-path billing meter (CTO-84/85/86): counts distinct traces + feature tags before any
     # sampling/shed so the bill is exact regardless of analytics sample rate.
     app.state.metering = UsageRollup()
+    # CTO-390: /v1/usage answers from a DURABLE, SHARED source, never from the meter above. That
+    # meter is still the HEAD counter for ingest (CTO-84) and still owns plan limits, but it is per
+    # replica and dies with the process, so reading billing off it made every answer a fraction of
+    # actual usage, made two reads of the same dashboard disagree, and reset the count on every
+    # deploy. The open period is now counted with uniqExact over ClickHouse and a closed period is
+    # read from tenant_usage_periods (migration 0034).
+    #
+    # counts_source is a callable so the ClickHouse store is resolved at READ time: app.state.store
+    # is swapped by the test suite and may be replaced on a reconnect, and a captured reference
+    # would go on reading a dead client.
+    #
+    # build_usage_rollup probes tenant_usage_periods here and says which mode it is in, rather than
+    # letting a missing migration 0034 surface later as an undifferentiated 503 (CTO-390 review).
+    app.state.usage = build_usage_rollup(
+        settings,
+        counts_source=lambda: app.state.store,
+        plan_limits=app.state.metering.plan_limit_for,
+    )
     app.state.in_flight = 0
     # Ingest burst buffer (CTO-37): when enabled, spans are written to ClickHouse off the hot path by
     # a background drain loop, so a burst can't produce 5xx. Disabled → synchronous write (None).
@@ -1111,10 +1135,15 @@ def get_usage(
 
     Consumed by the dashboard ("usage vs. plan limit") and billing (CTO-86). Tenant resolves from
     the API key when auth is on, else from the ``X-Tenant-Id`` header (local dev).
+
+    Answers from the durable, shared source (CTO-390): ClickHouse for an open period, Postgres for a
+    committed one. It does NOT read the in-process meter, and it does not fall back to it when the
+    durable source is down, because a fraction of a tenant's usage looks exactly like a real small
+    number and nothing downstream could tell the difference.
     """
     settings = app.state.settings
     auth: ApiKeyAuth = app.state.auth
-    metering: UsageRollup = app.state.metering
+    usage_source: DurableUsageRollup = app.state.usage
 
     if settings.require_api_key:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -1128,7 +1157,51 @@ def get_usage(
         if not tenant_id:
             raise HTTPException(status_code=422, detail="X-Tenant-Id required when auth is disabled")
 
-    record = metering.usage(tenant_id, period)
+    try:
+        record = usage_source.usage(tenant_id, period)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except UsageUnavailable as exc:
+        # Honest under uncertainty: an explicit unknown, never a zero and never the in-process
+        # meter's partial view. Retryable, because the durable source being down is transient.
+        #
+        # CTO-390 review: SHAPE-COMPATIBLE with the 200 body. Every key UsageRecord.as_dict emits is
+        # present and explicitly null, so a consumer reading over_trace_limit, plan or closed gets an
+        # unknown it can recognise rather than a missing key it will read as false/undefined. An
+        # absent key is how "we do not know" turns back into "no" one layer down.
+        #
+        # And the period is always named. It used to echo the raw query parameter, so an omitted
+        # ?period= answered "period": null and the caller could not tell which period had failed.
+        logger.exception("usage source unavailable for tenant %s", tenant_id)
+        resolved_period = period or usage_source.current_period()
+        message = "usage source unavailable; retry"
+        if usage_source.boot_warning:
+            # Name the cause when the boot probe already knows it, rather than making an operator
+            # correlate a 503 with a log line from startup.
+            message = f"{message} ({usage_source.boot_warning})"
+        return JSONResponse(
+            {
+                "tenant_id": tenant_id,
+                "period": resolved_period,
+                "plan": None,
+                "trace_count": None,
+                "feature_count": None,
+                "trace_limit": None,
+                "feature_limit": None,
+                "over_trace_limit": None,
+                "over_feature_limit": None,
+                "trace_commitment": None,
+                "feature_commitment": None,
+                "closed": None,
+                "error": {
+                    "code": USAGE_UNAVAILABLE_CODE,
+                    "message": message,
+                    "reason": str(exc),
+                },
+            },
+            status_code=503,
+            headers={"Retry-After": "5"},
+        )
     return JSONResponse(record.as_dict(), status_code=200)
 
 

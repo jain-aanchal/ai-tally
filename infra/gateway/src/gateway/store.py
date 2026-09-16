@@ -43,6 +43,12 @@ class ClickHouseStore:
                 username=self._settings.clickhouse_user,
                 password=self._settings.clickhouse_password,
                 database=self._settings.clickhouse_db,
+                # CTO-390 review: bounded, because an unbounded wait is how an "honest error" turns
+                # into a hang. /v1/usage runs on the threadpool, so a dependency that accepts a
+                # connection and then never answers would pin a worker rather than reaching the
+                # explicit-unknown 503 the endpoint promises.
+                connect_timeout=self._settings.clickhouse_connect_timeout_s,
+                send_receive_timeout=self._settings.clickhouse_query_timeout_s,
             )
         return self._client
 
@@ -252,6 +258,37 @@ class ClickHouseStore:
             "SELECT count(), countIf(notEmpty(AccountIdHash)) FROM daily_account_rollup "
             "WHERE TenantId = %(t)s",
             parameters={"t": tenant_id},
+        )
+        row = result.result_rows[0]
+        return int(row[0]), int(row[1])
+
+    def usage_counts(
+        self, tenant_id: str, *, period_start: datetime, period_end: datetime
+    ) -> tuple[int, int]:
+        """``(distinct_traces, distinct_feature_tags)`` for one tenant over one billing period.
+
+        The shared, durable replacement for the in-process billing counters (CTO-390). Every replica
+        reads the same ``otel_spans``, so every replica answers the same number, and the number
+        survives a deploy because it was never in a process to begin with.
+
+        ``uniqExact`` rather than ``uniq``. ``uniq`` is a HyperLogLog approximation, and an
+        approximate count is fine for a chart and unacceptable for an invoice: it would put a number
+        on a bill that no later query reproduces exactly. Exactness costs memory proportional to the
+        distinct set, which is bounded here by one tenant and one month.
+
+        ``notEmpty`` guards both ids for the same reason
+        :meth:`coverage_account_rows` needs it: an untagged span carries the empty default, and
+        counting that default would invent a feature named "" and bill for it.
+
+        Tenant-scoped and half-open on time (``>= start``, ``< end``), so a span at midnight on the
+        first belongs to exactly one period and no span is counted in two.
+        """
+        result = self.client.query(
+            "SELECT uniqExactIf(TraceId, notEmpty(TraceId)), "
+            "       uniqExactIf(FeatureTag, notEmpty(FeatureTag)) "
+            "FROM otel_spans "
+            "WHERE TenantId = %(t)s AND Timestamp >= %(s)s AND Timestamp < %(e)s",
+            parameters={"t": tenant_id, "s": period_start, "e": period_end},
         )
         row = result.result_rows[0]
         return int(row[0]), int(row[1])
