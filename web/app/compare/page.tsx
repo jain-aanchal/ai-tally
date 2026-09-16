@@ -7,7 +7,7 @@
 //
 // #320: the replay diagnostics are no longer fixture constants. Nothing on this page claims a
 // replayed trace, a replay cost or a corpus size unless the real /v1/replay projection measured it.
-import { Suspense, type ReactNode } from "react";
+import { Suspense } from "react";
 
 import { Card } from "@/components/Card";
 import {
@@ -34,19 +34,6 @@ import type { MicroUSD } from "@/lib/types";
 // absence of one.
 const NO_REPLAY_REASON =
   "no cross-provider replay has run for this workload, so there is nothing replayed to count or cost";
-
-/**
- * A diagnostics row whose value may be an honest blank ({@link Diag} takes a plain string, so a
- * blank rendered through it would lose the reason that has to travel with it).
- */
-function DiagNode({ k, v }: { k: string; v: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted">{k}</dt>
-      <dd>{v}</dd>
-    </>
-  );
-}
 
 export default async function ComparePage({
   searchParams,
@@ -226,7 +213,10 @@ export default async function ComparePage({
           {/* #320: every count here is nullable and renders the explained blank when no replay has
               run. Previously the fixture's 4,200 / 87,400 / $42.30 printed on a live page with nine
               spans behind it, which is the fabricated-figure failure CLAUDE.md exists to prevent. */}
-          <DiagNode
+          {/* CTO-298 widened `Diag`'s value to a ReactNode precisely so a row can carry the shared
+              `Blank` with its reason attached, which is what the local DiagNode wrapper existed to
+              work around. The wrapper is gone; this is the shared component. */}
+          <Diag
             k="samples replayed"
             v={
               diagnostics.samplesReplayed === null || diagnostics.samplesAvailable === null ? (
@@ -238,7 +228,7 @@ export default async function ComparePage({
           />
           {/* #329: the "excluded (rate limits)" row is gone. Nothing ever measured it, so it
               rendered a blank on every code path. The blank was honest and the row was noise. */}
-          <DiagNode
+          <Diag
             k="replay cost"
             v={<Money micro={diagnostics.replayCostMicroUsd} reason={NO_REPLAY_REASON} />}
           />

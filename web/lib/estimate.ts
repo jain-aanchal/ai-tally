@@ -8,6 +8,7 @@
 // the fixture only where sampleDataAllowed() permits it; every other caller gets
 // EMPTY_PROJECTION, whose nulls the page renders as blanks carrying the reason.
 
+import type { FirstEventStatus } from "./firstEvent";
 import type { MicroUSD } from "./types";
 
 /** Where a payload's figures came from. `none` is the honest empty answer for a real tenant. */
@@ -37,8 +38,15 @@ export interface Projection {
   blowUpRisk: number | null;
   drivers: { delta: number; reason: string }[]; // delta in micro-USD/month
   sample: {
-    /** A real count: zero replayed samples is a measurement, not an unknown. */
-    used: number;
+    /**
+     * Replayed samples this projection used, or null when no replay was attempted.
+     *
+     * CTO-298 follow-up: this was a bare `number` and EMPTY_PROJECTION set it to 0, so the "samples
+     * used" diagnostic printed a literal 0 on every path where nothing had been replayed. A count
+     * nobody took is unknown, not zero. A replay that DID run and matched nothing still reports its
+     * real 0, which is a measurement; the two are only tellable apart because this is nullable.
+     */
+    used: number | null;
     tailWeighted: number | null;
     pathologicalIncluded: number | null;
     ciHalfWidthPct: number | null; // on p99
@@ -59,6 +67,19 @@ export interface Projection {
    * exactly when the data is synthetic.
    */
   synthetic: boolean;
+  /**
+   * What the first-event probe measured about this workspace: `connected` (a span exists),
+   * `waiting` (the probe ran and found none), `unknown` (the probe could not run).
+   *
+   * CTO-298 follow-up, and the reason it exists. The page derived its empty state from
+   * `current.monthlyCostMicroUsd === null`, and `current` is filled in by the fixture alone, so
+   * that test was true for EVERY real tenant: a pilot with a live replay corpus was told, as a
+   * measured fact, that no priced traffic had reached ai-tally, by a route that had queried neither
+   * spend nor traffic. The empty state now keys on something actually measured, and `unknown` is
+   * carried through rather than folded onto `waiting`, so a probe that could not run never reads as
+   * a definite "nothing is here".
+   */
+  workspaceTraffic: FirstEventStatus;
 }
 
 /**
@@ -69,7 +90,8 @@ export interface Projection {
 export interface WhatIfProjection extends Projection {
   candidate: { provider: string; model: string };
   systemPromptOverride?: string;
-  groundedSamples: number;
+  /** Null when no replay ran at all (CTO-298 follow-up): never 0 standing in for an unknown. */
+  groundedSamples: number | null;
   replay_source: ReplaySource;
 }
 
@@ -85,8 +107,12 @@ export function pctDelta(cur: number | null, prop: number | null): number | null
  * The honest answer for a tenant with no replayed corpus behind this workload (CTO-298).
  *
  * Every figure is null rather than 0, and `drivers` is empty rather than the fixture's three: a
- * driver breakdown nobody computed is not a breakdown totalling zero. The page reads `synthetic:
- * false` plus the null baseline as the new-workspace case and points at setup.
+ * driver breakdown nobody computed is not a breakdown totalling zero.
+ *
+ * What this constant does NOT decide is whether the workspace is empty. It carries no measurement,
+ * so `workspaceTraffic` defaults to `unknown` and the route overwrites it with what the first-event
+ * probe found. Reading emptiness off these nulls is exactly the CTO-298 follow-up bug: they are
+ * null on every real tenant's payload, corpus or no corpus.
  */
 export const EMPTY_PROJECTION: Projection = {
   workload: null,
@@ -95,9 +121,10 @@ export const EMPTY_PROJECTION: Projection = {
   proposed: { monthlyCostMicroUsd: null, p99CostMicroUsd: null, meanLatencyMs: null },
   blowUpRisk: null,
   drivers: [],
-  sample: { used: 0, tailWeighted: null, pathologicalIncluded: null, ciHalfWidthPct: null },
+  sample: { used: null, tailWeighted: null, pathologicalIncluded: null, ciHalfWidthPct: null },
   reconcilerLastRunMinutesAgo: null,
   synthetic: false,
+  workspaceTraffic: "unknown",
 };
 
 /**
@@ -136,4 +163,7 @@ export const projection = {
   },
   reconcilerLastRunMinutesAgo: 18,
   synthetic: true,
+  // The demo storyline has traffic behind it by construction, so the page renders the what-if body
+  // (inside the SAMPLE DATA banner) rather than the new-workspace state.
+  workspaceTraffic: "connected",
 } satisfies Projection;

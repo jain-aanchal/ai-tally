@@ -42,6 +42,9 @@ vi.mock("@/lib/clickhouse", () => ({
   // ungated fallback survived both #364 and CTO-379. It is unlinked from the nav, and that is not
   // a gate: middleware.ts protects it as an ordinary signed-in route.
   queryReplayEstimate: vi.fn(),
+  // CTO-298 follow-up: /api/estimate probes for first-event traffic, because its page's empty state
+  // is a claim about the workspace and the route had measured nothing to back it.
+  queryFirstEventSeen: vi.fn().mockResolvedValue("unknown"),
   queryIntegrationStatus: vi.fn().mockResolvedValue([]),
 }));
 
@@ -93,6 +96,9 @@ function allUnavailable() {
   for (const fn of Object.values(mocked)) fn.mockResolvedValue(null);
   mocked.queryFeatureValueEvents.mockResolvedValue([]);
   mocked.queryAttributionDiagnostics.mockResolvedValue({ state: "unavailable" });
+  // The probe is a read like any other: when it cannot run, the answer is "unknown", never the
+  // definite "waiting" that would tell a customer nothing has arrived (CTO-298 follow-up).
+  mocked.queryFirstEventSeen.mockResolvedValue("unknown");
 }
 
 /**
@@ -131,6 +137,8 @@ function allEmpty() {
   mocked.queryReplayCandidates.mockResolvedValue(null);
   mocked.queryEvalCandidates.mockResolvedValue(null);
   mocked.queryReplayEstimate.mockResolvedValue(null);
+  // The read succeeded and found no span: the one state that earns "nothing has arrived yet".
+  mocked.queryFirstEventSeen.mockResolvedValue("waiting");
   mocked.queryCostSeries.mockResolvedValue({
     reconciledThrough: "1970-01-01",
     days: Array.from({ length: 30 }, (_, i) => ({

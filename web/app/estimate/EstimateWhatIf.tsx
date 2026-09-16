@@ -26,6 +26,10 @@ const NO_LATENCY_DISTRIBUTION =
   "mean latency needs a full latency distribution; replay returns a p50 only, and a median is not a mean";
 const NO_RISK =
   "blow-up risk is the probability that p99 cost more than doubles, which needs the p99 distribution replay does not return yet";
+// CTO-298 follow-up: this row rendered a literal 0 whenever no replay had been attempted, which
+// reads as "we replayed and used none of it". Nothing was replayed and nothing was counted.
+const NO_SAMPLES_USED =
+  "no replay has been attempted for this workload, so no samples were used and none were counted";
 
 function Latency({ ms, reason }: { ms: number | null; reason: string }) {
   return ms === null ? <Blank reason={reason} /> : <>{ms} ms</>;
@@ -40,8 +44,12 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
   const [error, setError] = useState<string | null>(null);
   // Start from whatever the GET returned; POST replaces them.
   const [proposed, setProposed] = useState<Proposed>(initial.proposed);
-  const [sampleUsed, setSampleUsed] = useState(initial.sample.used);
+  const [sampleUsed, setSampleUsed] = useState<number | null>(initial.sample.used);
   const [grounded, setGrounded] = useState<number | null>(null);
+  // Separate from `grounded`, which is now nullable in its own right: a null grounded count means
+  // "a replay was requested and none ran", which is a different fact from "nothing has been
+  // requested yet" and has to be sayable (CTO-298 follow-up).
+  const [estimated, setEstimated] = useState(false);
 
   async function onEstimate() {
     setPending(true);
@@ -65,6 +73,7 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
       setProposed(body.proposed);
       setSampleUsed(body.sample.used);
       setGrounded(body.groundedSamples);
+      setEstimated(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -126,10 +135,16 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
               {pending ? "Estimating…" : "Estimate"}
             </button>
             {error && <span className="text-bad">{error}</span>}
-            {grounded !== null && !error && (
+            {estimated && !error && (
               <span className="text-muted">
-                grounded on {grounded} replayed sample{grounded === 1 ? "" : "s"}
-                {proposed.monthlyCostMicroUsd === null && " (too few to report a cost)"}
+                {grounded === null ? (
+                  "no replay ran for this workload, so nothing grounds this estimate"
+                ) : (
+                  <>
+                    grounded on {grounded} replayed sample{grounded === 1 ? "" : "s"}
+                    {proposed.monthlyCostMicroUsd === null && " (too few to report a cost)"}
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -205,7 +220,16 @@ export function EstimateWhatIf({ initial }: { initial: Projection }) {
 
       <Card title="Sample diagnostics">
         <dl className="grid grid-cols-1 gap-y-1.5 text-sm sm:grid-cols-2">
-          <Diag k="samples used" v={`${sampleUsed}`} />
+          <Diag
+            k="samples used"
+            v={
+              sampleUsed === null ? (
+                <Blank reason={NO_SAMPLES_USED} />
+              ) : (
+                sampleUsed.toLocaleString()
+              )
+            }
+          />
           <Diag
             k="pathological runs included"
             v={

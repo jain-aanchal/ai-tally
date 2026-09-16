@@ -3,10 +3,12 @@ import { NextResponse } from "next/server";
 import { EMPTY_PROJECTION, projection, type WhatIfProjection } from "@/lib/estimate";
 import { sampleDataAllowed } from "@/lib/mock";
 import {
+  queryFirstEventSeen,
   queryReconcilerLastRun,
   queryReplayCandidates,
   queryReplayEstimate,
 } from "@/lib/clickhouse";
+import type { FirstEventStatus } from "@/lib/firstEvent";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -28,13 +30,24 @@ const MIN_GROUNDING_SAMPLES = 50;
  *
  * There is nothing to fall back TO for a real tenant: an estimate is a projection off a measured
  * baseline, and without a replayed corpus there is no baseline and no driver breakdown. So the
- * honest answer is the empty one, and the page reads it as the new-workspace case.
+ * honest answer is the empty one, and the page renders the what-if with its blanks.
+ *
+ * `workspaceTraffic` is the measured half of that answer (CTO-298 follow-up). The page used to
+ * infer "this workspace is empty" from the null baseline below, which is null for every real
+ * tenant, so every real tenant was told no telemetry had arrived by a route that had asked about
+ * neither spend nor traffic. The first-event probe answers the question the empty state actually
+ * puts, and its `unknown` travels through so a probe that could not run is never read as a
+ * definite "nothing is here".
  */
-function fallbackProjection(reconcilerLastRunMinutesAgo: number | null) {
+function fallbackProjection(
+  reconcilerLastRunMinutesAgo: number | null,
+  workspaceTraffic: FirstEventStatus,
+) {
   const base = sampleDataAllowed() ? projection : EMPTY_PROJECTION;
   return NextResponse.json({
     ...base,
     reconcilerLastRunMinutesAgo,
+    workspaceTraffic,
     replay_source: base.synthetic ? "mock" : "none",
   });
 }
@@ -52,17 +65,24 @@ export async function GET(req: Request) {
 
   // CTO-169: baseline freshness is the real reconciliation_runs last-run, not the fixture constant,
   // null (rendered as a blank) when the reconciler has never run / the source is unavailable.
-  const reconcilerLastRunMinutesAgo = await queryReconcilerLastRun();
+  //
+  // CTO-298 follow-up: the first-event probe rides along, because the page's empty state makes a
+  // claim about this workspace's traffic and nothing in this route had measured it. Neither read
+  // feeds the other, so they start together.
+  const [reconcilerLastRunMinutesAgo, workspaceTraffic] = await Promise.all([
+    queryReconcilerLastRun(),
+    queryFirstEventSeen(),
+  ]);
 
   if (!candidateModel) {
-    return fallbackProjection(reconcilerLastRunMinutesAgo);
+    return fallbackProjection(reconcilerLastRunMinutesAgo, workspaceTraffic);
   }
 
   const replay = await queryReplayCandidates(featureTag, [
     { provider: candidateProvider, model: candidateModel },
   ]);
   if (!replay || replay.per_candidate.length === 0) {
-    return fallbackProjection(reconcilerLastRunMinutesAgo);
+    return fallbackProjection(reconcilerLastRunMinutesAgo, workspaceTraffic);
   }
 
   // GET replays the captured envelope as-is against the candidate model (no prompt rewrite).
@@ -75,6 +95,7 @@ export async function GET(req: Request) {
   return NextResponse.json({
     ...EMPTY_PROJECTION,
     reconcilerLastRunMinutesAgo,
+    workspaceTraffic,
     proposed: {
       monthlyCostMicroUsd: proposed.projected_monthly_cost_micro_usd,
       // Both null by CTO-298: see the Figures doc comment. p99 was monthly * 1.4 (a fixture
@@ -120,7 +141,7 @@ export async function POST(req: Request) {
       : undefined;
 
   const candidate = { provider, model: candidateModel };
-  const [replay, reconcilerLastRunMinutesAgo] = await Promise.all([
+  const [replay, reconcilerLastRunMinutesAgo, workspaceTraffic] = await Promise.all([
     queryReplayEstimate({
       candidateModel: candidate,
       systemPromptOverride,
@@ -129,12 +150,15 @@ export async function POST(req: Request) {
     }),
     // CTO-169: real reconciler last-run (or null, rendered as a blank), not the fixture constant.
     queryReconcilerLastRun(),
+    queryFirstEventSeen(),
   ]);
 
   const row = replay?.per_candidate[0];
-  const grounded = row?.samples_replayed ?? 0;
+  // CTO-298 follow-up: null when no replay row came back at all. A replay that ran and matched
+  // nothing reports its real 0; a replay that never ran has no count, and a 0 would claim one.
+  const grounded = row ? row.samples_replayed : null;
   // Honest-null floor: too few samples grounding the estimate -> null cost, page renders a blank.
-  const sufficient = !!row && grounded >= MIN_GROUNDING_SAMPLES;
+  const sufficient = grounded !== null && grounded >= MIN_GROUNDING_SAMPLES;
 
   // CTO-298: the surrounding context (baseline, PR, drivers, blow-up risk) is the fixture's only on
   // the sample path. A real tenant's what-if carries the replayed figures and nothing else.
@@ -149,6 +173,7 @@ export async function POST(req: Request) {
       p99CostMicroUsd: null,
       meanLatencyMs: null,
     },
+    workspaceTraffic,
     sample: {
       ...base.sample,
       used: grounded,

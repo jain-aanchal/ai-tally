@@ -15,6 +15,10 @@ vi.mock("@/lib/clickhouse", () => ({
   queryReplayEstimate: vi.fn().mockResolvedValue(null),
   // CTO-169: reconciler last-run is read from the real source; default to null (honest-null) here.
   queryReconcilerLastRun: vi.fn().mockResolvedValue(null),
+  // CTO-298 follow-up: the route probes for first-event traffic, because the page's empty state is
+  // a claim about this workspace and nothing here had ever measured it. Default to a workspace
+  // that has sent something, so the cases below are about the replay corpus, not about traffic.
+  queryFirstEventSeen: vi.fn().mockResolvedValue("connected"),
 }));
 
 import { GET as EstimateGET, POST as EstimatePOST } from "./route";
@@ -23,6 +27,7 @@ import { projection } from "@/lib/estimate";
 
 const queryReplayEstimate = ch.queryReplayEstimate as unknown as ReturnType<typeof vi.fn>;
 const queryReplayCandidates = ch.queryReplayCandidates as unknown as ReturnType<typeof vi.fn>;
+const queryFirstEventSeen = ch.queryFirstEventSeen as unknown as ReturnType<typeof vi.fn>;
 
 const originalDemo = process.env.NEXT_PUBLIC_DEMO_MODE;
 const originalDev = process.env.TALLY_DEV_TENANT;
@@ -164,6 +169,54 @@ describe("GET /api/estimate: a real replay", () => {
   });
 });
 
+// CTO-298 follow-up. The page's empty state used to be derived from the null baseline this route
+// returns to every real tenant, so a pilot with a live corpus was told nothing had ever arrived.
+// The route now reports what the first-event probe measured, and the page keys on that instead.
+describe("GET /api/estimate: the workspace-traffic probe", () => {
+  it("reports traffic the probe found, so the page renders the what-if rather than an empty state", async () => {
+    queryFirstEventSeen.mockResolvedValueOnce("connected");
+    const res = await EstimateGET(getReq());
+    const body = await res.json();
+
+    expect(body.workspaceTraffic).toBe("connected");
+    // Still no baseline: an estimate needs a replayed corpus, and that is a separate fact from
+    // whether the workspace has traffic. The two were conflated, which is the bug.
+    expect(body.current.monthlyCostMicroUsd).toBeNull();
+  });
+
+  it("reports an empty workspace only when the probe actually found none", async () => {
+    queryFirstEventSeen.mockResolvedValueOnce("waiting");
+    const res = await EstimateGET(getReq());
+    expect((await res.json()).workspaceTraffic).toBe("waiting");
+  });
+
+  it("passes the probe's unknown through rather than collapsing it onto 'nothing here'", async () => {
+    // A probe that could not run is the honest-unknown case. Folding it onto "waiting" would turn
+    // an absence of knowledge into a definite negative, which is the invariant this route breaks.
+    queryFirstEventSeen.mockResolvedValueOnce("unknown");
+    const res = await EstimateGET(getReq());
+    expect((await res.json()).workspaceTraffic).toBe("unknown");
+  });
+
+  it("carries the probe's answer onto a real replay result too", async () => {
+    queryFirstEventSeen.mockResolvedValueOnce("connected");
+    queryReplayCandidates.mockResolvedValueOnce(GROUNDED);
+    const res = await EstimateGET(getReq("?candidate_model=claude-haiku-4-5"));
+    const body = await res.json();
+    expect(body.workspaceTraffic).toBe("connected");
+    expect(body.sample.used).toBe(60);
+  });
+
+  // CTO-298 follow-up: the "samples used" diagnostic rendered this 0 as though it were a count.
+  it("reports no sample count at all when no replay was attempted", async () => {
+    const res = await EstimateGET(getReq());
+    const body = await res.json();
+    // Was 0 from EMPTY_PROJECTION, which reads as "we replayed and used none of it".
+    expect(body.sample.used).toBeNull();
+    expect(body.sample.used).not.toBe(0);
+  });
+});
+
 describe("POST /api/estimate", () => {
   it("400s when candidateModel is missing", async () => {
     const res = await EstimatePOST(postReq({ systemPromptOverride: "x" }));
@@ -219,7 +272,10 @@ describe("POST /api/estimate", () => {
     const res = await EstimatePOST(postReq({ candidateModel: "gpt-5-mini", providerOverride: "openai" }));
     const body = await res.json();
     expect(body.proposed.monthlyCostMicroUsd).toBeNull();
-    expect(body.groundedSamples).toBe(0);
+    // CTO-298 follow-up: null, not 0. No replay row came back, so no sample count was taken, and a
+    // 0 here would claim a replay ran and matched nothing.
+    expect(body.groundedSamples).toBeNull();
+    expect(body.sample.used).toBeNull();
     expect(body.replay_source).toBe("none");
     expectNoFixtureFigures(body);
   });

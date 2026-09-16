@@ -2,6 +2,7 @@
 import {
   NoDataYet,
   PartialDataBanner,
+  SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
@@ -13,17 +14,23 @@ import { EstimateWhatIf } from "./EstimateWhatIf";
 
 export default async function EstimatePage() {
   const projection = await apiGet<Projection>("/api/estimate");
-  const { workload, pr, current, sample, synthetic } = projection;
+  const { workload, pr, sample, synthetic, workspaceTraffic } = projection;
 
   // This projection samples a reconciled historical window; surface that window's freshness so a
   // forecast off a stale baseline is never shown as fresh (CTO-80).
   const reconciledThrough = boundaryFromMinutesAgo(projection.reconcilerLastRunMinutesAgo);
-  // CTO-298: an absent baseline is null, not 0. The old `=== 0` test was never true for the fixture
-  // (whose baseline is $19,100/mo), so the empty state it gated was unreachable.
-  const noBaseline = current.monthlyCostMicroUsd === null;
-  const thinSample = sample.used > 0 && sample.pathologicalIncluded === 0;
+  // CTO-298 follow-up: the empty state keys on the route's first-event probe, not on the baseline.
+  //
+  // It was `current.monthlyCostMicroUsd === null`, and `current` is filled in by the fixture alone,
+  // so that test held for every real tenant: a pilot with a replayed corpus opened this page and
+  // was told, as a measured fact, that nothing had reached ai-tally. Worse, the what-if form, the
+  // tiles, the driver breakdown and every honest blank below live inside `body`, which a real
+  // tenant then never saw. `waiting` is the probe having run and found no span, which is exactly
+  // what the copy under it claims.
+  const noTraffic = workspaceTraffic === "waiting";
+  const thinSample = (sample.used ?? 0) > 0 && sample.pathologicalIncluded === 0;
   const state = deriveDataState({
-    isEmpty: noBaseline,
+    isEmpty: noTraffic,
     isPartial: thinSample,
     reconciledThrough,
   });
@@ -75,10 +82,14 @@ export default async function EstimatePage() {
       */}
       {synthetic ? (
         <SyntheticPreviewBanner workflow="Estimate">{body}</SyntheticPreviewBanner>
+      ) : workspaceTraffic === "unknown" ? (
+        // The probe could not run, so whether anything has arrived is genuinely unknown. Answering
+        // that with "nothing has arrived" would be the same fabrication in a friendlier voice.
+        <SourceUnavailable reason="The telemetry store could not be read, so we cannot tell whether any traffic has arrived for this workspace." />
       ) : state === "empty" ? (
         <NoDataYet
-          what="baseline cost for this workload"
-          detail="An estimate is a projection off a measured baseline, and no priced traffic has reached ai-tally for this workspace yet."
+          what="traffic for this workspace"
+          detail="An estimate is a projection off a measured baseline, and the first-event probe found no spans for this workspace."
         />
       ) : (
         body
