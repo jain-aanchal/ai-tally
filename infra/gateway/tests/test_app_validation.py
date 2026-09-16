@@ -55,6 +55,19 @@ def _good(i: int) -> dict:
     }
 
 
+def _good_without_ids() -> dict:
+    """A good span shaped like real SDK traffic: gen_ai.* attributes and no structural ids.
+
+    CTO-396: every fixture here used to set trace_id/span_id, so the dedup key was always unique in
+    tests and never in production, which is how the id-less collapse survived the suite.
+    """
+    return {
+        GenAI.SYSTEM: "openai",
+        GenAI.OPERATION_NAME: "chat",
+        GenAI.USAGE_INPUT_TOKENS: 10,
+    }
+
+
 def _post(c: TestClient, spans: list[dict]) -> dict:
     body = {"tenant_id": "t-local", "sdk_version": "test", "resource_spans": spans}
     return c.post("/v1/batches", json=body)
@@ -69,6 +82,16 @@ def test_all_good_spans_accepted() -> None:
         assert body["accepted_spans"] == 2
         assert body["partial_errors"] == []
         assert len(store.spans) == 2
+
+
+def test_all_good_spans_accepted_without_ids() -> None:
+    with _client() as (c, store):
+        r = _post(c, [_good_without_ids() for _ in range(3)])
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "accepted"
+        assert body["accepted_spans"] == 3
+        assert len(store.spans) == 3
 
 
 def test_one_bad_span_yields_partial() -> None:
