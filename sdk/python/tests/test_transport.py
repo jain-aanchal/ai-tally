@@ -17,9 +17,12 @@ from tally.transport import (
     _MAX_ACK_BYTES,
     _MAX_CODE_LEN,
     _MAX_HINT_BYTES,
+    _MAX_SUMMARY_CODES,
+    _MAX_SUMMARY_LEN,
     _NON_RETRYABLE_ITEM_CODES,
     BatchingTransport,
     SendResult,
+    _code_summary,
     _parse_ack,
     _retry_hint_ms,
     _safe_code,
@@ -1149,7 +1152,7 @@ def test_a_hostile_item_code_cannot_forge_a_log_line(caplog):
         # And the record stays a readable size rather than carrying the endpoint's payload.
         assert len(message) < 400
     # The outcome is still reported, under a code that cannot be mistaken for a real one.
-    assert any("_TRUNCATED" in m for m in messages)
+    assert any("_ALTERED" in m for m in messages)
 
 
 @pytest.mark.parametrize(
@@ -1158,22 +1161,84 @@ def test_a_hostile_item_code_cannot_forge_a_log_line(caplog):
         ("RATE_LIMITED", "RATE_LIMITED"),
         ("PAYLOAD_TOO_LARGE", "PAYLOAD_TOO_LARGE"),
         ("gen.ai-2", "gen.ai-2"),
-        ("BAD\nCODE", "BADCODE"),
-        ("BAD\r\nCODE", "BADCODE"),
-        ("DROP\x00TABLE", "DROPTABLE"),
-        ("\x1b[31mred", "31mred"),
-        ("\x00\x1b\r\n", "UNPRINTABLE_CODE"),
-        ("", "UNPRINTABLE_CODE"),
+        ("BAD\nCODE", "BADCODE_ALTERED"),
+        ("BAD\r\nCODE", "BADCODE_ALTERED"),
+        ("DROP\x00TABLE", "DROPTABLE_ALTERED"),
+        ("\x1b[31mred", "31mred_ALTERED"),
+        ("\x00\x1b\r\n", "UNPRINTABLE_CODE_ALTERED"),
+        ("", "UNPRINTABLE_CODE_ALTERED"),
+        # Line terminators Python's splitlines() honours but a plain "\n" check does not, so they
+        # were unpinned before (CTO-408 review). U+2028, U+2029, U+0085.
+        ("BAD CODE", "BADCODE_ALTERED"),
+        ("BAD CODE", "BADCODE_ALTERED"),
+        ("BAD\x85CODE", "BADCODE_ALTERED"),
     ],
 )
 def test_safe_code_keeps_a_plausible_code_and_strips_the_rest(raw, expected):
     assert _safe_code(raw) == expected
 
 
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "‮PII_DETECTED",  # a right-to-left override in front of a permanent-drop code
+        "PII _DETECTED",  # a line separator inside one
+        "PII\x85_DETECTED",  # a NEL inside one
+        "PII_DETECTED\x00",
+        "‮RATE_LIMITED",  # and the retryable side of the same trick
+        "RATE _LIMITED",
+        "RATE_LIMITED" + "!" * 100,  # 112 hostile characters that strip to exactly a real code
+    ],
+)
+def test_filtering_can_never_turn_junk_into_a_real_code(hostile):
+    """The regression this hygiene introduced (CTO-408 review).
+
+    Stripping silently could rewrite garbage INTO a code this client classifies. Landing on
+    PII_DETECTED means a permanent drop of billable spans, where an unrecognised code was merely
+    retried before CTO-408 existed. Any altered string must therefore be visibly altered.
+    """
+    out = _safe_code(hostile)
+    assert out != hostile  # the input really is hostile, so this case is not vacuous
+    assert out.endswith("_ALTERED")
+    assert out not in _NON_RETRYABLE_ITEM_CODES  # cannot be classified as a permanent refusal
+    assert out not in _FLAG_ITEM_CODES  # nor silently swallowed as accepted-but-flagged
+    assert len(out) <= _MAX_CODE_LEN
+
+
+def test_an_altered_code_is_never_classified_as_a_permanent_drop(caplog):
+    """Behavioural: the span comes back rather than being written off (CTO-408 review)."""
+    import logging
+
+    sender = _ScriptedSender(
+        [SendResult(200, None, _ack(1, (("#1", "‮PII_DETECTED"),))), SendResult(200)]
+    )
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+
+    # Retried, not booked as a permanent gateway refusal: the pre-CTO-408 fate of a code we do not
+    # recognise. Reading PII_DETECTED out of that string would have lost the span for good.
+    assert t.pending() == 1
+    assert t.rejected_by_gateway_span_count == 0
+
+
 def test_safe_code_is_bounded_however_long_the_input():
     cut = _safe_code("A" * 10_000)
     assert len(cut) == _MAX_CODE_LEN
-    assert cut.endswith("_TRUNCATED")  # a cut code cannot pass as a real one
+    assert cut.endswith("_ALTERED")  # a cut code cannot pass as a real one
+
+
+def test_truncation_is_decided_on_the_raw_length_not_the_stripped_one():
+    """A long hostile code that strips short must still be marked (CTO-408 review).
+
+    Deciding the cap on the filtered string let 112 characters of hostile input pass through as an
+    unmarked, 12 character, perfectly real RATE_LIMITED.
+    """
+    raw = "RATE_LIMITED" + "!" * 100
+    assert len(raw) > _MAX_CODE_LEN
+    assert _safe_code(raw) == "RATE_LIMITED_ALTERED"
 
 
 def test_every_code_this_client_knows_survives_sanitising_unchanged():
@@ -1191,6 +1256,48 @@ def test_a_hostile_code_is_bounded_in_state_not_only_in_the_log():
     )
     assert ack is not None
     assert [len(code) for _, code in ack.errors] == [_MAX_CODE_LEN]
+
+
+def test_the_joined_log_line_is_bounded_in_aggregate_not_only_per_code(caplog):
+    """Bounding each code bounds nothing for the line as a whole (CTO-408 review).
+
+    512 distinct 64 character codes sit well inside the 1 MiB ack read cap, so this is reachable in
+    normal operation rather than a contrivance, and joining every distinct code produced a single
+    34,990 character WARNING record. The earlier size assertion in this file passed only because its
+    ack named ONE code, so it pinned nothing about the aggregate.
+    """
+    import logging
+
+    n = 512
+    errors = tuple((f"#{i}", f"C{i:03d}".ljust(_MAX_CODE_LEN, "Z")) for i in range(n))
+    sender = _ScriptedSender([SendResult(200, None, _ack(0, errors)), SendResult(200)])
+    t = _transport(sender)
+    for i in range(n):
+        t.export({"n": i})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+
+    messages = [r.getMessage() for r in caplog.records]
+    partial = [m for m in messages if "inside a 200" in m]
+    assert partial  # the line under test really did fire, so this is not a vacuous assertion
+    for message in messages:
+        assert len(message) < 600  # the aggregate bound, with every one of the 512 codes in play
+        assert "\n" not in message
+    # The tail is counted rather than printed, so the line still says how much it is not naming.
+    assert f"+{n - _MAX_SUMMARY_CODES} more" in partial[0]
+
+
+def test_the_code_summary_names_the_biggest_offenders_and_counts_the_rest():
+    counts = {"RATE_LIMITED": 3, "INVALID_SCHEMA": 9, "PII_DETECTED": 1}
+    # Ranked by count, so the line names what actually happened rather than what sorts first.
+    assert _code_summary(counts) == "INVALID_SCHEMA=9, RATE_LIMITED=3, PII_DETECTED=1"
+    assert _code_summary({}) == ""
+
+    many = {f"C{i:03d}": 1 for i in range(50)}
+    summary = _code_summary(many)
+    assert summary.count("=") == _MAX_SUMMARY_CODES
+    assert summary.endswith(f"+{50 - _MAX_SUMMARY_CODES} more")
+    assert len(summary) <= _MAX_SUMMARY_LEN
 
 
 def test_an_oversized_body_is_not_json_parsed_for_a_retry_hint():
