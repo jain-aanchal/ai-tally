@@ -115,7 +115,7 @@ function proxyAnthropic(key: string, e: ConnectEndpoints): Snippet {
       '  -H "anthropic-version: 2023-06-01" \\',
       `  -H "X-Tenant-Key: ${key}" \\`,
       '  -H "Content-Type: application/json" \\',
-      `  -d '{"model":"claude-3-5-haiku-latest","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'`,
+      `  -d '{"model":"claude-haiku-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'`,
     ].join("\n"),
     note: PROXY_REFRESH_NOTE,
   };

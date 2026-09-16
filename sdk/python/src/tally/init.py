@@ -32,6 +32,7 @@ from tally.hmac_keys import HmacKeyBootstrap, HmacKeyRegistry, RemoteKeyMaterial
 from tally.instrumentation.patch import patch_anthropic, patch_openai, unpatch_all
 from tally.pricing import PriceCatalog, seed_catalog
 from tally.safety import SelfObservability
+from tally.sampling import Sampler, SamplingConfig
 from tally.transport import DEFAULT_ENDPOINT, BatchingTransport, fetch_hmac_key
 
 _log = logging.getLogger("tally")
@@ -106,6 +107,7 @@ def init(
                 endpoint=resolved_endpoint,
                 exporter=transport,
                 catalog=resolved_catalog,
+                sampler=_keep_every_call_sampler(),
                 observability=obs,
             )
 
@@ -144,6 +146,19 @@ def init(
             if _client is None:
                 _client = TallyClient(observability=obs)
             return _client
+
+
+def _keep_every_call_sampler() -> Sampler:
+    """A sampler that sends every ``record_llm_call`` span.
+
+    CTO-382: the default :class:`SamplingConfig` keeps about 1 in 10 cheap calls, but the dashboard
+    sums ``EstimatedCost`` as stored and never scales kept spans back up by their sample rate, so a
+    one-line connect undercounted hand-recorded LLM cost about tenfold. Every other path already
+    sends everything (the patched openai / anthropic clients and the other ``record_*`` helpers), so
+    ``tally.init`` does too. Head sampling stays available to callers who build a ``TallyClient``
+    with their own sampler.
+    """
+    return Sampler(SamplingConfig(body_rate=1.0, mid_rate=1.0, tail_rate=1.0))
 
 
 def _bootstrap_hmac(
