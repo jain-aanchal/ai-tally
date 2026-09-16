@@ -948,6 +948,19 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
                 tenant_id=batch.tenant_id,
                 effective_ts_ns=skew.effective_ts_ns,
                 sample_rate=batch.sampling.head_sample_rate,
+                # CTO-402: the span's position in the batch as posted, which is part of what an
+                # id-less span's deterministic identity is derived from. A retry presents the same
+                # spans in the same order, so it reproduces the same ids and the duplicate rows
+                # collapse instead of accumulating.
+                batch_index=index,
+                # CTO-402: hash the RAW posted span, not result.attributes. enrich_cost returns a
+                # COPY (it never mutates `span`), and that copy carries the server-recomputed cost
+                # and gen_ai.cost.price_catalog_version. Both move when the catalog reloads or a
+                # rolling deploy lands between an attempt and its retry, which would shift the
+                # derived id and stop the duplicate rows collapsing: exactly the failure this fix
+                # exists to prevent. The posted span is the only thing a retry reproduces byte for
+                # byte.
+                identity_span=span,
             )
         )
         # CTO-405: the client-facing name of the span this row came from, kept in lockstep with
