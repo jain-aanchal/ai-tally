@@ -38,13 +38,23 @@ export function ThresholdSettings({
   initial,
   defaults,
   hasOverride,
+  canEdit = true,
+  accessUnknown = false,
 }: {
   initial: UnitEconomicsThresholds;
   defaults: UnitEconomicsThresholds;
   hasOverride: boolean;
+  /** CTO-392: false for a non-admin. The route refuses the write either way; this only stops the
+   *  panel offering a save that is always refused. */
+  canEdit?: boolean;
+  /** CTO-392: true when `canEdit` is false only because the role could not be READ, so the panel
+   *  says which of the two it is instead of calling an admin a member. */
+  accessUnknown?: boolean;
 }) {
   const [form, setForm] = useState<UnitEconomicsThresholds>(initial);
   const [state, setState] = useState<SaveState>("idle");
+  /** CTO-393: why the save failed, so an unreachable control plane says so rather than "save failed". */
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [overridden, setOverridden] = useState(hasOverride);
   const err = invalid(form);
   const isDefault =
@@ -67,20 +77,29 @@ export function ThresholdSettings({
   async function save() {
     if (err) return;
     setState("saving");
+    setSaveError(null);
     try {
       const res = await fetch("/api/unit-economics/config", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(form),
       });
-      if (res.ok) {
-        setState("saved");
-        setOverridden(true);
-      } else {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        persisted?: boolean;
+      };
+      // CTO-393: `res.ok` alone used to be the test, so an unreachable control plane (which answered
+      // 200 with persisted:false) set "saved" over cutoffs that still held their old values.
+      if (!res.ok || body.persisted === false) {
         setState("error");
+        setSaveError(body.error ?? "Not saved: the control plane is unreachable.");
+        return;
       }
+      setState("saved");
+      setOverridden(true);
     } catch {
       setState("error");
+      setSaveError("Not saved: the control plane is unreachable.");
     }
   }
 
@@ -98,7 +117,7 @@ export function ThresholdSettings({
         <button
           type="button"
           onClick={resetToDefaults}
-          disabled={isDefault}
+          disabled={isDefault || !canEdit}
           className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
         >
           Reset to defaults
@@ -114,6 +133,7 @@ export function ThresholdSettings({
               type="number"
               step={step}
               min="0"
+              disabled={!canEdit}
               value={Number.isFinite(form[key]) ? form[key] : ""}
               onChange={(e) => patch(key, e.target.value)}
               className="w-full rounded-md border border-edge bg-ink px-2 py-1 text-sm tabular-nums"
@@ -127,15 +147,28 @@ export function ThresholdSettings({
         <button
           type="button"
           onClick={save}
-          disabled={!!err || state === "saving"}
+          disabled={!!err || state === "saving" || !canEdit}
           className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-40"
         >
           Save thresholds
         </button>
+        {!canEdit &&
+          (accessUnknown ? (
+            <span className="text-xs text-warn">
+              Your access could not be checked, so saving is turned off. That is not a statement
+              that you lack permission: the control plane did not answer.
+            </span>
+          ) : (
+            <span className="text-xs text-muted">
+              Read-only. Ask an organization admin to change these cutoffs.
+            </span>
+          ))}
         {err && <span className="text-xs text-bad">{err}</span>}
         {!err && state === "saving" && <span className="text-xs text-muted">saving…</span>}
         {!err && state === "saved" && <span className="text-xs text-good">saved ✓</span>}
-        {!err && state === "error" && <span className="text-xs text-bad">save failed</span>}
+        {!err && state === "error" && (
+          <span className="text-xs text-bad">{saveError ?? "save failed"}</span>
+        )}
       </div>
     </section>
   );

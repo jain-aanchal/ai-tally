@@ -23,3 +23,18 @@ export interface ResolvedTenant {
 
 /** Clerk's admin role in an org. Key and member writes require it (§9). */
 export const ORG_ADMIN_ROLE = "org:admin";
+
+/**
+ * Whether a surface may offer control-plane writes, in the three states that actually exist
+ * (CTO-392).
+ *
+ * `unknown` is the one worth having. Resolving the role means resolving the org through the
+ * gateway, which can fail, and a failure is NOT the same fact as "you are a member". Collapsing
+ * the two shows an admin a read-only page during a transient blip with nothing to explain it,
+ * which is the honesty invariant applied to permissions: a state we could not read is reported as
+ * unknown, never rendered as a definite "no".
+ *
+ * The server is the enforcement point in every case; this only decides what is worth showing and
+ * what to say about it.
+ */
+export type EditAccess = "allowed" | "denied" | "unknown";

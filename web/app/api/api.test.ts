@@ -146,12 +146,23 @@ describe("api routes", () => {
     expect(body.overall.attributionRate).toBeGreaterThan(0);
   });
 
-  it("GET /api/estimate returns a projection", async () => {
-    const body = await json<{ workload: string; blowUpRisk: number }>(
-      await EstimateGET(new Request("http://test/api/estimate") as never),
-    );
-    expect(body.workload).toBeTypeOf("string");
-    expect(body.blowUpRisk).toBeGreaterThanOrEqual(0);
+  // CTO-298: the pinned test tenant is a real tenant with no replayed corpus, and the suite is not
+  // a demo build, so /estimate answers with the empty projection. It used to assert the fixture's
+  // workload string and 42% blow-up risk here, which is exactly what a signed-in pilot user saw.
+  it("GET /api/estimate returns an honest empty projection, not the fixture", async () => {
+    const body = await json<{
+      workload: string | null;
+      blowUpRisk: number | null;
+      drivers: unknown[];
+      synthetic: boolean;
+      current: { monthlyCostMicroUsd: number | null };
+    }>(await EstimateGET(new Request("http://test/api/estimate") as never));
+    expect(body.synthetic).toBe(false);
+    expect(body.workload).toBeNull();
+    expect(body.blowUpRisk).toBeNull();
+    expect(body.drivers).toEqual([]);
+    // Null, never 0: an unmeasured baseline is unknown, and "$0.00/mo" would be a claim.
+    expect(body.current.monthlyCostMicroUsd).toBeNull();
   });
 
   it("GET /api/onboarding returns progress + creds (no OpenAI key leaked)", async () => {
@@ -242,9 +253,18 @@ describe("api routes", () => {
     expect(body.economics).toEqual({});
   });
 
-  it("POST /api/guardrails echoes a valid rule (gateway unreachable), rejects an unconstrained one", async () => {
-    // Gateway isn't running in CI / fresh clone, so POST validates and echoes the rule back with a
-    // client-supplied change_id rather than blocking on the control plane.
+  it("POST /api/guardrails echoes a valid rule on the DEV path (gateway unreachable), rejects an unconstrained one", async () => {
+    // CTO-393 CHANGED THIS EXPECTATION. It used to read "echoes a valid rule (gateway unreachable)"
+    // with no mention of which path, because the echo was unconditional: the route answered 200 with
+    // `persisted: false` to everyone, including a signed-in customer whose save had just failed.
+    //
+    // The echo is kept, but only where its stated reason holds: a fresh clone with no infra, which
+    // is what the dev escape hatch marks. This suite sets TALLY_DEV_TENANT (vitest.config.ts), so it
+    // is on the dev path and the echo still applies. The product-path 503 is pinned in
+    // honest-save-failures.test.ts, over a cleared escape hatch and a mocked Clerk org.
+    //
+    // `persisted` is asserted explicitly now: a 200 alone no longer means the rule was stored, and
+    // that distinction is the whole ticket.
     const ok = await GuardrailsPOST(
       new Request("http://test/x", {
         method: "POST",
@@ -252,8 +272,9 @@ describe("api routes", () => {
       }),
     );
     expect(ok.status).toBe(200);
-    const okBody = await json<{ changeId: string }>(ok);
+    const okBody = await json<{ changeId: string; persisted: boolean }>(ok);
     expect(okBody.changeId).toBeTypeOf("string");
+    expect(okBody.persisted).toBe(false);
 
     const bad = await GuardrailsPOST(
       new Request("http://test/x", {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, requireAdmin, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -9,6 +9,7 @@ import {
   guardrailRules,
 } from "@/lib/guardrails";
 import { queryGuardrailRules } from "@/lib/clickhouse";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Guardrail config lives in the control plane (Postgres, CTO-27/116), reached via the gateway. The
 // reader (queryGuardrailRules) falls back to the typed mock when the gateway is unreachable, so
@@ -62,10 +63,16 @@ export async function GET(req: Request) {
 }
 
 // POST /api/guardrails: persist an edited rule. Validates the shape, then forwards to the gateway's
-// idempotent upsert with a client-supplied change_id (UUID). When the gateway is unreachable we still
-// validate and echo the rule back (the client treats the echo as the saved state) so the prototype
-// works without infra; the SDK picks the change up on its next config-refresh window.
+// idempotent upsert with a client-supplied change_id (UUID); the SDK picks the change up on its next
+// config-refresh window. When the gateway is unreachable OFF the product path the validated rule is
+// echoed back so a fresh clone works without infra (CTO-393); on the product path that is a failed
+// save and answers 503.
 export async function POST(req: Request) {
+  // CTO-392: a rule's caps and mode decide what live traffic is allowed to spend, so editing one is
+  // admin-only. Gated before the body is read, so a member's request never reaches the gateway.
+  const gate = await requireAdmin("change guardrail rules");
+  if (!gate.ok) return gate.response;
+
   let rule: Partial<GuardrailRule>;
   try {
     rule = (await req.json()) as Partial<GuardrailRule>;
@@ -102,7 +109,7 @@ export async function POST(req: Request) {
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/tenant/guardrails`, {
       method: "POST",
-      headers: controlPlaneHeaders(await resolveTenantId(), { "content-type": "application/json" }),
+      headers: controlPlaneHeaders(gate.tenant.tenantId, { "content-type": "application/json" }),
       body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(2000),
@@ -113,6 +120,8 @@ export async function POST(req: Request) {
         rule,
         gatewayRule: body.rule ?? null,
         changeId,
+        // CTO-393: stated explicitly so the client never has to infer "it saved" from a 200 alone.
+        persisted: true,
         configRefreshSeconds: CONFIG_REFRESH_SECONDS,
       });
     }
@@ -123,7 +132,17 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: `gateway error ${res.status}` }, { status: 502 });
   } catch {
-    // Gateway unreachable (CI / fresh clone): echo the validated rule so the prototype still works.
+    // CTO-393: the control plane could not be reached, so the rule was NOT stored. This branch used
+    // to answer 200 with `persisted: false` on every path, and GuardrailRow checks only `res.ok`, so
+    // a cap change that never happened rendered as "Caps updated. Live within the refresh window."
+    // over live traffic that is still running under the old cap.
+    if (!controlPlaneEchoAllowed()) {
+      return NextResponse.json(
+        { error: "Not saved: the control plane is unreachable.", persisted: false },
+        { status: 503 },
+      );
+    }
+    // Off the product path (fresh clone / CI): echo the validated rule so the prototype still works.
     return NextResponse.json({
       rule,
       changeId,

@@ -7,12 +7,13 @@
 //
 // #320: the replay diagnostics are no longer fixture constants. Nothing on this page claims a
 // replayed trace, a replay cost or a corpus size unless the real /v1/replay projection measured it.
-import { Suspense, type ReactNode } from "react";
+import { Suspense } from "react";
 
 import { Card } from "@/components/Card";
 import {
   NoDataYet,
   PartialDataBanner,
+  SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
 } from "@/components/DataStateBanner";
@@ -23,7 +24,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import { apiGet } from "@/lib/api";
-import { type Comparison, deltaPct } from "@/lib/compare";
+import { NO_REPLAY_RAN_REASON, type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { isDemoMode } from "@/lib/demoMode";
 import type { MicroUSD } from "@/lib/types";
@@ -32,21 +33,10 @@ import type { MicroUSD } from "@/lib/types";
 // a stack that has never run one there is no corpus, no replayed trace and no replay spend. The old
 // fixture answered all three with plausible numbers, which reads as a measurement rather than as the
 // absence of one.
-const NO_REPLAY_REASON =
-  "no cross-provider replay has run for this workload, so there is nothing replayed to count or cost";
-
-/**
- * A diagnostics row whose value may be an honest blank ({@link Diag} takes a plain string, so a
- * blank rendered through it would lose the reason that has to travel with it).
- */
-function DiagNode({ k, v }: { k: string; v: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted">{k}</dt>
-      <dd>{v}</dd>
-    </>
-  );
-}
+//
+// CTO-395 review: the reason now travels on the payload, because the page cannot tell from a null
+// count whether the replay never ran or the read failed, and those need different sentences. The
+// imported constant is the fallback for a payload that carries none.
 
 export default async function ComparePage({
   searchParams,
@@ -59,6 +49,20 @@ export default async function ComparePage({
   await searchParams;
   const comparison = await apiGet<Comparison>("/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
+
+  // CTO-395 review: a read that FAILED comes first, because it is not the same news as a workspace
+  // with no traffic and must not borrow its sentence. SourceUnavailable makes no claim about
+  // whether data exists; the empty state below claims none has arrived, which only a successful
+  // read earns. Without this branch, a customer in the post-signup provisioning race (a
+  // TenantNotProvisionedError out of resolveTenantId) was told no telemetry had ever reached us.
+  if (comparison.unavailable !== null) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Model Comparison" />
+        <SourceUnavailable reason={comparison.unavailable} />
+      </div>
+    );
+  }
 
   // CTO-379: no incumbent means no subject. Every figure below is derived from the current model,
   // so this is the new-workspace case and the next step is setup, not a comparison.
@@ -100,6 +104,12 @@ export default async function ComparePage({
     reconciledThrough,
   });
   const asOf = asOfLabel(reconciledThrough);
+
+  // CTO-395 review: the true reason for THIS payload's blank replay counts. A rejected replay read
+  // and an absent replay corpus both arrive as null counts, and telling a customer "no replay has
+  // run" when the read actually failed is a wrong reason on a blank, which the route's own
+  // docstring calls out as its own honesty failure.
+  const replayBlankReason = diagnostics.replayUnavailableReason ?? NO_REPLAY_RAN_REASON;
 
   // Money headlines from the payload. Cheapest candidate is a genuine min over real figures; null
   // when there are no candidates (honest blank rather than a fabricated 0).
@@ -160,11 +170,13 @@ export default async function ComparePage({
         <SummaryTile
           label="Replay cost"
           micro={diagnostics.replayCostMicroUsd}
-          reason={NO_REPLAY_REASON}
+          reason={replayBlankReason}
           hint={
-            diagnostics.samplesReplayed === null
-              ? "no replay has run for this workload"
-              : `${diagnostics.samplesReplayed.toLocaleString()} traces replayed`
+            diagnostics.samplesReplayed !== null
+              ? `${diagnostics.samplesReplayed.toLocaleString()} traces replayed`
+              : replayBlankReason === NO_REPLAY_RAN_REASON
+                ? "no replay has run for this workload"
+                : "replay counts could not be read"
           }
         />
       </TileGrid>
@@ -226,11 +238,14 @@ export default async function ComparePage({
           {/* #320: every count here is nullable and renders the explained blank when no replay has
               run. Previously the fixture's 4,200 / 87,400 / $42.30 printed on a live page with nine
               spans behind it, which is the fabricated-figure failure CLAUDE.md exists to prevent. */}
-          <DiagNode
+          {/* CTO-298 widened `Diag`'s value to a ReactNode precisely so a row can carry the shared
+              `Blank` with its reason attached, which is what the local DiagNode wrapper existed to
+              work around. The wrapper is gone; this is the shared component. */}
+          <Diag
             k="samples replayed"
             v={
               diagnostics.samplesReplayed === null || diagnostics.samplesAvailable === null ? (
-                <Blank reason={NO_REPLAY_REASON} />
+                <Blank reason={replayBlankReason} />
               ) : (
                 `${diagnostics.samplesReplayed.toLocaleString()} of ${diagnostics.samplesAvailable.toLocaleString()} prod traces`
               )
@@ -238,9 +253,9 @@ export default async function ComparePage({
           />
           {/* #329: the "excluded (rate limits)" row is gone. Nothing ever measured it, so it
               rendered a blank on every code path. The blank was honest and the row was noise. */}
-          <DiagNode
+          <Diag
             k="replay cost"
-            v={<Money micro={diagnostics.replayCostMicroUsd} reason={NO_REPLAY_REASON} />}
+            v={<Money micro={diagnostics.replayCostMicroUsd} reason={replayBlankReason} />}
           />
           {/* Demo presentation mode hides the "context fidelity" caption: its value is a pure
               methodology hedge ("resolved-context replay (no live retrieval)"), not a number. The

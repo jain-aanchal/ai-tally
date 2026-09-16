@@ -1005,4 +1005,244 @@ describe("/api/compare", () => {
       expect(body.diagnostics.replayCostMicroUsd).toBe(12_500);
     });
   });
+
+  // CTO-395. The route carried a comment promising these ran in parallel, directly above two
+  // sequential awaits. queryEvalCandidates is a synchronous judge run with a 600 second timeout,
+  // so a replay could sit behind a ten-minute eval and the page waited for the sum.
+  // CTO-395 review. `settled()` mapped every rejection onto null, and null on `live` is this
+  // route's "no traffic" signal, so a failure to identify or reach the tenant was reported to the
+  // customer as a measured fact about their telemetry. resolveTenantId() runs outside every
+  // helper's try block and throws NoActiveOrgError, throws TenantNotProvisionedError on the
+  // post-signup provisioning race, and rethrows on any non-404 from the gateway, including a 503.
+  describe("CTO-395 review: a failed read is not an empty workspace", () => {
+    /** A real signed-in tenant: the fixture gate is shut, so the honest answer is the only answer. */
+    function realTenant() {
+      delete process.env.NEXT_PUBLIC_DEMO_MODE;
+      delete process.env.TALLY_DEV_TENANT;
+    }
+
+    it("reports a rejected current-model read as unavailable, not as 'no telemetry has arrived'", async () => {
+      realTenant();
+      // Exactly what a browser that beats the organization.created webhook produces.
+      queryCurrentModel.mockRejectedValueOnce(new Error("no tenant provisioned for org org_123"));
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      // The new fact: the page has something true to render instead of the empty state.
+      expect(body.unavailable).toEqual(expect.stringContaining("could not be read"));
+      expect(body.current).toBeNull();
+      expect(body.candidates).toEqual([]);
+      expect(body.recommendation).toBeNull();
+    });
+
+    it("keeps that distinct from the genuine empty state, which does claim nothing arrived", async () => {
+      realTenant();
+      // The read SUCCEEDED and found no incumbent. This one has earned the "nothing yet" sentence.
+      queryCurrentModel.mockResolvedValueOnce(null);
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      expect(body.unavailable).toBeNull();
+      expect(body.current).toBeNull();
+    });
+
+    it("logs a warning naming the read that failed", async () => {
+      realTenant();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      queryCurrentModel.mockRejectedValueOnce(new Error("HTTP 503"));
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      await CompareGET(new Request("http://test/api/compare") as never);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("current model read failed"));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("HTTP 503"));
+      warn.mockRestore();
+    });
+  });
+
+  // CTO-395 review, finding 2. A rejected replay read and "no replay corpus exists" both arrive as
+  // null counts, so the blank said "no cross-provider replay has run for this workload" even when
+  // the truth was that the read failed. The route's own replayDiagnostics docstring states the
+  // rule: a wrong reason on a blank is its own honesty failure.
+  describe("CTO-395 review: the replay blank carries its true reason", () => {
+    const liveCurrent = {
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    };
+
+    it("says the read failed when the replay read threw", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockRejectedValueOnce(new Error("gateway unreachable"));
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      expect(body.diagnostics.replayUnavailableReason).toMatch(/could not be read/i);
+      // The counts stay unknown either way; it is the REASON that was wrong.
+      expect(body.diagnostics.samplesReplayed).toBeNull();
+      expect(body.diagnostics.replayUnavailableReason).not.toMatch(/no cross-provider replay has run/i);
+    });
+
+    it("says no replay ran when the replay read answered null", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockResolvedValueOnce(null);
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      expect(body.diagnostics.replayUnavailableReason).toMatch(/no cross-provider replay has run/i);
+      expect(body.diagnostics.samplesReplayed).toBeNull();
+    });
+
+    it("explains nothing away when the counts are real measurements", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockResolvedValueOnce({
+        samples_available: 50,
+        per_candidate: [
+          {
+            provider: "anthropic",
+            model: "claude-haiku-4-5",
+            projected_monthly_cost_micro_usd: 75_000,
+            p50_latency_ms: 800,
+            p95_latency_ms: 1500,
+            error_rate: 0.01,
+            samples_replayed: 50,
+            excluded_budget_count: 0,
+          },
+        ],
+        diagnostics: {
+          context_fidelity: "resolved-context replay (no live retrieval)",
+          replay_cost_micro_usd: 12_500,
+        },
+      });
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      expect(body.diagnostics.replayUnavailableReason).toBeNull();
+      expect(body.diagnostics.samplesReplayed).toBe(50);
+    });
+  });
+
+  describe("CTO-395: the reads run concurrently and fail honestly", () => {
+    const liveCurrent = {
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      monthlyCostMicroUsd: 10_000_000,
+      monthlyCalls: 2000,
+      latencyP95Ms: 2400,
+      errorRate: 0.004,
+      sampleCount: 500,
+    };
+
+    const replayProjection = {
+      samples_available: 50,
+      per_candidate: [
+        {
+          provider: "anthropic",
+          model: "claude-haiku-4-5",
+          projected_monthly_cost_micro_usd: 75_000,
+          p50_latency_ms: 800,
+          p95_latency_ms: 1500,
+          error_rate: 0.01,
+          samples_replayed: 50,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: {
+        context_fidelity: "resolved-context replay (no live retrieval)",
+        replay_cost_micro_usd: 12_500,
+      },
+    };
+
+    it("starts the eval query before the replay query resolves", async () => {
+      const order: string[] = [];
+      let releaseReplay: () => void = () => {};
+      const replayGate = new Promise<void>((resolve) => {
+        releaseReplay = resolve;
+        // Safety net: if the route is sequential again, the replay is never released by the eval
+        // call below, so release it here. The test then fails on the recorded order (fast and
+        // legible) instead of hanging until the suite timeout.
+        setTimeout(resolve, 100);
+      });
+
+      queryCurrentModel.mockResolvedValueOnce(null);
+      queryReplayCandidates.mockImplementationOnce(async () => {
+        order.push("replay:start");
+        await replayGate;
+        order.push("replay:end");
+        return null;
+      });
+      queryEvalCandidates.mockImplementationOnce(async () => {
+        // Only reachable while the replay is still pending if both were started together.
+        order.push("eval:start");
+        releaseReplay();
+        return null;
+      });
+
+      await CompareGET(new Request("http://test/api/compare") as never);
+
+      // Sequential code records replay:start, replay:end, eval:start.
+      expect(order).toEqual(["replay:start", "eval:start", "replay:end"]);
+    });
+
+    it("an eval failure leaves the replayed costs standing and quality honestly null", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockResolvedValueOnce(replayProjection);
+      queryEvalCandidates.mockRejectedValueOnce(new Error("judge run timed out"));
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      // The half that answered is not discarded because the other half threw.
+      expect(body.replay_source).toBe("replay");
+      const haiku = body.candidates.find((c: { model: string }) => c.model === "claude-haiku-4-5");
+      expect(haiku.monthlyCostMicroUsd).toBe(3_000_000);
+      // The half that failed is unknown, never a zero win-rate, which would read as "this model
+      // lost every judged pair" rather than "no pair was judged".
+      expect(haiku.qualityScore).toBeNull();
+      expect(haiku.qualityCi).toBeUndefined();
+    });
+
+    it("a replay failure is reported as unknown counts, not as zeros", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockRejectedValueOnce(new Error("gateway unreachable"));
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      // The incumbent still answers: one failed read does not blank a sibling that succeeded.
+      expect(body.current.model).toBe("claude-sonnet-4-5");
+      expect(body.current.latencyP95Ms).toBe(2400);
+      // A count we could not take is unknown. Zero would claim we replayed nothing successfully.
+      expect(body.diagnostics.samplesReplayed).toBeNull();
+      expect(body.diagnostics.samplesAvailable).toBeNull();
+      expect(body.diagnostics.replayCostMicroUsd).toBeNull();
+    });
+
+    it("a reconciler failure blanks only the freshness signal", async () => {
+      queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+      queryReplayCandidates.mockResolvedValueOnce(replayProjection);
+      (ch.queryReconcilerLastRun as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("reconciliation_runs unreadable"),
+      );
+
+      const res = await CompareGET(new Request("http://test/api/compare") as never);
+      const body = await res.json();
+
+      expect(body.diagnostics.reconcilerLastRunMinutesAgo).toBeNull();
+      // Everything else still came back.
+      expect(body.replay_source).toBe("replay");
+      expect(body.diagnostics.samplesReplayed).toBe(50);
+    });
+  });
 });

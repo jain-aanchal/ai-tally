@@ -6,6 +6,7 @@
 // as to the form. Nothing is written from the browser and the web app never touches Postgres.
 import { revalidatePath } from "next/cache";
 
+import { requireAdmin } from "@/lib/getTenant";
 import {
   type UploadResult,
   deleteRevenueUpload,
@@ -19,6 +20,10 @@ export async function uploadRevenueCsvAction(
   csv: string,
   filename: string,
 ): Promise<UploadResult> {
+  // CTO-392: a server action is a public endpoint, and an upload replaces a whole period's revenue,
+  // which is the denominator of every margin figure downstream.
+  const gate = await requireAdmin("upload revenue");
+  if (!gate.ok) return { ok: false, error: gate.error, rowErrors: [] };
   if (typeof csv !== "string" || !csv.trim()) {
     return { ok: false, error: "The file is empty.", rowErrors: [] };
   }
@@ -36,6 +41,8 @@ export async function uploadRevenueCsvAction(
 export async function deleteRevenueUploadAction(
   period: string,
 ): Promise<{ ok: true; removed: boolean } | { ok: false; error: string }> {
+  const gate = await requireAdmin("upload revenue");
+  if (!gate.ok) return { ok: false, error: gate.error };
   const result = await deleteRevenueUpload(period);
   if (!result.ok) return result;
   revalidatePath("/connectors");

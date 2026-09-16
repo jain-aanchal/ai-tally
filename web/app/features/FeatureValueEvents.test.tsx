@@ -40,6 +40,9 @@ function mockFetch(handlers: {
   observed?: { name: string; count: number }[];
   observedAvailable?: boolean;
   postOk?: boolean;
+  /** CTO-393: what the save route says it actually stored. Defaults to a real save. */
+  postPersisted?: boolean;
+  postStatus?: number;
 }) {
   const post = vi.fn();
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47,8 +50,15 @@ function mockFetch(handlers: {
     if (init?.method === "POST") {
       post(JSON.parse(String(init.body)));
       return new Response(
-        JSON.stringify({ feature: "smart_search", eventName: "paid_conversion" }),
-        { status: handlers.postOk === false ? 500 : 200 },
+        JSON.stringify({
+          feature: "smart_search",
+          eventName: "paid_conversion",
+          persisted: handlers.postPersisted ?? true,
+        }),
+        {
+          status:
+            handlers.postStatus ?? (handlers.postOk === false ? 500 : 200),
+        },
       );
     }
     if (url.includes("/api/features/value-events")) {
@@ -112,5 +122,25 @@ describe("FeatureValueEvents (CTO-140)", () => {
     // Row now shows the saved event and the banner is gone.
     await waitFor(() => expect(screen.getByText("paid_conversion")).toBeTruthy());
     expect(screen.queryByText(/Finish setup/i)).toBeNull();
+  });
+
+  // CTO-393: the modal checked only `res.ok`, so an unreachable control plane closed it and marked
+  // the feature configured while nothing had been stored. Whether a feature has a value event is
+  // what decides if its ROI is attributed at all, so a failed save has to stay visible.
+  it.each([
+    ["a 503 from an unreachable control plane", { postStatus: 503, postPersisted: false }],
+    ["a 200 that says persisted:false", { postStatus: 200, postPersisted: false }],
+  ])("keeps the modal open and reports the failure on %s", async (_name, overrides) => {
+    mockFetch({ observed: [{ name: "paid_conversion", count: 42 }], ...overrides });
+    render(<FeatureValueEvents initialFeatures={[feature({})]} />);
+    fireEvent.click(screen.getByText(/configure value event/i));
+    await waitFor(() => expect(screen.getByText("paid_conversion")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("radio", { name: /paid_conversion/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Save value event/i }));
+
+    await waitFor(() => expect(screen.getByText(/Not saved/i)).toBeTruthy());
+    // The row was never updated, so the workspace still shows this feature as unconfigured.
+    expect(screen.getByText(/Finish setup/i)).toBeTruthy();
   });
 });

@@ -27,6 +27,7 @@ import {
   type AttributionDiagnostics,
   type FeatureEconomics,
 } from "@/lib/features";
+import type { EditAccess } from "@/lib/tenantShared";
 import {
   asOfLabel,
   deriveDataState,
@@ -42,6 +43,11 @@ interface FeaturesDetailPayload {
   /** null when the reconciler status could not be read, or has never run (#364). */
   diagnostics: AttributionDiagnostics | null;
   sources: { features: SourceState; diagnostics: SourceState };
+  /** CTO-392: whether this caller may pin a value event, in three states. Absent on an older cached
+   *  payload, which is read as "unknown": the CTA stays hidden either way (the route refuses the
+   *  write), but an admin is told the access could not be established rather than being shown a
+   *  bare "not configured" that reads as a statement about their role. */
+  manageAccess?: EditAccess;
 }
 
 type FetchStatus = "loading" | "ready" | "unavailable";
@@ -145,7 +151,11 @@ export function FeatureDetail({ feature }: { feature: string }) {
           inline value-event config CTA + POST path, reused verbatim from /features. A single-element
           list yields exactly this one feature's row, so the value/user and payback honest blanks and
           the "configure value event →" flow are preserved unchanged (CTO-242). */}
-      <FeatureValueEvents initialFeatures={[selected]} />
+      <FeatureValueEvents
+        initialFeatures={[selected]}
+        canEdit={data.manageAccess === "allowed"}
+        accessUnknown={(data.manageAccess ?? "unknown") === "unknown"}
+      />
 
       <Card title="Attribution diagnostics">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

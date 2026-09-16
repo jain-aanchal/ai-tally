@@ -3,7 +3,7 @@
 // revoked_at = now() (a real revoke, not a delete). Returns the gateway's 204.
 import { NextResponse } from "next/server";
 
-import { canManage, controlPlaneHeaders, getTenant } from "@/lib/getTenant";
+import { controlPlaneHeaders, requireAdmin } from "@/lib/getTenant";
 
 const GATEWAY_URL = process.env.TALLY_GATEWAY_URL ?? "http://localhost:8080";
 
@@ -12,13 +12,12 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   const { id } = await params;
-  const tenant = await getTenant();
-  if (!canManage(tenant)) {
-    return NextResponse.json({ error: "admin role required to revoke keys" }, { status: 403 });
-  }
+  // CTO-392: the same gate as before, now the shared one every mutation goes through.
+  const gate = await requireAdmin("revoke keys");
+  if (!gate.ok) return gate.response;
   const res = await fetch(`${GATEWAY_URL}/v1/tenant/keys/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    headers: controlPlaneHeaders(tenant.tenantId),
+    headers: controlPlaneHeaders(gate.tenant.tenantId),
   });
   return new NextResponse(null, { status: res.status });
 }
