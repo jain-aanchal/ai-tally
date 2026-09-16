@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneEchoAllowed, controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import { queryDistinctBusinessEventNames, queryFeatureValueEvents } from "@/lib/clickhouse";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Feature value-event config (CTO-140) lives in the control plane (Postgres), reached via the
 // gateway; the observed-events list comes live from ClickHouse `business_events`. Both readers fall

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneEchoAllowed, controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -9,6 +9,7 @@ import {
   guardrailRules,
 } from "@/lib/guardrails";
 import { queryGuardrailRules } from "@/lib/clickhouse";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Guardrail config lives in the control plane (Postgres, CTO-27/116), reached via the gateway. The
 // reader (queryGuardrailRules) falls back to the typed mock when the gateway is unreachable, so

@@ -18,8 +18,25 @@ vi.mock("@clerk/nextjs/server", () => ({ auth: authMock }));
 const TENANT_UUID = "3f8c1c2a-0b7e-4d3a-9a1b-77c0d5e2f011";
 const originalDevTenant = process.env.TALLY_DEV_TENANT;
 
-/** The control plane is down: the org resolve still answers, every write attempt refuses. */
-function stubUnreachableGateway() {
+/**
+ * The control plane is down completely, the org resolve included.
+ *
+ * This is what an unreachable gateway actually looks like, and an earlier version of this suite
+ * quietly excluded it by always answering the resolve. Resolving the tenant is a gateway call like
+ * any other, so a stub that answers it exercises a failure mode that cannot occur in isolation and
+ * leaves the real one uncovered: on a branch that resolves the tenant ABOVE the route's try, the
+ * resolve throws straight out of the handler and Next answers a bare 500, with none of the honest
+ * refusal below ever running.
+ */
+function stubTotalOutage() {
+  vi.stubGlobal("fetch", () => Promise.reject(new Error("ECONNREFUSED")));
+}
+
+/**
+ * The resolve answers and then the write does not: a gateway that goes away mid-request, or one
+ * whose control-plane endpoint is failing while the lookup it caches still works.
+ */
+function stubWritesRefused() {
   vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/v1/tenant/by-clerk-org/")) {
@@ -30,6 +47,12 @@ function stubUnreachableGateway() {
     return Promise.reject(new Error("ECONNREFUSED"));
   });
 }
+
+/** Both shapes of outage. The answer to the customer has to be the same for either. */
+const OUTAGES: { name: string; stub: () => void }[] = [
+  { name: "nothing answers, the org resolve included", stub: stubTotalOutage },
+  { name: "the org resolve answers but the write does not", stub: stubWritesRefused },
+];
 
 function body(payload: unknown, method = "POST"): Request {
   return new Request("http://test/x", { method, body: JSON.stringify(payload) });
@@ -46,13 +69,13 @@ afterEach(() => {
   else process.env.TALLY_DEV_TENANT = originalDevTenant;
 });
 
-describe("CTO-393: the product path reports an unreachable control plane as a failure", () => {
+describe.each(OUTAGES)("CTO-393: a failed save is reported when $name", ({ stub }) => {
   beforeEach(() => {
     vi.resetModules();
     // Clear the escape hatch so these requests are shaped like a real signed-in customer's.
     delete process.env.TALLY_DEV_TENANT;
     authMock.mockResolvedValue({ orgId: "org_test", orgRole: "org:admin", userId: "user_1" });
-    stubUnreachableGateway();
+    stub();
   });
 
   const cases: { name: string; call: () => Promise<Response> }[] = [
@@ -69,6 +92,9 @@ describe("CTO-393: the product path reports an unreachable control plane as a fa
       call: async () => (await import("./features/value-events/route")).POST(body(MAPPING)),
     },
     {
+      // No UI reaches this handler today, so these cases are the only thing exercising its 503.
+      // Kept deliberately: it is a public endpoint whichever way the dashboard happens to call it,
+      // and a clear-that-never-happened leaves a feature still attributing ROI.
       name: "DELETE /api/features/value-events",
       call: async () =>
         (await import("./features/value-events/route")).DELETE(
@@ -87,12 +113,15 @@ describe("CTO-393: the product path reports an unreachable control plane as a fa
   });
 });
 
+// These three still pass with the product-path fix reverted, and that is what they are for: they
+// pin the echo that must SURVIVE, so tightening the rule above cannot quietly break a fresh clone
+// with no infra. The cases that fail on a revert are the product-path ones above.
 describe("CTO-393: the dev path still works with no gateway at all", () => {
   beforeEach(() => {
     vi.resetModules();
     // The escape hatch, as a fresh clone and this suite's own config set it. Clerk is never reached.
     process.env.TALLY_DEV_TENANT = "00000000-0000-0000-0000-000000000000";
-    stubUnreachableGateway();
+    stubTotalOutage();
   });
 
   it("POST /api/guardrails echoes the validated rule, flagged as not persisted", async () => {

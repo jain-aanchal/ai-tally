@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { controlPlaneEchoAllowed, controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
+import { controlPlaneHeaders, resolveTenantId } from "@/lib/getTenant";
 import { NextResponse } from "next/server";
 
 import {
@@ -8,6 +8,7 @@ import {
   type UnitEconomicsThresholds,
 } from "@/lib/unitEconomics";
 import { queryUnitEconomicsConfig } from "@/lib/unitEconomicsConfig";
+import { controlPlaneEchoAllowed } from "@/lib/controlPlaneEcho";
 
 // Per-tenant LTV/CAC band thresholds live in the control plane (Postgres, CTO-126), reached via the
 // gateway. The reader falls back to `null` (→ hardcoded defaults) when the gateway is unreachable, so
