@@ -209,9 +209,15 @@ function detectContextBloat(rows: StructuralRunRow[]): WasteFinding[] {
       windowSpendMicroUsd: totalCost(featureTotals.get(feature) ?? []),
       confidence: "medium",
       title: `Context bloat on ${feature}`,
+      // CTO-430: LABEL both numbers rather than relying on their order. This used to print
+      // "(median vs observed)" inside a sentence whose subject is the run, so a reader took the
+      // first figure for the run's own total and the finding read as the exact opposite of its
+      // claim: a run "far above the median" shown as the smaller of two numbers. The evidence
+      // object below had them right all along, which is how the prose drifted unnoticed.
       reason:
         `${outliers.length} run(s) on ${feature} carried input-token totals far above the ` +
-        `feature+model median (${med0(worst.cohortMedian)} vs ${worst.run.inputTokens} tokens). ` +
+        `feature+model median: ${worst.run.inputTokens.toLocaleString()} tokens against a median ` +
+        `of ${med0(worst.cohortMedian).toLocaleString()}. ` +
         `Recoverable is the marginal cost of the tokens above the median.`,
       evidence: {
         signal: "context-bloat",

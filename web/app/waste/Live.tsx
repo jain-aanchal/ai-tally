@@ -47,6 +47,15 @@ const CATEGORY_LABEL: Record<WasteCategory, string> = {
 // report (CTO-227), rendered as an honest blank rather than $0.
 const NO_BOUNDED_TOTAL = "no finding could be bounded to a dollar amount";
 const NO_BOUNDED_CATEGORY = "no finding in this category could be bounded to a dollar amount";
+// CTO-430: a category with NO findings is a different answer from one whose findings could not be
+// priced, and the blank has to say which. The tile used to pair a confident "0 findings" with a
+// reason blaming the bounding, so it explained an absence by describing a failure that never
+// happened. Deliberately not a fabricated $0.00 either: a detector needs priced spans to bound
+// anything, so on a mostly-unpriced window "we found none" and "we could not look" are not the
+// same fact, and this says the one we can actually stand behind.
+const NO_FINDINGS_IN_CATEGORY =
+  "no finding in this category, so there is no amount to recover from it";
+const NO_FINDINGS_AT_ALL = "no finding in this window, so there is no amount to recover";
 
 export function WasteLive({ initialData }: { initialData: WasteReport }) {
   // The FilterBar writes the window + dimension filters to the URL; useFilters reads them back as a
@@ -147,7 +156,7 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
         <SummaryTile
           label="Recoverable"
           micro={report.totalRecoverableMicroUsd}
-          reason={NO_BOUNDED_TOTAL}
+          reason={findings.length === 0 ? NO_FINDINGS_AT_ALL : NO_BOUNDED_TOTAL}
           // The total is over the SELECTED window, not a month -- label it with the real day count.
           hint={`last ${report.generatedForWindowDays} days · ${findings.length} finding${
             findings.length === 1 ? "" : "s"
@@ -158,7 +167,7 @@ export function WasteLive({ initialData }: { initialData: WasteReport }) {
             key={c}
             label={CATEGORY_LABEL[c]}
             micro={report.byCategory[c]}
-            reason={NO_BOUNDED_CATEGORY}
+            reason={countByCategory[c] === 0 ? NO_FINDINGS_IN_CATEGORY : NO_BOUNDED_CATEGORY}
             hint={`${countByCategory[c]} finding${countByCategory[c] === 1 ? "" : "s"}`}
           />
         ))}
