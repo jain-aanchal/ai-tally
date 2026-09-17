@@ -523,11 +523,13 @@ def seed_catalog() -> PriceCatalog:
         # fall back to the standard input rate (see compute_cost_micro_usd), which is 10x the real
         # price: for an agent that caches heavily, that is most of the bill overstated.
         #
-        # Cache WRITES ($0.25/Mtok, 1.25x standard input) are not modeled, for the same reason the
-        # Anthropic block below says so: there is no PriceType.CACHE_WRITE to bill them at, and a
-        # write folds into the standard input bucket at $0.20 instead. That understates a
-        # cache-heavy workload slightly. See docs/anthropic-cache-tokens.md for why that trade is
-        # the better of the two available errors.
+        # Cache WRITES ($0.25/Mtok, 1.25x standard input) are not modeled, for the reason the
+        # Anthropic block above already gives: there is no PriceType.CACHE_WRITE to bill them at.
+        # A write is counted as ordinary input at $0.20, so a cache-heavy workload is understated
+        # by $0.05 per million written tokens. Understating here is the containable error of the
+        # two: a write happens once per cached prefix while reads recur, so the miss stays small
+        # and bounded, where pricing every read at the write rate would compound. Two providers now
+        # want this tier, so the enum gap is worth closing rather than annotating a third time.
         ("openai", "gpt-5.6-luna", PriceType.INPUT, "0.20"),
         ("openai", "gpt-5.6-luna", PriceType.CACHED_INPUT, "0.02"),
         ("openai", "gpt-5.6-luna", PriceType.OUTPUT, "1.20"),
