@@ -58,6 +58,18 @@ def test_unknown_is_representable(ddl_code):
     assert "'unpriced' = 3" in ddl_code
 
 
+def test_cost_source_separates_subscription_from_unpriced(ddl_code):
+    """CTO-417: "no per-call price to know" is not the same fact as "we could not price it".
+
+    Both store EstimatedCost NULL, but an unpriced span is a gap an operator can close by seeding a
+    rate and a subscription span never will be. The existing values must keep their numbers, or
+    every already-written row silently changes meaning.
+    """
+    assert "'subscription' = 4" in ddl_code
+    for existing in ("'estimated' = 1", "'reconciled' = 2", "'unpriced' = 3"):
+        assert existing in ddl_code, f"CostSource value moved off its label: {existing}"
+
+
 def test_dual_track_and_key_version_columns(ddl):
     for col in ("CostSource", "PriceCatalogVersion", "UserIdHashKeyVersion"):
         assert col in ddl, f"missing required column {col}"

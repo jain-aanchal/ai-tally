@@ -39,6 +39,12 @@ class GenAI:
     COST_CURRENCY = "gen_ai.cost.currency"  # ISO-4217, default "USD"
     COST_PRICE_CATALOG_VERSION = "gen_ai.cost.price_catalog_version"
 
+    #: HOW the call was billed, which is a different question from what it cost (CTO-417).
+    #: See BILLING_MODES below for the values and the full contract. Sits in the cost namespace
+    #: because it is an input to the cost decision, alongside the catalog version that records
+    #: which rates produced a figure.
+    COST_BILLING_MODE = "gen_ai.cost.billing_mode"  # str, "api" | "subscription"
+
     FEATURE_TAG = "gen_ai.feature_tag"
     SESSION_ID = "gen_ai.session_id"
     USER_ID_HASH = "gen_ai.user_id_hash"  # HMAC-SHA256 hex
@@ -116,6 +122,38 @@ TRACE_ID_SYNTHETIC_KEY = "gen_ai.trace_id_synthetic"
 #: ReplacingMergeTree keeps both rows instead of collapsing them.
 TIMESTAMP_NS_KEY = "timestamp_ns"
 
+#: CTO-417. ``gen_ai.cost.billing_mode`` values. ai-tally prices from (provider, model, tokens) and
+#: until now had no notion of HOW a call was billed, so a call covered by a subscription whose model
+#: happens to be in the catalog was priced at pay-as-you-go list rates and stamped
+#: ``CostSource = 'estimated'``: a confident assertion of a cost the customer never incurred. That
+#: is the same class of fabricated number the Nullable cost columns exist to remove (CTO-244), only
+#: arrived at from the other direction.
+#:
+#: * ``"api"`` (or the key ABSENT): per-token API spend. Priced from the catalog exactly as before.
+#: * ``"subscription"``: covered by a seat or plan the customer already pays for. There is no
+#:   per-call price to know, so NO cost is assigned, whether or not the catalog prices the model.
+#:   The row lands ``EstimatedCost = NULL`` with ``CostSource = 'subscription'``.
+#:
+#: ABSENCE MEANS "PRICE IT AS WE DO NOW", never "unknown, refuse to price". The wire contract is
+#: additive-only (CTO-31) and every producer shipped before this field existed sends nothing, so
+#: reading absence as unknown would stop pricing all of them at once.
+#:
+#: WHY NOT PER TENANT OR PER PROVIDER. A single tenant genuinely mixes the two: the motivating
+#: tenant's Fireworks traffic is per-token API spend while its openai and claude-code traffic runs
+#: under a subscription. A tenant-level or provider-level switch cannot express that, so the mode
+#: belongs on the span.
+#:
+#: THIS MARKER IS CLIENT-ASSERTED AND CANNOT BE CORROBORATED SERVER-SIDE. Nothing in the telemetry
+#: proves a call was covered by a subscription; ai-tally only knows what the producer said, exactly
+#: as with ``gen_ai.trace_id_synthetic`` (CTO-401). Marking a span subscription REMOVES cost from
+#: the tenant's own spend picture, so a wrong or adversarial marker understates their reported
+#: spend. That is acceptable for observability and is NOT acceptable as a billing control: do not
+#: build enforcement, invoicing or entitlement checks on this field without an independent source
+#: of truth. CTO-410 tracks the general problem of client-asserted fields the gateway cannot verify.
+BILLING_MODE_API = "api"
+BILLING_MODE_SUBSCRIPTION = "subscription"
+BILLING_MODES = frozenset({BILLING_MODE_API, BILLING_MODE_SUBSCRIPTION})
+
 _STRUCTURAL_KEYS = frozenset({TRACE_ID_KEY, SPAN_ID_KEY})
 #: Structural keys whose value is an integer rather than a string identifier.
 _STRUCTURAL_INT_KEYS = frozenset({TIMESTAMP_NS_KEY})
@@ -163,6 +201,7 @@ _STR_KEYS = frozenset(
         GenAI.OPERATION_NAME,
         GenAI.COST_CURRENCY,
         GenAI.COST_PRICE_CATALOG_VERSION,
+        GenAI.COST_BILLING_MODE,
         GenAI.FEATURE_TAG,
         GenAI.SESSION_ID,
         GenAI.USER_ID_HASH,
@@ -217,6 +256,7 @@ class SpanFields:
     cost_estimated_micro_usd: int | None = None
     cost_currency: str | None = None
     price_catalog_version: str | None = None
+    billing_mode: str | None = None
     feature_tag: str | None = None
     session_id: str | None = None
     user_id_hash: str | None = None
@@ -247,6 +287,7 @@ _FIELD_TO_KEY = {
     "cost_estimated_micro_usd": GenAI.COST_ESTIMATED_MICRO_USD,
     "cost_currency": GenAI.COST_CURRENCY,
     "price_catalog_version": GenAI.COST_PRICE_CATALOG_VERSION,
+    "billing_mode": GenAI.COST_BILLING_MODE,
     "feature_tag": GenAI.FEATURE_TAG,
     "session_id": GenAI.SESSION_ID,
     "user_id_hash": GenAI.USER_ID_HASH,
@@ -347,6 +388,17 @@ def validate_span_attributes(attrs: dict[str, object]) -> list[str]:
 
     if GenAI.COST_ESTIMATED_MICRO_USD in attrs and GenAI.COST_CURRENCY not in attrs:
         violations.append("cost present without gen_ai.cost.currency")
+
+    # CTO-417. Same treatment as the stratum above and for the same reason: a free-text billing mode
+    # would be a silent no-op at the gateway (which prices only what it recognises), so the SDK says
+    # so here rather than letting a typo look like it worked. Absence is conformant and means "price
+    # it as we do now"; this only fires on a value that was spelled.
+    billing_mode = attrs.get(GenAI.COST_BILLING_MODE)
+    if isinstance(billing_mode, str) and billing_mode and billing_mode not in BILLING_MODES:
+        violations.append(
+            f"{GenAI.COST_BILLING_MODE} must be one of {sorted(BILLING_MODES)}, "
+            f"got {billing_mode!r}"
+        )
 
     stratum = attrs.get(GenAI.SAMPLING_STRATUM)
     if isinstance(stratum, str) and stratum not in _SAMPLING_STRATA:

@@ -178,6 +178,60 @@ real catalog version**. Those stay `0`, and the check names the ambiguous ones a
 (`measured_zero_no_model`, `measured_zero_flat_usage`) rather than implying they are all decided. See "Historical rows stored as
 a priced $0" below.
 
+### Subscription-billed calls (CTO-417)
+
+ai-tally prices from `(provider, model, tokens)`. That says nothing about **how** a call was billed,
+so a call covered by a seat or plan whose model happens to be in the price catalog used to be priced
+at pay-as-you-go list rates and stamped `CostSource = 'estimated'`: a confident number for a cost the
+customer never incurred. A producer now declares the mode on the span.
+
+**What a producer must send.** One optional string attribute on the span, alongside the other
+`gen_ai.*` attributes:
+
+```json
+{ "gen_ai.cost.billing_mode": "subscription" }
+```
+
+| value | meaning | what lands |
+|---|---|---|
+| absent | the producer has nothing to say | priced from the catalog, exactly as before |
+| `"api"` | per-token API spend | priced from the catalog, identical to absence |
+| `"subscription"` | covered by a seat or plan | `EstimatedCost = NULL`, `CostSource = 'subscription'` |
+| anything else | a mode this build cannot read | `EstimatedCost = NULL`, `CostSource = 'unpriced'` |
+
+Absence means "price it as we do now", never "unknown, refuse to price": the wire contract is
+additive-only (CTO-31) and every producer shipped before this field sends nothing. Nothing else about
+a marked span changes. Token counts, model, feature tag and account attribution all still land; only
+the cost is withheld. The mode is per **span**, not per tenant or per provider, because one tenant
+routinely mixes the two: the motivating tenant's Fireworks traffic is real per-token API spend while
+their openai and claude-code traffic runs under a subscription.
+
+From the Python SDK, per call or as a client-wide default, with the per-call argument winning:
+
+```python
+client = TallyClient(catalog=catalog, billing_mode="subscription")   # whole process
+client.record_llm_call(provider="openai", model="gpt-4o-mini", usage=usage)               # covered
+client.record_llm_call(provider="fireworks-ai", model="...", usage=usage, billing_mode="api")
+```
+
+**This marker is client-asserted and the gateway cannot corroborate it.** Nothing in the telemetry
+proves a call was covered by a subscription; ai-tally only knows what the producer said, the same
+footing as `gen_ai.trace_id_synthetic` (CTO-401). Marking a span subscription REMOVES cost from the
+tenant's own spend picture, so a wrong marker understates their reported spend. That is fine for
+observability and is not fine as a billing control: do not build enforcement, invoicing or
+entitlement checks on this field without an independent source of truth. CTO-410 tracks the general
+problem.
+
+**Applying it to a stack that is already up.** Run `make ch-migrate` from `infra/`. It extends the
+`CostSource` enum with `'subscription' = 4`, which is a metadata-only ALTER (unlike the CTO-244
+Nullable widening, it rewrites no parts), keeps `1`/`2`/`3` on their existing labels so no written
+row changes meaning, and is safe to replay. **Apply it before any producer starts sending the field**:
+until it is applied, writing `'subscription'` into the old three-value enum is an insert error.
+
+**No backfill, deliberately.** Spans written before the cutover carry no billing mode and nothing on
+the row records how the call was billed, so historical spend for a tenant on a subscription may still
+include list-rate figures for calls they never paid per token, and no query can separate them.
+
 ### Usage and billing counts (CTO-390)
 
 `GET /v1/usage` answers from a durable, shared source: ClickHouse (`uniqExact` over `otel_spans`) for

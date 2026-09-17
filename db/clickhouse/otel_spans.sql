@@ -74,10 +74,16 @@ CREATE TABLE IF NOT EXISTS otel_spans
     -- CostSource carries the WHY: 'unpriced' means we could not put a number on this span, so a
     -- reader can say so instead of summing a fabricated zero. PriceCatalogVersion is '' on those
     -- rows, which is the same empty-version signal tally.pricing already uses for a catalog miss.
+    --
+    -- CTO-417 adds 'subscription': the producer declared the call was covered by a seat or plan, so
+    -- there is no per-call price to know. Kept separate from 'unpriced' because they are different
+    -- diagnoses. 'unpriced' is a gap someone can close by seeding a rate; 'subscription' never will
+    -- be, and a reader chasing pricing coverage should not be sent after it. Same reasoning that
+    -- keeps UnknownUsageSpanCount and UnpricedSpanCount apart in rollups.sql.
     EstimatedCost          Nullable(Decimal64(8))   CODEC(ZSTD(1)),
     ReconciledCost         Nullable(Decimal64(8))   CODEC(ZSTD(1)),
     CostCurrency           LowCardinality(String),
-    CostSource             Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3),
+    CostSource             Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3, 'subscription' = 4),
     PriceCatalogVersion    LowCardinality(String),
 
     -- Agent context
@@ -270,6 +276,46 @@ ALTER TABLE otel_spans
     MODIFY COLUMN CachedInputTokens Nullable(UInt32)       CODEC(T64, ZSTD(1)),
     MODIFY COLUMN EstimatedCost     Nullable(Decimal64(8)) CODEC(ZSTD(1)),
     MODIFY COLUMN CostSource        Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3);
+
+-- CTO-417 migration: teach CostSource to say "there was no per-call price to know".
+--
+-- WHY. ai-tally prices from (provider, model, tokens) and had no notion of HOW a call was billed,
+-- so a call covered by a subscription whose model happens to sit in the catalog was priced at
+-- pay-as-you-go list rates and stamped 'estimated'. That asserts a cost the customer never
+-- incurred, which is the CTO-244 fabricated-zero problem arriving from the other direction: there
+-- the write was a confident 0 for a real cost, here it is a confident number for no cost at all.
+-- The producer now declares the mode on the span (`gen_ai.cost.billing_mode`, see
+-- tally.schema.BILLING_MODES) and a span marked 'subscription' is never assigned a cost.
+--
+-- WHY A NEW ENUM VALUE RATHER THAN REUSING 'unpriced'. Both land EstimatedCost NULL, but they are
+-- different facts. 'unpriced' means we could not put a number on this span, which is a gap an
+-- operator can close by seeding a rate; 'subscription' means there is no per-call number to put on
+-- it and there never will be. Conflating them sends whoever is chasing pricing coverage after
+-- spans that are already correct. Same reason rollups.sql keeps UnknownUsageSpanCount and
+-- UnpricedSpanCount apart.
+--
+-- SHAPE OF THE CHANGE. This follows the CTO-244 pattern above exactly: an Enum8 extension that
+-- keeps 1, 2 and 3 on their existing labels, so every already-written row keeps its meaning and
+-- nothing needs a backfill. Adding a value to an Enum8 is a metadata-only ALTER (no part rewrite,
+-- unlike the Nullable widening above), it is safe to replay because modifying a column to the type
+-- it already has is a no-op, and ingest is not blocked while it runs.
+--
+-- APPLYING IT TO A STACK THAT IS ALREADY UP. `make ch-migrate` from infra/. As the CTO-180 note
+-- above says, docker-entrypoint-initdb.d only runs on a first boot against an empty volume, so a
+-- running stack will never see this statement on its own. Until it is applied, the gateway writing
+-- 'subscription' into the old three-value enum is a ClickHouse insert error, so apply it BEFORE
+-- any producer starts sending the new field.
+--
+-- NO BACKFILL, DELIBERATELY. Spans written before this cutover carry no billing mode, and nothing
+-- on the row records how the call was billed. The 180 subscription calls already in the motivating
+-- tenant's history escaped pricing only because their model ids missed the catalog, and they are
+-- stored as 'unpriced'; guessing which historical rows "were really" subscription would fabricate
+-- exactly the kind of fact this change exists to stop asserting. Historical spend for a tenant on
+-- a subscription may therefore still include list-rate figures for calls they never paid per token,
+-- and no query can separate them. Post-cutover rows are honest.
+ALTER TABLE otel_spans
+    MODIFY COLUMN CostSource
+        Enum8('estimated' = 1, 'reconciled' = 2, 'unpriced' = 3, 'subscription' = 4);
 
 -- CTO-245 ENGINE MIGRATION: WHAT AN EXISTING INSTALL MUST DO. Read this before trusting the
 -- ENGINE line above.

@@ -33,6 +33,8 @@ from tally.pricing import (
 from tally.safety import SelfObservability, safe
 from tally.sampling import BillingMeter, Sampler, TraceSignals
 from tally.schema import (
+    BILLING_MODE_API,
+    BILLING_MODE_SUBSCRIPTION,
     SPAN_ID_KEY,
     TIMESTAMP_NS_KEY,
     TRACE_ID_KEY,
@@ -117,6 +119,14 @@ class TallyClient:
         hmac_registry: key registry used to hash account ids (CTO-181). Required together with
             ``tenant_id`` for the account dimension to be emitted; without both, account tagging
             degrades to a one-time WARN and the span is emitted unattributed rather than dropped.
+        billing_mode: default ``gen_ai.cost.billing_mode`` for the catalog-priced calls this client
+            records (CTO-417), one of ``tally.schema.BILLING_MODES``. Leave it None and spans carry
+            no mode, which prices them from the catalog exactly as before. Set it to
+            ``"subscription"`` for a process whose LLM traffic runs entirely under a seat or plan.
+            Per-call arguments override it, which is the case that matters: the motivating tenant
+            mixes subscription and per-token API traffic inside one tenant (their Fireworks spend is
+            real per-token API spend while their openai and claude-code traffic is not), so a
+            process-wide switch alone would be wrong for one half of it either way round.
     """
 
     def __init__(
@@ -133,6 +143,7 @@ class TallyClient:
         observability: SelfObservability | None = None,
         tenant_id: str | None = None,
         hmac_registry: HmacKeyRegistry | None = None,
+        billing_mode: str | None = None,
     ) -> None:
         self.obs = observability or SelfObservability()
         self._api_key = api_key
@@ -144,7 +155,29 @@ class TallyClient:
         self.billing = billing_meter or BillingMeter()
         self.guardrails = guardrails or GuardrailEngine()
         self.tenant_id = tenant_id
+        self.billing_mode = billing_mode
         self.hmac_registry = hmac_registry
+
+    def _resolve_billing_mode(self, billing_mode: str | None) -> str | None:
+        """Per-call mode, else the client default, else None (CTO-417).
+
+        None is returned rather than ``"api"`` so the attribute is simply absent on a span nobody
+        declared a mode for. Absence and ``"api"`` price identically, and emitting nothing keeps
+        pre-CTO-417 spans byte-identical on the wire, which is what makes the old-producer
+        behaviour testable rather than merely asserted.
+        """
+        mode = billing_mode if billing_mode is not None else self.billing_mode
+        if mode is None:
+            return None
+        normalised = mode.strip().lower()
+        if normalised not in (BILLING_MODE_API, BILLING_MODE_SUBSCRIPTION):
+            # Warn rather than raise: the SDK never takes a customer's process down over telemetry.
+            # The gateway refuses to price what it cannot read, so the span stays honest either way.
+            _log.warning(
+                "unknown billing mode %r; span will be sent unpriced rather than at list rates",
+                mode,
+            )
+        return normalised
 
     @property
     def observability(self) -> SelfObservability:
@@ -180,6 +213,7 @@ class TallyClient:
         at: date | None = None,
         account_id: str | None = None,
         account_label: str | None = None,
+        billing_mode: str | None = None,
     ) -> LlmCallResult:
         """Record an LLM call end-to-end. Never raises.
 
@@ -203,6 +237,14 @@ class TallyClient:
         pass it to override that for this one call. It is hashed with the tenant's HMAC key and
         never travels raw. ``account_label`` is optional, wire-only, and only carried when a
         hash was produced.
+
+        ``billing_mode`` declares HOW this one call was billed (CTO-417), overriding the client-wide
+        default. Pass ``"subscription"`` when the call is covered by a seat or plan: no cost is then
+        estimated here and none is assigned server-side, because there is no per-call price to know.
+        Omit it and the call prices from the catalog exactly as before. This is per call because a
+        single process routinely mixes the two, and it is CLIENT-ASSERTED: nothing downstream can
+        corroborate it, so it must not be used as a billing control (see
+        ``tally.schema.BILLING_MODES`` and CTO-410).
         """
 
         @safe(self.obs, where="TallyClient.record_llm_call", fallback=None)
@@ -216,9 +258,16 @@ class TallyClient:
             if trace_id is not None:
                 self.billing.count_trace(trace_id)
 
+            # CTO-417: resolved before the estimate, because a subscription-billed call must not be
+            # priced client-side either. Leaving the local estimate in place would put a list-rate
+            # figure on LlmCallResult.cost_micro_usd and into the customer's own dashboards, and
+            # would hand the gateway a client cost hint for a call that has no price.
+            mode = self._resolve_billing_mode(billing_mode)
+            priced_per_token = mode != BILLING_MODE_SUBSCRIPTION
+
             cost_micro: int | None = None
             catalog_version: str | None = None
-            if self.catalog is not None:
+            if self.catalog is not None and priced_per_token:
                 cost_micro, version = compute_cost_micro_usd(
                     self.catalog, provider, model, usage, at=at, tenant_id=self.tenant_id
                 )
@@ -240,6 +289,7 @@ class TallyClient:
                 cached_input_tokens=usage.cached_input_tokens or None,
                 cost_estimated_micro_usd=cost_micro,
                 price_catalog_version=catalog_version,
+                billing_mode=mode,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
                 # CTO-119: stratum + configured keep-rate ride on the kept span so the DQ surface
@@ -384,6 +434,7 @@ class TallyClient:
         at: date | None = None,
         account_id: str | None = None,
         account_label: str | None = None,
+        billing_mode: str | None = None,
     ) -> EmbeddingCallResult:
         """Record an embedding call so the span lands in the gateway's ``embeddings`` bucket.
 
@@ -396,6 +447,9 @@ class TallyClient:
         pass it to override that for this one call. It is hashed with the tenant's HMAC key and
         never travels raw. ``account_label`` is optional, wire-only, and only carried when a
         hash was produced.
+
+        ``billing_mode`` works exactly as on :meth:`record_llm_call` (CTO-417): an embedding covered
+        by a subscription is estimated at nothing here and assigned nothing server-side.
         """
 
         @safe(self.obs, where="TallyClient.record_embedding_call", fallback=None)
@@ -405,9 +459,13 @@ class TallyClient:
             if trace_id is None:
                 note_synthetic_trace(self.obs, where="record_embedding_call")
 
+            # CTO-417: same ordering and same reason as record_llm_call.
+            mode = self._resolve_billing_mode(billing_mode)
+            priced_per_token = mode != BILLING_MODE_SUBSCRIPTION
+
             cost_micro: int | None = None
             catalog_version: str | None = None
-            if self.catalog is not None:
+            if self.catalog is not None and priced_per_token:
                 # Embeddings are priced under PriceType.EMBEDDING, not INPUT; use the
                 # embedding-specific resolver so seeded embedding rates actually apply.
                 cost_micro, version = compute_embedding_cost_micro_usd(
@@ -438,6 +496,7 @@ class TallyClient:
                 input_tokens=input_tokens,
                 cost_estimated_micro_usd=cost_micro,
                 price_catalog_version=catalog_version,
+                billing_mode=mode,
                 feature_tag=ctx.feature_tag,
                 session_id=ctx.session_id,
                 account_id_hash=acct_hash,
