@@ -26,9 +26,15 @@ import {
 
 const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>;
 
-async function renderPage(payload: Comparison) {
-  mockApiGet.mockResolvedValueOnce(payload);
-  render(await ComparePage({}));
+/** The window every fixture payload below was read over, matching what the route reports. */
+const SEVEN_DAY_WINDOW = { days: 7, requestedDays: 7, honorsRequestedRange: true };
+
+async function renderPage(
+  payload: Comparison,
+  searchParams?: Record<string, string | string[] | undefined>,
+) {
+  mockApiGet.mockResolvedValueOnce({ comparisonWindow: SEVEN_DAY_WINDOW, ...payload });
+  render(await ComparePage(searchParams ? { searchParams: Promise.resolve(searchParams) } : {}));
 }
 
 /** The claim only a successful read may make. */
@@ -194,5 +200,62 @@ describe("the replay diagnostics blank states its true reason", () => {
 
     expect(screen.getAllByText(/no cross-provider replay has run/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/could not be read, so we do not know what has been replayed/i)).toBeNull();
+  });
+});
+
+// CTO-428. The range selector used to discard its input: the comparison read a fixed seven days
+// whatever was picked, while the cost chart under the same selector followed it. A control that
+// silently drops what it is given is worse than a wrong number, so the page has to say at the
+// selector which window the comparison really used.
+describe("the range selector states the window the comparison actually read", () => {
+  it("names the window at the selector, and says the range does not narrow the comparison", async () => {
+    await renderPage(comparison, { range: "30d" });
+
+    expect(screen.getByText(/Comparison window: fixed at the last 7 days/i)).toBeTruthy();
+    expect(screen.getByText(/range selector narrows the cost chart below/i)).toBeTruthy();
+  });
+
+  it("takes the figure from the payload, so the notice cannot drift from the data", async () => {
+    // A payload read over a different window has to move the sentence with it: the notice is
+    // derived from what the route reports, not from a constant that happens to match today.
+    mockApiGet.mockResolvedValueOnce({
+      ...comparison,
+      comparisonWindow: { days: 14, requestedDays: 90, honorsRequestedRange: false },
+    });
+    render(await ComparePage({ searchParams: Promise.resolve({ range: "90d" }) }));
+
+    expect(screen.getByText(/Comparison window: fixed at the last 14 days/i)).toBeTruthy();
+    expect(screen.queryByText(/Comparison window: fixed at the last 7 days/i)).toBeNull();
+  });
+
+  it("names the requested range too when the comparison could not follow it", async () => {
+    // The payload carries what was asked for as well as what was read. A notice that states only
+    // the fixed window leaves the customer to spot the mismatch themselves.
+    mockApiGet.mockResolvedValueOnce({
+      ...comparison,
+      comparisonWindow: { days: 7, requestedDays: 90, honorsRequestedRange: false },
+    });
+    render(await ComparePage({ searchParams: Promise.resolve({ range: "90d" }) }));
+
+    expect(screen.getByText(/You asked for 90 days: that applies to the chart, not to the comparison/i)).toBeTruthy();
+  });
+
+  it("does not claim a mismatch when the selected range is the window read", async () => {
+    // 7d selected and 7d read: there is nothing to disclose, and a page that cries mismatch on a
+    // request it did honour is its own wrong answer.
+    mockApiGet.mockResolvedValueOnce({
+      ...comparison,
+      comparisonWindow: { days: 7, requestedDays: 7, honorsRequestedRange: true },
+    });
+    render(await ComparePage({ searchParams: Promise.resolve({ range: "7d" }) }));
+
+    expect(screen.getByText(/Comparison window: fixed at the last 7 days/i)).toBeTruthy();
+    expect(screen.queryByText(/You asked for/i)).toBeNull();
+  });
+
+  it("forwards the selected range to the API so the route sees what was asked for", async () => {
+    await renderPage(comparison, { range: "90d" });
+
+    expect(mockApiGet).toHaveBeenCalledWith("/api/compare?range=90d");
   });
 });

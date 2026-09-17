@@ -1246,3 +1246,95 @@ describe("/api/compare", () => {
     });
   });
 });
+
+// CTO-428. The page's 7d / 30d / 90d / Custom selector never reached this route: the window was a
+// module constant, and the `workload` label was derived from that same constant, so the label was
+// honest only by coincidence and the control was the lie. The comparison still cannot follow the
+// range (queryCurrentModel reads one hardcoded window and the replay corpus has none), so what the
+// route owes the page is the truth about which window it read and what was asked for.
+describe("the window the comparison reports is the window it read (CTO-428)", () => {
+  const liveCurrent = {
+    model: "zephyr-quill-2",
+    provider: "acme-labs",
+    monthlyCostMicroUsd: 10_000_000,
+    monthlyCalls: 2000,
+    latencyP95Ms: 2400,
+    errorRate: 0.004,
+    sampleCount: 500,
+  };
+
+  it("reads the requested range off the query string instead of ignoring it", async () => {
+    queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(new Request("http://test/api/compare?range=90d") as never);
+    const body = await res.json();
+
+    expect(body.comparisonWindow.requestedDays).toBe(90);
+    // The honest half: the request asked for 90 days and the comparison did not read 90 days, so
+    // the payload says so rather than letting the page present a 7-day answer as a 90-day one.
+    expect(body.comparisonWindow.honorsRequestedRange).toBe(false);
+  });
+
+  it("resolves a custom range the same way the other windowed routes do", async () => {
+    queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(
+      new Request("http://test/api/compare?range=custom&from=2026-01-01&to=2026-01-10") as never,
+    );
+    const body = await res.json();
+
+    expect(body.comparisonWindow.requestedDays).toBe(10);
+  });
+
+  it("says the range was honoured when the request asked for the window it reads", async () => {
+    queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(new Request("http://test/api/compare?range=7d") as never);
+    const body = await res.json();
+
+    expect(body.comparisonWindow.requestedDays).toBe(7);
+    expect(body.comparisonWindow.honorsRequestedRange).toBe(true);
+  });
+
+  it("derives the workload label from the window used, not from a constant", async () => {
+    queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+    queryReplayCandidates.mockResolvedValueOnce(null);
+
+    const res = await CompareGET(new Request("http://test/api/compare?range=30d") as never);
+    const body = await res.json();
+
+    // The label and the window are one fact on the wire: whatever the comparison read is what the
+    // subtitle says, so a future window change cannot leave the label behind.
+    expect(body.workload).toBe(`all traffic / production / last ${body.comparisonWindow.days} days`);
+  });
+
+  it("reports the window on the replay-backed branch too", async () => {
+    queryCurrentModel.mockResolvedValueOnce(liveCurrent);
+    queryReplayCandidates.mockResolvedValueOnce({
+      samples_available: 1000,
+      per_candidate: [
+        {
+          provider: "acme-labs",
+          model: "zephyr-quill-mini",
+          projected_monthly_cost_micro_usd: 1_000_000,
+          p50_latency_ms: 400,
+          p95_latency_ms: 900,
+          error_rate: 0.001,
+          samples_replayed: 100,
+          excluded_budget_count: 0,
+        },
+      ],
+      diagnostics: { context_fidelity: "live retrieval", replay_cost_micro_usd: 1_000 },
+    });
+
+    const res = await CompareGET(new Request("http://test/api/compare?range=30d") as never);
+    const body = await res.json();
+
+    expect(body.replay_source).toBe("replay");
+    expect(body.comparisonWindow.requestedDays).toBe(30);
+    expect(body.workload).toBe(`all traffic / production / last ${body.comparisonWindow.days} days`);
+  });
+});

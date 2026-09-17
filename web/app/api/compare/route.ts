@@ -10,6 +10,8 @@ import {
   scaleCandidateMonthlyCost,
 } from "@/lib/compare";
 import { sampleDataAllowed } from "@/lib/mock";
+import { parseFilters, rangeDays } from "@/lib/filters";
+import { resolveComparisonWindow } from "./window";
 import {
   queryCurrentModel,
   queryEvalCandidates,
@@ -30,9 +32,6 @@ const MIN_JUDGED_SAMPLES = 10;
 // the same honest-null rule the `current` row uses for its live otel window (CTO-115).
 const MIN_REPLAYED_SAMPLES = 50;
 
-// CTO-168: the current-model cost window queryCurrentModel reads (last 7 days). Used to derive the
-// `workload` label on the live path instead of shipping the fixture string.
-const WORKLOAD_WINDOW_DAYS = 7;
 
 // #320: the replay counts on every branch that has NOT run a replay. Null, not the fixture's
 // 4,200 traces / 87,400 available / $42.30, which the page rendered as though they were measured.
@@ -119,6 +118,13 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const featureTag = url.searchParams.get("tag") ?? undefined;
+  // CTO-428: read the range the FilterBar wrote to the URL the same way /api/home and /api/explore
+  // do, so the request's own selection is a fact this route holds rather than one it never saw. The
+  // comparison itself cannot follow it (see ./window for why), so what we do with it is report it:
+  // `comparisonWindow.days` is what was really read, and the page states that at the selector
+  // rather than letting the control look as though it applied.
+  const requestedWindowDays = rangeDays(parseFilters(url.searchParams).range);
+  const comparisonWindow = resolveComparisonWindow(requestedWindowDays);
 
   // CTO-113: try the real replay projection first. When it returns data, the candidate rows
   // are grounded in actual cross-provider replay outcomes (real cost from the SDK price catalog,
@@ -161,6 +167,7 @@ export async function GET(req: Request) {
   if (!liveRead.ok && !sampleDataAllowed()) {
     return NextResponse.json({
       ...comparison,
+      comparisonWindow,
       unavailable: CURRENT_MODEL_UNREADABLE_REASON,
       workload: null,
       current: null,
@@ -188,6 +195,7 @@ export async function GET(req: Request) {
     // reads it as the new-workspace case and points at setup.
     return NextResponse.json({
       ...comparison,
+      comparisonWindow,
       workload: null,
       current: null,
       candidates: [],
@@ -214,6 +222,7 @@ export async function GET(req: Request) {
     });
     return NextResponse.json({
       ...comparison,
+      comparisonWindow,
       current: { ...comparison.current, qualityScore: null },
       candidates,
       // #320: the fixture used to ship 4,200 / 87,400 / $42.30 here and the page printed them as
@@ -295,8 +304,10 @@ export async function GET(req: Request) {
     });
     return NextResponse.json({
       ...comparison,
-      // CTO-168: real query context (tag filter + 7-day window), not the fixture label.
-      workload: deriveWorkload(featureTag, WORKLOAD_WINDOW_DAYS),
+      comparisonWindow,
+      // CTO-168: real query context (tag filter + window), not the fixture label. CTO-428: the
+      // window comes from the one the comparison actually read, so the label cannot drift from it.
+      workload: deriveWorkload(featureTag, comparisonWindow.days),
       current: {
         ...comparison.current,
         model: live.model,
@@ -406,8 +417,10 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     ...comparison,
-    // CTO-168: real query context (tag filter + 7-day window), not the fixture label.
-    workload: deriveWorkload(featureTag, WORKLOAD_WINDOW_DAYS),
+    comparisonWindow,
+    // CTO-168: real query context (tag filter + window), not the fixture label. CTO-428: the window
+    // comes from the one the comparison actually read, so the label cannot drift from it.
+    workload: deriveWorkload(featureTag, comparisonWindow.days),
     current: {
       ...comparison.current,
       model: live.model,
