@@ -516,6 +516,21 @@ def seed_catalog() -> PriceCatalog:
         ("openai", "gpt-5", PriceType.INPUT, "2.50"),
         ("openai", "gpt-5", PriceType.CACHED_INPUT, "0.25"),
         ("openai", "gpt-5", PriceType.OUTPUT, "10.00"),
+        # CTO-424. gpt-5.6-luna, rates as of the August 2026 reduction. Absent from this list, a
+        # tenant whose primary model it is reported blank for every figure anchored to its cost.
+        #
+        # The cached-read tier matters more here than the headline rates. Without it, cached tokens
+        # fall back to the standard input rate (see compute_cost_micro_usd), which is 10x the real
+        # price: for an agent that caches heavily, that is most of the bill overstated.
+        #
+        # Cache WRITES ($0.25/Mtok, 1.25x standard input) are not modeled, for the same reason the
+        # Anthropic block below says so: there is no PriceType.CACHE_WRITE to bill them at, and a
+        # write folds into the standard input bucket at $0.20 instead. That understates a
+        # cache-heavy workload slightly. See docs/anthropic-cache-tokens.md for why that trade is
+        # the better of the two available errors.
+        ("openai", "gpt-5.6-luna", PriceType.INPUT, "0.20"),
+        ("openai", "gpt-5.6-luna", PriceType.CACHED_INPUT, "0.02"),
+        ("openai", "gpt-5.6-luna", PriceType.OUTPUT, "1.20"),
         # gpt-4o family. [unverified at implementation time]
         ("openai", "gpt-4o", PriceType.INPUT, "2.50"),
         ("openai", "gpt-4o", PriceType.CACHED_INPUT, "1.25"),
