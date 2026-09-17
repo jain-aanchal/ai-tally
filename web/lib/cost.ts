@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Mock data for the Cost workflow (CTO-65/66). Typed for the eventual API.
 
-import type { MicroUSD, SpendByLayer } from "./types";
+import { isZeroRoundingLowerBound, type MicroUSD, type SpendByLayer } from "./types";
 
 export interface CostDayPoint {
   date: string; // ISO yyyy-mm-dd
@@ -83,6 +83,11 @@ export interface LayerCoverage {
  * observed but could not price are NOT a measured zero. A layer whose every span is unpriced has an
  * unknown cost and blanks with that reason, rather than reporting the "$0.00" a bare span count
  * would otherwise license.
+ *
+ * CTO-423 extends that last signal to the partly unpriced case: a priced subtotal that rounds to
+ * zero at display precision is read as a measured zero no matter what marker sits beside it, so it
+ * blanks too. The threshold comes from the formatter (see `isZeroRoundingLowerBound`), never from a
+ * constant kept here.
  */
 export function layerCoverage(
   byLayer: Readonly<Record<Layer, number>>,
@@ -100,6 +105,20 @@ export function layerCoverage(
         layer,
         totalMicroUsd: null,
         reason: `all ${spans.toLocaleString()} ${label} span${spans === 1 ? "" : "s"} in this window could not be priced, so the cost is unknown rather than zero`,
+      };
+    }
+    // CTO-423. The blank above only fired when EVERY span was unpriced, so a layer with 530
+    // unpriced spans and one priced span worth 5 micro-USD fell through here and rendered
+    // "$0.0000 at least" with a 100.0% share: a lower bound that rounds away at display precision
+    // is indistinguishable from a measured zero, and the "at least" marker cannot carry that
+    // difference on its own. Deliberately not a proportional rule (that needs a constant nobody has
+    // chosen yet); only the figure the reader would misread as zero blanks.
+    if (isZeroRoundingLowerBound(total, unpriced)) {
+      const label = LAYER_LABEL[layer];
+      return {
+        layer,
+        totalMicroUsd: null,
+        reason: `only ${(spans - unpriced).toLocaleString()} of ${spans.toLocaleString()} ${label} span${spans === 1 ? "" : "s"} in this window could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`,
       };
     }
     if (total > 0) return { layer, totalMicroUsd: total, reason: "" };

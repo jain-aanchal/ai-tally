@@ -15,7 +15,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { Card } from "@/components/Card";
 import { StaleBadge } from "@/components/DataStateBanner";
@@ -29,7 +29,7 @@ import {
   relativeAge,
   type SourceState,
 } from "@/lib/dataState";
-import { formatUSD } from "@/lib/types";
+import { formatUSD, isZeroRoundingLowerBound } from "@/lib/types";
 
 interface AgentsDetailPayload {
   agents: AgentSummary[];
@@ -140,7 +140,21 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
         )}
         <div className="flex flex-wrap items-end gap-x-8 gap-y-3">
           <Stat label="Runs/day" value={summary.runsPerDay.toLocaleString()} />
-          <Stat label="Cost/day" value={formatUSD(summary.costPerDayMicroUsd)} />
+          {/* CTO-423: cost/day is computed over the priced runs only, so when some runs could not
+              be priced it is a lower bound. A lower bound that rounds to "$0.0000" is read as a
+              measured zero, so it blanks with the reason rather than printing one. */}
+          <Stat
+            label="Cost/day"
+            value={
+              isZeroRoundingLowerBound(summary.costPerDayMicroUsd, summary.unpricedRuns ?? 0) ? (
+                <Blank
+                  reason={`${(summary.unpricedRuns ?? 0).toLocaleString()} run${(summary.unpricedRuns ?? 0) === 1 ? "" : "s"} could not be priced and what we could price rounds to zero, so this is unknown rather than zero`}
+                />
+              ) : (
+                formatUSD(summary.costPerDayMicroUsd)
+              )
+            }
+          />
           <Stat label="p50" value={formatUSD(summary.p50MicroUsd)} />
           <Stat label="p99" value={formatUSD(summary.p99MicroUsd)} />
           <div>
@@ -201,7 +215,7 @@ export function AgentDetail({ agent, queryString }: { agent: string; queryString
 const UNPRICED_RUN =
   "at least one step in this run could not be priced, so the run total is unknown";
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <div className="text-xs uppercase tracking-wide text-muted">{label}</div>

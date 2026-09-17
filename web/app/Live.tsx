@@ -55,7 +55,7 @@ import {
 } from "@/lib/dataState";
 import { rangeDays } from "@/lib/filters";
 import type { FeatureRoi, SpendSummary } from "@/lib/types";
-import { formatUSD, type MicroUSD } from "@/lib/types";
+import { formatUSD, isZeroRoundingLowerBound, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -164,11 +164,11 @@ export function HomeLive({
   }
   const s = spend;
 
-  // Hidden cost is every non-LLM layer: the "all-in" story the tile makes explicit. The percentage
-  // and its zero-when-empty behaviour are carried over verbatim (CTO-222 keeps the meaning as-is).
+  // Hidden cost is every non-LLM layer: the "all-in" story the tile makes explicit. Its share of
+  // spend is computed with the other tile percentages below (CTO-222 kept the meaning as-is;
+  // CTO-423 made a share of an unreportable total blank rather than print).
   const hidden =
     s.byLayer.vector + s.byLayer.tools + s.byLayer.compute + s.byLayer.embeddings + s.byLayer.egress;
-  const hiddenPct = s.totalMicroUsd === 0 ? 0 : Math.round((hidden / s.totalMicroUsd) * 100);
 
   const layerTotals = LAYERS.reduce<Record<Layer, number>>(
     (acc, l) => {
@@ -194,24 +194,38 @@ export function HomeLive({
   // duplicated the Spend headline whenever nothing had reconciled yet (the common state), so the
   // estimated/reconciled split now lives in the Reconciled tile's coverage hint instead of a second
   // identical number (CTO-228). "Estimated" is always Spend minus Reconciled, so no figure is lost.
-  const reconciledPct =
-    s.totalMicroUsd === 0 ? 0 : Math.round((s.reconciledMicroUsd / s.totalMicroUsd) * 100);
+  // The reconciled share of spend is computed with the other percentages below.
 
   // CTO-244. ClickHouse sum() skips NULLs, so when some spans could not be priced the Spend
   // headline is a LOWER BOUND, not the total. Say so on the tile. We deliberately do NOT blank the
-  // headline: what we know is real money already spent, and hiding it would be its own dishonesty.
-  // What we must never do is present it as complete, which is what the old zero-filled column did.
+  // headline while it still prints a figure: what we know is real money already spent, and hiding it
+  // would be its own dishonesty. What we must never do is present it as complete, which is what the
+  // old zero-filled column did, or let it round away to a zero (CTO-423, below).
   const unpricedSpans = s.unpricedSpanCount ?? 0;
   const totalSpans = s.spanCount ?? 0;
   const spendHint =
     unpricedSpans > 0
       ? `at least: ${unpricedSpans.toLocaleString()} of ${totalSpans.toLocaleString()} spans in the last ${windowDays} days could not be priced`
       : `last ${windowDays} days`;
+  // CTO-423. The lower bound is only honest while it still prints a figure. Once the priced subset
+  // rounds away at display precision the tile reads "$0.0000", which a reader takes as a measured
+  // zero however the hint is worded, so the headline blanks with the reason instead. The Hidden
+  // cost tile is the same sum over the non-LLM layers and is understated by the same spans.
+  const spendUnknown = isZeroRoundingLowerBound(s.totalMicroUsd, unpricedSpans);
+  const hiddenUnknown = isZeroRoundingLowerBound(hidden, unpricedSpans);
+  const boundReason = `only ${(totalSpans - unpricedSpans).toLocaleString()} of ${totalSpans.toLocaleString()} spans in the last ${windowDays} days could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`;
+  // A share of a total we cannot report is not a smaller percentage, it is no percentage at all
+  // (CTO-423). A genuine measured zero total keeps the 0% it always printed.
+  const pctOfTotal = (part: number) =>
+    spendUnknown ? null : s.totalMicroUsd === 0 ? 0 : Math.round((part / s.totalMicroUsd) * 100);
+  const reconciledPct = pctOfTotal(s.reconciledMicroUsd);
+  const hiddenPct = pctOfTotal(hidden);
   const tiles = (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <SummaryTile
         label="Spend"
-        micro={s.totalMicroUsd}
+        micro={spendUnknown ? null : s.totalMicroUsd}
+        reason={boundReason}
         hint={spendHint}
         higherIsBetter={false}
       />
@@ -219,15 +233,22 @@ export function HomeLive({
         label="Reconciled"
         micro={s.reconciledMicroUsd}
         hint={
-          hasReconciledDate
-            ? `${reconciledPct}% invoice-confirmed, through ${s.reconciledThrough}`
-            : "not yet invoice-confirmed (all still estimated)"
+          !hasReconciledDate
+            ? "not yet invoice-confirmed (all still estimated)"
+            : reconciledPct === null
+              ? `invoice-confirmed through ${s.reconciledThrough}`
+              : `${reconciledPct}% invoice-confirmed, through ${s.reconciledThrough}`
         }
       />
       <SummaryTile
         label="Hidden cost"
-        micro={hidden}
-        hint={`${hiddenPct}% of spend · vector + tools + compute`}
+        micro={hiddenUnknown ? null : hidden}
+        reason={boundReason}
+        hint={
+          hiddenPct === null
+            ? "vector + tools + compute"
+            : `${hiddenPct}% of spend · vector + tools + compute`
+        }
       />
     </div>
   );

@@ -112,6 +112,53 @@ describe("Home renders the source state it was given (#364)", () => {
   });
 });
 
+// CTO-423. The Spend tile carries an "at least" hint when some spans could not be priced, and that
+// hint stops meaning anything once the priced remainder rounds away: the reader sees "$0.0000" and
+// takes it as a measurement. These pin the three cases apart on the rendered page.
+describe("Home does not render a lower bound that rounds to zero (CTO-423)", () => {
+  it("blanks the Spend tile when one priced span of 5 micro-USD stands for 531", () => {
+    renderHome(
+      payload({}, {
+        ...EMPTY_SPEND,
+        totalMicroUsd: 5,
+        byLayer: { ...zeroLayers(), llm: 5 },
+        spanCount: 531,
+        unpricedSpanCount: 530,
+      }),
+    );
+
+    expect(screen.queryByText("$0.0000")).toBeNull();
+    // The blank is explained, and the explanation says which situation the reader is in.
+    const blank = screen.getAllByText(/No value: only 1 of 531 spans/i);
+    expect(blank.length).toBeGreaterThan(0);
+  });
+
+  it("keeps a small lower bound that still renders as a figure", () => {
+    renderHome(
+      payload({}, {
+        ...EMPTY_SPEND,
+        totalMicroUsd: 100,
+        byLayer: { ...zeroLayers(), llm: 100 },
+        spanCount: 531,
+        unpricedSpanCount: 530,
+      }),
+    );
+
+    expect(screen.getByText("$0.0001")).toBeTruthy();
+    // And it still says it is a lower bound.
+    expect(screen.getByText(/at least: 530 of 531 spans/i)).toBeTruthy();
+  });
+
+  it("still shows a genuine measured zero: spans observed, none unpriced", () => {
+    renderHome(
+      payload({}, { ...EMPTY_SPEND, spanCount: 531, unpricedSpanCount: 0 }),
+    );
+
+    // Zero IS the measurement here, and blanking it would be the opposite error.
+    expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
+  });
+});
+
 const EMPTY_SPEND: SpendSummary = {
   totalMicroUsd: 0,
   estimatedMicroUsd: 0,

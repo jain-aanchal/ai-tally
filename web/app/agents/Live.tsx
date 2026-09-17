@@ -44,7 +44,7 @@ import {
   relativeAge,
   type SourceState,
 } from "@/lib/dataState";
-import { formatUSD, type MicroUSD } from "@/lib/types";
+import { formatUSD, isZeroRoundingLowerBound, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -59,6 +59,11 @@ const UNPRICED_RUN =
  * the excluded runs is the honest disclosure; a per-RUN figure still blanks, because there is no
  * population to be a statistic over.
  */
+/** Why a priced-runs-only figure that rounds away at display precision blanks (CTO-423). */
+function unpricedLowerBoundReason(n: number): string {
+  return `${n.toLocaleString()} run${n === 1 ? "" : "s"} could not be priced and what we could price rounds to zero, so this is unknown rather than zero`;
+}
+
 function PartialRuns({ n }: { n: number }) {
   return (
     <span
@@ -209,8 +214,16 @@ export function AgentsLive({
                   {/* CTO-244: these three describe the PRICED runs only. When some runs could not
                       be priced, say so on the figure rather than let it read as the whole agent. */}
                   <td className="py-2 text-right tabular-nums">
-                    {formatUSD(a.costPerDayMicroUsd)}
-                    {(a.unpricedRuns ?? 0) > 0 && <PartialRuns n={a.unpricedRuns ?? 0} />}
+                    {/* CTO-423: a lower bound that rounds to "$0.0000" reads as a measured zero,
+                        and the asterisk cannot say otherwise, so the figure blanks instead. */}
+                    {isZeroRoundingLowerBound(a.costPerDayMicroUsd, a.unpricedRuns ?? 0) ? (
+                      <Blank reason={unpricedLowerBoundReason(a.unpricedRuns ?? 0)} />
+                    ) : (
+                      <>
+                        {formatUSD(a.costPerDayMicroUsd)}
+                        {(a.unpricedRuns ?? 0) > 0 && <PartialRuns n={a.unpricedRuns ?? 0} />}
+                      </>
+                    )}
                   </td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(a.p50MicroUsd)}</td>
                   <td className="py-2 text-right tabular-nums">{formatUSD(a.p99MicroUsd)}</td>
