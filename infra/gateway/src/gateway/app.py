@@ -2370,10 +2370,6 @@ async def delete_tenant_budget(
 # anything not overridden stays on the public rate. See docs/price-overrides.md.
 
 
-def _price_override_payload(record: object) -> dict[str, object]:
-    return record.as_dict()  # type: ignore[attr-defined]
-
-
 @app.get("/v1/tenant/price-overrides")
 def list_price_overrides(
     history: bool = False,
@@ -2411,14 +2407,14 @@ def list_price_overrides(
     ledger = OverrideLedger.from_records(records)
     body: dict[str, object] = {
         "tenant_id": tenant_id,
-        "overrides": [_price_override_payload(r) for r in ledger.active()],
+        "overrides": [r.as_dict() for r in ledger.active()],
         "configured": bool(ledger.active()),
         "load": refresher.status().as_dict(),
         "available_price_types": [t.value for t in PriceType],
         "available_units": [u.value for u in Unit],
     }
     if history:
-        body["history"] = [_price_override_payload(r) for r in records]
+        body["history"] = [r.as_dict() for r in records]
     return JSONResponse(body, status_code=200)
 
 
@@ -2503,7 +2499,7 @@ async def append_price_override(
     return JSONResponse(
         {
             "tenant_id": tenant_id,
-            "entry": _price_override_payload(record),
+            "entry": record.as_dict(),
             "applied": status.healthy,
             "load": status.as_dict(),
         },
