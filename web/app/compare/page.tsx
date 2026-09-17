@@ -25,10 +25,19 @@ import { PageHeader } from "@/components/PageHeader";
 import { SummaryTile, TileGrid } from "@/components/SummaryTile";
 import { Blank, Money, Pct } from "@/components/HonestValue";
 import { apiGet } from "@/lib/api";
+import { filtersToQueryString, parseFilters } from "@/lib/filters";
+import { searchParamsFromRecord } from "@/lib/searchParams";
+import {
+  type ComparisonWindow,
+  comparisonWindowNotice,
+} from "@/app/api/compare/window";
 import { NO_REPLAY_RAN_REASON, type Comparison, deltaPct } from "@/lib/compare";
 import { asOfLabel, boundaryFromMinutesAgo, deriveDataState, relativeAge } from "@/lib/dataState";
 import { isDemoMode } from "@/lib/demoMode";
 import type { MicroUSD } from "@/lib/types";
+
+/** The wire shape of /api/compare: the comparison plus the window it was actually read over. */
+type ComparePayload = Comparison & { comparisonWindow: ComparisonWindow };
 
 // #320: why a replay diagnostic is blank. A cross-provider replay is opt-in and per-workload, so on
 // a stack that has never run one there is no corpus, no replayed trace and no replay spend. The old
@@ -42,13 +51,19 @@ import type { MicroUSD } from "@/lib/types";
 export default async function ComparePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ tag?: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   // Parse ?tag= for URL stability across the CTO-104 deep-link set. The /api/compare data is
-  // mock-only today, so the filter is captured but doesn't yet narrow the comparison — CTO-105
+  // mock-only today, so the filter is captured but doesn't yet narrow the comparison: CTO-105
   // will wire it through to a tag-scoped replay.
-  await searchParams;
-  const comparison = await apiGet<Comparison>("/api/compare");
+  //
+  // CTO-428: the URL-synced time range now rides onto the API call, the same way /cost forwards it.
+  // The comparison cannot narrow to it yet, and the route says so on the payload rather than
+  // quietly reading seven days behind a selector that offers ninety; the notice below the selector
+  // is built from what the route reports it read.
+  const sp = searchParamsFromRecord((await searchParams) ?? {});
+  const qs = filtersToQueryString(parseFilters(sp), sp);
+  const comparison = await apiGet<ComparePayload>(qs ? `/api/compare?${qs}` : "/api/compare");
   const { workload, current, candidates, recommendation, diagnostics } = comparison;
 
   // CTO-395 review: a read that FAILED comes first, because it is not the same news as a workspace
@@ -293,13 +308,21 @@ export default async function ComparePage({
           ) : undefined
         }
         toolbar={
-          <Suspense fallback={null}>
-            <FilterBar
-              groupByChoices={["model", "provider"]}
-              defaultGroupBy="model"
-              options={{ model: modelOptions, provider: providerOptions }}
-            />
-          </Suspense>
+          <div className="space-y-1.5">
+            <Suspense fallback={null}>
+              <FilterBar
+                groupByChoices={["model", "provider"]}
+                defaultGroupBy="model"
+                options={{ model: modelOptions, provider: providerOptions }}
+              />
+            </Suspense>
+            {/* CTO-428: the range selector does not reach the comparison query, so it says so here,
+                at the control, before the customer chooses. The sentence names the window the route
+                reports it actually read, so it cannot go stale against a constant. Without it the
+                page showed a 30-day cost chart directly above a 7-day comparison under one
+                selector, with nothing marking the disagreement. */}
+            <p className="text-xs text-muted">{comparisonWindowNotice(comparison.comparisonWindow)}</p>
+          </div>
         }
       />
 
