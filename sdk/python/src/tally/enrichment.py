@@ -29,7 +29,7 @@ from tally.pricing import (
     compute_cost_micro_usd,
     compute_embedding_cost_micro_usd,
 )
-from tally.schema import GenAI
+from tally.schema import BILLING_MODE_API, BILLING_MODE_SUBSCRIPTION, GenAI
 
 # ``gen_ai.operation.name`` values priced under ``PriceType.EMBEDDING`` rather than INPUT/OUTPUT.
 _EMBEDDING_OPERATIONS = frozenset({"embeddings", "embedding"})
@@ -71,10 +71,35 @@ class EnrichmentResult:
     # told enough usage to do it. Both land NULL / 'unpriced', but they are different diagnoses and
     # the rollups count them separately.
     usage_unknown: bool = False
+    # CTO-417: the producer declared this call was not billed per token, so there is no per-call
+    # price to know. Distinct from both flags above: those say we FAILED to price something that
+    # has a price, this says the question does not apply. The row lands NULL with
+    # ``CostSource = 'subscription'`` rather than 'unpriced' so a reader can tell the two apart.
+    subscription_billed: bool = False
+    # CTO-417: the producer spelled a billing mode this build does not recognise. Treated exactly
+    # like subscription for the cost decision (we do not know how it was billed, so we assert no
+    # figure) but it lands 'unpriced', because claiming 'subscription' for a mode we cannot read
+    # would be its own fabricated fact.
+    billing_mode_unknown: bool = False
 
 
 def _int_or_none(v: object) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _billing_mode(attributes: dict[str, object]) -> str:
+    """Return the normalised ``gen_ai.cost.billing_mode``, defaulting to ``"api"`` (CTO-417).
+
+    ABSENCE IS THE LOAD-BEARING CASE. Every producer shipped before this field existed sends
+    nothing, and the wire contract is additive-only (CTO-31), so an absent mode has to mean exactly
+    what the gateway did before: price it from the catalog. Reading absence as "unknown, refuse to
+    price" would silently stop pricing every existing producer. A non-string value is treated the
+    same way, because a producer that cannot even spell a string here has told us nothing.
+    """
+    mode = attributes.get(GenAI.COST_BILLING_MODE)
+    if not isinstance(mode, str) or not mode:
+        return BILLING_MODE_API
+    return mode.strip().lower()
 
 
 def _usage_or_none(attributes: dict[str, object]) -> Usage | None:
@@ -148,11 +173,42 @@ def enrich_cost(
     - CTO-244: when the model is priceable but no usable token counts were reported the cost key
       is likewise removed and ``usage_unknown`` is True, so the row lands NULL / 'unpriced'
       rather than claiming a priced 0.
+    - CTO-417: when the producer declares ``gen_ai.cost.billing_mode = "subscription"`` no cost is
+      assigned AT ALL, even for a model the catalog prices, and ``subscription_billed`` is True so
+      the row lands NULL / 'subscription'. An absent mode prices exactly as before. The marker is
+      client-asserted and cannot be corroborated here; see ``tally.schema.BILLING_MODES``.
 
     Tool and vector spans (``gen_ai.operation.name`` of ``tool``/``vector``) are priced per call
     and take the branch in :func:`_enrich_call_cost`; everything else is priced from token usage.
     """
     out = dict(attributes)
+
+    # CTO-417. Ahead of every pricing branch, including the per-call one below, because the
+    # question "was this billed per token at all" precedes "what do our rates say". A subscription
+    # call whose model happens to sit in the catalog is exactly the case that was being priced at
+    # list rates and stamped 'estimated', so this must run before any lookup rather than as a veto
+    # on the result of one. Token counts, model, feature tag and every other attribute survive
+    # untouched: only the cost keys are dropped, so usage and attribution still land in full.
+    mode = _billing_mode(out)
+    if mode != BILLING_MODE_API:
+        subscription = mode == BILLING_MODE_SUBSCRIPTION
+        client_cost = _int_or_none(out.get(GenAI.COST_ESTIMATED_MICRO_USD))
+        # The client's own figure goes too. A producer that declares a call subscription-billed and
+        # also reports a list-rate cost is contradicting itself, and keeping the number would leave
+        # the same fabricated spend on the row by a different route.
+        out.pop(GenAI.COST_ESTIMATED_MICRO_USD, None)
+        out.pop(GenAI.COST_PRICE_CATALOG_VERSION, None)
+        out.pop(GenAI.TOOL_COST_MICRO_USD, None)
+        return EnrichmentResult(
+            out,
+            None,
+            client_cost,
+            None,
+            False,
+            catalog_miss=False,
+            subscription_billed=subscription,
+            billing_mode_unknown=not subscription,
+        )
 
     operation = out.get(GenAI.OPERATION_NAME)
     price_type = _CALL_PRICED_OPERATIONS.get(operation) if isinstance(operation, str) else None

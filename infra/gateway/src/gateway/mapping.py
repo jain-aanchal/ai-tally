@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import blake2b
 
-from tally.schema import GenAI, micro_to_usd
+from tally.schema import BILLING_MODE_SUBSCRIPTION, GenAI, micro_to_usd
 
 # gen_ai.* keys that get promoted to typed columns (so they don't also duplicate into the map).
 _PROMOTED_GENAI = frozenset(
@@ -341,6 +341,25 @@ def span_to_row(
     priced = isinstance(cost_micro, int) and not isinstance(cost_micro, bool)
     estimated_cost: Decimal | None = micro_to_usd(cost_micro) if priced else None
     cost_source = "estimated" if priced else "unpriced"
+
+    # CTO-417. A subscription-billed call has no per-call price to know, which is a DIFFERENT fact
+    # from 'unpriced' ("we could not put a number on this"), and a reader needs to tell them apart:
+    # an unpriced span is a gap someone can close by seeding a rate, a subscription span never will
+    # be. Hence the dedicated enum value rather than folding it into 'unpriced'.
+    #
+    # This repeats the veto that tally.enrichment.enrich_cost already applies, deliberately. That
+    # one is the enrichment path's decision; this one is the storage boundary's, and it is the last
+    # place a cost can be written. A caller that maps a span without going through enrichment
+    # (gateway/connectors/base.py does exactly that) would otherwise stamp a cost on a span its
+    # producer said was not billed per call. Neither guard relies on the other.
+    #
+    # The marker is CLIENT-ASSERTED. Nothing here can corroborate it; see tally.schema.BILLING_MODES
+    # and CTO-410. It removes cost from the tenant's own spend picture, so it is safe for
+    # observability and must not be used as a billing control.
+    billing_mode = span.get(GenAI.COST_BILLING_MODE)
+    if isinstance(billing_mode, str) and billing_mode.strip().lower() == BILLING_MODE_SUBSCRIPTION:
+        estimated_cost = None
+        cost_source = "subscription"
 
     # Long-tail attributes: anything not promoted and not structural, stringified for Map(String,String).
     # PII guard (CTO-118): refuse to persist any key that looks like it could carry a message body.
