@@ -285,48 +285,66 @@ class TenantSpellings:
     ambiguous: list[str]
 
 
-def resolve_tenant_spellings(rows: list[tuple[str, list[str]]]) -> TenantSpellings:
+def resolve_tenant_spellings(
+    rows: list[tuple[str, str | None, str | None]],
+) -> TenantSpellings:
     """Keep only the alternate tenant spellings that identify exactly ONE tenant.
 
-    Pure, so the rule can be tested without a database. See
-    :meth:`PriceOverrideStore.load_tenant_spellings` for why an ambiguous spelling must not carry an
-    override.
+    Each row is ``(tenants.id, tenants.name, tenants.clerk_org_id)``. Pure, so the rule can be
+    tested without a database. See :meth:`PriceOverrideStore.load_tenant_spellings` for why an
+    ambiguous spelling must not carry an override.
 
-    Three ways a spelling is refused, and the second and third are the ones that matter:
+    ``clerk_org_id`` is machine-assigned and carries a partial UNIQUE index, so it is trusted as
+    soon as it is present. ``name`` is FREE TEXT arriving from the Clerk organization webhook, and
+    it is refused when:
 
-    1. **Two tenants share it.** ``tenants.name`` has no unique constraint, so two orgs can both be
+    1. **two tenants share it.** ``tenants.name`` has no unique constraint, so two orgs can both be
        called ``acme``.
-    2. **It collides with ANOTHER tenant's canonical UUID.** A name is free text arriving from the
-       Clerk organization webhook with no format check, so a tenant can name their org after another
-       tenant's ``tenants.id``. Counting only alternates against each other (the first version of
-       this function) scored such a name as unique, registered the attacker's negotiated rate under
-       the victim's catalog key, and the victim's OWN authenticated ingest then priced from it. That
-       is an authenticated, self-serve cross-tenant write to another customer's billing figures, and
-       it is the failure this whole ticket exists to prevent.
-    3. **It merely LOOKS like a UUID.** A spelling that parses as a UUID but is not this tenant's own
-       id is refused even when it matches no existing tenant, because the tenant it names may be
-       created later, and this map is rebuilt on a schedule rather than on that event.
+    2. **it collides with any tenant's canonical UUID**, including another tenant's. Counting names
+       against each other only (the first version of this rule) scored such a name as unique, so a
+       tenant could name their org after another tenant's ``tenants.id``, append a rate for
+       themselves, and have it register under the victim's catalog key. The victim's OWN
+       authenticated ingest then priced from it: an authenticated, self-serve cross-tenant write to
+       another customer's billing figures.
+    3. **it merely LOOKS like an identifier that could be assigned later**: a UUID, or a Clerk org
+       id (``org_...``). Neither has to exist yet. This map is rebuilt on a schedule rather than on
+       tenant creation, so a name that pre-claims a spelling somebody may be given tomorrow is
+       refused today. The ``org_`` half of this is the nit from the CTO-416 round 2 review: refusing
+       UUID-shaped names for that reason while allowing org-shaped ones was an asymmetry with no
+       argument behind it.
     """
-    canonical_ids = {canonical for canonical, _alternates in rows}
+    canonical_ids = {canonical for canonical, _name, _org in rows}
     claims: dict[str, int] = {}
-    for _canonical, alternates in rows:
-        for alias in set(alternates):
+    for _canonical, name, org in rows:
+        for alias in {a for a in (name, org) if a}:
             claims[alias] = claims.get(alias, 0) + 1
 
     usable: dict[str, list[str]] = {}
     ambiguous: list[str] = []
-    for canonical, alternates in rows:
+
+    def refuse(alias: str) -> None:
+        if alias not in ambiguous:
+            ambiguous.append(alias)
+
+    for canonical, name, org in rows:
         keep: list[str] = []
-        for alias in alternates:
-            if alias == canonical:
+        for alias, machine_assigned in ((org, True), (name, False)):
+            if not alias or alias == canonical:
                 continue
-            if claims.get(alias, 0) != 1 or alias in canonical_ids or _is_uuid(alias):
-                if alias not in ambiguous:
-                    ambiguous.append(alias)
+            if claims.get(alias, 0) != 1 or alias in canonical_ids:
+                refuse(alias)
+                continue
+            if not machine_assigned and (_is_uuid(alias) or _is_clerk_org_id(alias)):
+                refuse(alias)
                 continue
             keep.append(alias)
         usable[canonical] = keep
     return TenantSpellings(usable=usable, ambiguous=ambiguous)
+
+
+def _is_clerk_org_id(value: str) -> bool:
+    """A Clerk organization id, which the provisioner may assign to some tenant later."""
+    return value.startswith("org_")
 
 
 def _is_uuid(value: str) -> bool:
@@ -436,7 +454,14 @@ class PriceOverrideStore:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT id, name, clerk_org_id FROM tenants")
             return resolve_tenant_spellings(
-                [(str(r[0]), [str(v) for v in (r[1], r[2]) if v]) for r in cur.fetchall()]
+                [
+                    (
+                        str(row[0]),
+                        str(row[1]) if row[1] else None,
+                        str(row[2]) if row[2] else None,
+                    )
+                    for row in cur.fetchall()
+                ]
             )
 
     def history(self, tenant_id: str) -> list[OverrideRecord]:
@@ -539,7 +564,7 @@ class OverrideLoadStatus:
     enabled: bool
     healthy: bool
     record_count: int
-    active_count: int
+    in_force_count: int
     loaded_at: datetime | None
     error: str | None
     #: Tenant spellings that carry no override because they do not identify exactly one tenant.
@@ -563,7 +588,7 @@ class OverrideLoadStatus:
             "healthy": self.healthy,
             "applied": self.applied,
             "record_count": self.record_count,
-            "active_count": self.active_count,
+            "in_force_count": self.in_force_count,
             # null, not a zero timestamp: "never loaded" is a different state from "loaded at the
             # epoch", and only one of them is true here.
             "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
@@ -606,7 +631,7 @@ class PriceOverrideRefresher:
         self._lock = threading.Lock()
         # Keyed by the loop it belongs to: a Lock binds to the loop that first awaits it, and the
         # test suite (and any embedding process) runs more than one loop over this module's lifetime.
-        self._async_locks: dict[object, asyncio.Lock] = {}
+        self._async_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
         self._last_attempt_at: float | None = None
         self._status = OverrideLoadStatus(
             enabled=self._enabled,
@@ -615,7 +640,7 @@ class PriceOverrideRefresher:
             # "applied": see OverrideLoadStatus.applied.
             healthy=not self._enabled,
             record_count=0,
-            active_count=0,
+            in_force_count=0,
             loaded_at=None,
             error=None if self._enabled else "price overrides disabled",
         )
@@ -671,7 +696,7 @@ class PriceOverrideRefresher:
                     enabled=True,
                     healthy=False,
                     record_count=0,
-                    active_count=0,
+                    in_force_count=0,
                     loaded_at=self._status.loaded_at,
                     error=str(exc),
                 )
@@ -690,7 +715,7 @@ class PriceOverrideRefresher:
                 enabled=True,
                 healthy=True,
                 record_count=len(records),
-                active_count=len(effective),
+                in_force_count=len(effective),
                 loaded_at=datetime.now(timezone.utc),
                 error=None,
                 ambiguous_spellings=list(spellings.ambiguous),
@@ -733,6 +758,13 @@ class PriceOverrideRefresher:
         loop = asyncio.get_running_loop()
         lock = self._async_locks.get(loop)
         if lock is None:
+            # Drop locks belonging to loops that have gone away, so a process that runs many loops
+            # over its lifetime (the test suite, an embedding host) does not accumulate one entry
+            # per loop forever. A long-lived server has exactly one.
+            for stale in [
+                other for other in self._async_locks if other is not loop and other.is_closed()
+            ]:
+                self._async_locks.pop(stale, None)
             lock = self._async_locks.setdefault(loop, asyncio.Lock())
         async with lock:
             # Re-check under the lock: while this coroutine waited, another one may have refreshed.

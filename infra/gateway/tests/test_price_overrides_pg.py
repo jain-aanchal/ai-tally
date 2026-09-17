@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from datetime import date
 from decimal import Decimal
 
@@ -284,3 +285,69 @@ def test_a_tenants_own_spelling_is_usable_but_a_uuid_shaped_name_is_not(
     spellings = store.load_tenant_spellings()
     assert victim not in spellings.usable.get(attacker, [])
     assert victim in spellings.ambiguous
+
+
+MIGRATION = (
+    Path(__file__).resolve().parents[3] / "db" / "postgres" / "0035_price_override_ledger.sql"
+)
+
+
+def test_migration_0035_is_replayable_against_a_populated_table(
+    conn: psycopg.Connection, store: PriceOverrideStore, tenant: str
+) -> None:
+    """Replaying the file must succeed and change nothing (CTO-416 round 2 nit).
+
+    Every other migration here is safe to replay, and this one has to be too, because a running
+    stack applies migrations by hand and an operator re-running the file is normal. It is also the
+    property that keeps the pre-backfill DROP TRIGGER honest: the backfill is an UPDATE, the trigger
+    it creates refuses UPDATEs, and without the drop a replay fails. The backfill is deliberately
+    unconditional within its scope so that this test exercises exactly that.
+
+    Runs against a slot with pre-ledger rows (what the backfill is for) AND a ledger-managed slot
+    (which it must leave alone).
+    """
+    sql = MIGRATION.read_text()
+
+    # A pre-ledger slot: rows as the 0001 table would have held them, several windows, actor left at
+    # the migration's own backfill marker.
+    with conn.cursor() as cur:
+        for version, (start, rate) in enumerate(
+            ((date(2026, 1, 1), "0.05"), (date(2026, 6, 1), "0.04")), start=1
+        ):
+            cur.execute(
+                """
+                INSERT INTO price_catalog_overrides
+                    (tenant_id, provider, model, price_type, unit, price_per_unit, valid_from,
+                     version, supersedes, actor, reason)
+                VALUES (%s, 'openai', 'legacy-model', 'input', 'per_million_tokens', %s, %s,
+                        %s, %s, 'pre-ledger', 'pre-ledger row, provenance unknown')
+                """,
+                (tenant, rate, start, version, version - 1 or None),
+            )
+
+    # A ledger-managed slot, including a BACKDATED append: renumbering this one would rewrite a
+    # supersedes chain and could collide with the unique index.
+    _append(store, tenant, "0.015", valid_from=date(2026, 9, 1))
+    _append(store, tenant, "0.012", valid_from=date(2026, 2, 1))
+
+    def snapshot() -> list[tuple]:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT model, version, supersedes, valid_from, price_per_unit, actor "
+                "FROM price_catalog_overrides WHERE tenant_id = %s ORDER BY model, version",
+                (tenant,),
+            )
+            return cur.fetchall()
+
+    before = snapshot()
+    with psycopg.connect(DSN, autocommit=True) as replay, replay.cursor() as cur:
+        cur.execute(sql)  # must not raise
+    assert snapshot() == before
+
+    # And the objects the guarantees live in are still there afterwards.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_trigger WHERE tgrelid = 'price_catalog_overrides'::regclass "
+            "AND tgname = 'trg_price_overrides_append_only' AND NOT tgisinternal"
+        )
+        assert cur.fetchone() is not None

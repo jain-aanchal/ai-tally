@@ -395,9 +395,15 @@ def _line(entry: PriceEntry, tokens: int) -> Decimal:
     # nothing. Nothing should reach here any more: PriceCatalog._best drops an entry whose unit
     # cannot price its tier, and the override control plane refuses the pairing at the boundary.
     # This is the assertion that keeps the next unit added to the enum from reintroducing the zero.
+    # getattr, not .value: a PriceEntry can be built by a caller that passed a plain string for
+    # unit or price_type (both enums here are str-Enums, so a string mostly behaves), and this
+    # message must not raise an AttributeError from inside the reporting of the real error. That
+    # turned a clean, diagnosable failure into a mystery AttributeError on the ingest path
+    # (CTO-416 review; CTO-420 covers the underlying str-vs-enum trap).
+    unit = getattr(entry.unit, "value", entry.unit)
+    tier = getattr(entry.price_type, "value", entry.price_type)
     raise ValueError(
-        f"no cost arithmetic for unit {entry.unit.value} on price type {entry.price_type.value}; "
-        "see PRICEABLE_UNITS"
+        f"no cost arithmetic for unit {unit} on price type {tier}; see PRICEABLE_UNITS"
     )
 
 

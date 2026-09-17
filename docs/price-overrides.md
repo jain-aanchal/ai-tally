@@ -8,8 +8,12 @@ authoritative statement of which one wins. It is written so a customer-facing an
 For one span, cost is resolved per rate slot: `(provider, model, price_type)`, where `price_type` is
 `input`, `output`, `cached_input`, `tool_call`, `vector_call` or `embedding`.
 
-1. **The tenant's own override**, if an active one covers that slot on the span's date. This is the
-   negotiated or committed-use rate from their contract.
+0. **Was the call billed per token at all?** A span the producer marks
+   `gen_ai.cost.billing_mode = "subscription"` (CTO-417) carries no per-call price and is never
+   priced from either table. It lands blank with `CostSource = 'subscription'`, which is a different
+   statement from `'unpriced'`: there is no per-call rate to know, rather than one we are missing.
+1. **The tenant's own override**, if one covers that slot on the span's date. This is the negotiated
+   or committed-use rate from their contract.
 2. **The public catalog** otherwise. These are the published list prices.
 
 Within either pool, the exact model id is matched first and its family second (so
@@ -41,10 +45,20 @@ through `tally.overrides.OverrideLedger`. The table is an **append-only, version
   priced at in March is still readable in June and a past invoice stays explainable. A database
   trigger refuses `UPDATE` outright.
 - Withdrawing a rate **appends a tombstone** (an entry with no price) rather than deleting a row.
-  The slot then falls back to the public catalog, and the withdrawal itself remains in the trail. A
-  tombstone withdraws the windows that start on or before its own date; a window scheduled to open
-  later is untouched, because "stop overriding now" and "here is the rate from January" are
-  different statements.
+  The withdrawal itself stays in the trail.
+
+A tombstone **closes** the override rather than erasing it, and its `valid_from` is the date the
+override ENDS:
+
+- A revocation filed in advance ("this contract ends on 1 January") keeps pricing at the contract
+  rate until that date, and falls back to the public catalog from it.
+- A backdated one ("it ended on 1 August", filed in September) ends the override on 1 August.
+- Either way, a span from **before** the end date is still priced at the rate that was in force when
+  the call was made, so a backfill, a late arrival or a reconciliation rerun over a pre-revocation
+  date reports what the customer was actually charged.
+- A revocation says there is no override from its date onward, so a window that was scheduled
+  earlier for a later date does not survive it. To set a new rate after a revocation, append it
+  after the revocation: the ledger is read in order and the last statement about a date wins.
 
 ## Changing a price
 
@@ -55,6 +69,9 @@ GET  /v1/tenant/price-overrides                  # active rates (+ ?history=true
 POST /v1/tenant/price-overrides                  # append a rate, or {"revoke": true} for a tombstone
 POST /v1/tenant/price-overrides/refresh          # re-read the ledger on this replica now
 ```
+
+On a revocation (`{"revoke": true}`), `valid_from` is the date the override ends and defaults to
+today; `valid_to` is refused, because a tombstone closes a window rather than opening one.
 
 A rate is a decimal **string** (`"2.40"`), never a float: money that passes through a float has lost
 precision before it reaches the column. `actor` and `reason` are required. The replica that takes

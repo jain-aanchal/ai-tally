@@ -49,24 +49,36 @@ ALTER TABLE price_catalog_overrides ALTER COLUMN price_per_unit DROP NOT NULL;
 -- is one transaction, so a failure anywhere rolls the drop back with everything else.
 DROP TRIGGER IF EXISTS trg_price_overrides_append_only ON price_catalog_overrides;
 
-WITH numbered AS (
-    SELECT id,
-           row_number() OVER (
-               PARTITION BY tenant_id, provider, model, price_type
-               ORDER BY valid_from, id
-           ) AS slot_version
+-- SCOPED to slots that are entirely pre-ledger. Once the control plane has appended to a slot, its
+-- versions are assigned by the INSERT and are referenced by `supersedes` chains, so renumbering
+-- them on a replay would rewrite history and could collide with the unique index below (a backdated
+-- append sorts before an older row and would want its number). A slot nobody has appended to is
+-- unambiguous and is exactly what the backfill is for.
+WITH pre_ledger_slots AS (
+    SELECT tenant_id, provider, model, price_type
       FROM price_catalog_overrides
+     GROUP BY tenant_id, provider, model, price_type
+    HAVING bool_and(actor = 'pre-ledger')
+), numbered AS (
+    SELECT p.id,
+           row_number() OVER (
+               PARTITION BY p.tenant_id, p.provider, p.model, p.price_type
+               ORDER BY p.valid_from, p.id
+           ) AS slot_version
+      FROM price_catalog_overrides p
+      JOIN pre_ledger_slots s
+        ON (s.tenant_id, s.provider, s.model, s.price_type)
+         = (p.tenant_id, p.provider, p.model, p.price_type)
 )
+-- Deliberately UNCONDITIONAL within that scope: a replay rewrites the same numbers rather than
+-- skipping the statement. Skipping made the DROP TRIGGER above dead weight that a later edit could
+-- remove without any test noticing, and re-deriving a value that is a pure function of the rows is
+-- not a write worth avoiding.
 UPDATE price_catalog_overrides AS p
    SET version = numbered.slot_version,
        supersedes = NULLIF(numbered.slot_version - 1, 0)
   FROM numbered
- WHERE p.id = numbered.id
-   -- Touch only rows that are actually wrong, so a replay writes nothing at all rather than
-   -- rewriting a version that a real ledger append has since assigned.
-   AND (p.version IS DISTINCT FROM numbered.slot_version
-        AND p.version = 1
-        AND p.actor = 'pre-ledger');
+ WHERE p.id = numbered.id;
 
 -- Money sanity. A negative rate would compute a negative cost and quietly credit a tenant for
 -- spending; a version below 1 would break the supersedes chain.

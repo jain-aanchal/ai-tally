@@ -29,7 +29,7 @@ for deterministic tests.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -52,6 +52,36 @@ def _utcnow() -> datetime:
 def _to_decimal(value: Decimal | str | int) -> Decimal:
     """Coerce a price to :class:`~decimal.Decimal`, never via float (this is money)."""
     return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _to_unit(value: Unit | str) -> Unit:
+    """Coerce ``unit`` to the enum, refusing an unknown spelling (CTO-416 review).
+
+    Both enums here are ``str`` enums, so a plain string compares and hashes equal to its member and
+    a caller passing one gets correct behaviour almost everywhere. Almost: ``.value`` then raises
+    ``AttributeError``, and the first place that bit was inside the error message for a unit the
+    cost math cannot apply, which turned a clean diagnosable failure into a mystery AttributeError
+    raised while pricing a span. Coercing here means a record simply cannot be constructed with a
+    non-enum unit, so no later reader has to be defensive. CTO-420 tracks the general trap.
+    """
+    if isinstance(value, Unit):
+        return value
+    try:
+        return Unit(value)
+    except (ValueError, TypeError) as exc:
+        allowed = ", ".join(u.value for u in Unit)
+        raise ValueError(f"unknown unit {value!r}; expected one of: {allowed}") from exc
+
+
+def _to_price_type(value: PriceType | str) -> PriceType:
+    """Coerce ``price_type`` to the enum, refusing an unknown spelling. See :func:`_to_unit`."""
+    if isinstance(value, PriceType):
+        return value
+    try:
+        return PriceType(value)
+    except (ValueError, TypeError) as exc:
+        allowed = ", ".join(t.value for t in PriceType)
+        raise ValueError(f"unknown price_type {value!r}; expected one of: {allowed}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,8 +219,8 @@ class OverrideLedger:
         """
         now = self._now()
         return self._append(
-            tenant_id, provider, model, price_type,
-            unit=unit, price_per_unit=_to_decimal(price_per_unit),
+            tenant_id, provider, model, _to_price_type(price_type),
+            unit=_to_unit(unit), price_per_unit=_to_decimal(price_per_unit),
             valid_from=valid_from or now.date(), valid_to=valid_to,
             actor=actor, reason=reason, currency=currency, now=now,
         )
@@ -204,13 +234,20 @@ class OverrideLedger:
         *,
         actor: str,
         reason: str,
+        valid_from: date | None = None,
     ) -> OverrideRecord:
         """Revoke a tenant's override for a slot (records a tombstone; cost falls back to public).
+
+        ``valid_from`` is the date the override ENDS, defaulting to today. It may be in the future
+        ("this contract ends on 1 January") or in the past ("it ended on 1 August, filed today"),
+        and :meth:`effective` resolves it against the span's date rather than applying it the moment
+        it is filed: see that method for why a tombstone closes a window instead of erasing it.
 
         Idempotent in effect: revoking an already-absent/revoked slot still appends an audited
         tombstone (the request itself is part of the trail), but :meth:`active` will simply not
         surface the slot.
         """
+        price_type = _to_price_type(price_type)
         prev = self._current(tenant_id, provider, model, price_type)
         unit = prev.unit if prev is not None else Unit.PER_MILLION_TOKENS
         currency = prev.currency if prev is not None else DEFAULT_CURRENCY
@@ -218,7 +255,7 @@ class OverrideLedger:
         return self._append(
             tenant_id, provider, model, price_type,
             unit=unit, price_per_unit=None,
-            valid_from=now.date(), valid_to=None,
+            valid_from=valid_from or now.date(), valid_to=None,
             actor=actor, reason=reason, currency=currency, now=now,
         )
 
@@ -314,14 +351,35 @@ class OverrideLedger:
         :meth:`tally.pricing.PriceCatalog._best` picks the one applicable at the span's date, which
         is the resolution it already implements for the public table.
 
-        Two things mask a record:
+        Two things change a record:
 
-        * a LATER version with the SAME ``valid_from``, which is a correction of that window rather
-          than a new one, and
-        * a TOMBSTONE, which withdraws every window starting at or before its own ``valid_from``. It
-          deliberately does NOT withdraw a window that starts after it: "stop overriding now" and
-          "here is the rate from January" are different statements, and a tenant who schedules next
-          year's rate and then ends this year's contract means both.
+        * a LATER version with the SAME ``valid_from`` REPLACES it. That is a correction of one
+          window rather than the opening of a new one.
+        * a TOMBSTONE CLOSES the slot at its own ``valid_from`` rather than erasing it (CTO-416
+          review). Every window that was open across that date has its ``valid_to`` moved to it, and
+          any window that would start on or after it is removed, because the tombstone says there is
+          no override from that date onward.
+
+        Closing rather than deleting is what makes a DATED revocation mean what it says, in both
+        directions, and it is the same resolution the rest of this module already relies on:
+
+        * "this contract ends on 1 January 2027", filed today, must keep pricing at the contract
+          rate until that date. Deleting the window instead started over-reporting that tenant at
+          public list the moment the revocation was filed, months early, with the endpoint happily
+          answering ``applied: true``.
+        * "the contract ended on 1 August", filed on 1 September, must stop pricing on 1 August and
+          must not leave a later window alive to resume afterwards.
+        * a span from BEFORE the end date is still priced by the rate that was in force when the
+          call was made. Deletion erased the contract from the past as well, so a backfill, a late
+          arrival or a reconciliation rerun over a pre-revocation date came back at public list,
+          which contradicts the promise that a past invoice stays explainable.
+
+        A rate appended AFTER a tombstone re-opens the slot in the ordinary way, because the ledger
+        is read in order and the last statement about a date wins.
+
+        The ``valid_to`` a tombstone imposes is materialized onto the returned record, so what this
+        returns is what the catalog should hold rather than a verbatim copy of the stored row. The
+        stored rows themselves are untouched; :meth:`history` is the verbatim view.
         """
         windows: dict[_Slot, dict[date, OverrideRecord]] = {}
         for record in self._records:  # insertion order is version order
@@ -329,8 +387,14 @@ class OverrideLedger:
                 continue
             window = windows.setdefault(record.slot, {})
             if record.revoked:
-                for start in [s for s in window if s <= record.valid_from]:
-                    del window[start]
+                ends_on = record.valid_from
+                for start, open_record in list(window.items()):
+                    if start >= ends_on:
+                        # Nothing may start on or after the end date, including a window that was
+                        # scheduled before this revocation was filed.
+                        del window[start]
+                    elif open_record.valid_to is None or open_record.valid_to > ends_on:
+                        window[start] = replace(open_record, valid_to=ends_on)
                 continue
             window[record.valid_from] = record
         return [

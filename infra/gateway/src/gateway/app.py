@@ -2458,7 +2458,12 @@ async def append_price_override(
     "reason": "CTO-416 enterprise contract, 20 percent off list", "valid_from": "2026-09-01"}``.
 
     ``{"revoke": true}`` with the same slot and no ``price_per_unit`` appends a TOMBSTONE, and the
-    slot reverts to the public catalog. There is no PUT and no DELETE here on purpose: re-pricing is
+    slot reverts to the public catalog FROM ``valid_from``, which on a revocation means the date the
+    override ENDS (today when omitted). A revocation is resolved against each span's date like every
+    other entry: "this contract ends on 1 January" filed in advance keeps pricing at the contract
+    rate until January, a backdated one ends the override where it says, and a span from before the
+    end date still prices at the rate that was in force when the call was made. ``valid_to`` is
+    refused on a revocation: a tombstone closes a window, it does not open one (CTO-416 review). There is no PUT and no DELETE here on purpose: re-pricing is
     a new version that records what it supersedes, and withdrawing is a tombstone, so the rate a
     past span was priced at is still in the table. Migration 0035 backs that with a trigger, so even
     a hand-written UPDATE is refused.
@@ -2498,6 +2503,11 @@ async def append_price_override(
         if revoke:
             if body.get("price_per_unit") is not None:
                 raise PriceOverrideError("a revocation must not carry a price_per_unit")
+            if valid_to is not None:
+                raise PriceOverrideError(
+                    "a revocation must not carry a valid_to; valid_from is the date the override "
+                    "ends"
+                )
             rate = None
         else:
             rate = normalize_price_per_unit(body.get("price_per_unit"))

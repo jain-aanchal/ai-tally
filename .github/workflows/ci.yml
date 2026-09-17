@@ -176,7 +176,7 @@ jobs:
               # tested against a fake store, so without these the MAX(version)+1 append, the unique
               # index that decides a concurrent append, the append-only trigger and migration 0035
               # itself are exercised by nothing in CI.
-              "tests.test_price_overrides_pg": (9, ""),
+              "tests.test_price_overrides_pg": (10, ""),
               "tests.test_scheduler_locking": (4, "test_live_"),
               "tests.test_scheduler_pooling": (1, "test_live_"),
           }

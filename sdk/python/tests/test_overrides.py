@@ -400,27 +400,116 @@ def test_a_correction_to_one_window_replaces_only_that_window() -> None:
     assert sorted(str(r.price_per_unit) for r in led.effective("t")) == ["0.04", "0.055"]
 
 
-def test_a_tombstone_withdraws_windows_up_to_its_own_date_only() -> None:
-    """Ending a contract now and scheduling a rate for next year are different statements."""
-    clock = _Clock(datetime(2026, 5, 1, 12, tzinfo=timezone.utc))
-    led = OverrideLedger(now=clock)
+def test_a_tombstone_closes_the_slot_at_its_own_date_rather_than_erasing_it() -> None:
+    """A revocation is resolved against the SPAN's date, not applied the moment it is filed.
+
+    Deleting the windows outright had three consequences, and this covers all three: a dated
+    revocation took effect immediately rather than on its date, a window scheduled before the
+    revocation survived it forever, and the contract vanished from the PAST so a recompute of a
+    pre-revocation span came back at public list.
+    """
+    led = OverrideLedger(now=_Clock(datetime(2026, 5, 1, 12, tzinfo=timezone.utc)))
     led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="current",
                valid_from=date(2026, 1, 1))
     led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.04", actor="a", reason="scheduled",
                valid_from=date(2026, 12, 1))
-    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="contract ended")
+    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="contract ends",
+               valid_from=date(2026, 9, 1))
 
-    remaining = led.effective("t")
-    assert [str(r.price_per_unit) for r in remaining] == ["0.04"]
     cat = seed_catalog()
     led.apply_to_catalog(cat)
     usage = Usage(input_tokens=1_000_000)
-    # Between the tombstone and December: back to the public catalog.
-    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 7, 1),
+
+    def cost(at: date) -> int:
+        return compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")[0]
+
+    assert cost(date(2026, 3, 1)) == 50_000  # history stays priceable at the contract rate
+    assert cost(date(2026, 8, 31)) == 50_000  # right up to the end date
+    assert cost(date(2026, 9, 1)) == 2_500_000  # and from the end date, public list
+    # The window scheduled for December was scheduled BEFORE the revocation, and the revocation says
+    # there is no override from September onward. It must not resume.
+    assert cost(date(2026, 12, 15)) == 2_500_000
+
+    # The closed window is reported with the end date the tombstone gave it.
+    closed = [r for r in led.effective("t")]
+    assert [(r.valid_from, r.valid_to) for r in closed] == [(date(2026, 1, 1), date(2026, 9, 1))]
+
+
+def test_a_revocation_filed_in_advance_does_not_reprice_today() -> None:
+    """The reported case: "this contract ends on 1 January 2027", filed months earlier.
+
+    The endpoint answered applied: true and the tenant silently started over-reporting at public
+    list from the moment the revocation was filed.
+    """
+    led = OverrideLedger(now=_Clock(datetime(2026, 8, 1, 12, tzinfo=timezone.utc)))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="contract",
+               valid_from=date(2026, 7, 1))
+    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="ends next year",
+               valid_from=date(2027, 1, 1))
+
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 8, 1),
+                                  tenant_id="t")[0] == 50_000
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2027, 1, 2),
                                   tenant_id="t")[0] == 2_500_000
-    # After December: the scheduled rate the tombstone did not touch.
-    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 12, 15),
-                                  tenant_id="t")[0] == 40_000
+
+
+def test_a_backdated_revocation_ends_the_override_where_it_says() -> None:
+    """The mirror case: "the contract ended on 1 August", filed on 1 September."""
+    led = OverrideLedger(now=_Clock(datetime(2026, 9, 1, 12, tzinfo=timezone.utc)))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="contract",
+               valid_from=date(2026, 1, 1))
+    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="ended in August",
+               valid_from=date(2026, 8, 1))
+
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 7, 31),
+                                  tenant_id="t")[0] == 50_000
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 8, 2),
+                                  tenant_id="t")[0] == 2_500_000
+
+
+def test_a_rate_appended_after_a_tombstone_reopens_the_slot() -> None:
+    """The ledger is read in order: the last statement about a date wins."""
+    led = OverrideLedger(now=_Clock(datetime(2026, 9, 1, 12, tzinfo=timezone.utc)))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="old contract",
+               valid_from=date(2026, 1, 1))
+    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="ended",
+               valid_from=date(2026, 9, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.03", actor="a", reason="renewed",
+               valid_from=date(2027, 1, 1))
+
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+
+    def cost(at: date) -> int:
+        return compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")[0]
+
+    assert cost(date(2026, 5, 1)) == 50_000  # the old contract, before it ended
+    assert cost(date(2026, 10, 1)) == 2_500_000  # the gap between contracts
+    assert cost(date(2027, 2, 1)) == 30_000  # the renewal
+
+
+def test_a_revocation_defaults_to_today_when_no_date_is_given() -> None:
+    """The plain "stop overriding" case keeps working, and still leaves history priceable."""
+    led = OverrideLedger(now=_Clock(datetime(2026, 9, 1, 12, tzinfo=timezone.utc)))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="contract",
+               valid_from=date(2026, 1, 1))
+    tombstone = led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="ended")
+    assert tombstone.valid_from == date(2026, 9, 1)
+
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 6, 1),
+                                  tenant_id="t")[0] == 50_000
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 9, 2),
+                                  tenant_id="t")[0] == 2_500_000
 
 
 def test_a_unit_that_cannot_price_its_tier_is_a_miss_not_a_confident_zero() -> None:
@@ -487,3 +576,49 @@ def test_marking_unavailable_drops_the_pool_in_the_same_call() -> None:
     assert (
         cat.lookup("openai", "gpt-5", PriceType.INPUT, at=date(2026, 6, 15), tenant_id="t") is None
     )
+
+
+# --- a non-enum unit must not turn a clean failure into an AttributeError (CTO-416 review) --------
+
+
+def test_a_string_unit_is_coerced_by_the_public_upsert() -> None:
+    """Both enums here are str enums, so a string mostly works, right up until something calls
+    ``.value`` on it. Coercing at the boundary means such a record cannot exist."""
+    led = _ledger()
+    rec = led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="r",
+                     unit="per_call")
+    assert rec.unit is Unit.PER_CALL
+    assert rec.to_price_entry().unit is Unit.PER_CALL
+
+    typed = led.upsert("t", "openai", "gpt-5", "output", "0.05", actor="a", reason="r")
+    assert typed.price_type is PriceType.OUTPUT
+    assert typed.as_dict()["price_type"] == "output"  # the call that used to raise
+
+
+def test_an_unknown_unit_or_tier_is_refused_rather_than_stored() -> None:
+    led = _ledger()
+    with pytest.raises(ValueError, match="unknown unit"):
+        led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1", actor="a", reason="r",
+                   unit="per_fortnight")
+    with pytest.raises(ValueError, match="unknown price_type"):
+        led.upsert("t", "openai", "gpt-5", "wholesale", "1", actor="a", reason="r")
+
+
+def test_the_unpriceable_unit_error_survives_a_non_enum_entry() -> None:
+    """The error message itself must not raise while reporting the error.
+
+    A PriceEntry built outside the ledger can still carry plain strings, and the AttributeError that
+    came out of formatting this message was raised from inside ``enrich_cost`` on the ingest path,
+    which is a different and much worse failure mode than the ValueError it was trying to raise.
+    """
+    entry = PriceEntry(
+        version="v1",
+        valid_from=date(2026, 1, 1),
+        provider="openai",
+        model="gpt-5",
+        price_type="input",  # type: ignore[arg-type]
+        unit="per_gb",  # type: ignore[arg-type]
+        price_per_unit=Decimal("1"),
+    )
+    with pytest.raises(ValueError, match="no cost arithmetic for unit per_gb"):
+        _line(entry, 1_000_000)
