@@ -19,7 +19,9 @@ from tally.transport import (
     _MAX_HINT_BYTES,
     _MAX_SUMMARY_CODES,
     _MAX_SUMMARY_LEN,
+    _NON_ITEM_CODES,
     _NON_RETRYABLE_ITEM_CODES,
+    _RETRYABLE_ITEM_CODES,
     BatchingTransport,
     SendResult,
     _code_summary,
@@ -284,6 +286,7 @@ def test_503_retry_hint_zero_succeeds_on_attempt_two():
         "rejected_by_gateway_span_count": 0,
         "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
+        "unknown_code_span_count": 0,
     }
 
 
@@ -481,6 +484,7 @@ def test_buffer_overflow_count_is_not_polluted_by_another_component(caplog):
         "rejected_by_gateway_span_count": 0,
         "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 1,
+        "unknown_code_span_count": 0,
     }
 
 
@@ -560,6 +564,7 @@ def test_rate_limited_items_in_a_200_are_requeued_and_land_on_the_next_flush():
         "rejected_by_gateway_span_count": 0,
         "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
+        "unknown_code_span_count": 0,
     }
 
 
@@ -611,6 +616,7 @@ def test_unknown_feature_tag_is_a_flag_not_a_loss():
         "rejected_by_gateway_span_count": 0,
         "unmapped_retryable_span_count": 0,
         "buffer_overflow_span_count": 0,
+        "unknown_code_span_count": 0,
     }
 
 
@@ -972,29 +978,37 @@ def test_the_partial_retry_bound_is_per_transport_not_per_span():
 # --- CTO-391 review: the mirrored code set must not drift from the gateway's own ---
 
 
-def test_non_retryable_item_codes_match_the_gateways_own_set():
-    """The SDK mirrors ``gateway/errors.py`` ``NON_RETRYABLE`` as a literal, because it depends on
-    no gateway code. Nothing pinned the two together, so a reclassification on the gateway side
-    would silently make this client retry an item that can never be accepted, or permanently drop
-    one that would have been (CTO-391 review).
+def _gateway_errors_py() -> Path:
+    """Locate ``gateway/errors.py``, skipping ONLY when the gateway project is absent entirely.
 
-    Textual, via ast: there is no gateway import to be had, and textual is enough to catch the
-    failure that actually happens, which is somebody editing one set and not the other.
+    The skip used to be ``if not errors_py.exists()``, which is vacuous in the one case that
+    matters: move, rename or delete errors.py inside this repo and the contract test guarding the
+    wire contract passes, having checked nothing. So the skip now hangs off a marker for "is the
+    gateway project here at all" (its pyproject), which is what distinguishes the SDK being tested
+    standalone from an sdist. Marker present but errors.py missing is a FAILURE, because that is a
+    real break of the mirror this test exists to hold (CTO-406).
     """
-    errors_py = (
-        Path(__file__).resolve().parents[3]
-        / "infra"
-        / "gateway"
-        / "src"
-        / "gateway"
-        / "errors.py"
+    gateway_root = Path(__file__).resolve().parents[3] / "infra" / "gateway"
+    if not (gateway_root / "pyproject.toml").exists():
+        pytest.skip("gateway project not in this checkout (SDK tested standalone)")
+    errors_py = gateway_root / "src" / "gateway" / "errors.py"
+    assert errors_py.exists(), (
+        f"the gateway project is in this checkout but {errors_py} is missing, so the SDK's "
+        "mirrored code sets cannot be checked against it"
     )
-    if not errors_py.exists():
-        pytest.skip("gateway source not in this checkout")
+    return errors_py
 
-    tree = ast.parse(errors_py.read_text(encoding="utf-8"))
+
+def _gateway_code_sets() -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Read the gateway's codes textually: member -> wire string, plus each declared code set.
+
+    Textual, via ast: there is no gateway import to be had (the SDK depends on no gateway code),
+    and textual is enough to catch the failure that actually happens, which is somebody editing one
+    set and not the other.
+    """
+    tree = ast.parse(_gateway_errors_py().read_text(encoding="utf-8"))
     wire_value: dict[str, str] = {}  # ErrorCode member -> the string that goes on the wire
-    non_retryable_members: set[str] | None = None
+    declared: dict[str, set[str]] = {}  # module-level set name -> the members it names
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "ErrorCode":
             for stmt in node.body:
@@ -1005,11 +1019,25 @@ def test_non_retryable_item_codes_match_the_gateways_own_set():
                     and isinstance(stmt.value.value, str)
                 ):
                     wire_value[stmt.targets[0].id] = stmt.value.value
-        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "NON_RETRYABLE":
-            non_retryable_members = {
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            declared[node.target.id] = {
                 n.attr for n in ast.walk(node.value) if isinstance(n, ast.Attribute)
             }
+    return wire_value, declared
 
+
+def test_non_retryable_item_codes_match_the_gateways_own_set():
+    """The SDK mirrors ``gateway/errors.py`` ``NON_RETRYABLE`` as a literal, because it depends on
+    no gateway code. Nothing pinned the two together, so a reclassification on the gateway side
+    would silently make this client retry an item that can never be accepted, or permanently drop
+    one that would have been (CTO-391 review).
+    """
+    wire_value, declared = _gateway_code_sets()
+    non_retryable_members = declared.get("NON_RETRYABLE")
     assert wire_value, "could not read ErrorCode from the gateway source"
     assert non_retryable_members, "could not read NON_RETRYABLE from the gateway source"
     assert {wire_value[m] for m in non_retryable_members} == set(_NON_RETRYABLE_ITEM_CODES)
@@ -1206,7 +1234,19 @@ def test_filtering_can_never_turn_junk_into_a_real_code(hostile):
 
 
 def test_an_altered_code_is_never_classified_as_a_permanent_drop(caplog):
-    """Behavioural: the span comes back rather than being written off (CTO-408 review)."""
+    """Behavioural: a tampered code is never read as the real code it imitates (CTO-408 review).
+
+    The property this test exists to hold is unchanged: reading ``PII_DETECTED`` out of a tampered
+    string would write the span off permanently, and it must not. That still holds, by a different
+    route than it did.
+
+    The span is no longer RETRIED, which is what this test used to assert. CTO-406 gave an
+    unrecognised code its own bucket, and a marked code is unrecognised by construction, so the span
+    is neither resent nor booked as a loss. Not resending is the deliberate half: a double send
+    permanently inflates billable spend and nothing downstream can undo it, whereas an undelivered
+    span stays visible in ``shed_counts()`` and is recoverable. Those costs are not symmetric
+    (CTO-406).
+    """
     import logging
 
     sender = _ScriptedSender(
@@ -1218,10 +1258,17 @@ def test_an_altered_code_is_never_classified_as_a_permanent_drop(caplog):
     with caplog.at_level(logging.DEBUG):
         t.flush_once()
 
-    # Retried, not booked as a permanent gateway refusal: the pre-CTO-408 fate of a code we do not
-    # recognise. Reading PII_DETECTED out of that string would have lost the span for good.
-    assert t.pending() == 1
+    # Not booked as a permanent gateway refusal, which is the CTO-408 property this test guards.
     assert t.rejected_by_gateway_span_count == 0
+    # Nor as a confirmed loss: an unknown code is not known to be one (CLAUDE.md, honest under
+    # uncertainty).
+    assert t.obs.dropped_span_count == 0
+    # And not resent, which is CTO-406's half: no second send of a span the gateway may have kept.
+    assert t.pending() == 0
+    assert t.unknown_code_span_count == 1
+    assert t.shed_counts()["unknown_code_span_count"] == 1
+    # The operator can still see WHAT arrived, under a code that cannot pass as a real one.
+    assert any("PII_DETECTED_ALTERED" in r.getMessage() for r in caplog.records)
 
 
 def test_safe_code_is_bounded_however_long_the_input():
@@ -1311,3 +1358,164 @@ def test_an_oversized_body_is_not_json_parsed_for_a_retry_hint():
     assert _retry_hint_ms(None, huge) is None
     # The same hint in a body of sane size is still honoured.
     assert _retry_hint_ms(None, b'{"server_hints": {"retry_after_ms": 1000}}') == 1000
+
+
+def test_the_flag_code_set_is_pinned_to_the_gateways_own_in_both_directions():
+    """Equality, not containment (CTO-406).
+
+    This used to assert only ``_FLAG_ITEM_CODES <= gateway codes``, i.e. that the flags this client
+    knows are real codes. The direction that was missing is the one that bites: a flag code ADDED on
+    the gateway satisfied that assertion perfectly while reaching this client as an unknown code,
+    and an unknown code was treated as retryable. Since the gateway counts an accepted-but-flagged
+    span in ``accepted_spans``, that made ``accepted + named`` exceed the batch, tripped the
+    self-consistency guard, and turned the whole ack into "distrusted", which clears the batch on
+    status alone. That is the CTO-391 silent loss, back behind a warning about distrust rather than
+    about spans. Pinned both ways, adding a flag code to errors.py fails here until the SDK learns
+    it.
+    """
+    wire_value, declared = _gateway_code_sets()
+    flag_members = declared.get("ACCEPTED_BUT_FLAGGED")
+    assert flag_members, "could not read ACCEPTED_BUT_FLAGGED from the gateway source"
+    assert {wire_value[m] for m in flag_members} == set(_FLAG_ITEM_CODES)
+
+
+def test_every_gateway_code_is_classified_somewhere_in_this_client():
+    """No gateway code may reach this client unclassified (CTO-406).
+
+    The partition is the general form of the trap: ``errors.py`` invites additive codes in its own
+    header, and every code this client has not placed in one of its four sets becomes an "unknown"
+    at runtime, in a customer's process, rather than a red test here. Adding ANY code to errors.py
+    now fails this test until somebody decides which set it belongs in.
+    """
+    wire_value, _ = _gateway_code_sets()
+    classified = (
+        set(_NON_RETRYABLE_ITEM_CODES)
+        | set(_FLAG_ITEM_CODES)
+        | set(_RETRYABLE_ITEM_CODES)
+        | set(_NON_ITEM_CODES)
+    )
+    assert set(wire_value.values()) == classified
+
+
+# --- CTO-406: one unrecognised code must not invalidate a whole ack ---
+
+
+def test_a_new_accepted_but_flagged_code_does_not_switch_the_accounting_off():
+    """The reproduction. A code the SDK has never seen, on a span the gateway ACCEPTED.
+
+    Before: unknown meant retryable, so the span was re-enqueued and counted, ``accepted + named``
+    came to 3 for a 2 span batch, the self-consistency guard fired, and the ack was distrusted
+    whole, clearing the batch on status alone.
+    """
+    sender = _ScriptedSender([SendResult(200, None, _ack(2, (("#0", "DEPRECATED_MODEL"),)))])
+    t = _transport(sender)
+    t.export({"n": 0})
+    t.export({"n": 1})
+
+    with caplog_at_warning() as records:
+        assert t.flush_once() is True
+
+    messages = " ".join(r.getMessage() for r in records)
+    assert "distrusting" not in messages  # the ack's own numbers add up fine
+    assert "unrecognised code" in messages
+    # And the code itself is NAMED, not reduced to a count: this ack fires no other warning, so
+    # withholding the text would leave an operator unable to find out what arrived. Safe to log
+    # because it is sanitised at the parse boundary (CTO-406, CTO-408).
+    assert "DEPRECATED_MODEL=1" in messages
+    assert t.pending() == 0  # never resent: it may well have landed
+    assert t.requeued_span_count == 0
+    assert t.unknown_code_span_count == 1
+    assert t.shed_counts()["unknown_code_span_count"] == 1
+    # Not booked as a loss, because it is not known to be one.
+    assert t.obs.dropped_span_count == 0
+    assert t.shed_counts()["rejected_by_gateway_span_count"] == 0
+
+
+def test_an_unknown_code_does_not_disturb_the_known_outcomes_beside_it():
+    """One unknown code must cost only its own span's certainty, not the rest of the ack."""
+    sender = _ScriptedSender(
+        [
+            SendResult(
+                200, None, _ack(1, (("#1", "RATE_LIMITED"), ("#2", "SOME_FUTURE_CODE")))
+            ),
+            SendResult(200, None, _ack(1)),
+        ]
+    )
+    t = _transport(sender, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    for i in range(3):
+        t.export({"n": i})
+
+    assert t.flush_once() is True
+    # The known retryable span still goes back on the buffer, exactly as before.
+    assert t.pending() == 1
+    assert t.requeued_span_count == 1
+    assert t.unknown_code_span_count == 1
+    # And no loss is invented for either of them.
+    assert t.shed_counts()["rejected_by_gateway_span_count"] == 0
+    assert t.shed_counts()["undelivered_span_count"] == 0
+
+    assert t.flush_once() is True
+    assert decode_request(sender.calls[1][2].decode("utf-8")).resource_spans == [{"n": 1}]
+
+
+def test_a_known_retryable_code_other_than_rate_limited_still_goes_again():
+    """Pins the retryable set as a set, not as "whatever is left over".
+
+    ``QUOTA_EXCEEDED`` and ``IDEMPOTENCY_UNAVAILABLE`` are retryable on the gateway's own terms
+    (errors.py), and naming them explicitly is what lets an unrecognised code be treated as
+    unrecognised rather than as a retry (CTO-406).
+    """
+    sender = _ScriptedSender(
+        [
+            SendResult(200, None, _ack(1, (("#1", "QUOTA_EXCEEDED"),))),
+            SendResult(200, None, _ack(1)),
+        ]
+    )
+    t = _transport(sender, backoff=BackoffPolicy(base_ms=0, max_ms=0))
+    t.export({"n": 0})
+    t.export({"n": 1})
+
+    assert t.flush_once() is True
+    assert t.pending() == 1
+    assert t.requeued_span_count == 1
+    assert t.unknown_code_span_count == 0
+    assert t.flush_once() is True
+    assert decode_request(sender.calls[1][2].decode("utf-8")).resource_spans == [{"n": 1}]
+
+
+def test_the_unrecognised_code_warning_names_the_codes_and_stays_bounded(caplog):
+    """An all-unknown ack is the one ack whose codes reach no other line (CTO-406, CTO-408).
+
+    Nothing else warns for it: there is no loss to report and nothing was re-enqueued, so the
+    partial-ack summary never fires. This line therefore has to carry the gateway's own strings, or
+    an operator is told that something arrived the SDK does not understand and given no way to find
+    out what. Carrying them is safe only because CTO-408 sanitised each code at the parse boundary,
+    and safe in aggregate only because this line reuses that ticket's own summariser: 5000 distinct
+    64 character codes sit inside the ack read cap, so joining them verbatim is reachable in normal
+    operation rather than a contrivance.
+    """
+    import logging
+
+    n = 5000
+    errors = tuple((f"#{i}", f"U{i:04d}".ljust(_MAX_CODE_LEN, "Z")) for i in range(n))
+    sender = _ScriptedSender([SendResult(200, None, _ack(0, errors)), SendResult(200)])
+    t = _transport(sender, max_batch_size=n)
+    for i in range(n):
+        t.export({"n": i})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+
+    messages = [r.getMessage() for r in caplog.records]
+    named = [m for m in messages if "unrecognised code" in m]
+    assert named  # the line under test really did fire, so this is not a vacuous assertion
+    for message in messages:
+        # Bounded in aggregate, and still one record on one physical line however it is formatted.
+        assert len(message) < 600
+        assert "\n" not in message
+        assert "\r" not in message
+    # The codes are NAMED, ranked, and the tail is counted rather than printed.
+    assert "U0000" in named[0]
+    assert f"+{n - _MAX_SUMMARY_CODES} more" in named[0]
+    # All of them land in the bucket, and not one is booked as a confirmed loss.
+    assert t.unknown_code_span_count == n
+    assert t.obs.dropped_span_count == 0

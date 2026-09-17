@@ -53,7 +53,7 @@ from gateway.batch_idempotency import (
 from gateway.config import get_settings
 from gateway.cost_connector_job import register_cost_connector_job
 from gateway.coverage_probe import AccountSignal, build_coverage, parse_wired_param
-from gateway.errors import ErrorCode
+from gateway.errors import ACCEPTED_BUT_FLAGGED, ErrorCode
 from gateway.ingest_buffer import AsyncIngestBuffer
 from gateway.mapping import span_to_row
 from gateway.metering import ClosedPeriodError, UsageRollup, validate_max_ids_per_period
@@ -214,6 +214,11 @@ REPLAY_INDEX_PER_TENANT_CAP = 500
 # in-memory index (CTO-237). Bounded so a large corpus does not blow up startup; the per-tenant cap
 # above then trims each tenant's slice to REPLAY_INDEX_PER_TENANT_CAP.
 REPLAY_HYDRATE_LIMIT = 5000
+
+# The wire spellings of the accepted-but-flagged codes, derived once at import rather than rebuilt
+# per request on the /v1/batches hot path. ACCEPTED_BUT_FLAGGED is a frozenset fixed at import, so
+# there is nothing to recompute (CTO-406).
+_FLAG_ERROR_VALUES = frozenset(c.value for c in ACCEPTED_BUT_FLAGGED)
 
 # Guards _configure_logging so a re-created app (e.g. the test suite spinning up many TestClients in
 # one process) attaches the root handler exactly once and never stacks duplicates. See CTO-218.
@@ -1164,7 +1169,10 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         logger.info("catalog drift on %d/%d spans (batch %s)", drift_count, len(rows), batch.batch_id)
 
     # Some items rejected/flagged but others written → PARTIAL; otherwise clean ACCEPTED.
-    fatal = [e for e in partial_errors if e.code != ErrorCode.UNKNOWN_FEATURE_TAG.value]
+    # Reads the declared flag set rather than naming one code inline, so a second accepted-but-
+    # flagged code added to errors.py is non-fatal here automatically instead of silently turning
+    # every flagged batch into a PARTIAL (CTO-406).
+    fatal = [e for e in partial_errors if e.code not in _FLAG_ERROR_VALUES]
     status = Status.PARTIAL if fatal else Status.ACCEPTED
     resp = BatchResponse(
         batch_id=batch.batch_id,

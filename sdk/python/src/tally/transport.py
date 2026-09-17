@@ -29,7 +29,10 @@ the ingest key as bearer. The design guarantees, all non-negotiable (CLAUDE.md, 
   code (``RATE_LIMITED``, what backpressure sheds) go back on the buffer and ship on a later flush,
   items refused PERMANENTLY (``PII_DETECTED``, ``INVALID_SCHEMA``, ``PAYLOAD_TOO_LARGE``) are
   counted in ``rejected_by_gateway_span_count`` and warned about rather than resent, and
-  ``UNKNOWN_FEATURE_TAG`` is an accepted-but-flagged marker, so it counts as neither. Items the
+  ``UNKNOWN_FEATURE_TAG`` is an accepted-but-flagged marker, so it counts as neither. A code this
+  client does not recognise at ALL is none of those three, and guessing costs real money either
+  way, so it goes to its own bucket: counted in ``unknown_code_span_count``, warned about, and not
+  resent (CTO-406). Items the
   gateway named under an id that matches no span we sent (its buffer-overflow shed numbers the
   overflow by ITS position) are retryable loss we cannot act on: counted apart again, in
   ``unmapped_retryable_span_count``, never booked as a permanent refusal. Anything that leaves this
@@ -206,6 +209,29 @@ _NON_RETRYABLE_ITEM_CODES: frozenset[str] = frozenset(
 #: are advice, not loss: counting one as a rejected span would invent a loss that never happened.
 _FLAG_ITEM_CODES: frozenset[str] = frozenset({"UNKNOWN_FEATURE_TAG"})
 
+#: Per-item codes that mean "this item can be accepted later, so send it again". Named explicitly
+#: rather than inferred as "everything that is not permanent and not a flag", because that
+#: inference is what broke: a code this client had never heard of was treated as retryable, so ONE
+#: new accepted-but-flagged code on the gateway would be re-enqueued and also counted against a
+#: batch whose ``accepted_spans`` already included its span. That pushes accepted + named past the
+#: batch size, trips the self-consistency guard, and makes the whole ack untrusted, which clears the
+#: batch on status alone: the CTO-391 silent loss returning behind a warning that says
+#: "distrusting", not "spans lost" (CTO-406).
+_RETRYABLE_ITEM_CODES: frozenset[str] = frozenset(
+    {
+        "QUOTA_EXCEEDED",
+        "RATE_LIMITED",
+        "IDEMPOTENCY_UNAVAILABLE",
+    }
+)
+
+#: Real gateway codes that can never appear as a per-ITEM outcome: they refuse a whole control-plane
+#: request (the HMAC key export endpoint), never a span inside a batch. Listed so the contract test
+#: can assert that EVERY code the gateway defines is classified somewhere here, which is what turns
+#: a newly added gateway code into a CI failure in this suite rather than an unknown at runtime in a
+#: customer's process (CTO-406).
+_NON_ITEM_CODES: frozenset[str] = frozenset({"HMAC_EXPORT_DISABLED"})
+
 
 @dataclass(frozen=True, slots=True)
 class _BatchAck:
@@ -280,8 +306,12 @@ def _safe_code(raw: str) -> str:
     spans that were retried before this hygiene existed were dropped for good after it. Deciding
     truncation on the filtered length had the same shape: ``"RATE_LIMITED" + "!" * 100`` is 112
     characters of hostile input that strips to exactly ``RATE_LIMITED`` and never trips the cap.
-    A marked code matches nothing in either code set, so it falls through to unknown and is
-    retried, which is the pre-CTO-408 behaviour for a malformed code (CTO-408 review).
+    A marked code matches nothing in any code set, so it falls through to the unrecognised-code
+    bucket. It used to be RETRIED there, which was the pre-CTO-408 fate of a malformed code; it now
+    is not, because re-sending a span the gateway may in fact have accepted permanently inflates
+    billable spend and nothing downstream can undo it. It is not booked as a loss either, since
+    neither outcome is known to be true. This sentence is the product of both tickets: the marking
+    is CTO-408's, the fate of a marked code is CTO-406's (CTO-408 review, CTO-406).
     """
     cleaned = "".join(c for c in raw if c in _CODE_SAFE_CHARS)
     # The RAW length decides truncation, so a long hostile code that strips short is still marked.
@@ -555,6 +585,11 @@ class BatchingTransport:
         # because they are NOT permanent: the spans are shed under load and the fix is ingest
         # capacity, not anything in the caller's code (CTO-391 review).
         self.unmapped_retryable_span_count = 0
+        # Spans the gateway named with a code this SDK has never heard of. Its own bucket because it
+        # is the one outcome that genuinely cannot be classified: an unknown code may be a new
+        # refusal or a new accepted-but-flagged marker, and those want opposite handling. Never
+        # resent, and never booked as loss either, since neither is known to be true (CTO-406).
+        self.unknown_code_span_count = 0
         # Spans handed back to the buffer after a RETRYABLE in-200 refusal. Not a loss, so not in
         # shed_counts(): it is the running total of spans that got a second chance, and it is the
         # figure that says "the gateway is shedding" while every loss counter stays at zero.
@@ -816,9 +851,21 @@ class BatchingTransport:
             self._partial_retry_rounds = 0
             return
 
-        retry_positions, dead_positions, codes, unmapped_retryable, unmapped_dead = (
-            self._classify_rejections(sent, ack)
-        )
+        (
+            retry_positions,
+            dead_positions,
+            codes,
+            unmapped_retryable,
+            unmapped_dead,
+            unknown_codes,
+        ) = self._classify_rejections(sent, ack)
+        unknown_spans = sum(unknown_codes.values())
+        # Unknown codes are deliberately NOT in ``named`` (CTO-406). The gateway counts an
+        # accepted-but-flagged span inside accepted_spans, so if an unknown code turns out to be a
+        # new flag, its span is already in that figure and adding it here would push
+        # accepted + named past the batch size and trip the guard below on an ack that was perfectly
+        # consistent. The guard exists to stop us re-enqueueing a span the gateway accepted, and an
+        # unknown-coded item is never re-enqueued, so leaving it out cannot weaken that.
         named = len(retry_positions) + len(dead_positions) + unmapped_retryable + unmapped_dead
         if ack.accepted_spans + named > len(sent):
             # An ack claiming more outcomes than the batch had items cannot be reconciled with what
@@ -853,7 +900,11 @@ class BatchingTransport:
         # they are counted with the permanent losses rather than resent: a resend of a span the
         # gateway may in fact have written would double-count spend, which nothing downstream can
         # undo (#311).
-        unattributed = max(0, len(sent) - ack.accepted_spans - named)
+        # Unknown-coded items come out of the shortfall too. If the code was a new refusal its span
+        # sits outside accepted_spans and this is exactly right; if it was a new flag its span is
+        # inside accepted_spans and subtracting again only shrinks the shortfall, which errs toward
+        # not inventing a loss. Clamped at zero either way (CTO-406).
+        unattributed = max(0, len(sent) - ack.accepted_spans - named - unknown_spans)
         lost = len(dead_positions) + unmapped_dead + unattributed
         if lost:
             self.rejected_by_gateway_span_count += lost
@@ -867,6 +918,11 @@ class BatchingTransport:
             # span the gateway accepted.
             self.unmapped_retryable_span_count += unmapped_retryable
             self.obs.dropped_span_count += unmapped_retryable
+        if unknown_spans:
+            # Counted, but deliberately NOT added to dropped_span_count: that counter means "lost",
+            # and an unknown code is not known to be a loss. Booking uncertainty as loss is as
+            # dishonest as booking it as success (CLAUDE.md, honest under uncertainty; CTO-406).
+            self.unknown_code_span_count += unknown_spans
 
         requeued = discarded = 0
         if retry_positions:
@@ -934,6 +990,35 @@ class BatchingTransport:
                     rolled_spans,
                 )
 
+        if unknown_spans:
+            # Its own line and its own damping key. This is the one outcome where the right action
+            # is to upgrade the SDK, and it must not be mistaken for either a loss or a success
+            # (CTO-406). The codes are NAMED here rather than reduced to a count. An all-unknown ack
+            # fires no other line, so a bare count would tell an operator that something arrived
+            # they do not understand while withholding the one string that would let them find out.
+            # Naming it is safe because CTO-408 already sanitised it at the parse boundary: filtered
+            # to an allowlist, capped at _MAX_CODE_LEN, and marked _ALTERED when changed, so it can
+            # neither forge a log line nor impersonate a real code. Summarised through the same
+            # _code_summary the partial-ack line uses, so the aggregate bound holds here too rather
+            # than being re-derived (CTO-406, CTO-408).
+            first, rolled_events, rolled_spans = self._damp_locked(
+                "gateway named an unrecognised code", unknown_spans
+            )
+            if first:
+                _log.warning(
+                    "tally: gateway named %d span(s) inside a 200 with an unrecognised code (%s); "
+                    "not resent and not counted as lost, because an unknown code may be a refusal "
+                    "or an accepted-but-flagged marker; upgrade the SDK (see shed_counts())",
+                    unknown_spans,
+                    _code_summary(unknown_codes) or "no codes named",
+                )
+            elif rolled_events:
+                _log.warning(
+                    "tally: %d more ack(s) naming %d span(s) with an unrecognised code",
+                    rolled_events,
+                    rolled_spans,
+                )
+
         if requeued:
             # Treated as a failed flush for pacing: the gateway just told us it is shedding, so the
             # resend waits out its hint (or our backoff) instead of arriving immediately.
@@ -946,16 +1031,25 @@ class BatchingTransport:
 
     def _classify_rejections(
         self, sent: list[dict[str, object]], ack: _BatchAck
-    ) -> tuple[list[int], list[int], dict[str, int], int, int]:
+    ) -> tuple[list[int], list[int], dict[str, int], int, int, dict[str, int]]:
         """Split the ack's refusals into retryable and permanent positions in ``sent``.
 
         Returns ``(retry_positions, dead_positions, codes, unmapped_retryable,
-        unmapped_permanent)``.
+        unmapped_permanent, unknown_codes)``, the last being the unrecognised codes mapped to their
+        counts rather than a bare total, so the warning can name what the gateway actually sent.
 
         A code we cannot place (an item_id that is not ours) is never resent: guessing which span it
         meant could resend one the gateway accepted. It is still COUNTED, and counted according to
         its own code, because an unplaceable id is not evidence that the loss was permanent: the
         gateway's buffer-overflow shed is retryable and names every item this way (CTO-391 review).
+
+        A code we do not RECOGNISE is separated from all of those (CTO-406). It used to fall through
+        to "retryable", which is the wrong guess in the direction that costs the most: a new
+        accepted-but-flagged code would have been re-enqueued as well as counted, and since the
+        gateway already counts a flagged span in ``accepted_spans``, that alone tips
+        ``accepted + named`` past the batch size and makes the self-consistency guard throw the
+        whole ack away. An unknown code is genuinely ambiguous, so it is placed nowhere, resent
+        never, and counted where it can be seen.
         """
         positions = self._item_positions(sent)
         retry: dict[int, None] = {}
@@ -963,11 +1057,18 @@ class BatchingTransport:
         codes: dict[str, int] = {}
         unmapped_retryable = 0
         unmapped_permanent = 0
+        unknown_codes: dict[str, int] = {}
         for item_id, code in ack.errors:
             if code in _FLAG_ITEM_CODES:
                 continue  # accepted-but-flagged: advice about the span, not a loss of it
             codes[code] = codes.get(code, 0) + 1
             permanent = code in _NON_RETRYABLE_ITEM_CODES
+            if not permanent and code not in _RETRYABLE_ITEM_CODES:
+                # Neither a refusal we know nor a retry we know. Counted apart and left in place:
+                # re-enqueueing it could double-send a span the gateway accepted, and booking it as
+                # a permanent refusal would invent a loss that may not have happened (CTO-406).
+                unknown_codes[code] = unknown_codes.get(code, 0) + 1
+                continue
             pos = positions.get(item_id)
             if pos is None:
                 if permanent:
@@ -980,7 +1081,7 @@ class BatchingTransport:
                 dead[pos] = None
             elif pos not in dead:
                 retry[pos] = None
-        return list(retry), list(dead), codes, unmapped_retryable, unmapped_permanent
+        return list(retry), list(dead), codes, unmapped_retryable, unmapped_permanent, unknown_codes
 
     @staticmethod
     def _item_positions(sent: list[dict[str, object]]) -> dict[str, int]:
@@ -1086,6 +1187,12 @@ class BatchingTransport:
         Every figure is tracked at its own site rather than derived by subtraction: ``obs`` is
         shared, and :class:`~tally.egress.BatchProcessor` also writes ``dropped_span_count``, so a
         subtracted overflow figure would silently absorb another component's drops (#315 review).
+
+        ``unknown_code_span_count`` is the one entry that is NOT a confirmed loss (CTO-406). It
+        counts spans the gateway named with a code this SDK does not know, which may have landed or
+        may have been refused. It is reported here anyway, because this dict is the surface an
+        operator actually reads, and an uncertainty nobody can see is not "counted" in any useful
+        sense. Do not add it into a loss total.
         """
         with self._lock:
             return {
@@ -1094,6 +1201,7 @@ class BatchingTransport:
                 "rejected_by_gateway_span_count": self.rejected_by_gateway_span_count,
                 "unmapped_retryable_span_count": self.unmapped_retryable_span_count,
                 "buffer_overflow_span_count": self.buffer_overflow_span_count,
+                "unknown_code_span_count": self.unknown_code_span_count,
             }
 
     def current_backoff_ms(self) -> float:
