@@ -31,7 +31,7 @@ import {
   withGroupBy,
 } from "@/lib/filters";
 import { Money } from "@/components/HonestValue";
-import { type MicroUSD } from "@/lib/types";
+import { isZeroRoundingLowerBound, type MicroUSD } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 
 interface ExploreBreakdownRow {
@@ -137,11 +137,25 @@ export function ExploreChartCard({
           <span className="text-xs text-muted">
             by {DIMENSION_LABEL[series.groupBy].toLowerCase()} ·{" "}
             {/* CTO-244 follow-up: a slice we could not price at all has no headline figure. It
-                renders the explained blank rather than a "$0.00" nobody measured. */}
+                renders the explained blank rather than a "$0.00" nobody measured.
+
+                CTO-426: and neither does a slice we priced a sliver of. This header was the one
+                surface CTO-423 left, because the total is non-null the moment a single span
+                prices, and a lower bound that rounds away at display precision reads as a
+                measured zero just as surely as a fabricated one. The reason has to name which
+                case it is, since the all-unpriced wording is a false statement in the other. */}
             <span className="tabular-nums text-fg">
               <Money
-                micro={series.totalMicroUsd}
-                reason={`all ${series.spanCount.toLocaleString()} spans in this slice could not be priced, so the cost is unknown rather than zero`}
+                micro={
+                  isZeroRoundingLowerBound(series.totalMicroUsd, series.unpricedSpanCount)
+                    ? null
+                    : series.totalMicroUsd
+                }
+                reason={
+                  series.unpricedSpanCount >= series.spanCount
+                    ? `all ${series.spanCount.toLocaleString()} spans in this slice could not be priced, so the cost is unknown rather than zero`
+                    : `${series.unpricedSpanCount.toLocaleString()} of ${series.spanCount.toLocaleString()} spans in this slice could not be priced, and what did price is below the smallest figure this can show, so the cost is unknown rather than zero`
+                }
               />
             </span>{" "}
             ·{" "}
