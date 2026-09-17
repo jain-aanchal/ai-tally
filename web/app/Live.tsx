@@ -216,10 +216,19 @@ export function HomeLive({
   const boundReason = `only ${(totalSpans - unpricedSpans).toLocaleString()} of ${totalSpans.toLocaleString()} spans in the last ${windowDays} days could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`;
   // A share of a total we cannot report is not a smaller percentage, it is no percentage at all
   // (CTO-423). A genuine measured zero total keeps the 0% it always printed.
-  const pctOfTotal = (part: number) =>
-    spendUnknown ? null : s.totalMicroUsd === 0 ? 0 : Math.round((part / s.totalMicroUsd) * 100);
+  //
+  // CTO-427: the NUMERATOR has to clear the same bar. CTO-423 only guarded the denominator, so a
+  // tile could blank its own value as unknown and then print "0% of spend" for that same quantity
+  // one line below, which is the tile contradicting itself. A share is only reportable when both
+  // halves of the ratio are.
+  const pctOfTotal = (part: number, partUnknown = false) =>
+    spendUnknown || partUnknown
+      ? null
+      : s.totalMicroUsd === 0
+        ? 0
+        : Math.round((part / s.totalMicroUsd) * 100);
   const reconciledPct = pctOfTotal(s.reconciledMicroUsd);
-  const hiddenPct = pctOfTotal(hidden);
+  const hiddenPct = pctOfTotal(hidden, hiddenUnknown);
   const tiles = (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <SummaryTile

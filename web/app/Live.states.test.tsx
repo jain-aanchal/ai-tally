@@ -133,6 +133,27 @@ describe("Home does not render a lower bound that rounds to zero (CTO-423)", () 
     expect(blank.length).toBeGreaterThan(0);
   });
 
+  it("does not print a share for a value it just blanked (CTO-427)", () => {
+    // The production shape: LLM spend prices to a real figure while the non-LLM layers, understated
+    // by the same unpriced spans, round away. The Hidden cost tile blanked its value and then said
+    // "0% of spend" for that same quantity, which is the tile contradicting itself one line apart.
+    renderHome(
+      payload({}, {
+        ...EMPTY_SPEND,
+        totalMicroUsd: 685_000,
+        byLayer: { ...zeroLayers(), llm: 685_000 },
+        spanCount: 568,
+        unpricedSpanCount: 538,
+      }),
+    );
+
+    // The spend headline is a real figure, so the denominator is reportable.
+    expect(screen.getByText("$0.685")).toBeTruthy();
+    // The hidden-cost numerator is not, so its share is no percentage at all.
+    expect(screen.queryByText(/0% of spend/i)).toBeNull();
+    expect(screen.getByText(/vector \+ tools \+ compute/i)).toBeTruthy();
+  });
+
   it("keeps a small lower bound that still renders as a figure", () => {
     renderHome(
       payload({}, {
