@@ -1517,3 +1517,49 @@ describe("queryAttribution reads revenue as micro-USD (#340)", () => {
     expect(openai?.valuePerUserMicroUsd).toBeLessThan(1_000_000_000);
   });
 });
+
+// CTO-429. The roll-up ratio used to ask "did a row WITH conversions lose its ratio?", which a
+// system that went unpriced and happens to have no conversions of its own slips straight past: its
+// missing cost stays out of the numerator while every other system's conversions stay in the
+// denominator, and the total is published as a confident figure. The test is now "did any span in
+// the window go unpriced?".
+describe("queryAttribution totals ratio vs unpriced spans (CTO-429)", () => {
+  /** The five reads queryAttribution issues, with one unpriced system that has no conversions. */
+  function respondUnpricedBystander() {
+    respondRows([
+      { provider: "anthropic", sessions: "40", cost: "0.685", unpriced: "0", spans: "60" },
+      { provider: "cohere", sessions: "12", cost: "0", unpriced: "5", spans: "5" },
+    ]);
+    respondRows([{ provider: "anthropic", conversions: "8" }]);
+    respondRows([]);
+    respondRows([]);
+    respondRows([{ start: "2026-08-10" }]);
+  }
+
+  it("blanks the total when a system with no conversions went unpriced", async () => {
+    const { queryAttribution } = await freshSut();
+    respondUnpricedBystander();
+
+    const out = await queryAttribution({ tag: null, provider: null, outcome: null });
+    expect(out).not.toBeNull();
+    // cohere contributes 12 sessions and 5 unpriced spans but no conversions, so the old predicate
+    // saw nothing wrong. The cost it could not report is still missing from the numerator.
+    expect(out!.totals.unpricedSpanCount).toBe(5);
+    expect(out!.totals.costPerConversionMicroUsd).toBeNull();
+  });
+
+  it("still computes the total when every span in the window priced", async () => {
+    const { queryAttribution } = await freshSut();
+    respondRows([
+      { provider: "anthropic", sessions: "40", cost: "0.685", unpriced: "0", spans: "60" },
+    ]);
+    respondRows([{ provider: "anthropic", conversions: "8" }]);
+    respondRows([]);
+    respondRows([]);
+    respondRows([{ start: "2026-08-10" }]);
+
+    const out = await queryAttribution({ tag: null, provider: null, outcome: null });
+    expect(out!.totals.unpricedSpanCount).toBe(0);
+    expect(out!.totals.costPerConversionMicroUsd).toBe(Math.round(685_000 / 8));
+  });
+});

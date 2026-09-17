@@ -5,7 +5,7 @@
 // is a cost-attribution view, and hiding a row would take real spend off a page whose job is to
 // account for it.
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AttributionLive, type AttributionPayload } from "./Live";
@@ -124,5 +124,121 @@ describe("attribution source states (#364)", () => {
   it("labels the fixture report as sample data on the demo-only path", () => {
     renderLive({ ...report(), isMock: true, state: "sample" });
     expect(screen.getByText(/SAMPLE DATA/i)).toBeTruthy();
+  });
+});
+
+// CTO-429. The per-system table formatted a NULL-skipping `sum()`: a system whose spans all lack a
+// catalog rate summed to 0, not to null, so `<Money>` had nothing to blank on and the page printed
+// "$0.00" for a real cost under a footnote asserting every row was real spend. These pin the three
+// answers apart, and pin the figures derived from an unknown cost to inheriting the unknown.
+describe("unpriced systems (CTO-429)", () => {
+  /** One priced system, one all-unpriced system, and one that genuinely spent nothing. */
+  function mixedReport(): AttributionPayload {
+    const perProvider = [
+      // Priced: 60 spans, none unpriced.
+      buildProviderRow("anthropic", 40, 8, 685_000, null, 0, 60),
+      // Spans observed, all of them unpriced. The sum is 0 because there was nothing to add.
+      buildProviderRow("cohere", 12, 4, 0, null, 12, 12),
+      // Spans observed, every one priced, and the spend really was nothing. A measurement.
+      buildProviderRow("groq", 9, 3, 0, null, 0, 30),
+    ];
+    return {
+      filters: { tag: null, provider: null, outcome: null },
+      perProvider,
+      totals: {
+        sessions: 61,
+        conversions: 15,
+        costMicroUsd: 685_000,
+        // Unpriced spans in the window, so the roll-up ratio is unknown (queryAttribution nulls it).
+        costPerConversionMicroUsd: null,
+        unpricedSpanCount: 12,
+        spanCount: 102,
+      },
+      isMock: false,
+      state: "live",
+    };
+  }
+
+  function row(system: string): HTMLElement {
+    const cell = screen.getByText(system);
+    const tr = cell.closest("tr");
+    expect(tr).toBeTruthy();
+    return tr as HTMLElement;
+  }
+
+  it("blanks an all-unpriced system with a reason instead of fabricating $0.00", () => {
+    renderLive(mixedReport());
+    const cohere = within(row("cohere"));
+    expect(cohere.queryByText("$0.00")).toBeNull();
+    expect(
+      cohere.getByText(/none of the 12 spans for this system in this window carry a catalog rate/),
+    ).toBeTruthy();
+  });
+
+  it("still shows a fully priced system's figure", () => {
+    renderLive(mixedReport());
+    expect(within(row("anthropic")).getByText("$0.685")).toBeTruthy();
+  });
+
+  it("still shows a genuine measured zero, which is a measurement and not a gap", () => {
+    renderLive(mixedReport());
+    const groq = within(row("groq"));
+    expect(groq.getAllByText("$0.00").length).toBeGreaterThan(0);
+    expect(groq.queryByText(/carry a catalog rate/)).toBeNull();
+  });
+
+  it("makes every figure derived from an unknown cost unknown too", () => {
+    renderLive(mixedReport());
+    const cohere = within(row("cohere"));
+    // $/conversion, value/user and margin/user all blank, and all three send the reader to the
+    // cost rather than to a conversion count or a revenue connector that is not the problem.
+    const blamed = cohere.getAllByText(/the cost for this system is unknown, not zero/);
+    expect(blamed.length).toBe(3);
+    // The row has four conversions, so "nothing to divide by" would be a wrong explanation.
+    expect(cohere.queryByText(/no conversion events for this system/)).toBeNull();
+  });
+
+  it("blanks the headline tiles when nothing in the window could be priced", () => {
+    const data = mixedReport();
+    data.perProvider = [buildProviderRow("cohere", 12, 4, 0, null, 12, 12)];
+    data.totals = {
+      sessions: 12,
+      conversions: 4,
+      costMicroUsd: 0,
+      costPerConversionMicroUsd: null,
+      unpricedSpanCount: 12,
+      spanCount: 12,
+    };
+    renderLive(data);
+    const tile = screen.getByText("Total cost").closest("div") as HTMLElement;
+    expect(within(tile).queryByText("$0.00")).toBeNull();
+    expect(
+      within(tile).getByText(/none of the 12 spans in this window carry a catalog rate/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/the total cost for this window is unknown, not zero/),
+    ).toBeTruthy();
+  });
+
+  it("keeps the headline tiles when the window is fully priced", () => {
+    const data = mixedReport();
+    data.perProvider = [buildProviderRow("anthropic", 40, 8, 685_000, null, 0, 60)];
+    data.totals = {
+      sessions: 40,
+      conversions: 8,
+      costMicroUsd: 685_000,
+      costPerConversionMicroUsd: 85_625,
+      unpricedSpanCount: 0,
+      spanCount: 60,
+    };
+    renderLive(data);
+    const tile = screen.getByText("Total cost").closest("div") as HTMLElement;
+    expect(within(tile).getByText("$0.685")).toBeTruthy();
+  });
+
+  it("stops claiming in the footnote that every row is real spend", () => {
+    renderLive(mixedReport());
+    expect(screen.queryByText(/Every row is real spend for this window/)).toBeNull();
+    expect(screen.getByText(/never a zero/)).toBeTruthy();
   });
 });
