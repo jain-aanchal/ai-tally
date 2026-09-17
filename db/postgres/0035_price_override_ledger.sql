@@ -18,6 +18,13 @@
 -- NO SECRETS LIVE HERE. A price is a contract term, not a credential. This table holds no key
 -- material and no reference to any, and nothing in the write path accepts one.
 
+-- ONE TRANSACTION, and this is not boilerplate (CTO-416 review). psql autocommits statement by
+-- statement, so the first version of this file aborted halfway on any database that already held
+-- rows: the columns were added and NOT NULL was dropped, and then the unique index failed, leaving
+-- a database with no unique index and NO APPEND-ONLY TRIGGER while looking migrated. Both the
+-- audit guarantee and the concurrent-append race guard live in those two objects. All or nothing.
+BEGIN;
+
 ALTER TABLE price_catalog_overrides
     ADD COLUMN IF NOT EXISTS version     INTEGER     NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS supersedes  INTEGER,
@@ -27,6 +34,39 @@ ALTER TABLE price_catalog_overrides
 
 -- A tombstone is a row with no price. That is what makes a withdrawal auditable instead of a gap.
 ALTER TABLE price_catalog_overrides ALTER COLUMN price_per_unit DROP NOT NULL;
+
+-- BACKFILL the version per slot, rather than leaving every existing row at the DEFAULT of 1.
+--
+-- The 0001 table has no slot uniqueness and its whole point was several TIME-WINDOWED rows per
+-- slot, so a constant 1 collides the moment any tenant has two windows for one rate, and the unique
+-- index below then refuses to build. Numbering by valid_from is also the honest reading of what
+-- those rows are: the earliest window is version 1 and each later one supersedes it, which is
+-- exactly the chain the ledger would have recorded had it existed when they were written. `id`
+-- breaks a tie between two rows with the same valid_from so the numbering is deterministic.
+-- The append-only trigger is dropped for the duration, because the backfill below is itself an
+-- UPDATE and a RE-RUN of this file would otherwise be refused by the trigger its own first run
+-- created. Every other migration here is safe to replay, and this one has to be too: the whole file
+-- is one transaction, so a failure anywhere rolls the drop back with everything else.
+DROP TRIGGER IF EXISTS trg_price_overrides_append_only ON price_catalog_overrides;
+
+WITH numbered AS (
+    SELECT id,
+           row_number() OVER (
+               PARTITION BY tenant_id, provider, model, price_type
+               ORDER BY valid_from, id
+           ) AS slot_version
+      FROM price_catalog_overrides
+)
+UPDATE price_catalog_overrides AS p
+   SET version = numbered.slot_version,
+       supersedes = NULLIF(numbered.slot_version - 1, 0)
+  FROM numbered
+ WHERE p.id = numbered.id
+   -- Touch only rows that are actually wrong, so a replay writes nothing at all rather than
+   -- rewriting a version that a real ledger append has since assigned.
+   AND (p.version IS DISTINCT FROM numbered.slot_version
+        AND p.version = 1
+        AND p.actor = 'pre-ledger');
 
 -- Money sanity. A negative rate would compute a negative cost and quietly credit a tenant for
 -- spending; a version below 1 would break the supersedes chain.
@@ -60,9 +100,8 @@ ALTER TABLE price_catalog_overrides
 CREATE UNIQUE INDEX IF NOT EXISTS uq_price_overrides_slot_version
     ON price_catalog_overrides (tenant_id, provider, model, price_type, version);
 
--- The load path reads a tenant's whole history in ledger order.
-CREATE INDEX IF NOT EXISTS idx_price_overrides_tenant_order
-    ON price_catalog_overrides (tenant_id, provider, model, price_type, version);
+-- The unique index above also serves the load path's read (a tenant's history in ledger order), so
+-- there is deliberately no second index on the same columns.
 
 -- APPEND-ONLY, enforced by the database rather than by convention. An UPDATE here would rewrite the
 -- rate a past cost was computed from, which is the one thing the version column exists to prevent.
@@ -76,6 +115,10 @@ END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_price_overrides_append_only ON price_catalog_overrides;
+-- Created LAST, after the backfill above, which is itself an UPDATE and would otherwise be refused
+-- by the very rule it is preparing the table for.
 CREATE TRIGGER trg_price_overrides_append_only
     BEFORE UPDATE ON price_catalog_overrides
     FOR EACH ROW EXECUTE FUNCTION price_overrides_refuse_update();
+
+COMMIT;

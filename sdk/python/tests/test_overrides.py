@@ -11,11 +11,15 @@ import pytest
 
 from tally.overrides import OverrideLedger, OverrideRecord
 from tally.pricing import (
+    PriceEntry,
     PriceType,
     Unit,
     Usage,
+    _line,
     compute_cost_micro_usd,
+    priceable_units,
     seed_catalog,
+    unit_can_price,
 )
 
 
@@ -331,3 +335,155 @@ def test_clear_overrides_drops_the_pool_in_place() -> None:
     cat.clear_overrides()
     public, _ = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")
     assert public == 2_500_000
+
+
+# --- date windows and unusable units (CTO-416 review) --------------------------------------------
+
+
+def test_a_rate_negotiated_in_advance_does_not_hide_the_one_in_force() -> None:
+    """``active`` collapses a slot to its newest record, which is NOT what may price a span.
+
+    Materializing only that record left the rate actually in force today out of the catalog, so the
+    lookup fell through to the public list price, and a contract rate is normally well below list.
+    ``effective`` hands every surviving window to the catalog and lets it resolve by date, which is
+    what ``valid_from`` was for in the first place.
+    """
+    led = _ledger()
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="in force",
+               valid_from=date(2026, 1, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.04", actor="a", reason="next quarter",
+               valid_from=date(2026, 12, 1))
+
+    assert [str(r.price_per_unit) for r in led.active("t")] == ["0.04"]
+    assert sorted(str(r.price_per_unit) for r in led.effective("t")) == ["0.04", "0.05"]
+
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+    today, later = date(2026, 6, 15), date(2026, 12, 15)
+
+    def cost(at: date) -> int:
+        return compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")[0]
+
+    assert cost(today) == 50_000
+    assert cost(later) == 40_000
+    assert cost(today) != 2_500_000  # and emphatically not the public 2.50 per million
+
+
+def test_a_historical_span_is_priced_by_the_window_that_was_in_force() -> None:
+    """The mirror image: a March span must not resolve against a rate that starts in June."""
+    led = _ledger()
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="q1",
+               valid_from=date(2026, 1, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.04", actor="a", reason="q2",
+               valid_from=date(2026, 6, 1))
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+
+    def cost(at: date) -> int:
+        return compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")[0]
+
+    assert cost(date(2026, 3, 15)) == 50_000
+    assert cost(date(2026, 7, 15)) == 40_000
+
+
+def test_a_correction_to_one_window_replaces_only_that_window() -> None:
+    """A later version with the SAME valid_from is a correction, not a new window."""
+    led = _ledger()
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="q1",
+               valid_from=date(2026, 1, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.04", actor="a", reason="q2",
+               valid_from=date(2026, 6, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.055", actor="a", reason="q1 was wrong",
+               valid_from=date(2026, 1, 1))
+    assert sorted(str(r.price_per_unit) for r in led.effective("t")) == ["0.04", "0.055"]
+
+
+def test_a_tombstone_withdraws_windows_up_to_its_own_date_only() -> None:
+    """Ending a contract now and scheduling a rate for next year are different statements."""
+    clock = _Clock(datetime(2026, 5, 1, 12, tzinfo=timezone.utc))
+    led = OverrideLedger(now=clock)
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="current",
+               valid_from=date(2026, 1, 1))
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.04", actor="a", reason="scheduled",
+               valid_from=date(2026, 12, 1))
+    led.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="contract ended")
+
+    remaining = led.effective("t")
+    assert [str(r.price_per_unit) for r in remaining] == ["0.04"]
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    usage = Usage(input_tokens=1_000_000)
+    # Between the tombstone and December: back to the public catalog.
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 7, 1),
+                                  tenant_id="t")[0] == 2_500_000
+    # After December: the scheduled rate the tombstone did not touch.
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 12, 15),
+                                  tenant_id="t")[0] == 40_000
+
+
+def test_a_unit_that_cannot_price_its_tier_is_a_miss_not_a_confident_zero() -> None:
+    """A per-GB rate on a token tier used to price every matching span at exactly 0.
+
+    ``_line`` had no branch for it and returned Decimal(0), and because a catalog version WAS set
+    the span read as priced rather than as unpriced. The public rate still applies here, which is
+    the point: the unusable entry is skipped rather than honoured.
+    """
+    led = _ledger()
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.05", actor="a", reason="bad unit",
+               unit=Unit.PER_GB)
+    cat = seed_catalog()
+    led.apply_to_catalog(cat)
+    cost, version = compute_cost_micro_usd(
+        cat, "openai", "gpt-5", Usage(input_tokens=1_000_000), at=date(2026, 6, 15), tenant_id="t"
+    )
+    assert cost == 2_500_000  # the public rate, not 0
+    assert version == "seed-2026-06-15"
+    assert not unit_can_price(PriceType.INPUT, Unit.PER_GB)
+    assert priceable_units(PriceType.TOOL_CALL) == ["per_call"]
+
+
+def test_the_cost_math_raises_rather_than_returning_zero_for_a_unit_it_cannot_apply() -> None:
+    """The backstop that keeps the next unit added to the enum from reintroducing the zero."""
+    entry = PriceEntry(
+        version="v1",
+        valid_from=date(2026, 1, 1),
+        provider="openai",
+        model="gpt-5",
+        price_type=PriceType.INPUT,
+        unit=Unit.PER_GB,
+        price_per_unit=Decimal("1"),
+    )
+    with pytest.raises(ValueError, match="no cost arithmetic"):
+        _line(entry, 1_000_000)
+
+
+def test_replace_overrides_installs_a_pool_and_clears_the_fail_closed_flag() -> None:
+    """One assignment, so a concurrent reader never sees a half-built pool (CTO-416 review)."""
+    cat = seed_catalog()
+    cat.mark_overrides_unavailable("postgres unreachable")
+    led = _ledger()
+    rec = led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1.0", actor="a", reason="contract")
+    entry = rec.to_price_entry()
+    assert entry is not None
+    cat.replace_overrides({"t": [entry]})
+    assert cat.overrides_unavailable is None
+    usage = Usage(input_tokens=1_000_000)
+    assert compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 6, 15),
+                                  tenant_id="t")[0] == 1_000_000
+
+
+def test_marking_unavailable_drops_the_pool_in_the_same_call() -> None:
+    """Flag first, pool second: the reverse order leaves an empty pool still looking usable."""
+    cat = seed_catalog()
+    led = _ledger()
+    rec = led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1.0", actor="a", reason="contract")
+    entry = rec.to_price_entry()
+    assert entry is not None
+    cat.replace_overrides({"t": [entry]})
+    cat.mark_overrides_unavailable("postgres unreachable")
+    assert cat.overrides_unavailable == "postgres unreachable"
+    assert (
+        cat.lookup("openai", "gpt-5", PriceType.INPUT, at=date(2026, 6, 15), tenant_id="t") is None
+    )

@@ -24,27 +24,29 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 from tally.overrides import OverrideRecord
-from tally.pricing import PriceType, Unit
+from tally.pricing import PriceType, Unit, seed_catalog
 from tally.schema import SpanFields, build_span_attributes
 
 from gateway import app as app_module
 from gateway.app import app
 from gateway.config import get_settings
 from gateway.mapping import COLUMNS
+from gateway.price_overrides import TenantSpellings
 from gateway.price_overrides import (
     MAX_PRICE_PER_UNIT,
     PriceOverrideError,
-    unambiguous_spellings,
+    normalize_currency,
     normalize_price_per_unit,
     normalize_price_type,
     normalize_reason,
     normalize_unit,
+    resolve_tenant_spellings,
 )
 
 TENANT = "t-local"
@@ -105,10 +107,12 @@ class FakeLedgerStore:
         *,
         fail: bool = False,
         spellings: dict[str, list[str]] | None = None,
+        ambiguous: list[str] | None = None,
     ) -> None:
         self.records = list(records or [])
         self.fail = fail
         self.spellings = spellings or {}
+        self.ambiguous = ambiguous or []
         # Counted so a test can assert WHEN the ledger was read, which is the difference between
         # loading at startup and loading on the first batch that happens to arrive.
         self.loads = 0
@@ -119,10 +123,10 @@ class FakeLedgerStore:
             raise RuntimeError("connection to server at \"postgres\" failed")
         return list(self.records)
 
-    def load_tenant_spellings(self) -> dict[str, list[str]]:
+    def load_tenant_spellings(self) -> TenantSpellings:
         if self.fail:
             raise RuntimeError("connection to server at \"postgres\" failed")
-        return dict(self.spellings)
+        return TenantSpellings(usable=dict(self.spellings), ambiguous=list(self.ambiguous))
 
 
 def _record(
@@ -319,9 +323,50 @@ def test_a_name_two_tenants_share_carries_no_override() -> None:
         ("11111111-1111-4111-8111-111111111111", ["local-dev", "org_a"]),
         ("22222222-2222-4222-8222-222222222222", ["local-dev"]),
     ]
-    resolved = unambiguous_spellings(rows)
-    assert resolved["11111111-1111-4111-8111-111111111111"] == ["org_a"]
-    assert resolved["22222222-2222-4222-8222-222222222222"] == []
+    resolved = resolve_tenant_spellings(rows)
+    assert resolved.usable["11111111-1111-4111-8111-111111111111"] == ["org_a"]
+    assert resolved.usable["22222222-2222-4222-8222-222222222222"] == []
+    assert resolved.ambiguous == ["local-dev"]
+
+
+def test_a_name_that_is_another_tenants_uuid_carries_no_override() -> None:
+    """The cross-tenant leak: tenants.name is free text from the Clerk webhook (CTO-416 review).
+
+    Counting alternates against each other only, the first version of this rule scored a name equal
+    to ANOTHER tenant's canonical id as unique, so tenant B could name their org after tenant A's
+    UUID, append a rate for themselves, and have it register under A's catalog key. A's own
+    authenticated ingest then priced from B's contract. Authenticated, self-serve, production path.
+    """
+    victim = "11111111-1111-4111-8111-111111111111"
+    attacker = "22222222-2222-4222-8222-222222222222"
+    resolved = resolve_tenant_spellings([(victim, ["acme"]), (attacker, [victim, "org_b"])])
+    assert resolved.usable[attacker] == ["org_b"]
+    assert victim in resolved.ambiguous
+    # The victim keeps their own spellings; the attacker gains nothing.
+    assert resolved.usable[victim] == ["acme"]
+
+
+def test_a_dropped_spelling_is_reported_rather_than_silently_swallowed() -> None:
+    """Dropping the alias is the safe choice, but it is not a no-op for the tenant who owns it.
+
+    Their override stops applying to batches posted under that spelling, which from the outside is
+    indistinguishable from the feature not working, and a third party can cause it by naming their
+    own org after that tenant's name. So it is surfaced in the load status (and logged), not hidden.
+    """
+    ledger = RecordingLedgerStore(_contract_records(), ambiguous=["acme"])
+    with _client(ledger) as (c, _store):
+        load = c.get("/v1/tenant/price-overrides", headers=HEADERS).json()["load"]
+    assert load["ambiguous_spellings"] == ["acme"]
+    assert load["healthy"] is True  # degraded coverage, not a failed load
+
+
+def test_a_uuid_shaped_name_carries_no_override_even_when_it_matches_no_tenant() -> None:
+    """A spelling that merely parses as a UUID is refused too: that tenant may be created later,
+    and this map is rebuilt on a schedule rather than on that event."""
+    mine = "11111111-1111-4111-8111-111111111111"
+    resolved = resolve_tenant_spellings([(mine, ["99999999-9999-4999-8999-999999999999", "ok"])])
+    assert resolved.usable[mine] == ["ok"]
+    assert resolved.ambiguous == ["99999999-9999-4999-8999-999999999999"]
 
 
 def test_public_catalog_still_prices_a_tenant_with_no_override() -> None:
@@ -353,11 +398,43 @@ def test_failed_override_load_leaves_cost_unpriced_not_list_price() -> None:
 def test_failed_override_load_is_visible_on_readyz() -> None:
     """The failure is a health signal, not only a log line: blank costs alone look like no traffic."""
     with _client(FakeLedgerStore(_contract_records(), fail=True)) as (c, _store):
-        r = c.get("/readyz")
-        body = r.json()
-        assert body["checks"]["price_overrides"] is False
+        body = c.get("/readyz").json()
+        assert body["degraded"] == ["price_overrides"]
         assert body["price_overrides"]["healthy"] is False
         assert body["price_overrides"]["error"]
+
+
+def test_a_failed_override_load_does_not_take_the_replica_out_of_rotation() -> None:
+    """Degraded pricing must not stop INGEST (CTO-416 review).
+
+    ``/readyz`` answering 503 pulls the replica from the load balancer, so folding the ledger into
+    ``ready`` traded blank cost columns for dropped customer telemetry, on every replica at once and
+    with no self-healing. The likely trigger is mundane: the flag on before migration 0035 has been
+    applied by hand to a running stack, against a perfectly healthy Postgres.
+    """
+    class HealthyAuth:
+        """Stands in for the Postgres-backed auth ping, so this asserts the PRICE check alone."""
+
+        def ping(self) -> bool:
+            return True
+
+    with _client(FakeLedgerStore(_contract_records(), fail=True)) as (c, store):
+        real_auth = app.state.auth
+        app.state.auth = HealthyAuth()
+        try:
+            readyz = c.get("/readyz")
+        finally:
+            app.state.auth = real_auth
+        body = readyz.json()
+        # Dependencies are healthy, so the replica is READY even though pricing is degraded.
+        assert readyz.status_code == 200, body
+        assert body["ready"] is True
+        assert body["degraded"] == ["price_overrides"]
+        assert "price_overrides" not in body["checks"]
+        _post(c)  # and ingest still accepts the batch
+
+    assert len(store.spans) == 1
+    assert _row(store)["CostSource"] == "unpriced"
 
 
 def test_a_recovered_ledger_prices_again_without_a_restart() -> None:
@@ -595,3 +672,311 @@ def test_rates_stay_decimal_end_to_end() -> None:
         normalize_unit("per_fortnight")
     with pytest.raises(PriceOverrideError):
         normalize_reason("   ")
+
+
+# --- date windows: the rate in force, not the newest row (CTO-416 review) ------------------------
+
+
+def _dated(
+    price: Decimal | None,
+    price_type: PriceType,
+    *,
+    version: int,
+    valid_from: date,
+    supersedes: int | None = None,
+) -> OverrideRecord:
+    record = _record(price, price_type, version=version, supersedes=supersedes)
+    return OverrideRecord(**{**vars_of(record), "valid_from": valid_from})
+
+
+def _post_at(c: TestClient, when: date) -> None:
+    """Post the standard span stamped with a specific date, the way a backfill would."""
+    span = _span()
+    span["timestamp_ns"] = int(
+        datetime(when.year, when.month, when.day, 12, tzinfo=timezone.utc).timestamp() * 1e9
+    )
+    r = c.post(
+        "/v1/batches",
+        json={"tenant_id": TENANT, "sdk_version": "test", "resource_spans": [span]},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_a_rate_negotiated_in_advance_does_not_hide_the_one_in_force() -> None:
+    """The defect this catches silently TRIPLED a contract tenant's reported cost.
+
+    Scheduling next quarter's rate is the documented use of valid_from. Materializing only the
+    slot's newest entry meant the rate actually in force today was never handed to the catalog, so
+    the lookup fell through to the PUBLIC price until the new window opened.
+    """
+    today = datetime.now(timezone.utc).date()
+    in_force = today - timedelta(days=30)
+    future = today + timedelta(days=90)
+    records = [
+        _dated(CONTRACT_INPUT, PriceType.INPUT, version=1, valid_from=in_force),
+        _dated(CONTRACT_OUTPUT, PriceType.OUTPUT, version=1, valid_from=in_force),
+        # Negotiated now, starts next quarter. Newest entry for both slots.
+        _dated(Decimal("0.005"), PriceType.INPUT, version=2, valid_from=future, supersedes=1),
+        _dated(Decimal("0.020"), PriceType.OUTPUT, version=2, valid_from=future, supersedes=1),
+    ]
+    with _client(FakeLedgerStore(records)) as (c, store):
+        _post(c)
+
+    assert _row(store)["EstimatedCost"] == CONTRACT_PRICE  # today's rate, not the future one
+    assert _row(store)["EstimatedCost"] != LIST_PRICE  # and emphatically not list
+
+
+def test_a_span_is_priced_on_its_own_date_not_todays() -> None:
+    """Historical recompute, which is the reason the ledger is versioned and windowed at all.
+
+    A backfilled or late span priced against today's window is the same class of wrong as pricing
+    it at list: it reports a number the customer was never charged. docs/price-overrides.md promises
+    the span's date, and that promise is meant to be citable to a customer about a bill.
+    """
+    today = datetime.now(timezone.utc).date()
+    march = today - timedelta(days=120)
+    records = [
+        _dated(Decimal("0.030"), PriceType.INPUT, version=1, valid_from=march - timedelta(days=10)),
+        _dated(Decimal("0.120"), PriceType.OUTPUT, version=1, valid_from=march - timedelta(days=10)),
+        _dated(CONTRACT_INPUT, PriceType.INPUT, version=2, valid_from=today, supersedes=1),
+        _dated(CONTRACT_OUTPUT, PriceType.OUTPUT, version=2, valid_from=today, supersedes=1),
+    ]
+    with _client(FakeLedgerStore(records)) as (c, store):
+        _post_at(c, march)
+        _post(c)
+
+    assert dict(zip(COLUMNS, store.spans[0], strict=True))["EstimatedCost"] == Decimal("0.150")
+    assert dict(zip(COLUMNS, store.spans[1], strict=True))["EstimatedCost"] == CONTRACT_PRICE
+
+
+def test_a_tombstone_does_not_withdraw_a_window_that_starts_after_it() -> None:
+    """Ending this year's contract and scheduling next year's are different statements."""
+    today = datetime.now(timezone.utc).date()
+    records = [
+        _dated(CONTRACT_INPUT, PriceType.INPUT, version=1, valid_from=today - timedelta(days=30)),
+        _dated(CONTRACT_OUTPUT, PriceType.OUTPUT, version=1, valid_from=today - timedelta(days=30)),
+        _dated(None, PriceType.INPUT, version=2, valid_from=today, supersedes=1),
+        _dated(Decimal("0.005"), PriceType.INPUT, version=3, valid_from=today + timedelta(days=30)),
+    ]
+    with _client(RecordingLedgerStore(records), ttl_s=0.0) as (c, store):
+        _post(c)  # today: input withdrawn (list), output still on contract
+        # The scheduled window is asserted against the catalog rather than by posting a future-dated
+        # span, because the skew clamp (correctly) rewrites a timestamp from the future to server
+        # time, so such a span could never exercise a future window anyway.
+        scheduled = app.state.catalog.lookup(
+            "openai",
+            "gpt-4o-mini",
+            PriceType.INPUT,
+            at=today + timedelta(days=60),
+            tenant_id=TENANT,
+        )
+        listed = c.get("/v1/tenant/price-overrides", headers=HEADERS).json()
+
+    assert dict(zip(COLUMNS, store.spans[0], strict=True))["EstimatedCost"] == Decimal("0.21")
+    assert scheduled is not None and scheduled.price_per_unit == Decimal("0.005")
+    # The GET separates the two questions a customer asks. The input slot's LATEST entry is the
+    # scheduled v3, so it appears under "overrides" even though today's input is priced at list;
+    # "in_force" is what the cost path is actually holding.
+    assert sorted((o["price_type"], o["version"]) for o in listed["overrides"]) == [
+        ("input", 3),
+        ("output", 1),
+    ]
+    assert sorted((o["price_type"], o["version"]) for o in listed["in_force"]) == [
+        ("input", 3),
+        ("output", 1),
+    ]
+
+
+# --- the refresh must never expose a half-built pool ---------------------------------------------
+
+
+def test_a_refresh_swaps_the_pool_in_one_step_and_never_empties_it_in_place() -> None:
+    """Rebuilding in place priced contract tenants at LIST for the length of every refresh.
+
+    ``refresh`` runs on a worker thread while the ingest path keeps enriching and readers hold no
+    lock, so any window in which the pool is empty and still flagged trustworthy is a window in
+    which a lookup falls through to the public catalog. Once per TTL window, forever, not only on
+    failure. This asserts the mechanism rather than trying to hit a microsecond race: the pool is
+    installed with one assignment and is never cleared in place on the success path.
+    """
+    ledger = FakeLedgerStore(_contract_records())
+    with _client(ledger) as (c, _store):
+        catalog = app.state.catalog
+        calls: list[str] = []
+        original_clear = catalog.clear_overrides
+        original_replace = catalog.replace_overrides
+        catalog.clear_overrides = lambda: (calls.append("clear"), original_clear())[1]
+        catalog.replace_overrides = lambda pool: (
+            calls.append("replace"),
+            original_replace(pool),
+        )[1]
+        try:
+            assert c.post("/v1/tenant/price-overrides/refresh", headers=HEADERS).status_code == 200
+        finally:
+            catalog.clear_overrides = original_clear
+            catalog.replace_overrides = original_replace
+
+    assert calls == ["replace"]
+
+
+def test_a_failed_load_flags_the_catalog_before_it_drops_the_pool() -> None:
+    """Ordering, at the layer that owns it: the reverse order leaves an empty pool looking usable."""
+    catalog = seed_catalog()
+    catalog.add_override(TENANT, _contract_records()[0].to_price_entry())
+    catalog.mark_overrides_unavailable("postgres unreachable")
+    assert catalog.overrides_unavailable == "postgres unreachable"
+    assert catalog.lookup("openai", "gpt-4o-mini", PriceType.INPUT, tenant_id=TENANT) is None
+
+
+# --- units that cannot price the tier -------------------------------------------------------------
+
+
+def test_a_per_gb_rate_on_a_token_tier_is_refused_at_the_boundary() -> None:
+    """It used to be accepted, stored, and then price every matching span at a confident ZERO.
+
+    ``_line`` has no arithmetic for per-GB, so the cost came back 0 carrying a real catalog version:
+    the span read as priced rather than as unpriced, which is the fabricated number the Nullable
+    cost columns exist to prevent.
+    """
+    with _client(RecordingLedgerStore([])) as (c, _store):
+        r = c.post(
+            "/v1/tenant/price-overrides",
+            json={
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "price_type": "input",
+                "unit": "per_gb",
+                "price_per_unit": "0.015",
+                "actor": "amy@example.com",
+                "reason": "CTO-416 contract",
+            },
+            headers=HEADERS,
+        )
+        assert r.status_code == 422, r.text
+        assert "per_gb" in r.text
+
+        # And the endpoint does not advertise the pairing it would refuse.
+        listed = c.get("/v1/tenant/price-overrides", headers=HEADERS).json()
+    assert listed["available_units"]["input"] == ["per_million_tokens"]
+    assert listed["available_units"]["tool_call"] == ["per_call"]
+
+
+def test_a_unit_that_cannot_price_its_tier_is_a_miss_not_a_zero() -> None:
+    """Belt and braces below the boundary: a bad pairing already in the table prices NOTHING."""
+    records = [
+        OverrideRecord(**{**vars_of(r), "unit": Unit.PER_GB}) for r in _contract_records()
+    ]
+    with _client(FakeLedgerStore(records)) as (c, store):
+        _post(c)
+
+    row = _row(store)
+    assert row["EstimatedCost"] == LIST_PRICE  # the public rate still applies, and it is not zero
+    assert row["CostSource"] == "estimated"
+
+
+def test_a_non_usd_rate_is_refused() -> None:
+    """Nothing converts currency, so a EUR contract would be reported as USD spend."""
+    with _client(RecordingLedgerStore([])) as (c, _store):
+        r = c.post(
+            "/v1/tenant/price-overrides",
+            json={
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "price_type": "input",
+                "price_per_unit": "0.015",
+                "currency": "EUR",
+                "actor": "amy@example.com",
+                "reason": "CTO-416 contract",
+            },
+            headers=HEADERS,
+        )
+    assert r.status_code == 422, r.text
+    with pytest.raises(PriceOverrideError):
+        normalize_currency("eur")
+    assert normalize_currency(None) == "USD"
+
+
+def test_an_audit_field_may_not_carry_control_characters() -> None:
+    """actor and reason are read back into logs and a dashboard (CTO-408 class)."""
+    with _client(RecordingLedgerStore([])) as (c, _store):
+        r = c.post(
+            "/v1/tenant/price-overrides",
+            json={
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "price_type": "input",
+                "price_per_unit": "0.015",
+                "actor": "amy@example.com",
+                "reason": "line one\nWARNING forged line two",
+            },
+            headers=HEADERS,
+        )
+    assert r.status_code == 422, r.text
+
+
+# --- the disabled path and the control-plane gate --------------------------------------------------
+
+
+def test_with_the_feature_disabled_pricing_is_untouched_and_an_append_is_not_applied() -> None:
+    """Flag off must be byte-identical to before this landed, and must SAY the write is not live."""
+    ledger = RecordingLedgerStore(_contract_records())
+    store = FakeClickHouse()
+    settings = get_settings()
+    prev = settings.ingest_buffered, settings.price_overrides_enabled
+    settings.ingest_buffered = False
+    settings.price_overrides_enabled = False
+    orig_ch, orig_ledger = app_module.ClickHouseStore, app_module.PriceOverrideStore
+    app_module.ClickHouseStore = lambda _settings: store
+    app_module.PriceOverrideStore = lambda _settings: ledger
+    try:
+        with TestClient(app) as c:
+            app.state.settings.require_api_key = False
+            _post(c)
+            assert ledger.loads == 0  # nothing read the ledger at all
+            posted = c.post(
+                "/v1/tenant/price-overrides",
+                json={
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "price_type": "input",
+                    "price_per_unit": "0.015",
+                    "actor": "amy@example.com",
+                    "reason": "CTO-416 contract",
+                },
+                headers=HEADERS,
+            ).json()
+    finally:
+        app_module.ClickHouseStore, app_module.PriceOverrideStore = orig_ch, orig_ledger
+        settings.ingest_buffered, settings.price_overrides_enabled = prev
+        app.state.catalog.clear_overrides()
+        app.state.catalog.mark_overrides_loaded()
+
+    assert dict(zip(COLUMNS, store.spans[0], strict=True))["EstimatedCost"] == LIST_PRICE
+    # Stored and audited, but pricing nothing. Saying "applied" here is the control-plane version of
+    # a confident wrong number.
+    assert posted["applied"] is False
+    assert posted["load"]["enabled"] is False
+
+
+def test_the_price_override_endpoints_require_the_service_token() -> None:
+    """Control-plane only: the web server is the sole caller, same gate as every /v1/tenant route."""
+    ledger = RecordingLedgerStore([])
+    with _client(ledger) as (c, _store):
+        settings = app.state.settings
+        settings.require_api_key = True
+        settings.gateway_service_token = "s3rvice"
+        try:
+            unauthed = [
+                c.get("/v1/tenant/price-overrides", headers=HEADERS),
+                c.post("/v1/tenant/price-overrides", headers=HEADERS, json={}),
+                c.post("/v1/tenant/price-overrides/refresh", headers=HEADERS),
+            ]
+            for r in unauthed:
+                assert r.status_code == 401, r.text
+            # And the right token gets in, so the assertion above is about auth and not about a
+            # route that happens to reject everything.
+            authed = {**HEADERS, "Authorization": "Bearer s3rvice"}
+            assert c.get("/v1/tenant/price-overrides", headers=authed).status_code == 200
+        finally:
+            settings.require_api_key = False
+            settings.gateway_service_token = ""

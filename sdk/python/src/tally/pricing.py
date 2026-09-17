@@ -39,6 +39,39 @@ class Unit(str, Enum):
     PER_GB = "per_gb"
 
 
+#: Which units each price tier can actually be priced in (CTO-416).
+#:
+#: This is not taxonomy for its own sake: :func:`_line` only knows how to turn PER_MILLION_TOKENS
+#: and PER_CALL into money, and every other pairing used to fall through to ``Decimal(0)``. A
+#: per-GB rate on an ``input`` tier therefore produced a cost of exactly zero WITH a catalog
+#: version attached, so the span read as confidently priced at nothing rather than as unpriced.
+#: Callers that accept a rate from a human (the gateway's price-override control plane) validate
+#: against this map at the boundary, and :meth:`PriceCatalog._best` skips anything that slipped
+#: past so the answer is a miss rather than a fabricated zero.
+PRICEABLE_UNITS: dict[PriceType, frozenset[Unit]] = {
+    PriceType.INPUT: frozenset({Unit.PER_MILLION_TOKENS}),
+    PriceType.OUTPUT: frozenset({Unit.PER_MILLION_TOKENS}),
+    PriceType.CACHED_INPUT: frozenset({Unit.PER_MILLION_TOKENS}),
+    PriceType.EMBEDDING: frozenset({Unit.PER_MILLION_TOKENS}),
+    PriceType.TOOL_CALL: frozenset({Unit.PER_CALL}),
+    PriceType.VECTOR_CALL: frozenset({Unit.PER_CALL}),
+}
+
+
+def unit_can_price(price_type: PriceType, unit: Unit) -> bool:
+    """True when a rate in ``unit`` can actually be applied to ``price_type``.
+
+    Unknown tiers answer False rather than True: a tier nobody has taught the cost math about must
+    not price anything until somebody does.
+    """
+    return unit in PRICEABLE_UNITS.get(price_type, frozenset())
+
+
+def priceable_units(price_type: PriceType) -> list[str]:
+    """The unit spellings a caller may offer for ``price_type``, for a control-plane response."""
+    return sorted(u.value for u in PRICEABLE_UNITS.get(price_type, frozenset()))
+
+
 @dataclass(frozen=True, slots=True)
 class PriceEntry:
     version: str
@@ -80,42 +113,83 @@ class PriceCatalog:
 
     def __init__(self, entries: list[PriceEntry] | None = None) -> None:
         self._entries: list[PriceEntry] = list(entries or [])
-        # per-tenant override entries, keyed by tenant id
-        self._overrides: dict[str, list[PriceEntry]] = {}
-        # CTO-416: set to a human-readable reason while the override ledger could not be loaded.
-        self._overrides_unavailable: str | None = None
+        # CTO-416: the override pool AND whether it can be trusted, held as ONE value.
+        #
+        # They are one attribute rather than two because a reader must never see a mix of them. The
+        # ingest path enriches on the event loop while a refresh runs on a worker thread, and
+        # neither takes a lock, so with two attributes there is always an instant between the two
+        # writes: an empty pool that still advertises itself as loaded, in which a contract tenant's
+        # lookup falls through to the PUBLIC list price. One tuple, one assignment, and under the
+        # GIL a reader gets the old pair or the new pair and never half of each.
+        self._override_state: tuple[dict[str, list[PriceEntry]], str | None] = ({}, None)
+
+    @property
+    def _overrides(self) -> dict[str, list[PriceEntry]]:
+        return self._override_state[0]
 
     def add(self, entry: PriceEntry) -> None:
         self._entries.append(entry)
 
     def add_override(self, tenant_id: str, entry: PriceEntry) -> None:
-        self._overrides.setdefault(tenant_id, []).append(entry)
+        """Append ONE override entry to the live pool.
+
+        For building a pool a step at a time (a test, or ``OverrideLedger.apply_to_catalog`` onto a
+        catalog nothing is reading yet). A reloader of a LIVE catalog uses :meth:`replace_overrides`
+        instead: see the constructor for why an incremental rebuild is visible to readers.
+        """
+        pool, unavailable = self._override_state
+        pool.setdefault(tenant_id, []).append(entry)
+        if unavailable is not None:
+            # Adding an entry to a pool flagged unreadable would leave an override nothing can use.
+            self._override_state = (pool, None)
 
     def clear_overrides(self) -> None:
         """Drop every materialized override entry (CTO-416).
 
-        The reload path rebuilds this pool from the ledger in place rather than swapping the whole
-        catalog object, because callers hold a reference to it (``app.state.catalog``) and a swap
-        would leave a request enriching against the catalog it captured before the change.
+        This changes the pool in place rather than swapping the whole catalog object, because
+        callers hold a reference to it (``app.state.catalog``) and a swap would leave a request
+        enriching against the catalog it captured before the change.
+
+        A reloader must NOT use this to rebuild: clearing and re-adding leaves a window in which the
+        pool is empty but nothing says so, and a lookup landing in that window prices a contract
+        tenant at public list. Use :meth:`replace_overrides`, which installs in one assignment.
         """
-        self._overrides.clear()
+        self._override_state = ({}, self._override_state[1])
+
+    def replace_overrides(self, pool: dict[str, list[PriceEntry]]) -> None:
+        """Install a freshly built override pool and mark it loaded, in ONE step (CTO-416).
+
+        WHY this exists rather than clear-then-add. ``refresh`` runs on a worker thread while the
+        ingest path keeps enriching, and readers take no lock. Rebuilding in place meant every
+        reader during the rebuild saw a partial (often empty) pool with the fail-closed flag already
+        cleared, so a tenant on a contract was priced at LIST for the duration, on every refresh
+        window rather than only on failure.
+
+        The pool is swapped, never the catalog object, so a caller holding a reference to this
+        catalog (``app.state.catalog``) still observes the change.
+        """
+        self._override_state = (
+            {tenant: list(entries) for tenant, entries in pool.items()},
+            None,
+        )
 
     @property
     def overrides_unavailable(self) -> str | None:
         """Why the override pool is untrustworthy right now, or ``None`` when it is loaded."""
-        return self._overrides_unavailable
+        return self._override_state[1]
 
     def mark_overrides_unavailable(self, reason: str) -> None:
         """Fail CLOSED: tenant-scoped lookups answer ``None`` until overrides load again (CTO-416).
 
-        Callers must also drop the stale pool (:meth:`clear_overrides`); this flag alone stops the
-        public table from standing in for a contract we cannot read.
+        Drops the pool and raises the flag in the same assignment. Done as two statements in either
+        order, one of them is briefly visible without the other, and the order that leaves an empty
+        pool looking trustworthy is exactly the list-price fallback this flag exists to prevent.
         """
-        self._overrides_unavailable = reason
+        self._override_state = ({}, reason)
 
     def mark_overrides_loaded(self) -> None:
-        """Clear the fail-closed flag after a successful ledger load."""
-        self._overrides_unavailable = None
+        """Clear the fail-closed flag after a successful ledger load, keeping the current pool."""
+        self._override_state = (self._override_state[0], None)
 
     def _best(
         self, pool: list[PriceEntry], provider: str, model: str, price_type: PriceType, at: date
@@ -127,6 +201,12 @@ class PriceCatalog:
             and e.model == model
             and e.price_type == price_type
             and e.is_valid_at(at)
+            # CTO-416: an entry whose unit cannot price this tier (a per_gb rate on an input tier)
+            # is a MISS, not a hit worth zero. _line has no arithmetic for it, so honouring the
+            # entry produced a confident cost of 0 carrying a real catalog version: a fabricated
+            # zero, which is the one thing the Nullable cost columns exist to prevent. Skipping it
+            # leaves the span unpriced, which is the honest answer for a rate we cannot apply.
+            and unit_can_price(e.price_type, e.unit)
         ]
         if not candidates:
             return None
@@ -143,12 +223,16 @@ class PriceCatalog:
         tenant_id: str | None = None,
     ) -> PriceEntry | None:
         at = at or date.today()
-        # CTO-416: the ledger behind the override pool could not be read, so we do not know whether
-        # this tenant has a negotiated rate for this slot. Answer "unknown" rather than the public
-        # list price: a contract rate is usually BELOW list, so falling back would over-report spend
-        # the customer never incurred, and it would look exactly like a real number. The caller
+        # CTO-416: read the pool and its trustworthiness ONCE, as the pair they are stored as, so a
+        # refresh landing mid-lookup cannot have this call price from an empty pool that the flag
+        # said was loaded. See PriceCatalog.__init__.
+        overrides, unavailable = self._override_state
+        # The ledger behind the pool could not be read, so we do not know whether this tenant has a
+        # negotiated rate for this slot. Answer "unknown" rather than the public list price: a
+        # contract rate is usually BELOW list, so falling back would over-report spend the customer
+        # never incurred, and it would look exactly like a real number. The caller
         # (tally.enrichment) turns a None into a NULL cost with CostSource 'unpriced'.
-        if self._overrides_unavailable is not None and tenant_id:
+        if unavailable is not None and tenant_id:
             return None
         # CTO-368: providers report the snapshot they served (claude-haiku-4-5-20251001,
         # gpt-4o-mini-2024-07-18) while the catalog lists families, so an exact-only match left
@@ -160,8 +244,8 @@ class PriceCatalog:
         if family is not None:
             models.append(family)
         pools = [self._entries]
-        if tenant_id and tenant_id in self._overrides:
-            pools.insert(0, self._overrides[tenant_id])
+        if tenant_id and tenant_id in overrides:
+            pools.insert(0, overrides[tenant_id])
         for pool in pools:
             for candidate in models:
                 hit = self._best(pool, provider, candidate, price_type, at)
@@ -306,7 +390,15 @@ def _line(entry: PriceEntry, tokens: int) -> Decimal:
         return entry.price_per_unit * Decimal(tokens) / Decimal(1_000_000)
     if entry.unit is Unit.PER_CALL:
         return entry.price_per_unit
-    return Decimal(0)
+    # CTO-416: raise rather than return Decimal(0). The zero was indistinguishable from a real free
+    # call and travelled with the entry's catalog version, so a whole tier could read as costing
+    # nothing. Nothing should reach here any more: PriceCatalog._best drops an entry whose unit
+    # cannot price its tier, and the override control plane refuses the pairing at the boundary.
+    # This is the assertion that keeps the next unit added to the enum from reintroducing the zero.
+    raise ValueError(
+        f"no cost arithmetic for unit {entry.unit.value} on price type {entry.price_type.value}; "
+        "see PRICEABLE_UNITS"
+    )
 
 
 # --- Seed data (illustrative; replaced by the scraper, CTO-53) ----------------------------------

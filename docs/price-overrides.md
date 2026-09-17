@@ -14,7 +14,15 @@ For one span, cost is resolved per rate slot: `(provider, model, price_type)`, w
 
 Within either pool, the exact model id is matched first and its family second (so
 `claude-haiku-4-5-20251001` uses a rate listed for `claude-haiku-4-5` when no rate is listed for the
-snapshot), and the most recent applicable `valid_from` wins.
+snapshot), and the most recent `valid_from` that is on or before the span's date wins.
+
+**The date is the span's own**, not the date the span happened to be ingested. A backfilled or
+late-arriving call is priced by the rate that was in force when the call was made, which is what
+makes a corrected rate recomputable and what makes an old invoice explainable. A span older than
+every applicable window is unpriced rather than priced at today's rate.
+
+**A rate can be scheduled ahead.** Appending an entry with a future `valid_from` does not disturb
+the rate in force today: both windows are live, and each span resolves to the one covering its date.
 
 Precedence is per slot, not per model. A tenant with a negotiated input rate and no negotiated
 output rate is billed contract input and list output, which is what most contracts actually say.
@@ -33,7 +41,10 @@ through `tally.overrides.OverrideLedger`. The table is an **append-only, version
   priced at in March is still readable in June and a past invoice stays explainable. A database
   trigger refuses `UPDATE` outright.
 - Withdrawing a rate **appends a tombstone** (an entry with no price) rather than deleting a row.
-  The slot then falls back to the public catalog, and the withdrawal itself remains in the trail.
+  The slot then falls back to the public catalog, and the withdrawal itself remains in the trail. A
+  tombstone withdraws the windows that start on or before its own date; a window scheduled to open
+  later is untouched, because "stop overriding now" and "here is the rate from January" are
+  different statements.
 
 ## Changing a price
 
@@ -48,7 +59,14 @@ POST /v1/tenant/price-overrides/refresh          # re-read the ledger on this re
 A rate is a decimal **string** (`"2.40"`), never a float: money that passes through a float has lost
 precision before it reaches the column. `actor` and `reason` are required. The replica that takes
 the write applies it immediately; other replicas pick it up within
-`TALLY_PRICE_OVERRIDES_REFRESH_TTL_S` (60 seconds by default).
+`TALLY_PRICE_OVERRIDES_REFRESH_TTL_S` (60 seconds by default). The response says which of the two
+happened in `applied`, and `applied` is false when nothing has loaded the entry, including when the
+feature is switched off.
+
+The `unit` must be one the cost math can apply to that tier: per-million-tokens for `input`,
+`output`, `cached_input` and `embedding`, per-call for `tool_call` and `vector_call`. The GET
+response lists the allowed units per tier. Rates are USD only: nothing in the cost path converts a
+currency, so a non-USD rate would be reported as USD spend and is refused.
 
 Loading the ledger is enabled with `TALLY_PRICE_OVERRIDES_ENABLED` (on in `infra/docker-compose.yml`,
 off in the code default so a checkout without Postgres boots unchanged).
@@ -56,8 +74,12 @@ off in the code default so a checkout without Postgres boots unchanged).
 ## When the ledger cannot be read
 
 Cost lands **blank**, not at list price. `EstimatedCost` is `NULL` and `CostSource` is `'unpriced'`
-for every tenant-scoped span until a load succeeds, `/readyz` reports `price_overrides: false`, and
-the gateway logs the failure at ERROR.
+for every tenant-scoped span until a load succeeds, `/readyz` reports the gateway as `degraded` for
+`price_overrides`, and the gateway logs the failure at ERROR.
+
+Readiness itself is **not** affected: the replica stays in rotation and keeps accepting telemetry.
+Pricing metadata that cannot be read is a reason to stop asserting a cost, never a reason to stop
+accepting a customer's spans.
 
 This is deliberate. A contract rate is normally below list, so pricing from the public catalog while
 the contract is unreadable would report spend the customer never incurred, in a number that looks
