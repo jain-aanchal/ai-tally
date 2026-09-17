@@ -69,6 +69,30 @@ describe("detectStructuralInefficiency: context bloat", () => {
     expect(f.recoverableMicroUsd!).toBe(Math.round((50 * USD * 40_000) / 51_000));
   });
 
+  it("states the observed total and the median in an order that matches the claim (CTO-430)", () => {
+    // The reason used to print "(median vs observed)" inside a sentence claiming the run was far
+    // ABOVE the median, so it rendered the smaller number first and read as the opposite of itself.
+    const rows = [
+      ...baseline(6, { inputTokens: 10_000, outputTokens: 1_000, costMicroUsd: 10 * USD }),
+      run({
+        runId: "bloated",
+        inputTokens: 50_000,
+        outputTokens: 1_000,
+        costMicroUsd: 50 * USD,
+      }),
+    ];
+
+    const f = detectStructuralInefficiency(rows).find(
+      (x) => x.evidence.signal === "context-bloat",
+    )!;
+
+    // Both numbers are labelled, so position cannot silently invert the meaning again.
+    expect(f.reason).toContain("50,000 tokens against a median of 10,000");
+    // And the larger figure really is the run's, matching "far above the median".
+    expect(f.reason.indexOf("50,000")).toBeLessThan(f.reason.indexOf("10,000"));
+    expect(Number(f.evidence.observed)).toBeGreaterThan(Number(f.evidence.median));
+  });
+
   it("does not flag a cohort sitting at its own median (no deviation)", () => {
     const rows = baseline(8, { inputTokens: 12_000 });
     const findings = detectStructuralInefficiency(rows);
