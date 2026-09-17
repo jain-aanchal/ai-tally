@@ -244,3 +244,90 @@ def test_unit_per_call_override_supported() -> None:
     assert isinstance(rec, OverrideRecord)
     entry = rec.to_price_entry()
     assert entry is not None and entry.unit is Unit.PER_CALL
+
+
+# --- replay from storage + the fail-closed rule (CTO-416) ----------------------------------------
+
+
+def test_from_records_replays_a_stored_ledger_verbatim() -> None:
+    """The gateway stores this ledger in Postgres, so versions are assigned by the WRITE.
+
+    Replaying must preserve them rather than renumbering, or the ``supersedes`` chain that explains
+    a past invoice stops matching the rows it was written from.
+    """
+    source = _ledger()
+    source.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1.0", actor="a", reason="contract")
+    source.upsert("t", "openai", "gpt-5", PriceType.INPUT, "0.5", actor="a", reason="renegotiated")
+    stored = source.history()
+
+    replayed = OverrideLedger.from_records(stored)
+    assert [r.version for r in replayed.history()] == [1, 2]
+    current = replayed.current("t", "openai", "gpt-5", PriceType.INPUT)
+    assert current is not None and current.price_per_unit == Decimal("0.5")
+    # The high-water mark is rebuilt, so a further append continues the chain instead of colliding.
+    appended = replayed.upsert(
+        "t", "openai", "gpt-5", PriceType.INPUT, "0.25", actor="a", reason="again"
+    )
+    assert (appended.version, appended.supersedes) == (3, 2)
+
+
+def test_from_records_carries_tombstones_through() -> None:
+    source = _ledger()
+    source.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1.0", actor="a", reason="contract")
+    source.revoke("t", "openai", "gpt-5", PriceType.INPUT, actor="a", reason="ended")
+    replayed = OverrideLedger.from_records(source.history())
+    assert replayed.active("t") == []
+
+
+def test_overrides_unavailable_prices_nothing_for_a_tenant_rather_than_list_price() -> None:
+    """CTO-416 honesty invariant, at the layer that enforces it.
+
+    A contract rate is usually BELOW list, so answering the public rate while the ledger is
+    unreadable reports spend the customer never incurred, in a figure nothing downstream can tell
+    apart from a real one. An unknown must stay unknown.
+    """
+    cat = seed_catalog()
+    at = date(2026, 5, 15)
+    usage = Usage(input_tokens=1_000_000)
+    priced, version = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")
+    assert priced == 2_500_000 and version
+
+    cat.mark_overrides_unavailable("postgres unreachable")
+    _blank, blank_version = compute_cost_micro_usd(
+        cat, "openai", "gpt-5", usage, at=at, tenant_id="t"
+    )
+    # An empty version is what tally.enrichment turns into NULL / CostSource 'unpriced'.
+    assert blank_version == ""
+    assert cat.overrides_unavailable == "postgres unreachable"
+
+    cat.mark_overrides_loaded()
+    recovered = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")
+    assert recovered == (priced, version)
+
+
+def test_a_lookup_with_no_tenant_still_answers_while_overrides_are_unavailable() -> None:
+    """The fail-closed rule is about a TENANT's cost, not about every internal estimate.
+
+    A lookup that names no tenant cannot be standing in for a contract rate, so an unreadable ledger
+    says nothing about it and it keeps answering from the public catalog.
+    """
+    cat = seed_catalog()
+    cat.mark_overrides_unavailable("postgres unreachable")
+    usage = Usage(input_tokens=1_000_000)
+    cost, version = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=date(2026, 5, 15))
+    assert cost == 2_500_000 and version
+
+
+def test_clear_overrides_drops_the_pool_in_place() -> None:
+    """The reload path mutates one catalog object; callers hold a reference to it."""
+    cat = seed_catalog()
+    led = _ledger()
+    led.upsert("t", "openai", "gpt-5", PriceType.INPUT, "1.0", actor="a", reason="contract")
+    led.apply_to_catalog(cat)
+    at = date(2026, 5, 15)
+    usage = Usage(input_tokens=1_000_000)
+    contract, _ = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")
+    assert contract == 1_000_000
+    cat.clear_overrides()
+    public, _ = compute_cost_micro_usd(cat, "openai", "gpt-5", usage, at=at, tenant_id="t")
+    assert public == 2_500_000

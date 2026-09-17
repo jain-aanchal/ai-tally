@@ -320,6 +320,28 @@ class Settings(BaseSettings):
     # what makes the lock die with the process. See gateway/scheduler.py.
     scheduler_db_pool_max_idle: int = 4
 
+    # CTO-416: load the per-tenant price override ledger (`price_catalog_overrides`, migration 0035)
+    # onto the catalog, so a negotiated or missing rate is a control-plane WRITE rather than an edit
+    # to tally.pricing followed by a release.
+    #
+    # Off by default, for the same reason scheduler_enabled and ingest_buffered are: with the flag
+    # off nothing reads the table and pricing behaves exactly as it did before this landed, so a
+    # checkout with no Postgres, and the test suite, still boot and still price. It is env config,
+    # so turning it on is not a deploy either, and infra/docker-compose.yml ships it on.
+    #
+    # WHAT TURNING IT ON COMMITS TO, because it is not only additive: from then on a ledger the
+    # gateway cannot READ makes tenant-scoped costs land NULL with CostSource 'unpriced' rather than
+    # falling back to the public list price. A contract rate is usually below list, so the fallback
+    # would over-report spend the customer never incurred and would be indistinguishable from a real
+    # figure. See gateway/price_overrides.py.
+    price_overrides_enabled: bool = False
+    # How long a replica may go without re-reading the ledger. This is what carries a price written
+    # on one replica to the others, so it bounds "how stale may a rate be", not "how often do we
+    # query": the ingest path only pays for a query once a window has expired. Shaped after
+    # usage_cache_ttl_s, and short because the first thing anyone does after adding a price is look
+    # for it. An operator who will not wait can POST /v1/tenant/price-overrides/refresh.
+    price_overrides_refresh_ttl_s: float = 60.0
+
 
 _settings: Settings | None = None
 

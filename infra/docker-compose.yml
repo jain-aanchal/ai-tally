@@ -156,6 +156,11 @@ services:
       # computed from ClickHouse and each closed period is frozen here. initdb only fires on a first
       # boot against an empty volume, so an already-running stack must apply this by hand.
       - ../db/postgres/0034_tenant_usage_periods.sql:/docker-entrypoint-initdb.d/0034_tenant_usage_periods.sql:ro
+      # Per-tenant price override LEDGER (CTO-416): version, actor, reason, recorded_at and a
+      # nullable price so a withdrawal is a tombstone rather than a DELETE. Without it a negotiated
+      # rate can only be added by editing tally.pricing and shipping a release. initdb only fires on
+      # a first boot against an empty volume, so an already-running stack must apply this by hand.
+      - ../db/postgres/0035_price_override_ledger.sql:/docker-entrypoint-initdb.d/0035_price_override_ledger.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tally} -d ${POSTGRES_DB:-tally}"]
       interval: 5s
@@ -252,6 +257,13 @@ services:
       TALLY_REPLAY_S3_REGION: ${TALLY_REPLAY_S3_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-tally}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-tally-minio}
+      # CTO-416: load the per-tenant price override ledger, so a negotiated or missing rate is a
+      # control-plane write instead of an edit to tally.pricing and a release. On here because the
+      # local stack HAS a Postgres with migration 0035 in it; the code default stays off so a
+      # checkout without one boots and prices exactly as before. Note what it commits to: a ledger
+      # the gateway cannot read makes tenant-scoped costs land NULL / 'unpriced' rather than
+      # silently reverting to public list price.
+      TALLY_PRICE_OVERRIDES_ENABLED: ${TALLY_PRICE_OVERRIDES_ENABLED:-true}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:

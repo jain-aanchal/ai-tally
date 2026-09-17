@@ -25,7 +25,7 @@ tests.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -139,6 +139,28 @@ class OverrideLedger:
         self._records: list[OverrideRecord] = []
         # latest version assigned per slot (monotonic; never reused even across revoke→re-add)
         self._version: dict[_Slot, int] = {}
+
+    @classmethod
+    def from_records(cls, records: Iterable[OverrideRecord]) -> OverrideLedger:
+        """Rebuild a ledger from already-persisted records, oldest first (CTO-416).
+
+        The gateway stores this ledger in Postgres (``price_catalog_overrides``), so the version and
+        the ``supersedes`` back-reference are assigned by the WRITE, not re-derived here: several
+        replicas append to one table and an in-memory counter per process would hand two of them the
+        same version. This constructor therefore replays what was stored verbatim and only rebuilds
+        the per-slot high-water mark, so :meth:`active` and :meth:`apply_to_catalog` behave exactly
+        as they do for a ledger built in process.
+
+        ``records`` MUST arrive in ledger order (ascending version within a slot), because
+        :meth:`active` resolves a slot by last-write-wins. Feeding it a reversed cursor would
+        resurrect a rate a tombstone already withdrew.
+        """
+        ledger = cls()
+        for record in records:
+            ledger._records.append(record)
+            slot = record.slot
+            ledger._version[slot] = max(ledger._version.get(slot, 0), record.version)
+        return ledger
 
     # --- mutation (append-only) ------------------------------------------------------------------
 

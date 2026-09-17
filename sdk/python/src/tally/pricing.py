@@ -60,18 +60,62 @@ class PriceCatalogMiss(Exception):
 
 
 class PriceCatalog:
-    """In-memory price catalog with time-windowed lookup and per-tenant overrides."""
+    """In-memory price catalog with time-windowed lookup and per-tenant overrides.
+
+    PRECEDENCE, stated once and authoritatively (CTO-416). A tenant's own override beats the public
+    catalog for every lookup that carries a ``tenant_id``: the contract the customer signed is what
+    they are billed, and a public list price is only the fallback for a slot they have not
+    negotiated. Within either pool the most recent applicable ``valid_from`` wins, and the exact
+    model id is tried before its family (see :meth:`lookup`). ``docs/price-overrides.md`` is the
+    customer-facing statement of the same rule.
+
+    OVERRIDES UNAVAILABLE. The overrides in this object are a materialized copy of a durable ledger
+    (``price_catalog_overrides``, :class:`tally.overrides.OverrideLedger`). When whoever loads that
+    ledger cannot read it, they call :meth:`mark_overrides_unavailable` and every tenant-scoped
+    lookup then answers ``None`` instead of a public rate. That is deliberate and it is the honesty
+    invariant, not a bug: we cannot tell which slots a tenant has negotiated while the ledger is
+    unreadable, so pricing one from the public table would report spend the customer did not incur.
+    An honest blank is recoverable; a confident wrong number is not.
+    """
 
     def __init__(self, entries: list[PriceEntry] | None = None) -> None:
         self._entries: list[PriceEntry] = list(entries or [])
         # per-tenant override entries, keyed by tenant id
         self._overrides: dict[str, list[PriceEntry]] = {}
+        # CTO-416: set to a human-readable reason while the override ledger could not be loaded.
+        self._overrides_unavailable: str | None = None
 
     def add(self, entry: PriceEntry) -> None:
         self._entries.append(entry)
 
     def add_override(self, tenant_id: str, entry: PriceEntry) -> None:
         self._overrides.setdefault(tenant_id, []).append(entry)
+
+    def clear_overrides(self) -> None:
+        """Drop every materialized override entry (CTO-416).
+
+        The reload path rebuilds this pool from the ledger in place rather than swapping the whole
+        catalog object, because callers hold a reference to it (``app.state.catalog``) and a swap
+        would leave a request enriching against the catalog it captured before the change.
+        """
+        self._overrides.clear()
+
+    @property
+    def overrides_unavailable(self) -> str | None:
+        """Why the override pool is untrustworthy right now, or ``None`` when it is loaded."""
+        return self._overrides_unavailable
+
+    def mark_overrides_unavailable(self, reason: str) -> None:
+        """Fail CLOSED: tenant-scoped lookups answer ``None`` until overrides load again (CTO-416).
+
+        Callers must also drop the stale pool (:meth:`clear_overrides`); this flag alone stops the
+        public table from standing in for a contract we cannot read.
+        """
+        self._overrides_unavailable = reason
+
+    def mark_overrides_loaded(self) -> None:
+        """Clear the fail-closed flag after a successful ledger load."""
+        self._overrides_unavailable = None
 
     def _best(
         self, pool: list[PriceEntry], provider: str, model: str, price_type: PriceType, at: date
@@ -99,6 +143,13 @@ class PriceCatalog:
         tenant_id: str | None = None,
     ) -> PriceEntry | None:
         at = at or date.today()
+        # CTO-416: the ledger behind the override pool could not be read, so we do not know whether
+        # this tenant has a negotiated rate for this slot. Answer "unknown" rather than the public
+        # list price: a contract rate is usually BELOW list, so falling back would over-report spend
+        # the customer never incurred, and it would look exactly like a real number. The caller
+        # (tally.enrichment) turns a None into a NULL cost with CostSource 'unpriced'.
+        if self._overrides_unavailable is not None and tenant_id:
+            return None
         # CTO-368: providers report the snapshot they served (claude-haiku-4-5-20251001,
         # gpt-4o-mini-2024-07-18) while the catalog lists families, so an exact-only match left
         # real calls unpriced. The exact id is tried first, so a snapshot priced unlike its family
