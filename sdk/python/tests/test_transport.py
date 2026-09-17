@@ -1234,7 +1234,19 @@ def test_filtering_can_never_turn_junk_into_a_real_code(hostile):
 
 
 def test_an_altered_code_is_never_classified_as_a_permanent_drop(caplog):
-    """Behavioural: the span comes back rather than being written off (CTO-408 review)."""
+    """Behavioural: a tampered code is never read as the real code it imitates (CTO-408 review).
+
+    The property this test exists to hold is unchanged: reading ``PII_DETECTED`` out of a tampered
+    string would write the span off permanently, and it must not. That still holds, by a different
+    route than it did.
+
+    The span is no longer RETRIED, which is what this test used to assert. CTO-406 gave an
+    unrecognised code its own bucket, and a marked code is unrecognised by construction, so the span
+    is neither resent nor booked as a loss. Not resending is the deliberate half: a double send
+    permanently inflates billable spend and nothing downstream can undo it, whereas an undelivered
+    span stays visible in ``shed_counts()`` and is recoverable. Those costs are not symmetric
+    (CTO-406).
+    """
     import logging
 
     sender = _ScriptedSender(
@@ -1246,10 +1258,17 @@ def test_an_altered_code_is_never_classified_as_a_permanent_drop(caplog):
     with caplog.at_level(logging.DEBUG):
         t.flush_once()
 
-    # Retried, not booked as a permanent gateway refusal: the pre-CTO-408 fate of a code we do not
-    # recognise. Reading PII_DETECTED out of that string would have lost the span for good.
-    assert t.pending() == 1
+    # Not booked as a permanent gateway refusal, which is the CTO-408 property this test guards.
     assert t.rejected_by_gateway_span_count == 0
+    # Nor as a confirmed loss: an unknown code is not known to be one (CLAUDE.md, honest under
+    # uncertainty).
+    assert t.obs.dropped_span_count == 0
+    # And not resent, which is CTO-406's half: no second send of a span the gateway may have kept.
+    assert t.pending() == 0
+    assert t.unknown_code_span_count == 1
+    assert t.shed_counts()["unknown_code_span_count"] == 1
+    # The operator can still see WHAT arrived, under a code that cannot pass as a real one.
+    assert any("PII_DETECTED_ALTERED" in r.getMessage() for r in caplog.records)
 
 
 def test_safe_code_is_bounded_however_long_the_input():
@@ -1398,7 +1417,11 @@ def test_a_new_accepted_but_flagged_code_does_not_switch_the_accounting_off():
 
     messages = " ".join(r.getMessage() for r in records)
     assert "distrusting" not in messages  # the ack's own numbers add up fine
-    assert "does not recognise" in messages
+    assert "unrecognised code" in messages
+    # And the code itself is NAMED, not reduced to a count: this ack fires no other warning, so
+    # withholding the text would leave an operator unable to find out what arrived. Safe to log
+    # because it is sanitised at the parse boundary (CTO-406, CTO-408).
+    assert "DEPRECATED_MODEL=1" in messages
     assert t.pending() == 0  # never resent: it may well have landed
     assert t.requeued_span_count == 0
     assert t.unknown_code_span_count == 1
@@ -1458,3 +1481,41 @@ def test_a_known_retryable_code_other_than_rate_limited_still_goes_again():
     assert t.unknown_code_span_count == 0
     assert t.flush_once() is True
     assert decode_request(sender.calls[1][2].decode("utf-8")).resource_spans == [{"n": 1}]
+
+
+def test_the_unrecognised_code_warning_names_the_codes_and_stays_bounded(caplog):
+    """An all-unknown ack is the one ack whose codes reach no other line (CTO-406, CTO-408).
+
+    Nothing else warns for it: there is no loss to report and nothing was re-enqueued, so the
+    partial-ack summary never fires. This line therefore has to carry the gateway's own strings, or
+    an operator is told that something arrived the SDK does not understand and given no way to find
+    out what. Carrying them is safe only because CTO-408 sanitised each code at the parse boundary,
+    and safe in aggregate only because this line reuses that ticket's own summariser: 5000 distinct
+    64 character codes sit inside the ack read cap, so joining them verbatim is reachable in normal
+    operation rather than a contrivance.
+    """
+    import logging
+
+    n = 5000
+    errors = tuple((f"#{i}", f"U{i:04d}".ljust(_MAX_CODE_LEN, "Z")) for i in range(n))
+    sender = _ScriptedSender([SendResult(200, None, _ack(0, errors)), SendResult(200)])
+    t = _transport(sender, max_batch_size=n)
+    for i in range(n):
+        t.export({"n": i})
+    with caplog.at_level(logging.DEBUG):
+        t.flush_once()
+
+    messages = [r.getMessage() for r in caplog.records]
+    named = [m for m in messages if "unrecognised code" in m]
+    assert named  # the line under test really did fire, so this is not a vacuous assertion
+    for message in messages:
+        # Bounded in aggregate, and still one record on one physical line however it is formatted.
+        assert len(message) < 600
+        assert "\n" not in message
+        assert "\r" not in message
+    # The codes are NAMED, ranked, and the tail is counted rather than printed.
+    assert "U0000" in named[0]
+    assert f"+{n - _MAX_SUMMARY_CODES} more" in named[0]
+    # All of them land in the bucket, and not one is booked as a confirmed loss.
+    assert t.unknown_code_span_count == n
+    assert t.obs.dropped_span_count == 0

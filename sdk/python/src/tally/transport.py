@@ -306,8 +306,12 @@ def _safe_code(raw: str) -> str:
     spans that were retried before this hygiene existed were dropped for good after it. Deciding
     truncation on the filtered length had the same shape: ``"RATE_LIMITED" + "!" * 100`` is 112
     characters of hostile input that strips to exactly ``RATE_LIMITED`` and never trips the cap.
-    A marked code matches nothing in either code set, so it falls through to unknown and is
-    retried, which is the pre-CTO-408 behaviour for a malformed code (CTO-408 review).
+    A marked code matches nothing in any code set, so it falls through to the unrecognised-code
+    bucket. It used to be RETRIED there, which was the pre-CTO-408 fate of a malformed code; it now
+    is not, because re-sending a span the gateway may in fact have accepted permanently inflates
+    billable spend and nothing downstream can undo it. It is not booked as a loss either, since
+    neither outcome is known to be true. This sentence is the product of both tickets: the marking
+    is CTO-408's, the fate of a marked code is CTO-406's (CTO-408 review, CTO-406).
     """
     cleaned = "".join(c for c in raw if c in _CODE_SAFE_CHARS)
     # The RAW length decides truncation, so a long hostile code that strips short is still marked.
@@ -855,6 +859,7 @@ class BatchingTransport:
             unmapped_dead,
             unknown_codes,
         ) = self._classify_rejections(sent, ack)
+        unknown_spans = sum(unknown_codes.values())
         # Unknown codes are deliberately NOT in ``named`` (CTO-406). The gateway counts an
         # accepted-but-flagged span inside accepted_spans, so if an unknown code turns out to be a
         # new flag, its span is already in that figure and adding it here would push
@@ -899,7 +904,7 @@ class BatchingTransport:
         # sits outside accepted_spans and this is exactly right; if it was a new flag its span is
         # inside accepted_spans and subtracting again only shrinks the shortfall, which errs toward
         # not inventing a loss. Clamped at zero either way (CTO-406).
-        unattributed = max(0, len(sent) - ack.accepted_spans - named - unknown_codes)
+        unattributed = max(0, len(sent) - ack.accepted_spans - named - unknown_spans)
         lost = len(dead_positions) + unmapped_dead + unattributed
         if lost:
             self.rejected_by_gateway_span_count += lost
@@ -913,11 +918,11 @@ class BatchingTransport:
             # span the gateway accepted.
             self.unmapped_retryable_span_count += unmapped_retryable
             self.obs.dropped_span_count += unmapped_retryable
-        if unknown_codes:
+        if unknown_spans:
             # Counted, but deliberately NOT added to dropped_span_count: that counter means "lost",
             # and an unknown code is not known to be a loss. Booking uncertainty as loss is as
             # dishonest as booking it as success (CLAUDE.md, honest under uncertainty; CTO-406).
-            self.unknown_code_span_count += unknown_codes
+            self.unknown_code_span_count += unknown_spans
 
         requeued = discarded = 0
         if retry_positions:
@@ -985,25 +990,27 @@ class BatchingTransport:
                     rolled_spans,
                 )
 
-        if unknown_codes:
+        if unknown_spans:
             # Its own line and its own damping key. This is the one outcome where the right action
             # is to upgrade the SDK, and it must not be mistaken for either a loss or a success
-            # (CTO-406). This warning carries a count and no code text. That is a property of this
-            # line alone, not of the module: the "gateway rejected items" summary above formats the
-            # codes dict verbatim and an unrecognised code is in that dict, so on a mixed ack the
-            # gateway's string is already logged there. Bounding gateway-supplied code text in a log
-            # record is CTO-408's job, not this one's.
+            # (CTO-406). The codes are NAMED here rather than reduced to a count. An all-unknown ack
+            # fires no other line, so a bare count would tell an operator that something arrived
+            # they do not understand while withholding the one string that would let them find out.
+            # Naming it is safe because CTO-408 already sanitised it at the parse boundary: filtered
+            # to an allowlist, capped at _MAX_CODE_LEN, and marked _ALTERED when changed, so it can
+            # neither forge a log line nor impersonate a real code. Summarised through the same
+            # _code_summary the partial-ack line uses, so the aggregate bound holds here too rather
+            # than being re-derived (CTO-406, CTO-408).
             first, rolled_events, rolled_spans = self._damp_locked(
-                "gateway named an unrecognised code", unknown_codes
+                "gateway named an unrecognised code", unknown_spans
             )
             if first:
                 _log.warning(
-                    "tally: gateway named %d span(s) with a code this SDK does not recognise; not "
-                    "resent and not counted as lost, because an unknown code may be either a "
-                    "refusal or an accepted-but-flagged marker (upgrading the SDK teaches it the "
-                    "code; further occurrences are summarized every %d; see shed_counts())",
-                    unknown_codes,
-                    _SHED_LOG_EVERY,
+                    "tally: gateway named %d span(s) inside a 200 with an unrecognised code (%s); "
+                    "not resent and not counted as lost, because an unknown code may be a refusal "
+                    "or an accepted-but-flagged marker; upgrade the SDK (see shed_counts())",
+                    unknown_spans,
+                    _code_summary(unknown_codes) or "no codes named",
                 )
             elif rolled_events:
                 _log.warning(
@@ -1024,11 +1031,12 @@ class BatchingTransport:
 
     def _classify_rejections(
         self, sent: list[dict[str, object]], ack: _BatchAck
-    ) -> tuple[list[int], list[int], dict[str, int], int, int, int]:
+    ) -> tuple[list[int], list[int], dict[str, int], int, int, dict[str, int]]:
         """Split the ack's refusals into retryable and permanent positions in ``sent``.
 
         Returns ``(retry_positions, dead_positions, codes, unmapped_retryable,
-        unmapped_permanent, unknown)``.
+        unmapped_permanent, unknown_codes)``, the last being the unrecognised codes mapped to their
+        counts rather than a bare total, so the warning can name what the gateway actually sent.
 
         A code we cannot place (an item_id that is not ours) is never resent: guessing which span it
         meant could resend one the gateway accepted. It is still COUNTED, and counted according to
@@ -1049,7 +1057,7 @@ class BatchingTransport:
         codes: dict[str, int] = {}
         unmapped_retryable = 0
         unmapped_permanent = 0
-        unknown = 0
+        unknown_codes: dict[str, int] = {}
         for item_id, code in ack.errors:
             if code in _FLAG_ITEM_CODES:
                 continue  # accepted-but-flagged: advice about the span, not a loss of it
@@ -1059,7 +1067,7 @@ class BatchingTransport:
                 # Neither a refusal we know nor a retry we know. Counted apart and left in place:
                 # re-enqueueing it could double-send a span the gateway accepted, and booking it as
                 # a permanent refusal would invent a loss that may not have happened (CTO-406).
-                unknown += 1
+                unknown_codes[code] = unknown_codes.get(code, 0) + 1
                 continue
             pos = positions.get(item_id)
             if pos is None:
@@ -1073,7 +1081,7 @@ class BatchingTransport:
                 dead[pos] = None
             elif pos not in dead:
                 retry[pos] = None
-        return list(retry), list(dead), codes, unmapped_retryable, unmapped_permanent, unknown
+        return list(retry), list(dead), codes, unmapped_retryable, unmapped_permanent, unknown_codes
 
     @staticmethod
     def _item_positions(sent: list[dict[str, object]]) -> dict[str, int]:
