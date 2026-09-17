@@ -398,6 +398,28 @@ def test_public_catalog_still_prices_a_tenant_with_no_override() -> None:
 # --- the honesty invariant -----------------------------------------------------------------------
 
 
+def test_an_absurd_client_timestamp_does_not_take_the_whole_batch_down() -> None:
+    """CTO-416 review: the pricing date comes from the client clock, so both ends need bounding.
+
+    ``effective_timestamp_ns`` clamps the FUTURE side only, so a far-past ``timestamp_ns`` used to
+    raise out of the per-span loop and lose every span in the batch, not just the offending one.
+    Telemetry a customer cannot get back is a worse answer than one span priced at a boundary date.
+    """
+    ledger = FakeLedgerStore(_contract_records())
+    with _client(ledger) as (c, store):
+        bad = _span() | {"timestamp_ns": -(10**23), "span_id": "span-bad"}
+        good = _span() | {"span_id": "span-good"}
+        r = c.post(
+            "/v1/batches",
+            json={"tenant_id": TENANT, "sdk_version": "test", "resource_spans": [bad, good]},
+        )
+        assert r.status_code == 200, r.text
+
+    # Both spans stored, and the one with a sane clock is still priced by the contract.
+    assert len(store.spans) == 2
+    assert _row(store)["EstimatedCost"] == CONTRACT_PRICE
+
+
 def test_failed_override_load_leaves_cost_unpriced_not_list_price() -> None:
     """A ledger we cannot read must never be answered with the public list price.
 

@@ -27,7 +27,7 @@ from tally.models import discover_models
 from tally.overrides import OverrideLedger
 from tally.pricing import PriceType, priceable_units, seed_catalog
 from tally.schema import TRACE_ID_SYNTHETIC_KEY, GenAI
-from tally.timekeeping import assess
+from tally.timekeeping import NS_PER_SECOND, assess, representable_ts_ns
 from tally.wire import (
     BatchRequest,
     BatchResponse,
@@ -1014,8 +1014,10 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         # contradicts docs/price-overrides.md, which promises the span's date to a customer asking
         # about a bill, and it is also what makes a corrected rate recomputable at all. The skew
         # assessment moved above this line for the same reason a row uses it: it is the effective
-        # timestamp, already clamped, so an absurd client clock cannot pick a price window either.
-        priced_on = datetime.fromtimestamp(skew.effective_ts_ns / 1e9, tz=timezone.utc).date()
+        # timestamp, so a client clock running fast cannot pick a future price window either. It
+        # clamps the future side only, so the past side is bounded here.
+        priced_ns = representable_ts_ns(skew.effective_ts_ns)
+        priced_on = datetime.fromtimestamp(priced_ns // NS_PER_SECOND, tz=timezone.utc).date()
         result = enrich_cost(span, catalog, at=priced_on, tenant_id=batch.tenant_id)
         if result.drift_exceeded:
             drift_count += 1

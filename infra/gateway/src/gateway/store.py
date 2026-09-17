@@ -8,6 +8,7 @@ from uuid import UUID
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
+from tally.timekeeping import representable_ts_ns
 from tally.wire import BusinessEvent, IdentityLink
 
 from gateway.config import Settings
@@ -26,7 +27,7 @@ _IDENTITY_COLS = (
 
 
 def _ts(ns: int) -> datetime:
-    return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
+    return datetime.fromtimestamp(representable_ts_ns(ns) / 1e9, tz=timezone.utc)
 
 
 class ClickHouseStore:
