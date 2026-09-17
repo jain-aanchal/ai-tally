@@ -102,6 +102,52 @@ export function NoDataYet({
 }
 
 /**
+ * "The traffic is real, the rate for it is not known" (CTO-425).
+ *
+ * A third fact that used to be answered with {@link SyntheticPreviewBanner}, which told a workspace
+ * with real span traffic that its own figures were synthetic and offered it a connector it had
+ * already connected. Telemetry arrived here, so nothing on the page is a preview and setup is not
+ * the next step; what is missing is a per-call rate, which is why nothing anchored to the model's
+ * cost can be projected.
+ *
+ * Worded as a standing fact rather than as a wait, because it does not always resolve into a rate:
+ * CTO-417's `CostSource = 'subscription'` means a call covered by a seat or plan correctly has no
+ * per-call price to know, and a subscription-heavy workspace sits here by design.
+ *
+ * `subject` names what carries no rate ("the current model", "this agent"), and `model` is the
+ * label to show, so the customer can see which one we mean.
+ */
+export function UnpricedBaseline({
+  model,
+  subject = "the current model",
+  detail,
+}: {
+  model: string;
+  subject?: string;
+  /** What the missing rate makes impossible on this surface, in one clause. */
+  detail?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-edge bg-ink px-4 py-3 text-sm">
+      <p className="font-medium">
+        <span aria-hidden className="text-muted">
+          —
+        </span>{" "}
+        No cost rate for <span className="font-mono">{model}</span>
+      </p>
+      <p className="max-w-prose text-muted">
+        This workspace has real traffic and {subject} is serving it, but some of its spend over the
+        window carries no rate, so its monthly cost is unknown.{" "}
+        {detail ?? "Nothing can be anchored to that cost, so the figures derived from it are blank below."}{" "}
+        The measured traffic below is real. Add a rate for this model to price it, or if these calls
+        are covered by a seat or plan there is no per-call price to know and this is the correct
+        answer.
+      </p>
+    </div>
+  );
+}
+
+/**
  * "We could not read the source, so we do not know" (#364).
  *
  * The counterpart to {@link NoDataYet}, and deliberately worded so the two can never be mistaken
