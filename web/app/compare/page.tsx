@@ -16,6 +16,7 @@ import {
   SourceUnavailable,
   StaleBadge,
   SyntheticPreviewBanner,
+  UnpricedBaseline,
 } from "@/components/DataStateBanner";
 import { Diag } from "@/components/Diag";
 import { ExploreChartCard } from "@/components/ExploreChartCard";
@@ -87,13 +88,25 @@ export default async function ComparePage({
   // This projection is built off reconciled baseline traffic — surface that baseline's freshness so
   // a comparison off a stale window is never shown as fresh (CTO-80).
   const reconciledThrough = boundaryFromMinutesAgo(diagnostics.reconcilerLastRunMinutesAgo);
-  // CTO-244 follow-up: an unknown incumbent cost is as much "no baseline" as a zero one. It used to
-  // fall through this gate as a real figure and the page then rendered a blank tile next to a
-  // "$0.00" candidate table and a "0% reduction" recommendation, all at once.
-  const noBaseline =
-    current.monthlyCostMicroUsd === null ||
-    current.monthlyCostMicroUsd === 0 ||
-    candidates.length === 0;
+  // The incumbent's cost is unknown, so nothing on this page can be projected from it. One reason,
+  // used by every blank below, so the tiles, the table and the card all say the same thing.
+  const unknownBaseline = current.monthlyCostMicroUsd === null;
+  // CTO-425: "we cannot price the incumbent" is not "there is no incumbent". This gate used to fold
+  // both onto isEmpty, and `state === "empty"` wraps the body in SyntheticPreviewBanner, so a
+  // workspace with real span traffic whose incumbent carries no catalog rate was told its own
+  // measured figures were invented and offered a connector it had already connected. Reaching this
+  // line at all means a model served traffic (the no-incumbent case returned above), so the only
+  // honest reading of a null cost here is a pricing gap, which UnpricedBaseline states instead.
+  //
+  // Not a transitional state either: CTO-417's `CostSource = 'subscription'` gives a seat-covered
+  // call no cost by design, so null incumbent costs are becoming normal and no catalog entry would
+  // ever move such a workspace out of here.
+  //
+  // The `current.monthlyCostMicroUsd === 0` clause is gone with it. A measured zero is a
+  // measurement, not an absence; treating it as "no telemetry yet" hides real data behind a sample
+  // label, and blanking it as unknown would be the same error pointing the other way. It renders as
+  // the $0.00 it was measured to be, and the deltas against it are the real deltas.
+  const noBaseline = !unknownBaseline && candidates.length === 0;
   // #320: a null count is "we did not replay", not "we replayed zero of many", so the partial-data
   // banner only fires on the real projection reporting an empty replay against available traffic.
   const noReplay =
@@ -122,9 +135,6 @@ export default async function ComparePage({
     priced.length > 0
       ? priced.reduce((best, c) => (c.monthlyCostMicroUsd < best.monthlyCostMicroUsd ? c : best))
       : null;
-  // The incumbent's cost is unknown, so nothing on this page can be projected from it. One reason,
-  // used by every blank below, so the tiles, the table and the card all say the same thing.
-  const unknownBaseline = current.monthlyCostMicroUsd === null;
   const UNKNOWN_BASELINE_REASON =
     "some of the current model's spend over the window could not be priced, so its monthly cost is unknown and nothing can be projected from it";
 
@@ -294,6 +304,15 @@ export default async function ComparePage({
       />
 
       {state === "partial" && <PartialDataBanner missing="the replay sampler" />}
+
+      {/* CTO-425: above the real body, not around a fixture. The page still renders every figure it
+          did measure; what the banner explains is the one it could not. */}
+      {unknownBaseline && (
+        <UnpricedBaseline
+          model={current.model}
+          detail="No comparison can be anchored to it, so the savings, the candidate projections and the verdict are blank below."
+        />
+      )}
 
       {state === "empty" ? (
         <SyntheticPreviewBanner workflow="Compare">{body}</SyntheticPreviewBanner>

@@ -66,6 +66,113 @@ describe("/compare keeps a failed read apart from an empty workspace", () => {
   });
 });
 
+// CTO-425. The third fact this page used to collapse into "no telemetry yet": an incumbent with
+// real traffic whose cost cannot be known. Telling that workspace its own numbers are synthetic is
+// the honesty invariant broken in the unusual direction, so these pin both halves: the sample
+// label must not appear, and the pricing gap must be named.
+describe("/compare keeps an unpriceable incumbent apart from an empty workspace", () => {
+  /** A workspace with real span traffic whose incumbent model carries no catalog rate. */
+  const unpricedCurrent = {
+    ...comparison,
+    current: {
+      model: "zephyr-quill-2",
+      provider: "acme-labs",
+      monthlyCostMicroUsd: null,
+      qualityScore: null,
+      latencyP95Ms: 1900,
+      errorRate: 0.003,
+    },
+    recommendation: {
+      verdict: "mixed" as const,
+      summary: "Cannot project savings: some spend over the window could not be priced.",
+      projectedSavingsMicroUsd: null,
+      projectedSavingsPct: null,
+    },
+  };
+
+  it("names the pricing gap instead of labelling real traffic synthetic", async () => {
+    await renderPage(unpricedCurrent);
+
+    expect(screen.getByText(/No cost rate for/i)).toBeTruthy();
+    expect(screen.getAllByText("zephyr-quill-2").length).toBeGreaterThan(0);
+    expect(screen.getByText(/some of its spend over the window carries no rate/i)).toBeTruthy();
+    // The regression: a customer with 500+ real spans told their own figures were invented, under a
+    // CTA for a source they had already connected.
+    expect(screen.queryByText(/Sample data/i)).toBeNull();
+    expect(screen.queryByText(/These numbers are synthetic/i)).toBeNull();
+    expect(screen.queryByText(/Connect a data source/i)).toBeNull();
+    // Real traffic, so this is not the new-workspace case either.
+    expect(screen.queryByText(NOTHING_ARRIVED)).toBeNull();
+  });
+
+  it("still renders the measured body, with the unknown figures blank", async () => {
+    await renderPage(unpricedCurrent);
+
+    // The candidate table is the measurement, and it stays on screen rather than being replaced by
+    // a preview of somebody else's migration.
+    expect(screen.getByText(/current · zephyr-quill-2/i)).toBeTruthy();
+    expect(screen.getByText("1900 ms")).toBeTruthy();
+  });
+
+  it("does not fire for a priced incumbent: the normal comparison renders in full", async () => {
+    await renderPage({
+      ...comparison,
+      current: { ...comparison.current, model: "zephyr-quill-2", monthlyCostMicroUsd: 8_000_000_000 },
+      candidates: [
+        {
+          model: "zephyr-quill-mini",
+          provider: "acme-labs",
+          monthlyCostMicroUsd: 2_000_000_000,
+          qualityScore: null,
+          latencyP95Ms: 1200,
+          errorRate: 0.005,
+        },
+      ],
+      recommendation: {
+        verdict: "switch",
+        summary: "Switch to zephyr-quill-mini.",
+        projectedSavingsMicroUsd: 6_000_000_000,
+        projectedSavingsPct: 0.75,
+      },
+    });
+
+    expect(screen.getByText(/Recommendation: switch/i)).toBeTruthy();
+    expect(screen.getAllByText("zephyr-quill-mini").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/No cost rate for/i)).toBeNull();
+    expect(screen.queryByText(/Sample data/i)).toBeNull();
+  });
+
+  // A genuine measured zero is a measurement, not an absence (CTO-425). It used to be swept into
+  // the empty state by a `=== 0` clause; blanking it as unknown would be the opposite error, so it
+  // renders as the zero it was measured to be.
+  it("shows a measured zero incumbent as a real figure, not as a sample and not as a blank", async () => {
+    await renderPage({
+      ...comparison,
+      current: { ...comparison.current, model: "zephyr-quill-2", monthlyCostMicroUsd: 0 },
+      candidates: [
+        {
+          model: "zephyr-quill-mini",
+          provider: "acme-labs",
+          monthlyCostMicroUsd: 0,
+          qualityScore: null,
+          latencyP95Ms: 1200,
+          errorRate: 0.005,
+        },
+      ],
+      recommendation: {
+        verdict: "keep",
+        summary: "Keep zephyr-quill-2.",
+        projectedSavingsMicroUsd: 0,
+        projectedSavingsPct: 0,
+      },
+    });
+
+    expect(screen.queryByText(/Sample data/i)).toBeNull();
+    expect(screen.queryByText(/No cost rate for/i)).toBeNull();
+    expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
+  });
+});
+
 describe("the replay diagnostics blank states its true reason", () => {
   it("says the read failed, not that no replay ran, when the replay read threw", async () => {
     await renderPage({
