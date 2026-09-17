@@ -332,6 +332,13 @@ Point their SDK / edge-proxy at `https://${DOMAIN}/v1/batches` with the basic-au
 
 ## Resetting the data
 
+> **Demo instances only (CTO-432).** `reseed.sh` TRUNCATEs the telemetry tables. That is the point
+> on a demo box, whose data is regenerable from a seed, and it destroys customer spans anywhere
+> else. The nightly cron below is the sharp edge: it removes the data every night whether or not
+> anyone meant it to. `reseed.sh` refuses to run when `AUTH_MODE=clerk`, which this kit treats as a
+> real instance, but that guard reads the mode and not the data, so do not add the cron to a box
+> that serves anyone real.
+
 The demo data is synthetic and backdated relative to "now", so re-running keeps the window current.
 
 - **On demand:** `./deploy/demo/reseed.sh` truncates the telemetry tables and re-seeds + re-backfills.

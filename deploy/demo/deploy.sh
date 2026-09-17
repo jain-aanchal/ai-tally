@@ -216,6 +216,7 @@ elif [ "${EXISTING_SPANS}" != "0" ] && [ "${FORCE_BACKFILL:-}" != "1" ]; then
   echo "==> Skipping the backfill: tenant ${TENANT_UUID} already holds ${EXISTING_SPANS} spans."
   echo "    Re-post it anyway with: FORCE_BACKFILL=1 ./deploy/demo/deploy.sh"
 else
+BACKFILL_RAN=1
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
 # The `make chatbot-demo-backfill` target runs on the HOST and POSTs to localhost:8080 - neither
 # works on a locked-down single VM (no host Node, and the gateway publishes no host port in prod).
@@ -258,16 +259,44 @@ else
   LOGIN_LINE="  Login: ${BASIC_AUTH_USER}  (password: the plaintext you hashed into BASIC_AUTH_HASH)"
 fi
 
+# CTO-432: the closing banner used to assert, unconditionally, that this is a demo whose dataset is
+# synthetic and safe to share, and to hand the operator reseed.sh. On the pilot instance every one
+# of those was false, and the last two are the dangerous pair: reseed.sh TRUNCATEs the telemetry
+# tables, so the banner told an operator the data was disposable and then gave them the command that
+# disposes of it.
+#
+# The script already knew better. It branches on AUTH_MODE three lines above for the login line, and
+# its own comments define clerk as "a real instance"; it also computed EXISTING_SPANS and declined to
+# backfill because real spans were already there. Both facts are read here rather than asserting a
+# story about the data that this run did not establish. `demo` is claimed ONLY when this run actually
+# generated the corpus itself.
+if [ "${AUTH_MODE:-basic}" = "clerk" ] || [ "${BACKFILL_RAN:-0}" != "1" ]; then
+  HEADING="ai-tally is up."
+  if [ "${AUTH_MODE:-basic}" = "clerk" ]; then
+    WHY_NOT_DEMO="  This is a real instance: Clerk resolves the tenant from the signed-in organization."
+  else
+    WHY_NOT_DEMO="  The tenant already held ${EXISTING_SPANS} spans, so no synthetic corpus was posted."
+  fi
+  DATA_BLOCK="${WHY_NOT_DEMO}
+  This deploy did not generate the data here, so this banner makes no claim about it. Treat it as real
+  until you have checked, and do not share the URL on the assumption that it is not.
+
+  Do NOT run deploy/demo/reseed.sh against this instance. It TRUNCATEs the telemetry tables."
+else
+  HEADING="ai-tally demo is up."
+  DATA_BLOCK="  The dataset is SYNTHETIC (seeded + backfilled by this run), safe to share with testers.
+  Share the link and password privately. Reset the data with deploy/demo/reseed.sh."
+fi
+
 cat <<EOF
 
 ==================================================================
-  ai-tally demo is up.
+  ${HEADING}
 
   URL:   https://${DOMAIN}
 ${LOGIN_LINE}
 ${INGEST_LINE}
 
-  The dataset is SYNTHETIC (seeded + backfilled), safe to share with testers.
-  Share the link and password privately. Reset the data with deploy/demo/reseed.sh.
+${DATA_BLOCK}
 ==================================================================
 EOF
