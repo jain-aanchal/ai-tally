@@ -40,9 +40,17 @@ export function resolveComparisonWindow(requestedDays: number): ComparisonWindow
  * cannot drift from the data the way the old fixed label could.
  */
 export function comparisonWindowNotice(window: ComparisonWindow): string {
-  return (
+  const base =
     `Comparison window: fixed at the last ${window.days} days. ` +
     "The range selector narrows the cost chart below; the candidate comparison and the tiles above " +
-    "it always read this window."
+    "it always read this window.";
+  if (window.honorsRequestedRange) return base;
+  // The customer asked for something else and did not get it. Saying only that the window is fixed
+  // leaves them to notice the mismatch by comparing two numbers on the page, which is the same work
+  // the silent selector used to leave them, minus the false confidence. Naming what they asked for
+  // beside what was read is the part that makes this a disclosure rather than a footnote.
+  return (
+    `${base} You asked for ${window.requestedDays} days: that applies to the chart, not to the ` +
+    "comparison."
   );
 }

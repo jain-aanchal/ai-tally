@@ -228,6 +228,31 @@ describe("the range selector states the window the comparison actually read", ()
     expect(screen.queryByText(/Comparison window: fixed at the last 7 days/i)).toBeNull();
   });
 
+  it("names the requested range too when the comparison could not follow it", async () => {
+    // The payload carries what was asked for as well as what was read. A notice that states only
+    // the fixed window leaves the customer to spot the mismatch themselves.
+    mockApiGet.mockResolvedValueOnce({
+      ...comparison,
+      comparisonWindow: { days: 7, requestedDays: 90, honorsRequestedRange: false },
+    });
+    render(await ComparePage({ searchParams: Promise.resolve({ range: "90d" }) }));
+
+    expect(screen.getByText(/You asked for 90 days: that applies to the chart, not to the comparison/i)).toBeTruthy();
+  });
+
+  it("does not claim a mismatch when the selected range is the window read", async () => {
+    // 7d selected and 7d read: there is nothing to disclose, and a page that cries mismatch on a
+    // request it did honour is its own wrong answer.
+    mockApiGet.mockResolvedValueOnce({
+      ...comparison,
+      comparisonWindow: { days: 7, requestedDays: 7, honorsRequestedRange: true },
+    });
+    render(await ComparePage({ searchParams: Promise.resolve({ range: "7d" }) }));
+
+    expect(screen.getByText(/Comparison window: fixed at the last 7 days/i)).toBeTruthy();
+    expect(screen.queryByText(/You asked for/i)).toBeNull();
+  });
+
   it("forwards the selected range to the API so the route sees what was asked for", async () => {
     await renderPage(comparison, { range: "90d" });
 
