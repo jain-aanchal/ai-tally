@@ -151,6 +151,7 @@ jobs:
           set -euo pipefail
           uv run pytest -v -rs --junitxml="$RUNNER_TEMP/pg-tests.xml" \
             tests/test_batch_idempotency_pg.py tests/test_adopt_org_pg.py \
+            tests/test_price_overrides_pg.py \
             tests/test_scheduler_locking.py tests/test_scheduler_pooling.py
           python3 - "$RUNNER_TEMP/pg-tests.xml" <<'PY'
           import sys
@@ -171,6 +172,11 @@ jobs:
           EXPECTED = {
               "tests.test_batch_idempotency_pg": (11, ""),
               "tests.test_adopt_org_pg": (10, ""),
+              # CTO-416: the price override ledger's real SQL. Everything else about that feature is
+              # tested against a fake store, so without these the MAX(version)+1 append, the unique
+              # index that decides a concurrent append, the append-only trigger and migration 0035
+              # itself are exercised by nothing in CI.
+              "tests.test_price_overrides_pg": (10, ""),
               "tests.test_scheduler_locking": (4, "test_live_"),
               "tests.test_scheduler_pooling": (1, "test_live_"),
           }

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import blake2b
 
+from tally.timekeeping import representable_ts_ns
+
 _NS_PER_S = 1_000_000_000
 _TenantPeriod = tuple[str, str]
 
@@ -37,7 +39,7 @@ class ClosedPeriodError(RuntimeError):
 
 def billing_period(ts_ns: int) -> str:
     """Return the UTC billing period (``"YYYY-MM"``) a nanosecond timestamp falls in."""
-    dt = datetime.fromtimestamp(ts_ns / _NS_PER_S, tz=timezone.utc)
+    dt = datetime.fromtimestamp(representable_ts_ns(ts_ns) / _NS_PER_S, tz=timezone.utc)
     return f"{dt.year:04d}-{dt.month:02d}"
 
 

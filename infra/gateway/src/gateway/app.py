@@ -15,6 +15,7 @@ import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -23,9 +24,10 @@ from fastapi.responses import JSONResponse, Response
 from tally.account_identity import AccountLinker
 from tally.enrichment import enrich_cost
 from tally.models import discover_models
-from tally.pricing import seed_catalog
+from tally.overrides import OverrideLedger
+from tally.pricing import PriceType, priceable_units, seed_catalog
 from tally.schema import TRACE_ID_SYNTHETIC_KEY, GenAI
-from tally.timekeeping import assess
+from tally.timekeeping import NS_PER_SECOND, assess, representable_ts_ns
 from tally.wire import (
     BatchRequest,
     BatchResponse,
@@ -138,6 +140,22 @@ from gateway.tenant_allocation import (
     TenantNotFound as AllocationTenantNotFound,
     normalize_rule,
     normalize_updated_by,
+)
+from gateway.price_overrides import (
+    PriceOverrideConflict,
+    PriceOverrideError,
+    PriceOverrideRefresher,
+    PriceOverrideStore,
+    TenantNotFound as PriceOverrideTenantNotFound,
+    normalize_actor,
+    normalize_currency,
+    normalize_model,
+    normalize_optional_date,
+    normalize_price_per_unit,
+    normalize_price_type,
+    normalize_provider,
+    normalize_reason,
+    normalize_unit,
 )
 from gateway.tenant_budgets import (
     BUDGET_PERIODS,
@@ -432,6 +450,31 @@ async def lifespan(app: FastAPI):
     # is: losing it on restart costs an honest blank, never a wrong account.
     app.state.account_linker = AccountLinker()
     app.state.catalog = seed_catalog()
+    # CTO-416: materialize the per-tenant price override ledger onto that catalog. Until now the
+    # catalog was the seed and nothing else, so a negotiated or missing rate meant editing
+    # tally.pricing and shipping a release even though the ledger, the table and the precedence rule
+    # in PriceCatalog.lookup had all been built and tested. Off unless TALLY_PRICE_OVERRIDES_ENABLED
+    # is set, which keeps a Postgres-less checkout booting and pricing exactly as before.
+    #
+    # The load is awaited HERE, before the app serves, rather than left to the first batch: a replica
+    # that started serving with an unreconciled catalog would price that first window at list price
+    # for every tenant holding a contract, and nothing afterwards could tell which spans those were.
+    # The store is built either way: the control-plane endpoints read and append the ledger even on
+    # a deployment that has not switched the LOAD on, so an operator can stage a rate and see it in
+    # the audit trail before the cost path starts applying it.
+    app.state.price_override_store = PriceOverrideStore(settings)
+    app.state.price_overrides = PriceOverrideRefresher(
+        app.state.catalog,
+        app.state.price_override_store if settings.price_overrides_enabled else None,
+        enabled=settings.price_overrides_enabled,
+        ttl_s=settings.price_overrides_refresh_ttl_s,
+    )
+    if app.state.price_overrides.enabled:
+        # Never raises: a failure marks the catalog overrides-unavailable, which fails pricing CLOSED
+        # (NULL / 'unpriced') and shows up on /readyz. Refusing to boot instead would take ingest
+        # down entirely, and dropping customer telemetry is a worse answer than pricing it as unknown
+        # and saying so.
+        await asyncio.to_thread(app.state.price_overrides.refresh)
     # CTO-245: durable (tenant_id, batch_id) idempotency. The in-process cache alone died with the
     # worker, so a batch retried across a restart was accepted twice and its spend counted twice.
     app.state.idempotency = build_batch_idempotency(settings)
@@ -703,8 +746,27 @@ def readyz() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         logger.warning("postgres not ready: %s", exc)
         checks["postgres"] = False
+    # READINESS is decided by the dependencies above and ONLY by them. A 503 here pulls the replica
+    # out of the load balancer, so anything folded into `ready` can stop ingest.
     ready = all(checks.values())
-    return JSONResponse({"ready": ready, "checks": checks}, status_code=200 if ready else 503)
+
+    # CTO-416: a price override ledger that cannot be read is a real degradation and it is invisible
+    # from the outside, because the spans keep flowing and only their cost goes blank. It is
+    # reported here so a monitor catches it rather than a customer noticing empty cost columns, and
+    # it is deliberately NOT part of `ready` (CTO-416 review). Gating readiness on it took every
+    # replica out of rotation over a PRICING METADATA problem and dropped customer telemetry
+    # outright, which contradicts the lifespan's own reason for booting through a failed load. The
+    # likely trigger is not exotic either: the flag on while migration 0035 has not yet been applied
+    # by hand to a running stack raises UndefinedColumn against a perfectly healthy Postgres, and it
+    # would never clear on its own. Fail closed on the PRICE, stay in rotation for INGEST. A genuine
+    # Postgres outage is already covered by checks["postgres"] above.
+    overrides: PriceOverrideRefresher | None = getattr(app.state, "price_overrides", None)
+    override_status = overrides.status() if overrides is not None else None
+    degraded = [] if override_status is None or override_status.healthy else ["price_overrides"]
+    body: dict[str, Any] = {"ready": ready, "checks": checks, "degraded": degraded}
+    if override_status is not None:
+        body["price_overrides"] = override_status.as_dict()
+    return JSONResponse(body, status_code=200 if ready else 503)
 
 
 @app.get("/v1/capabilities")
@@ -893,6 +955,13 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
     batch = batch.deduplicated()
     server_recv_ns = time.time_ns()
 
+    # CTO-416: pick up a price written on ANOTHER replica before enriching this batch. A clock
+    # comparison on the hot path; only an expired TTL window pays for a query, and that query runs
+    # off the event loop. Placed after the idempotency claim so a replayed batch never triggers it,
+    # and before enrichment so the rate used is the freshest this replica is allowed to hold.
+    price_overrides: PriceOverrideRefresher = app.state.price_overrides
+    await price_overrides.ensure_fresh()
+
     # --- backpressure: under load, shed the batch's overflow (retryable) + tighten client hints ---
     backpressure: Backpressure = app.state.backpressure
     shed = backpressure.evaluate(getattr(app.state, "in_flight", 1), len(batch.resource_spans))
@@ -935,12 +1004,23 @@ async def _run_pipeline(batch: BatchRequest, authorization: str | None) -> JSONR
         for flag in verdict.flags:  # accepted-but-flagged (e.g. UNKNOWN_FEATURE_TAG)
             partial_errors.append(PartialError(item_id=item_id, code=flag.value, message=""))
         assert isinstance(span, dict)  # narrowed by verdict.accepted
-        result = enrich_cost(span, catalog, tenant_id=batch.tenant_id)
-        if result.drift_exceeded:
-            drift_count += 1
         client_ts = span.get("timestamp_ns")
         client_ts_ns = client_ts if isinstance(client_ts, int) else batch.client_send_ts_ns
         skew = assess(client_ts_ns, server_recv_ns)
+        # CTO-416 review: price against the span's OWN date, not today's. The catalog and the
+        # override ledger are both time-windowed, and leaving `at` unset made every lookup fall
+        # through to date.today(), so a backfill or a late arrival was priced at the rate in force
+        # when it happened to be ingested rather than when the call happened. That silently
+        # contradicts docs/price-overrides.md, which promises the span's date to a customer asking
+        # about a bill, and it is also what makes a corrected rate recomputable at all. The skew
+        # assessment moved above this line for the same reason a row uses it: it is the effective
+        # timestamp, so a client clock running fast cannot pick a future price window either. It
+        # clamps the future side only, so the past side is bounded here.
+        priced_ns = representable_ts_ns(skew.effective_ts_ns)
+        priced_on = datetime.fromtimestamp(priced_ns // NS_PER_SECOND, tz=timezone.utc).date()
+        result = enrich_cost(span, catalog, at=priced_on, tenant_id=batch.tenant_id)
+        if result.drift_exceeded:
+            drift_count += 1
         # Meter at HEAD, before the analytics sampling decision, so the billable trace count is
         # exact regardless of sample_rate (CTO-84/85). Drops/sampling must never lower the bill.
         #
@@ -2298,6 +2378,200 @@ async def delete_tenant_budget(
     return JSONResponse(
         {"tenant_id": tenant_id, "budget_id": target, "removed": removed},
         status_code=200,
+    )
+
+
+# --- Per-tenant price overrides (CTO-416) --------------------------------------------------------
+#
+# The write path for a negotiated or missing rate. Service-token authed like every other
+# /v1/tenant/* route: the web server is the only caller and the dashboard never touches Postgres.
+#
+# PRECEDENCE, so a customer-facing answer can cite it: an active override for
+# (tenant, provider, model, price_type) beats the public catalog for every span of that tenant;
+# anything not overridden stays on the public rate. See docs/price-overrides.md.
+
+
+@app.get("/v1/tenant/price-overrides")
+def list_price_overrides(
+    history: bool = False,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """This tenant's negotiated rates, and optionally the whole audit trail (CTO-416).
+
+    * ``overrides``: the latest live entry per slot. A slot whose latest entry is a tombstone is
+      absent, which means it has fallen back to the public catalog.
+    * ``in_force``: every window that can still price a span, which is what the cost path actually
+      holds. It differs from ``overrides`` whenever a rate was negotiated in advance: a rate whose
+      ``valid_from`` is next quarter is the slot's latest entry while TODAY is still priced by the
+      earlier one, and both appear here.
+    * ``history`` (with ``?history=true``): every entry ever appended, oldest first, tombstones
+      included, each with the actor, the reason and the version it supersedes. This is the answer to
+      "why was this tenant billed at that rate in March", and it is why nothing here is ever
+      updated in place.
+    * ``load``: whether THIS replica currently holds a usable copy of the ledger. When it is
+      unhealthy the tenant's costs are landing NULL / 'unpriced' rather than at list price, and the
+      caller should say so rather than show a rate the cost path is not actually applying.
+
+    An empty list is the normal state for almost every tenant and is not an error.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    store: PriceOverrideStore = app.state.price_override_store
+    refresher: PriceOverrideRefresher = app.state.price_overrides
+    try:
+        records = store.history(tenant_id)
+    except PriceOverrideTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - an unreadable ledger is a 503, never an empty list
+        # Answering [] here would say "this tenant has negotiated nothing", which is a claim we
+        # cannot make while the table is unreadable.
+        logger.exception("price overrides: read failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=503, detail=f"price override ledger unavailable: {exc}") from exc
+
+    ledger = OverrideLedger.from_records(records)
+    body: dict[str, object] = {
+        "tenant_id": tenant_id,
+        "overrides": [r.as_dict() for r in ledger.active()],
+        "configured": bool(ledger.active()),
+        "in_force": [r.as_dict() for r in ledger.effective()],
+        "load": refresher.status().as_dict(),
+        "available_price_types": [t.value for t in PriceType],
+        # CTO-416 review: units PER PRICE TYPE, not the whole enum. Advertising per_gb against an
+        # input tier invited a rate the cost math has no branch for, which used to price every
+        # matching span at a confident zero. A UI that reads this cannot offer the pairing at all.
+        "available_units": {t.value: priceable_units(t) for t in PriceType},
+    }
+    if history:
+        body["history"] = [r.as_dict() for r in records]
+    return JSONResponse(body, status_code=200)
+
+
+@app.post("/v1/tenant/price-overrides")
+async def append_price_override(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Append one ledger entry: a new rate, or a revocation (CTO-416).
+
+    Body: ``{"provider": "anthropic", "model": "claude-sonnet-4-5", "price_type": "input",
+    "price_per_unit": "2.40", "unit": "per_million_tokens", "actor": "amy@example.com",
+    "reason": "CTO-416 enterprise contract, 20 percent off list", "valid_from": "2026-09-01"}``.
+
+    ``{"revoke": true}`` with the same slot and no ``price_per_unit`` appends a TOMBSTONE, and the
+    slot reverts to the public catalog FROM ``valid_from``, which on a revocation means the date the
+    override ENDS (today when omitted). A revocation is resolved against each span's date like every
+    other entry: "this contract ends on 1 January" filed in advance keeps pricing at the contract
+    rate until January, a backdated one ends the override where it says, and a span from before the
+    end date still prices at the rate that was in force when the call was made. ``valid_to`` is
+    refused on a revocation: a tombstone closes a window, it does not open one (CTO-416 review). There is no PUT and no DELETE here on purpose: re-pricing is
+    a new version that records what it supersedes, and withdrawing is a tombstone, so the rate a
+    past span was priced at is still in the table. Migration 0035 backs that with a trigger, so even
+    a hand-written UPDATE is refused.
+
+    ``price_per_unit`` is a decimal STRING (or an integer), never a float: money that passes through
+    a float has already lost precision before it reaches the column. ``actor`` and ``reason`` are
+    required, because an entry without them is a rate change nobody can explain later.
+
+    The write is applied to this replica's catalog immediately; other replicas pick it up within
+    ``TALLY_PRICE_OVERRIDES_REFRESH_TTL_S``. The response says which of the two happened in
+    ``applied``, rather than implying the change is live everywhere.
+    """
+    _require_service_token(authorization)
+    tenant_id = _service_token_tenant(x_tenant_id)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="body is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="body must be a JSON object")
+
+    store: PriceOverrideStore = app.state.price_override_store
+    refresher: PriceOverrideRefresher = app.state.price_overrides
+    revoke = body.get("revoke") is True
+    try:
+        provider = normalize_provider(body.get("provider"))
+        model = normalize_model(body.get("model"))
+        price_type = normalize_price_type(body.get("price_type"))
+        # Validated AGAINST the tier: a unit the cost math cannot apply would otherwise be stored
+        # and price every matching span at a confident zero (CTO-416 review).
+        unit = normalize_unit(body.get("unit"), price_type)
+        actor = normalize_actor(body.get("actor"))
+        reason = normalize_reason(body.get("reason"))
+        valid_from = normalize_optional_date(body.get("valid_from"), field="valid_from")
+        valid_to = normalize_optional_date(body.get("valid_to"), field="valid_to")
+        currency = normalize_currency(body.get("currency"))
+        if revoke:
+            if body.get("price_per_unit") is not None:
+                raise PriceOverrideError("a revocation must not carry a price_per_unit")
+            if valid_to is not None:
+                raise PriceOverrideError(
+                    "a revocation must not carry a valid_to; valid_from is the date the override "
+                    "ends"
+                )
+            rate = None
+        else:
+            rate = normalize_price_per_unit(body.get("price_per_unit"))
+        record = store.append(
+            tenant_id,
+            provider=provider,
+            model=model,
+            price_type=price_type,
+            price_per_unit=rate,
+            actor=actor,
+            reason=reason,
+            unit=unit,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            currency=currency,
+        )
+    except PriceOverrideTenantNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PriceOverrideConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PriceOverrideError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Write-through, so the operator who just added a price sees it applied here rather than after
+    # a TTL they have no way to observe. A refresh that fails leaves the catalog fail-closed, which
+    # the response reports honestly instead of claiming the rate is in force.
+    status = await asyncio.to_thread(refresher.refresh)
+    return JSONResponse(
+        {
+            "tenant_id": tenant_id,
+            "entry": record.as_dict(),
+            # NOT status.healthy. With the feature disabled this replica is healthy and the entry is
+            # durably stored, but nothing has loaded it and it prices exactly nothing, which is the
+            # one case the answer must be false (CTO-416 review).
+            "applied": status.applied,
+            "load": status.as_dict(),
+        },
+        status_code=200,
+    )
+
+
+@app.post("/v1/tenant/price-overrides/refresh")
+async def refresh_price_overrides(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> JSONResponse:
+    """Re-read the ledger onto this replica's catalog now, without waiting out the TTL (CTO-416).
+
+    Deliberately a whole-catalog reload rather than a per-tenant one: the pool is materialized from
+    the ledger as a unit, and reloading one tenant's slice would leave this replica holding a mix of
+    two reads with no way to say which tenant is on which.
+
+    Returns the load status. A failed reload answers 503 AND leaves pricing fail-closed, so a caller
+    cannot read this as "nothing changed".
+    """
+    _require_service_token(authorization)
+    _service_token_tenant(x_tenant_id)
+    refresher: PriceOverrideRefresher = app.state.price_overrides
+    status = await asyncio.to_thread(refresher.refresh)
+    return JSONResponse(
+        {"load": status.as_dict()},
+        status_code=200 if status.healthy else 503,
     )
 
 

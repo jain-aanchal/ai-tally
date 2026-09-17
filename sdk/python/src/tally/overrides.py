@@ -17,16 +17,19 @@ layer**:
   tamper-evident by construction (append-only + monotonic versions).
 
 The ledger is the source of truth; :meth:`OverrideLedger.apply_to_catalog` materializes the
-currently *active* overrides onto a freshly-seeded :class:`~tally.pricing.PriceCatalog` so the cost
-path (:func:`tally.enrichment.enrich_cost`, which already threads ``tenant_id``) picks them up with
-no further wiring. Pure logic: no infra, no clock except an injectable ``now`` for deterministic
-tests.
+*effective* overrides onto a freshly-seeded :class:`~tally.pricing.PriceCatalog` so the cost path
+(:func:`tally.enrichment.enrich_cost`, which already threads ``tenant_id`` and the span's date)
+picks them up with no further wiring. Effective means every window a slot still has, not just its
+newest entry: the catalog resolves by date, so a rate negotiated in advance and the rate in force
+today are both materialized and each span gets the one covering it. See
+:meth:`OverrideLedger.effective`. Pure logic: no infra, no clock except an injectable ``now``
+for deterministic tests.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -49,6 +52,36 @@ def _utcnow() -> datetime:
 def _to_decimal(value: Decimal | str | int) -> Decimal:
     """Coerce a price to :class:`~decimal.Decimal`, never via float (this is money)."""
     return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _to_unit(value: Unit | str) -> Unit:
+    """Coerce ``unit`` to the enum, refusing an unknown spelling (CTO-416 review).
+
+    Both enums here are ``str`` enums, so a plain string compares and hashes equal to its member and
+    a caller passing one gets correct behaviour almost everywhere. Almost: ``.value`` then raises
+    ``AttributeError``, and the first place that bit was inside the error message for a unit the
+    cost math cannot apply, which turned a clean diagnosable failure into a mystery AttributeError
+    raised while pricing a span. Coercing here means a record simply cannot be constructed with a
+    non-enum unit, so no later reader has to be defensive. CTO-420 tracks the general trap.
+    """
+    if isinstance(value, Unit):
+        return value
+    try:
+        return Unit(value)
+    except (ValueError, TypeError) as exc:
+        allowed = ", ".join(u.value for u in Unit)
+        raise ValueError(f"unknown unit {value!r}; expected one of: {allowed}") from exc
+
+
+def _to_price_type(value: PriceType | str) -> PriceType:
+    """Coerce ``price_type`` to the enum, refusing an unknown spelling. See :func:`_to_unit`."""
+    if isinstance(value, PriceType):
+        return value
+    try:
+        return PriceType(value)
+    except (ValueError, TypeError) as exc:
+        allowed = ", ".join(t.value for t in PriceType)
+        raise ValueError(f"unknown price_type {value!r}; expected one of: {allowed}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +162,9 @@ class OverrideLedger:
     """Append-only, versioned ledger of per-tenant price overrides.
 
     Mutations (:meth:`upsert`, :meth:`revoke`) only ever *append* a new :class:`OverrideRecord`; the
-    full history is retained for audit. :meth:`active` returns the current effective overrides
-    (latest non-revoked record per slot), and :meth:`apply_to_catalog` materializes them onto a
-    catalog.
+    full history is retained for audit. :meth:`active` returns the latest live entry per slot (an
+    audit view), :meth:`effective` returns every window that can still price a span, and
+    :meth:`apply_to_catalog` materializes the latter onto a catalog.
     """
 
     def __init__(self, *, now: Callable[[], datetime] = _utcnow) -> None:
@@ -139,6 +172,28 @@ class OverrideLedger:
         self._records: list[OverrideRecord] = []
         # latest version assigned per slot (monotonic; never reused even across revoke→re-add)
         self._version: dict[_Slot, int] = {}
+
+    @classmethod
+    def from_records(cls, records: Iterable[OverrideRecord]) -> OverrideLedger:
+        """Rebuild a ledger from already-persisted records, oldest first (CTO-416).
+
+        The gateway stores this ledger in Postgres (``price_catalog_overrides``), so the version and
+        the ``supersedes`` back-reference are assigned by the WRITE, not re-derived here: several
+        replicas append to one table and an in-memory counter per process would hand two of them the
+        same version. This constructor therefore replays what was stored verbatim and only rebuilds
+        the per-slot high-water mark, so :meth:`active` and :meth:`apply_to_catalog` behave exactly
+        as they do for a ledger built in process.
+
+        ``records`` MUST arrive in ledger order (ascending version within a slot), because
+        :meth:`active` resolves a slot by last-write-wins. Feeding it a reversed cursor would
+        resurrect a rate a tombstone already withdrew.
+        """
+        ledger = cls()
+        for record in records:
+            ledger._records.append(record)
+            slot = record.slot
+            ledger._version[slot] = max(ledger._version.get(slot, 0), record.version)
+        return ledger
 
     # --- mutation (append-only) ------------------------------------------------------------------
 
@@ -164,8 +219,8 @@ class OverrideLedger:
         """
         now = self._now()
         return self._append(
-            tenant_id, provider, model, price_type,
-            unit=unit, price_per_unit=_to_decimal(price_per_unit),
+            tenant_id, provider, model, _to_price_type(price_type),
+            unit=_to_unit(unit), price_per_unit=_to_decimal(price_per_unit),
             valid_from=valid_from or now.date(), valid_to=valid_to,
             actor=actor, reason=reason, currency=currency, now=now,
         )
@@ -179,13 +234,20 @@ class OverrideLedger:
         *,
         actor: str,
         reason: str,
+        valid_from: date | None = None,
     ) -> OverrideRecord:
         """Revoke a tenant's override for a slot (records a tombstone; cost falls back to public).
+
+        ``valid_from`` is the date the override ENDS, defaulting to today. It may be in the future
+        ("this contract ends on 1 January") or in the past ("it ended on 1 August, filed today"),
+        and :meth:`effective` resolves it against the span's date rather than applying it the moment
+        it is filed: see that method for why a tombstone closes a window instead of erasing it.
 
         Idempotent in effect: revoking an already-absent/revoked slot still appends an audited
         tombstone (the request itself is part of the trail), but :meth:`active` will simply not
         surface the slot.
         """
+        price_type = _to_price_type(price_type)
         prev = self._current(tenant_id, provider, model, price_type)
         unit = prev.unit if prev is not None else Unit.PER_MILLION_TOKENS
         currency = prev.currency if prev is not None else DEFAULT_CURRENCY
@@ -193,7 +255,7 @@ class OverrideLedger:
         return self._append(
             tenant_id, provider, model, price_type,
             unit=unit, price_per_unit=None,
-            valid_from=now.date(), valid_to=None,
+            valid_from=valid_from or now.date(), valid_to=None,
             actor=actor, reason=reason, currency=currency, now=now,
         )
 
@@ -254,7 +316,12 @@ class OverrideLedger:
         return self._current(tenant_id, provider, model, price_type)
 
     def active(self, tenant_id: str | None = None) -> list[OverrideRecord]:
-        """Currently effective overrides: latest non-revoked record per slot.
+        """The latest non-revoked record per slot, IGNORING the validity window.
+
+        Answers "what was the last thing anyone said about this slot", which is what an audit view
+        wants. It is NOT what prices a span, and must not be used to materialize a catalog: a rate
+        negotiated in advance would hide the one in force today. See :meth:`effective`, which is
+        what :meth:`apply_to_catalog` uses (CTO-416).
 
         Pass ``tenant_id`` to scope to one tenant. A slot whose latest record is a tombstone is
         omitted (it has fallen back to the public catalog).
@@ -265,6 +332,76 @@ class OverrideLedger:
                 continue
             latest[record.slot] = record  # records are appended in order → last write wins
         return [r for r in latest.values() if not r.revoked]
+
+    def effective(self, tenant_id: str | None = None) -> list[OverrideRecord]:
+        """Every record that can still price something, with the DATE left to the catalog (CTO-416).
+
+        This is what :meth:`apply_to_catalog` materializes, and it is deliberately not
+        :meth:`active`. ``active`` collapses a slot to its latest record and ignores the validity
+        window, which threw away the whole point of ``valid_from``:
+
+        * A rate negotiated in advance (``valid_from`` next quarter) became the slot's only record,
+          so the rate actually IN FORCE today was not materialized at all and the tenant silently
+          priced at PUBLIC LIST until the new window opened. A contract rate is normally below list,
+          so that over-reports spend that was never incurred.
+        * A historical recompute hit the mirror image: a span from March resolved against a record
+          that does not start until June, found nothing applicable, and came back unpriced.
+
+        So every record a slot still has is handed to the catalog, and
+        :meth:`tally.pricing.PriceCatalog._best` picks the one applicable at the span's date, which
+        is the resolution it already implements for the public table.
+
+        Two things change a record:
+
+        * a LATER version with the SAME ``valid_from`` REPLACES it. That is a correction of one
+          window rather than the opening of a new one.
+        * a TOMBSTONE CLOSES the slot at its own ``valid_from`` rather than erasing it (CTO-416
+          review). Every window that was open across that date has its ``valid_to`` moved to it, and
+          any window that would start on or after it is removed, because the tombstone says there is
+          no override from that date onward.
+
+        Closing rather than deleting is what makes a DATED revocation mean what it says, in both
+        directions, and it is the same resolution the rest of this module already relies on:
+
+        * "this contract ends on 1 January 2027", filed today, must keep pricing at the contract
+          rate until that date. Deleting the window instead started over-reporting that tenant at
+          public list the moment the revocation was filed, months early, with the endpoint happily
+          answering ``applied: true``.
+        * "the contract ended on 1 August", filed on 1 September, must stop pricing on 1 August and
+          must not leave a later window alive to resume afterwards.
+        * a span from BEFORE the end date is still priced by the rate that was in force when the
+          call was made. Deletion erased the contract from the past as well, so a backfill, a late
+          arrival or a reconciliation rerun over a pre-revocation date came back at public list,
+          which contradicts the promise that a past invoice stays explainable.
+
+        A rate appended AFTER a tombstone re-opens the slot in the ordinary way, because the ledger
+        is read in order and the last statement about a date wins.
+
+        The ``valid_to`` a tombstone imposes is materialized onto the returned record, so what this
+        returns is what the catalog should hold rather than a verbatim copy of the stored row. The
+        stored rows themselves are untouched; :meth:`history` is the verbatim view.
+        """
+        windows: dict[_Slot, dict[date, OverrideRecord]] = {}
+        for record in self._records:  # insertion order is version order
+            if tenant_id is not None and record.tenant_id != tenant_id:
+                continue
+            window = windows.setdefault(record.slot, {})
+            if record.revoked:
+                ends_on = record.valid_from
+                for start, open_record in list(window.items()):
+                    if start >= ends_on:
+                        # Nothing may start on or after the end date, including a window that was
+                        # scheduled before this revocation was filed.
+                        del window[start]
+                    elif open_record.valid_to is None or open_record.valid_to > ends_on:
+                        window[start] = replace(open_record, valid_to=ends_on)
+                continue
+            window[record.valid_from] = record
+        return [
+            record
+            for slot in sorted(windows, key=lambda s: (s[0], s[1], s[2], s[3].value))
+            for _start, record in sorted(windows[slot].items())
+        ]
 
     def history(
         self, tenant_id: str | None = None, *, slot: _Slot | None = None
@@ -280,12 +417,16 @@ class OverrideLedger:
     # --- integration -----------------------------------------------------------------------------
 
     def apply_to_catalog(self, catalog: PriceCatalog, *, tenant_id: str | None = None) -> None:
-        """Materialize the active overrides onto ``catalog`` via :meth:`PriceCatalog.add_override`.
+        """Materialize the EFFECTIVE overrides onto ``catalog`` (:meth:`PriceCatalog.add_override`).
+
+        Every window a slot still has is materialized, not only the newest entry, so the catalog can
+        resolve by the span's date the way it does for the public table: see :meth:`effective` for
+        why materializing only the newest one priced a contract tenant at list.
 
         Intended for a *freshly seeded* catalog (the override entries are appended, so calling twice
         on the same catalog would double-register). Rebuild the catalog when the ledger changes.
         """
-        for record in self.active(tenant_id):
+        for record in self.effective(tenant_id):
             entry = record.to_price_entry()
             if entry is not None:
                 catalog.add_override(record.tenant_id, entry)

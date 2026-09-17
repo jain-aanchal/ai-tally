@@ -38,6 +38,24 @@ def effective_timestamp_ns(
     return min(client_ts_ns, ceiling)
 
 
+# The epoch-nanosecond range :class:`datetime` can represent (years 1 through 9999).
+MIN_REPRESENTABLE_TS_NS = -62135596800 * NS_PER_SECOND  # 0001-01-01T00:00:00Z
+MAX_REPRESENTABLE_TS_NS = 253402300799 * NS_PER_SECOND  # 9999-12-31T23:59:59Z
+
+
+def representable_ts_ns(ts_ns: int) -> int:
+    """Clamp a timestamp to what ``datetime.fromtimestamp`` can convert (CTO-416 review).
+
+    ``effective_timestamp_ns`` bounds the FUTURE side only, because a past timestamp is a normal
+    backfill and must be used as-is. But JSON admits an integer of any size, so a far-past
+    ``timestamp_ns`` reaches the conversion unclamped and raises ``ValueError``. On the ingest path
+    that raise escapes the per-span loop and loses every span in the batch, not just the offending
+    one. Telemetry a customer cannot get back is a worse answer than one span stamped at a boundary
+    date, so clamp: a nonsense clock costs that span an accurate timestamp, never the span itself.
+    """
+    return min(max(ts_ns, MIN_REPRESENTABLE_TS_NS), MAX_REPRESENTABLE_TS_NS)
+
+
 def skew_seconds(client_ts_ns: int, server_recv_ts_ns: int) -> float:
     """Signed skew in seconds: positive = client ahead of server."""
     return (client_ts_ns - server_recv_ts_ns) / NS_PER_SECOND

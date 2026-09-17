@@ -14,6 +14,7 @@ from decimal import Decimal
 from hashlib import blake2b
 
 from tally.schema import BILLING_MODE_SUBSCRIPTION, GenAI, micro_to_usd
+from tally.timekeeping import representable_ts_ns
 
 # gen_ai.* keys that get promoted to typed columns (so they don't also duplicate into the map).
 _PROMOTED_GENAI = frozenset(
@@ -328,7 +329,7 @@ def span_to_row(
     behaviour and is correct for callers that supply their own ids anyway
     (gateway/connectors/base.py).
     """
-    ts = datetime.fromtimestamp(effective_ts_ns / 1e9, tz=timezone.utc)
+    ts = datetime.fromtimestamp(representable_ts_ns(effective_ts_ns) / 1e9, tz=timezone.utc)
 
     # CTO-244. A span that carries no priced cost is UNPRICED, not free. Writing Decimal(0) here
     # told every downstream sum that a real call cost nothing; the honest write is NULL plus the
