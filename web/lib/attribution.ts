@@ -116,6 +116,20 @@ export interface ProviderAttribution {
   marginPerUserMicroUsd: MicroUSD | null;
   // Margin as a fraction of value: (value − cost) / value. Null when value/user is null or 0.
   marginPct: number | null;
+  /**
+   * Spans for this system in the window we could not put a price on (CTO-429, extending CTO-244).
+   *
+   * `costMicroUsd` is a ClickHouse `sum()` and `sum()` skips NULLs, so a system whose spans ALL
+   * lack a catalog rate sums to 0, not to null. Without this count the row is indistinguishable
+   * from a system that genuinely spent nothing, and the page rendered a confident "$0.00" for a
+   * real cost. It is deliberately a count and not a cost: the point is that those spans have no
+   * cost to add, and we must not guess what it was.
+   *
+   * Optional so the mock and any older payload still typecheck and read as "nobody counted".
+   */
+  unpricedSpanCount?: number;
+  /** Total spans behind this row, so `unpricedSpanCount` can be read as a share (CTO-429). */
+  spanCount?: number;
 }
 
 /** One calendar day of LLM cost split by provider, for the provider-breakdown chart (CTO-223). */
@@ -134,6 +148,10 @@ export interface AttributionReport {
     conversions: number;
     costMicroUsd: MicroUSD;
     costPerConversionMicroUsd: MicroUSD | null;
+    /** Unpriced spans across every system in the window (CTO-429). Same role as the per-row field. */
+    unpricedSpanCount?: number;
+    /** Total spans across every system in the window (CTO-429). */
+    spanCount?: number;
   };
   /**
    * Daily LLM cost per provider across the window, oldest to newest, for the stacked provider chart.
@@ -189,6 +207,11 @@ export function buildProviderRow(
    * money already spent, and the caller reports the coverage alongside it.
    */
   unpricedSpans = 0,
+  /**
+   * Total spans behind this row (CTO-429). Carried alongside `unpricedSpans` so a caller can tell
+   * "every span was unpriced, the cost is unknown" from "some were, the sum is a lower bound".
+   */
+  spans = 0,
 ): ProviderAttribution {
   const { p, lo, hi } = wilsonInterval(conversions, sessions);
   const costKnown = unpricedSpans === 0;
@@ -217,6 +240,8 @@ export function buildProviderRow(
     valuePerUserMicroUsd: valuePerUser,
     marginPerUserMicroUsd: marginPerUser,
     marginPct,
+    unpricedSpanCount: unpricedSpans,
+    spanCount: spans,
   };
 }
 

@@ -51,7 +51,17 @@ export async function GET(req: Request): Promise<NextResponse> {
     live ?? {
       filters,
       perProvider: [],
-      totals: { sessions: 0, conversions: 0, costMicroUsd: 0, costPerConversionMicroUsd: null },
+      // CTO-429: the span counts are stated as zeros rather than left absent. No span was observed,
+      // which is a different claim from "nobody counted", and the page renders no figure in this
+      // state either way.
+      totals: {
+        sessions: 0,
+        conversions: 0,
+        costMicroUsd: 0,
+        costPerConversionMicroUsd: null,
+        unpricedSpanCount: 0,
+        spanCount: 0,
+      },
       dailyByProvider: [],
       isMock: false,
     };

@@ -3057,13 +3057,20 @@ export async function queryAttribution(
       : "";
 
     // sessions per provider (distinct session ids per real provider).
-    const sessionsRows = await rowsP<{ provider: string; sessions: string; cost: string; unpriced: string }>(
+    const sessionsRows = await rowsP<{
+      provider: string;
+      sessions: string;
+      cost: string;
+      unpriced: string;
+      spans: string;
+    }>(
       db,
       `SELECT
          ${providerExpr} AS provider,
          uniqExact(s.SessionId) AS sessions,
          sum(s.EstimatedCost) AS cost,
-         countIf(s.EstimatedCost IS NULL) AS unpriced
+         countIf(s.EstimatedCost IS NULL) AS unpriced,
+         count() AS spans
        FROM otel_spans s FINAL
        WHERE s.TenantId = {tenant:String}
          AND s.Timestamp >= ${windowSql}
@@ -3159,8 +3166,18 @@ export async function queryAttribution(
       const revenue = revenueByProvider.get(r.provider) ?? null;
       // CTO-244: pass the unpriced count so the per-conversion and per-user ratios blank instead
       // of dividing a partial cost by a complete denominator.
+      // CTO-429 adds the span total beside it. `sum()` skips NULLs, so a system whose spans were
+      // ALL unpriced arrives here as a 0 rather than a null, and the cost column published that 0
+      // as measured spend. The two counts together are what let the page tell a real zero from an
+      // unknown, the same way querySpendSummary and the explore breakdown already do.
       return buildProviderRow(
-        r.provider, sessions, conversions, costMicro, revenue, parseInt(r.unpriced, 10) || 0,
+        r.provider,
+        sessions,
+        conversions,
+        costMicro,
+        revenue,
+        parseInt(r.unpriced, 10) || 0,
+        parseInt(r.spans, 10) || 0,
       );
     });
     perProvider.sort((a, b) => b.sessions - a.sessions);
@@ -3201,15 +3218,21 @@ export async function queryAttribution(
       conversions: perProvider.reduce((s, p) => s + p.conversions, 0),
       costMicroUsd: perProvider.reduce((s, p) => s + p.costMicroUsd, 0),
       costPerConversionMicroUsd: null as number | null,
+      // CTO-429: the roll-up carries the same two counts as the rows, so the headline tiles can
+      // make the same call the table does instead of formatting a NULL-skipping sum.
+      unpricedSpanCount: perProvider.reduce((s, p) => s + (p.unpricedSpanCount ?? 0), 0),
+      spanCount: perProvider.reduce((s, p) => s + (p.spanCount ?? 0), 0),
     };
     // CTO-244: if ANY provider row has an unknown cost per conversion, the roll-up of all of them
     // is unknown too. A total built from a partial numerator and a complete denominator is wrong,
     // not merely small.
-    const anyUnpriced = perProvider.some(
-      (p) => p.conversions > 0 && p.costPerConversionMicroUsd === null,
-    );
+    //
+    // CTO-429 widens the test from "a row with conversions lost its ratio" to "any span in the
+    // window went unpriced". A system with unpriced spans and no conversions of its own was not
+    // caught by the old predicate, yet its missing cost is still absent from the numerator here
+    // while its sessions and every other system's conversions stay in the denominator.
     totals.costPerConversionMicroUsd =
-      !anyUnpriced && totals.conversions > 0
+      totals.unpricedSpanCount === 0 && totals.conversions > 0
         ? Math.round(totals.costMicroUsd / totals.conversions)
         : null;
 
