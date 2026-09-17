@@ -71,6 +71,27 @@ source "${SCRIPT_DIR}/lib-tenant.sh"
 require_service_token_if_auth_on
 warn_backfill_unsupported_if_auth_on
 
+# CTO-432: refuse to truncate a real instance.
+#
+# This script TRUNCATEs the telemetry tables. That is correct for the nightly demo reset it was
+# written for and catastrophic anywhere else, and until now nothing stopped the second case: the
+# deploy banner advertised this script on every instance, including one running AUTH_MODE=clerk,
+# which the kit's own comments define as a real instance whose tenants come from signed-in Clerk
+# organizations. The data there belongs to customers and is not regenerable from a seed.
+#
+# The check is the mode, not a span count: a clerk instance that happens to be empty today is still
+# one whose next spans are real. The override exists because a deliberate operator on a throwaway
+# clerk instance is a legitimate case, but it has to be typed out rather than defaulted into.
+if [ "${AUTH_MODE:-basic}" = "clerk" ] && [ "${I_KNOW_THIS_DESTROYS_REAL_DATA:-}" != "1" ]; then
+  echo "REFUSING to reseed: AUTH_MODE=clerk, which this kit treats as a real instance." >&2
+  echo "  This script TRUNCATEs the telemetry tables. On a real instance that destroys customer" >&2
+  echo "  spans, and no seed can regenerate them." >&2
+  echo "" >&2
+  echo "  If you are certain this instance holds nothing you need:" >&2
+  echo "    I_KNOW_THIS_DESTROYS_REAL_DATA=1 ${0}" >&2
+  exit 1
+fi
+
 CH_USER="${CLICKHOUSE_USER:-tally}"
 CH_PASSWORD="${CLICKHOUSE_PASSWORD:-tally}"
 
