@@ -10,6 +10,7 @@ import {
   totalRange,
   type Layer,
 } from "./cost";
+import { formatUSD } from "./types";
 
 describe("cost series", () => {
   it("totalForDay sums all layers", () => {
@@ -106,5 +107,46 @@ describe("layerCoverage (CTO-244)", () => {
     )!;
     expect(llm.totalMicroUsd).toBe(900_000);
     expect(llm.reason).toBe("");
+  });
+});
+
+// CTO-423. "All unpriced" was too narrow a test for "we cannot report this". A layer of 531 spans
+// with 530 of them unpriced kept the priced remainder and rendered "$0.0000 at least, 100.0%": a
+// figure that rounds away at display precision is read as "we measured your spend and it was
+// nothing", which is a fabricated zero however it is marked.
+describe("layerCoverage: a lower bound that rounds to zero (CTO-423)", () => {
+  const zeros = (): Record<Layer, number> =>
+    Object.fromEntries(LAYERS.map((l) => [l, 0])) as Record<Layer, number>;
+
+  it("blanks a layer whose priced remainder formats to $0.0000", () => {
+    const byLayer = { ...zeros(), llm: 5 }; // one priced span worth 5 micro-USD
+    const llm = layerCoverage(byLayer, ["llm"], { llm: 531 }, { llm: 530 }).find(
+      (c) => c.layer === "llm",
+    )!;
+    expect(formatUSD(5)).toBe("$0.0000"); // the display precision that makes this necessary
+    expect(llm.totalMicroUsd).toBeNull();
+    expect(llm.reason).toContain("1 of 531");
+    expect(llm.reason).toContain("rounds to zero");
+  });
+
+  it("keeps a small lower bound that still renders as a figure", () => {
+    // 100 micro-USD prints "$0.0001". It is a real, readable number, so the "at least" marker can
+    // carry the rest of the story and the figure stays.
+    const byLayer = { ...zeros(), llm: 100 };
+    const llm = layerCoverage(byLayer, ["llm"], { llm: 531 }, { llm: 530 }).find(
+      (c) => c.layer === "llm",
+    )!;
+    expect(llm.totalMicroUsd).toBe(100);
+    expect(llm.reason).toBe("");
+  });
+
+  it("still reports a genuine measured zero: spans observed, none unpriced", () => {
+    // The opposite error. Nothing was unpriced, so zero IS the measurement and blanking it would
+    // hide a real answer.
+    const tools = layerCoverage(zeros(), [], { tools: 531 }, { tools: 0 }).find(
+      (c) => c.layer === "tools",
+    )!;
+    expect(tools.totalMicroUsd).toBe(0);
+    expect(tools.reason).toBe("");
   });
 });

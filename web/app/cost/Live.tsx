@@ -79,7 +79,7 @@ import {
   hasActiveFilters,
   rangeDays,
 } from "@/lib/filters";
-import { formatUSD } from "@/lib/types";
+import { formatUSD, isZeroRoundingLowerBound } from "@/lib/types";
 import { useFilters } from "@/lib/useFilters";
 import { useLivePoll } from "@/lib/useLivePoll";
 
@@ -257,8 +257,15 @@ export function CostLive({
   // one, and the tile must say so or it contradicts the breakdown footer directly beneath it.
   const sliceAllUnpriced =
     slice !== null && slice.spanCount > 0 && slice.unpricedSpanCount >= slice.spanCount;
+  // CTO-423: and a slice that is ALMOST all unpriced is the same story once the priced remainder
+  // rounds away at display precision. 530 unpriced spans beside one priced span worth 5 micro-USD
+  // put "$0.0000 at least" on this tile, which reads as a measured zero. It blanks with the reason
+  // instead; a lower bound that still prints a figure keeps it, however small.
+  const sliceRoundsToZero =
+    slice !== null && isZeroRoundingLowerBound(slice.totalMicroUsd, slice.unpricedSpanCount);
+  const sliceCostUnknown = sliceAllUnpriced || sliceRoundsToZero;
   const tileTotal = slice
-    ? sliceAllUnpriced
+    ? sliceCostUnknown
       ? null
       : slice.totalMicroUsd
     : isDefaultSlice
@@ -266,7 +273,7 @@ export function CostLive({
       : null;
   const tileReconciled = slice ? slice.reconciledMicroUsd : isDefaultSlice ? reconciled : null;
   const tileEstimated = slice
-    ? sliceAllUnpriced
+    ? sliceCostUnknown
       ? null
       : slice.estimatedMicroUsd
     : isDefaultSlice
@@ -279,10 +286,12 @@ export function CostLive({
     ? "this slice is served live and the telemetry source could not be reached"
     : sliceAllUnpriced
       ? `all ${(slice?.spanCount ?? 0).toLocaleString()} spans in this slice could not be priced, so the cost is unknown rather than zero`
-      : "no cost data for this slice";
+      : sliceRoundsToZero
+        ? `only ${((slice?.spanCount ?? 0) - (slice?.unpricedSpanCount ?? 0)).toLocaleString()} of ${(slice?.spanCount ?? 0).toLocaleString()} spans in this slice could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`
+        : "no cost data for this slice";
   // A partly unpriced slice keeps its figure, marked as the lower bound it is. Same wording as the
   // Home Spend tile so the two pages disclose the same gap the same way.
-  const sliceUnpriced = slice && !sliceAllUnpriced ? slice.unpricedSpanCount : 0;
+  const sliceUnpriced = slice && !sliceCostUnknown ? slice.unpricedSpanCount : 0;
   const totalHint =
     sliceUnpriced > 0
       ? `at least: ${sliceUnpriced.toLocaleString()} of ${(slice?.spanCount ?? 0).toLocaleString()} spans could not be priced`
@@ -783,8 +792,15 @@ function BreakdownTable({
   const footerTotal = visible.reduce((s, r) => s + (r.totalMicroUsd ?? 0), 0);
   const shownSpans = visible.reduce((s, r) => s + r.spanCount, 0);
   const shownUnpriced = visible.reduce((s, r) => s + r.unpricedSpanCount, 0);
-  // Nothing on screen could be priced: the footer has no figure at all, not a zero one.
-  const footerKnown = !(shownSpans > 0 && shownUnpriced >= shownSpans);
+  // Nothing on screen could be priced: the footer has no figure at all, not a zero one. CTO-423
+  // adds the case where a little was priced but the sum rounds to zero anyway: "$0.0000 at least"
+  // and "100.0%" claim a measurement nobody made, so the footer blanks there too.
+  const footerAllUnpriced = shownSpans > 0 && shownUnpriced >= shownSpans;
+  const footerRoundsToZero = isZeroRoundingLowerBound(footerTotal, shownUnpriced);
+  const footerKnown = !footerAllUnpriced && !footerRoundsToZero;
+  const footerReason = footerAllUnpriced
+    ? `all ${shownSpans.toLocaleString()} spans shown could not be priced, so the total is unknown`
+    : `only ${(shownSpans - shownUnpriced).toLocaleString()} of ${shownSpans.toLocaleString()} spans shown could be priced, and what we could price rounds to zero, so the total is unknown rather than zero`;
   const dimLabel = DIMENSION_LABEL[groupBy].toLowerCase();
 
   const toggleSort = (key: "cost" | "share") => {
@@ -871,10 +887,10 @@ function BreakdownTable({
                       <CostCell row={r} groupBy={groupBy} />
                     </td>
                     <td className="py-2 text-right tabular-nums">
-                      {r.totalMicroUsd === null ? (
+                      {rowCostUnknown(r) ? (
                         <Blank reason="this group's cost is unknown, so it has no share of the total" />
                       ) : footerTotal > 0 ? (
-                        <Pct value={r.totalMicroUsd / footerTotal} />
+                        <Pct value={(r.totalMicroUsd ?? 0) / footerTotal} />
                       ) : (
                         <Blank reason="no spend in this slice, so there is no total to take a share of" />
                       )}
@@ -896,7 +912,7 @@ function BreakdownTable({
                   <td className="py-2 text-right tabular-nums">
                     <Money
                       micro={footerKnown ? footerTotal : null}
-                      reason={`all ${shownSpans.toLocaleString()} spans shown could not be priced, so the total is unknown`}
+                      reason={footerReason}
                     />
                     {footerKnown && shownUnpriced > 0 && (
                       <span
@@ -927,14 +943,29 @@ function BreakdownTable({
 }
 
 /**
- * The cost cell for one breakdown row (CTO-244 follow-up), on three branches.
+ * Can this row report a cost at all? (CTO-244, extended by CTO-423)
+ *
+ * The cost cell and the share cell must agree: a row whose cost blanks cannot carry a percentage of
+ * the total, and the two used to test different things, so the share printed while the figure
+ * beside it did not. One predicate, consulted by both.
+ */
+function rowCostUnknown(row: ExploreBreakdownRow): boolean {
+  return (
+    row.totalMicroUsd === null ||
+    isZeroRoundingLowerBound(row.totalMicroUsd, row.unpricedSpanCount)
+  );
+}
+
+/**
+ * The cost cell for one breakdown row (CTO-244 follow-up), on four branches.
  *
  * The unknown branch is the whole point: ClickHouse `sum()` skips NULLs, so a group whose spans were
  * ALL unpriced arrives as 0 and used to render "$0.00" beside a group that genuinely cost nothing.
  * The provider axis showed the streamed spans that way, as a confident "google $0.00". A null total
  * is that case and it renders the explained blank instead. A partially unpriced group keeps its
  * priced figure (that money really was spent) with an "at least" marker, matching how the Home Spend
- * tile discloses the same gap, so the known subset is never passed off as the whole.
+ * tile discloses the same gap, so the known subset is never passed off as the whole, unless that
+ * figure rounds to zero at display precision and stops disclosing anything (CTO-423).
  */
 function CostCell({ row, groupBy }: { row: ExploreBreakdownRow; groupBy: Dimension }) {
   const label = groupLabel(groupBy, row.group);
@@ -942,6 +973,16 @@ function CostCell({ row, groupBy }: { row: ExploreBreakdownRow; groupBy: Dimensi
     return (
       <Blank
         reason={`all ${row.spanCount.toLocaleString()} ${label} span${row.spanCount === 1 ? "" : "s"} in this window could not be priced, so the cost is unknown rather than zero`}
+      />
+    );
+  }
+  // CTO-423: the lower bound stops being a disclosure once it rounds away. A group with 530 unpriced
+  // spans and one priced span worth 5 micro-USD rendered "$0.0000 at least" beside a 100.0% share,
+  // which is the same fabricated zero the branch above exists to prevent.
+  if (isZeroRoundingLowerBound(row.totalMicroUsd, row.unpricedSpanCount)) {
+    return (
+      <Blank
+        reason={`only ${(row.spanCount - row.unpricedSpanCount).toLocaleString()} of ${row.spanCount.toLocaleString()} ${label} span${row.spanCount === 1 ? "" : "s"} in this window could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`}
       />
     );
   }

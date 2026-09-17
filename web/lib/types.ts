@@ -23,6 +23,38 @@ export function formatUSD(micro: MicroUSD): string {
   });
 }
 
+/**
+ * Does `micro` vanish at the precision `formatUSD` will print it at? (CTO-423)
+ *
+ * Asked by running the formatter rather than by comparing against a threshold of its own: the
+ * display precision is scaled per value inside formatUSD, and a second copy of that scale here
+ * would drift the first time either side changed. If the formatter prints no non-zero digit, the
+ * reader sees a zero, whatever the underlying integer was.
+ */
+export function roundsToZeroUSD(micro: MicroUSD): boolean {
+  return !/[1-9]/.test(formatUSD(micro));
+}
+
+/**
+ * Is this figure a lower bound that the reader would read as a measured zero? (CTO-423)
+ *
+ * A priced subtotal standing in for a partly unpriced population is a lower bound, and the surfaces
+ * disclose that with an "at least" marker. The marker cannot carry the distinction on its own once
+ * the figure rounds away: 530 unpriced spans beside one priced span worth 5 micro-USD rendered
+ * "$0.0000 at least, 100.0%", which reads as "we measured your spend and it was nothing" when the
+ * truth is "we could price 1 of your 531 calls". That is a fabricated zero at the render layer, so
+ * the figure blanks with a reason instead, exactly as an all-unpriced population already does.
+ *
+ * Note this is NOT a proportional rule: a lower bound that still prints a non-zero figure keeps it,
+ * however much of the population was unpriced.
+ */
+export function isZeroRoundingLowerBound(
+  micro: MicroUSD | null,
+  unpricedCount: number,
+): boolean {
+  return micro !== null && unpricedCount > 0 && roundsToZeroUSD(micro);
+}
+
 export interface SpendByLayer {
   llm: MicroUSD;
   vector: MicroUSD;
