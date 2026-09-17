@@ -349,7 +349,9 @@ def seed_catalog() -> PriceCatalog:
     examples/* was needed because of catalog gaps. The scraper (CTO-53) will
     eventually own this; until then these are hand-maintained rates.
 
-    Rates are USD per million tokens unless noted. All rates below are
+    Rates are USD per million tokens unless noted. Except for the Fireworks AI
+    entries (CTO-418), which are owner-supplied and confirmed on 2026-09-17,
+    all rates below are
     [unverified at implementation time]: the live pricing pages were not
     reachable from the implementation environment, so values are taken from
     the assistant's training data and reflect publicly-listed prices as of
@@ -460,6 +462,28 @@ def seed_catalog() -> PriceCatalog:
         # Amazon Titan (legacy first-party text): no cached tier.
         ("bedrock", "amazon.titan-text-express", PriceType.INPUT, "0.20"),
         ("bedrock", "amazon.titan-text-express", PriceType.OUTPUT, "0.60"),
+        # --- Fireworks AI (https://fireworks.ai/pricing) ----------------------
+        # CTO-418. The provider string is "fireworks-ai", NOT "fireworks": that is the spelling
+        # the pilot's spans carry in gen_ai.system, confirmed against real production telemetry.
+        # An entry keyed "fireworks" would match no traffic at all, so do not "tidy" it.
+        # The model slot holds Fireworks' full account-scoped id exactly as it arrives in
+        # gen_ai.request.model (accounts/fireworks/models/<name>); it is not shortened, because
+        # the lookup is an exact match on what the caller sent.
+        #
+        # Rates below were supplied and confirmed by the account owner on 2026-09-17 (unlike the
+        # surrounding entries, which are training-data values). No cached-input rate was supplied,
+        # so none is listed: with no CACHED_INPUT tier, compute_cost_micro_usd bills cached tokens
+        # at the full input rate, which OVERSTATES cost for cache-heavy traffic. Inventing a
+        # discount would be worse (a fabricated number); source the real cached rates to fix it.
+        ("fireworks-ai", "accounts/fireworks/models/kimi-k3", PriceType.INPUT, "3.00"),
+        ("fireworks-ai", "accounts/fireworks/models/kimi-k3", PriceType.OUTPUT, "15.00"),
+        ("fireworks-ai", "accounts/fireworks/models/qwen3p8-2p4t-a95b", PriceType.INPUT, "2.00"),
+        ("fireworks-ai", "accounts/fireworks/models/qwen3p8-2p4t-a95b", PriceType.OUTPUT, "6.00"),
+        # DELIBERATELY UNPRICED (CTO-418): accounts/fireworks/models/qwen3p7-plus. Fireworks does
+        # not list it individually and its size band cannot be determined from the public docs, so
+        # no rate is honest to assert; the pilot's single call reported zero tokens anyway. It
+        # stays a catalog miss and renders blank rather than a guessed number. This omission is
+        # intentional, not an oversight: add an entry only once a rate is confirmed.
     ]
     for provider, model, pt, rate in seeds:
         cat.add(_mtok(provider, model, pt, rate))
