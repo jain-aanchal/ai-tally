@@ -149,9 +149,36 @@ describe("Home does not render a lower bound that rounds to zero (CTO-423)", () 
 
     // The spend headline is a real figure, so the denominator is reportable.
     expect(screen.getByText("$0.685")).toBeTruthy();
-    // The hidden-cost numerator is not, so its share is no percentage at all.
+    // The hidden-cost VALUE blanks. Asserted as the ABSENCE of the figure it would otherwise
+    // print, because a blank's reason text is shared with the other tiles on this payload: an
+    // assertion that merely finds that reason somewhere on the page is satisfied by a sibling
+    // and pins nothing. Hidden cost is the only quantity here that would render "$0.00".
+    expect(screen.queryByText("$0.00")).toBeNull();
+    expect(screen.getAllByText(/No value: only 30 of 568 spans/i).length).toBeGreaterThan(0);
+    // And its share is no percentage at all, rather than a 0% that contradicts the blank above it.
     expect(screen.queryByText(/0% of spend/i)).toBeNull();
     expect(screen.getByText(/vector \+ tools \+ compute/i)).toBeTruthy();
+  });
+
+  it("blanks Reconciled and its share on the same window, not just Hidden cost (CTO-427)", () => {
+    // Reconciled is understated by the same unpriced spans and had no guard at all, so it printed
+    // "$0.0000, 0% invoice-confirmed" beside a Spend tile blanking for exactly that reason.
+    // reconciledThrough has to be set or the percentage branch never renders and the gap hides.
+    renderHome(
+      payload({}, {
+        ...EMPTY_SPEND,
+        totalMicroUsd: 685_000,
+        reconciledMicroUsd: 5,
+        reconciledThrough: "2026-09-01",
+        byLayer: { ...zeroLayers(), llm: 685_000 },
+        spanCount: 568,
+        unpricedSpanCount: 538,
+      }),
+    );
+
+    expect(screen.queryByText("$0.0000")).toBeNull();
+    expect(screen.queryByText(/invoice-confirmed/i)).not.toBeNull();
+    expect(screen.queryByText(/0% invoice-confirmed/i)).toBeNull();
   });
 
   it("keeps a small lower bound that still renders as a figure", () => {

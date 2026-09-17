@@ -213,6 +213,10 @@ export function HomeLive({
   // cost tile is the same sum over the non-LLM layers and is understated by the same spans.
   const spendUnknown = isZeroRoundingLowerBound(s.totalMicroUsd, unpricedSpans);
   const hiddenUnknown = isZeroRoundingLowerBound(hidden, unpricedSpans);
+  // CTO-427 review: Reconciled is understated by the same unpriced spans and had no guard at all,
+  // so on a window where the priced remainder rounds away it printed "$0.0000, 0% invoice-confirmed"
+  // beside a Spend tile blanking for exactly that reason. Same figure, same window, two answers.
+  const reconciledUnknown = isZeroRoundingLowerBound(s.reconciledMicroUsd, unpricedSpans);
   const boundReason = `only ${(totalSpans - unpricedSpans).toLocaleString()} of ${totalSpans.toLocaleString()} spans in the last ${windowDays} days could be priced, and what we could price rounds to zero, so the cost is unknown rather than zero`;
   // A share of a total we cannot report is not a smaller percentage, it is no percentage at all
   // (CTO-423). A genuine measured zero total keeps the 0% it always printed.
@@ -221,13 +225,18 @@ export function HomeLive({
   // tile could blank its own value as unknown and then print "0% of spend" for that same quantity
   // one line below, which is the tile contradicting itself. A share is only reportable when both
   // halves of the ratio are.
+  //
+  // `spendUnknown` is deliberately kept although both current callers make it unreachable: every
+  // part is a subset of the total, so a total that rounds away implies a part that does. It is the
+  // default for a future caller that omits `partUnknown`, which is why no test pins it. Said here
+  // so the next reader does not go looking for the test that should be catching it.
   const pctOfTotal = (part: number, partUnknown = false) =>
     spendUnknown || partUnknown
       ? null
       : s.totalMicroUsd === 0
         ? 0
         : Math.round((part / s.totalMicroUsd) * 100);
-  const reconciledPct = pctOfTotal(s.reconciledMicroUsd);
+  const reconciledPct = pctOfTotal(s.reconciledMicroUsd, reconciledUnknown);
   const hiddenPct = pctOfTotal(hidden, hiddenUnknown);
   const tiles = (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -240,7 +249,8 @@ export function HomeLive({
       />
       <SummaryTile
         label="Reconciled"
-        micro={s.reconciledMicroUsd}
+        micro={reconciledUnknown ? null : s.reconciledMicroUsd}
+        reason={boundReason}
         hint={
           !hasReconciledDate
             ? "not yet invoice-confirmed (all still estimated)"
