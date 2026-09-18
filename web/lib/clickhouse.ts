@@ -339,17 +339,26 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY`,
       tenant,
     );
-    const byLayerRows = await rows<{ layer: Layer; cost: string }>(
+    // CTO-431: `spans` travels with the per-layer cost. The partial-data banner asks whether a
+    // connector is delivering, and sum() alone cannot answer it: a layer whose spans were all
+    // unpriced sums to 0 exactly like a layer that sent nothing, so the banner named working
+    // connectors as dead. Same unpriced/count pattern the totals above and the explore breakdown
+    // already carry, one grain finer.
+    const byLayerRows = await rows<{ layer: Layer; cost: string; spans: string }>(
       db,
-      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+      `SELECT ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost, count() AS spans
        FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY
        GROUP BY layer`,
       tenant,
     );
     const byLayer = zeroLayers();
+    const spansByLayer = zeroLayers();
     for (const r of byLayerRows) {
-      if ((LAYERS as readonly string[]).includes(r.layer)) byLayer[r.layer] = micro(r.cost);
+      if ((LAYERS as readonly string[]).includes(r.layer)) {
+        byLayer[r.layer] = micro(r.cost);
+        spansByLayer[r.layer] = parseInt(r.spans, 10) || 0;
+      }
     }
     const t = totals[0] ?? {
       total: "0", estimated: "0", reconciled: "0", recThrough: null, unpriced: "0", spans: "0",
@@ -363,6 +372,7 @@ export async function querySpendSummary(windowDays = 30): Promise<SpendSummary |
       // No reconciled data yet → boundary in the far past so everything reads as estimated.
       reconciledThrough: t.recThrough && t.recThrough !== "\\N" ? t.recThrough : "1970-01-01",
       byLayer,
+      spansByLayer,
     };
   });
 }

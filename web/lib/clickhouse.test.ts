@@ -1035,6 +1035,45 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
     expect(out.unpricedSpanCount).toBe(0);
   });
 
+  // CTO-431, the SQL half. The test above feeds rows straight to the mock, so it cannot catch the
+  // SELECT losing its count: the query text is never executed here. Asserted directly instead, the
+  // same way the queryAccountCosts SQL contract above is, because a per-layer count that is not
+  // selected is a fix that passes every test and does nothing on the box.
+  it("querySpendSummary SELECTs a per-layer span count beside the cost", async () => {
+    const { querySpendSummary } = await freshSut();
+    respondRows([
+      { total: "0", estimated: "0", reconciled: "0", recThrough: null, unpriced: "0", spans: "0" },
+    ]);
+    respondRows([]);
+    await querySpendSummary();
+    const byLayerSql = queryMock.mock.calls
+      .map((c) => (c[0] as { query: string }).query)
+      .find((q) => q.includes("GROUP BY layer"));
+    expect(byLayerSql).toBeTruthy();
+    expect(byLayerSql).toContain("count() AS spans");
+  });
+
+  // CTO-431: the UI decides "is this connector producing data" from spansByLayer, so a query that
+  // stopped supplying it would leave a fix that is correct in every test and inert in production.
+  it("querySpendSummary carries a span count per layer, not just a cost", async () => {
+    const { querySpendSummary } = await freshSut();
+    respondRows([
+      { total: "12.50", estimated: "12.50", reconciled: "0", recThrough: null, unpriced: "260", spans: "300" },
+    ]);
+    // vector delivered 260 spans and priced none of them, so sum() skips every row: the cost is 0
+    // while the connector is plainly alive. This is the pair the banner has to tell apart.
+    respondRows([
+      { layer: "llm", cost: "12.50", spans: "40" },
+      { layer: "vector", cost: "0", spans: "260" },
+    ]);
+    const out = (await querySpendSummary())!;
+    expect(out.byLayer.vector).toBe(0);
+    expect(out.spansByLayer?.vector).toBe(260);
+    expect(out.spansByLayer?.llm).toBe(40);
+    // A layer that returned no row at all is zero spans, which is the real "not producing" case.
+    expect(out.spansByLayer?.tools).toBe(0);
+  });
+
   it("queryCostExplore reports an all-unpriced group as unknown, not $0.00", async () => {
     const { queryCostExplore } = await freshSut();
     // Window bounds, then the per-group totals. `google` is the edge-proxy STREAMED case: spans

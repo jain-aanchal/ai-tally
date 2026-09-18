@@ -127,22 +127,33 @@ export function someZero(values: Record<string, number>): boolean {
 }
 
 /**
- * Connector-aware partial detection (CTO-107).
+ * Connector-aware partial detection (CTO-107, corrected in CTO-431).
  *
- * Returns the subset of *enabled* layers that report zero; those are the real gaps. Layers the
- * tenant never enabled don't count: a tenant who only declared the LLM connector should never see
- * the banner for vector/tools/etc., because they were never expected to fire. With the empty
+ * Returns the subset of *enabled* layers that delivered NO SPANS; those are the real gaps. Layers
+ * the tenant never enabled don't count: a tenant who only declared the LLM connector should never
+ * see the banner for vector/tools/etc., because they were never expected to fire. With the empty
  * input (no enabled connectors declared) we return [], i.e. nothing partial, by design.
+ *
+ * CTO-431: this takes SPAN COUNTS, and deliberately cannot see cost at all. It used to take the
+ * per-layer cost, and the banner it feeds says "that connector isn't producing data right now",
+ * which is a claim about delivery. ClickHouse sum() skips NULLs, so a layer whose spans all lack a
+ * catalog rate sums to 0 exactly like a layer that sent nothing, and working connectors were named
+ * as dead, three lines above a tile already saying that sum was unknown. Showing a wrong number is
+ * bad; sending someone to go fix infrastructure that is not broken is worse.
+ *
+ * Counts are REQUIRED rather than optional-with-a-cost-fallback, so a caller that cannot supply
+ * them has to decide for itself whether to make the claim instead of silently getting the old
+ * wrong answer. Both call sites now gate on having them.
  */
 export function zeroEnabledLayers<L extends string>(
-  // Keys are decoupled from L: byLayer carries every layer the system knows
-  // about (LLM/vector/tools/…); `enabled` is just the subset we're checking.
-  // Without the widening the call site would have to narrow byLayer to the
-  // exact enabled set, which is the opposite of how the data flows.
-  byLayer: Readonly<Record<string, number>>,
+  // Keyed by L rather than by `string`. A caller passes a map it already holds (a variable, not a
+  // fresh literal), so extra layers beyond `enabled` are accepted as they always were; what this
+  // does buy is that a map MISSING an enabled layer no longer type-checks, and a missing key here
+  // would silently read as "delivered nothing" and accuse that connector.
+  spansByLayer: Readonly<Record<L, number>>,
   enabled: readonly L[],
 ): L[] {
-  return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
+  return enabled.filter((l) => (spansByLayer[l] ?? 0) === 0);
 }
 
 // --- Source state: unavailable vs empty vs live (#364) -------------------------------------------

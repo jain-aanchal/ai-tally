@@ -216,3 +216,54 @@ const EMPTY_SPEND: SpendSummary = {
   unpricedSpanCount: 0,
   spanCount: 0,
 };
+
+// CTO-431. The render half of the predicate tests in lib/dataState.test.ts, because the sentence is
+// the bug: "vector, tools are reporting zero. That connector isn't producing data right now" sat
+// three lines above a Spend tile saying that same sum was unknown. It does not merely show a wrong
+// number, it sends the customer to debug a connector that is working.
+describe("the partial-data banner vs unpriced spans (CTO-431)", () => {
+  /** Every layer delivering spans, and not one of them priced. The pilot's actual shape. */
+  function allUnpricedSpend(): SpendSummary {
+    const spansByLayer = zeroLayers();
+    for (const l of LAYERS) spansByLayer[l] = 50;
+    return {
+      totalMicroUsd: 0,
+      estimatedMicroUsd: 0,
+      reconciledMicroUsd: 0,
+      reconciledThrough: new Date().toISOString().slice(0, 10),
+      byLayer: zeroLayers(),
+      unpricedSpanCount: 300,
+      spanCount: 300,
+      spansByLayer,
+    };
+  }
+
+  it("does not tell the customer a working connector has stopped producing data", () => {
+    renderHome(payload({}, allUnpricedSpend()));
+
+    expect(screen.queryByText(/isn.t producing data right now/i)).toBeNull();
+    expect(screen.queryByText(/reporting zero/i)).toBeNull();
+  });
+
+  it("claims nothing when the payload carries no per-layer counts at all", () => {
+    // An older payload, or a mock. The page used to fall back to the per-layer COST here, which is
+    // the reading this ticket removed, so the fallback would have reinstated the bug on exactly the
+    // deployments least likely to notice. Spend is zero across every layer and the banner stays off.
+    const spend = allUnpricedSpend();
+    delete spend.spansByLayer;
+    renderHome(payload({}, spend));
+
+    expect(screen.queryByText(/isn.t producing data right now/i)).toBeNull();
+  });
+
+  it("still raises the banner for a connector that really delivered nothing", () => {
+    // The guard must not swallow a real outage. vector goes silent; every other layer keeps its
+    // spans, so the only thing that changed is the one fact the banner is about.
+    const spend = allUnpricedSpend();
+    spend.spansByLayer = { ...spend.spansByLayer!, vector: 0 };
+    renderHome(payload({}, spend));
+
+    // Scoped to the banner's own sentence: "vector" also labels a row in the layer table below.
+    expect(screen.getByText(/vector is reporting zero\. That connector isn.t producing data/i)).toBeTruthy();
+  });
+});

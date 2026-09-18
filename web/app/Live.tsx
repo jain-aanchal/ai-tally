@@ -177,7 +177,13 @@ export function HomeLive({
     },
     { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
   );
-  const trippedLayers = zeroEnabledLayers(layerTotals, enabledLayers);
+  // CTO-431: answered from span counts, not cost. A layer whose spans were all unpriced sums to 0
+  // and was being reported as a connector that "isn't producing data", three lines above a tile
+  // saying that same sum was unknown. An older payload carries no counts, and then this page makes
+  // no claim rather than falling back to the reading that was wrong.
+  const trippedLayers = s.spansByLayer
+    ? zeroEnabledLayers(s.spansByLayer, enabledLayers)
+    : [];
   // #364: `isEmpty` is gone from this derivation. Emptiness is now decided by the READ, above, and
   // an all-zero window is no longer evidence for it: a tenant whose spend genuinely rounds to zero
   // across every layer is not the same tenant as one that has sent nothing, and only the span count

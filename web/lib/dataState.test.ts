@@ -136,11 +136,13 @@ describe("labels", () => {
   });
 });
 
-describe("zeroEnabledLayers (CTO-107)", () => {
+describe("zeroEnabledLayers (CTO-107, on span counts since CTO-431)", () => {
   it("stays silent when only the enabled layer has data", () => {
-    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm"])).toEqual([]);
+    // Typed as a variable, the way a caller holds it: layers beyond `enabled` are fine.
+    const spans = { llm: 100, vector: 0 };
+    expect(zeroEnabledLayers(spans, ["llm"])).toEqual([]);
   });
-  it("fires for an enabled layer reporting zero", () => {
+  it("fires for an enabled layer that delivered nothing", () => {
     expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
   });
   it("stays silent when every enabled layer has data", () => {
@@ -149,8 +151,38 @@ describe("zeroEnabledLayers (CTO-107)", () => {
   it("returns empty when no connectors are declared (LLM-only demos)", () => {
     expect(zeroEnabledLayers({}, [])).toEqual([]);
   });
-  it("ignores layers that aren't declared, even when zero", () => {
-    // tools is zero but never declared: it's by-design partial, not a real gap.
-    expect(zeroEnabledLayers({ llm: 5, vector: 0, tools: 0 }, ["llm"])).toEqual([]);
+  it("ignores layers that aren't declared, even when silent", () => {
+    // tools sent nothing but was never declared: by-design partial, not a real gap.
+    const spans = { llm: 5, vector: 0, tools: 0 };
+    expect(zeroEnabledLayers(spans, ["llm"])).toEqual([]);
+  });
+});
+
+// CTO-431. The banner this feeds says "that connector isn't producing data right now", a claim about
+// SPANS, and it was answered with COST. sum() skips NULLs, so a layer whose spans all lack a catalog
+// rate summed to 0 and was named as a dead connector, three lines under a tile already saying that
+// sum was unknown. Sending a customer to debug what is working is worse than an unexplained blank.
+//
+// The counts are now the ONLY input: cost is not a parameter, so the old reading is unreachable
+// rather than merely unused, and a caller without counts has to decide for itself whether to make
+// the claim (both call sites gate, and the page tests below pin what they decided).
+describe("zeroEnabledLayers reads delivery, not spend (CTO-431)", () => {
+  it("does not blame a connector that delivered spans we could not price", () => {
+    // 260 vector spans arrived and not one could be priced, so the cost is 0 and the connector is
+    // plainly alive. Under the old signature this was the input that produced ["vector"].
+    expect(zeroEnabledLayers({ llm: 40, vector: 260 }, ["llm", "vector"])).toEqual([]);
+  });
+
+  it("still names a connector that really delivered nothing", () => {
+    // The correction must not swallow a genuine outage: no spans is the finding it exists for.
+    expect(zeroEnabledLayers({ llm: 40, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
+  });
+
+  it("cannot be handed a cost to be misled by", () => {
+    // Regression guard on the SHAPE, not just the values. The defect was a caller passing per-layer
+    // COST into this position, which type-checked because both are Record<Layer, number>. The only
+    // defence left is that there is now exactly one numeric argument and its name says spans, so
+    // this pins the arity: a third argument would not compile.
+    expect(zeroEnabledLayers.length).toBe(2);
   });
 });
