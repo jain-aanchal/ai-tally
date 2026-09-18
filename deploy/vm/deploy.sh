@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# ai-tally demo-deploy-kit - one-shot deploy for a single VM behind Caddy (CTO-243).
+# ai-tally vm-deploy-kit - one-shot deploy for a single VM behind Caddy (CTO-243).
 #
 # Brings up the whole stack (ClickHouse, Postgres, Redpanda, MinIO, gateway, web, Caddy), applies
 # the ClickHouse DDL, and loads the SYNTHETIC demo dataset. Re-running is safe: compose reconciles
 # to the desired state, the DDL is idempotent (CREATE ... IF NOT EXISTS), and seed/backfill are the
 # same generators the local `make` targets use.
 #
-# Prereqs: Docker + Docker Compose v2, a filled-in deploy/demo/.env, and DNS for $DOMAIN pointed at
+# Prereqs: Docker + Docker Compose v2, a filled-in deploy/vm/.env, and DNS for $DOMAIN pointed at
 # this host (needed for Caddy to obtain a TLS cert, not for the containers to start).
 #
-# Usage:  ./deploy/demo/deploy.sh        (run from the repo root or anywhere; it finds the root)
+# Usage:  ./deploy/vm/deploy.sh        (run from the repo root or anywhere; it finds the root)
 
 set -euo pipefail
 
@@ -20,13 +20,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-ENV_FILE="deploy/demo/.env"
+ENV_FILE="deploy/vm/.env"
 BASE_COMPOSE="infra/docker-compose.yml"
-PROD_COMPOSE="deploy/demo/docker-compose.prod.yml"
+PROD_COMPOSE="deploy/vm/docker-compose.prod.yml"
 
 # --- Load .env ----------------------------------------------------------------------------------
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "ERROR: ${ENV_FILE} not found. Copy deploy/demo/.env.example to ${ENV_FILE} and fill it in." >&2
+  echo "ERROR: ${ENV_FILE} not found. Copy deploy/vm/.env.example to ${ENV_FILE} and fill it in." >&2
   exit 1
 fi
 set -a
@@ -56,8 +56,8 @@ command -v make >/dev/null 2>&1 || {
 # Compose reads the same .env for base-stack defaults; pass it explicitly so both files see it.
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
 
-# Tenant-UUID resolution and the service-token preflight, shared with reseed.sh.
-# shellcheck source=deploy/demo/lib-tenant.sh
+# Tenant-UUID resolution and the service-token preflight, shared with reset-demo-data.sh.
+# shellcheck source=deploy/vm/lib-tenant.sh
 source "${SCRIPT_DIR}/lib-tenant.sh"
 
 # Cheap check first: a missing service token with auth on means the gateway never boots.
@@ -214,7 +214,7 @@ if [ "${SKIP_BACKFILL:-}" = "1" ]; then
   echo "==> Skipping the backfill (SKIP_BACKFILL=1). Tenant holds ${EXISTING_SPANS} spans."
 elif [ "${EXISTING_SPANS}" != "0" ] && [ "${FORCE_BACKFILL:-}" != "1" ]; then
   echo "==> Skipping the backfill: tenant ${TENANT_UUID} already holds ${EXISTING_SPANS} spans."
-  echo "    Re-post it anyway with: FORCE_BACKFILL=1 ./deploy/demo/deploy.sh"
+  echo "    Re-post it anyway with: FORCE_BACKFILL=1 ./deploy/vm/deploy.sh"
 else
 BACKFILL_RAN=1
 echo "==> Backfilling 30 days of SYNTHETIC demo spans"
@@ -260,8 +260,8 @@ else
 fi
 
 # CTO-432: the closing banner used to assert, unconditionally, that this is a demo whose dataset is
-# synthetic and safe to share, and to hand the operator reseed.sh. On the pilot instance every one
-# of those was false, and the last two are the dangerous pair: reseed.sh TRUNCATEs the telemetry
+# synthetic and safe to share, and to hand the operator reset-demo-data.sh. On the pilot instance every one
+# of those was false, and the last two are the dangerous pair: reset-demo-data.sh TRUNCATEs the telemetry
 # tables, so the banner told an operator the data was disposable and then gave them the command that
 # disposes of it.
 #
@@ -281,11 +281,11 @@ if [ "${AUTH_MODE:-basic}" = "clerk" ] || [ "${BACKFILL_RAN:-0}" != "1" ]; then
   This deploy did not generate the data here, so this banner makes no claim about it. Treat it as real
   until you have checked, and do not share the URL on the assumption that it is not.
 
-  Do NOT run deploy/demo/reseed.sh against this instance. It TRUNCATEs the telemetry tables."
+  Do NOT run deploy/vm/reset-demo-data.sh against this instance. It TRUNCATEs the telemetry tables."
 else
   HEADING="ai-tally demo is up."
   DATA_BLOCK="  The dataset is SYNTHETIC (seeded + backfilled by this run), safe to share with testers.
-  Share the link and password privately. Reset the data with deploy/demo/reseed.sh."
+  Share the link and password privately. Reset the data with deploy/vm/reset-demo-data.sh."
 fi
 
 cat <<EOF

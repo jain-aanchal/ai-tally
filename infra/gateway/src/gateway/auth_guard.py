@@ -66,7 +66,7 @@ class InsecureAuthConfigError(RuntimeError):
 
 
 def is_truthy(value: object) -> bool:
-    """Same truthiness spelling ``web/lib/authGuard.ts`` and ``deploy/demo/lib-tenant.sh`` accept."""
+    """Same truthiness spelling ``web/lib/authGuard.ts`` and ``deploy/vm/lib-tenant.sh`` accept."""
     if isinstance(value, bool):
         return value
     if not isinstance(value, str):

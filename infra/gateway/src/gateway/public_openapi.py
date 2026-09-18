@@ -2,7 +2,7 @@
 """The public OpenAPI document for the docs site (CTO-371, CTO-375).
 
 The gateway serves dozens of routes, but a customer can reach exactly three of them on the hosted
-ingest host (``deploy/demo/caddy-ingest-api/on/api.caddy``): ``POST /v1/batches``,
+ingest host (``deploy/vm/caddy-ingest-api/on/api.caddy``): ``POST /v1/batches``,
 ``POST /v1/otlp/traces`` and ``GET /v1/tenant/hmac-key``. Publishing the whole ``app.openapi()``
 would document control-plane routes nobody outside can call, so this filters to those three.
 

@@ -30,7 +30,7 @@ export interface ConnectEndpoints {
  *
  * Order, per proxy URL:
  *   1. An explicit NEXT_PUBLIC_TALLY_*_PROXY_URL override.
- *   2. Derived from TALLY_INGEST_URL (the hosted proxy's base URL, set by deploy/demo when
+ *   2. Derived from TALLY_INGEST_URL (the hosted proxy's base URL, set by deploy/vm when
  *      INGEST_DOMAIN turns the proxy on), plus the path-mode provider prefix the proxy strips.
  *   3. Nothing: this deployment has no hosted proxy, so proxyDeployed is false.
  *

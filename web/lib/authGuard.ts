@@ -9,7 +9,7 @@
 // for the vitest suite and for the public demo VM. It is a catastrophe on a real instance: anyone
 // with the URL reads every number in the system.
 //
-// The trap is concrete. `deploy/demo/` is the only genuine one-command deploy in the repo, so it is
+// The trap is concrete. `deploy/vm/` is the only genuine one-command deploy in the repo, so it is
 // the thing an operator copies when standing up a real instance, and it exports `TALLY_DEV_TENANT`
 // on purpose. The production manifests set it empty today, but nothing enforced that they stay that
 // way. This module is that enforcement.
@@ -47,7 +47,7 @@ export class InsecureAuthConfigError extends Error {
   }
 }
 
-/** Same truthiness spelling `deploy/demo/lib-tenant.sh` accepts, so shell and app agree. */
+/** Same truthiness spelling `deploy/vm/lib-tenant.sh` accepts, so shell and app agree. */
 function isTruthy(v: string | undefined): boolean {
   if (!v) return false;
   return ["1", "true", "yes", "on"].includes(v.trim().toLowerCase());
@@ -98,9 +98,10 @@ You are in ONE OF TWO situations:
      The tenant then resolves from the signed-in Clerk organization, per
      web/lib/getTenant.ts.
 
-     If you copied deploy/demo/, that export is the line to delete. The demo kit
-     sets ${DEV_TENANT_ENV} deliberately and is NOT a template for a real
-     instance: it serves synthetic data behind Caddy basic auth.
+     If you copied deploy/vm/, that export is the line to delete. The kit's
+     BASIC mode sets ${DEV_TENANT_ENV} deliberately, to serve synthetic data
+     behind Caddy basic auth, and is not a template for a real instance. Its
+     CLERK mode is: it leaves ${DEV_TENANT_ENV} unset for exactly this reason.
 
   2. You genuinely want an UNAUTHENTICATED instance, the way the public demo is.
 
@@ -109,7 +110,7 @@ You are in ONE OF TWO situations:
          ${ALLOW_INSECURE_ENV}=1
 
      Only do this behind access control you supply yourself, and only with
-     synthetic data. deploy/demo/deploy.sh and deploy/demo/reseed.sh set it for
+     synthetic data. deploy/vm/deploy.sh and deploy/vm/reset-demo-data.sh set it for
      you; you do not need to add it by hand there.
 
 Checked: NODE_ENV=production, ${DEV_TENANT_ENV} set, ${ALLOW_INSECURE_ENV} not set.

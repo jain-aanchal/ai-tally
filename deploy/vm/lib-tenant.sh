@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# ai-tally demo-deploy-kit - shared preflight helpers for deploy.sh and reseed.sh (CTO-243).
+# ai-tally vm-deploy-kit - shared preflight helpers for deploy.sh and reset-demo-data.sh (CTO-243).
 #
 # WHY this file exists: both scripts need the SAME tenant-UUID resolution and the SAME service-token
 # preflight, and a copy-paste divergence between them is exactly the failure mode that produces a
 # blank demo dashboard. Keeping one definition means deploy and the nightly reseed cannot drift.
 #
-# Sourced, never executed. The caller must already have sourced deploy/demo/.env and populated the
+# Sourced, never executed. The caller must already have sourced deploy/vm/.env and populated the
 # COMPOSE array, e.g.
 #
 #   COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
-#   source deploy/demo/lib-tenant.sh
+#   source deploy/vm/lib-tenant.sh
 
 # The tenant NAME `gateway.seed` creates. Only the name is knowable ahead of time; the UUID is
 # generated at seed time, which is why it has to be read back out of Postgres.
@@ -101,12 +101,12 @@ ERROR: TALLY_REQUIRE_API_KEY is on but TALLY_GATEWAY_SERVICE_TOKEN is empty.
 
        The gateway refuses to boot in that state rather than come up with an open control plane,
        and every dashboard control-plane write would fail. Generate a real token and put it in
-       deploy/demo/.env:
+       deploy/vm/.env:
 
-         echo "TALLY_GATEWAY_SERVICE_TOKEN=\$(openssl rand -hex 32)" >> deploy/demo/.env
+         echo "TALLY_GATEWAY_SERVICE_TOKEN=\$(openssl rand -hex 32)" >> deploy/vm/.env
 
        The same value reaches the gateway as TALLY_GATEWAY_SERVICE_TOKEN and the web tier as
-       GATEWAY_SERVICE_TOKEN (see deploy/demo/docker-compose.prod.yml); they must match.
+       GATEWAY_SERVICE_TOKEN (see deploy/vm/docker-compose.prod.yml); they must match.
 ERR
     return 1
   fi
@@ -128,7 +128,7 @@ warn_backfill_unsupported_if_auth_on() {
   esac
 
   cat >&2 <<'WARN'
-WARNING: TALLY_REQUIRE_API_KEY is on, and the demo kit's SEEDING path does not support that.
+WARNING: TALLY_REQUIRE_API_KEY is on, and the kit's SEEDING path does not support that.
 
          The synthetic backfill (examples/vercel-chatbot/scripts/backfill-spans.ts) posts to
          /v1/batches with no Authorization header, and with auth on the gateway answers 401. The

@@ -2,7 +2,7 @@
 -- Per-organization on/off switch for the hosted edge proxy (zero-code connect).
 --
 -- WHY A SETTING AND NOT JUST A DEPLOY FLAG. The operator decides whether a proxy runs at all
--- (deploy/demo: INGEST_DOMAIN). Each organization then decides whether its keys may be used through
+-- (deploy/vm: INGEST_DOMAIN). Each organization then decides whether its keys may be used through
 -- it. Routing production LLM traffic through a third party's server is a trust decision an org admin
 -- should make explicitly, so the default is OFF, and a key that is valid for the SDK is refused by the
 -- proxy until an admin turns the proxy on under Settings > API keys.

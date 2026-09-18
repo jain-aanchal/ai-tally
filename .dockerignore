@@ -1,7 +1,7 @@
 # Root build-context ignore (CTO-243).
 #
 # Both root-context image builds honor this file:
-#   - deploy/demo/web.Dockerfile   (docker build -f deploy/demo/web.Dockerfile .)   -> COPY web/ .
+#   - deploy/vm/web.Dockerfile   (docker build -f deploy/vm/web.Dockerfile .)   -> COPY web/ .
 #   - infra/gateway/Dockerfile     (compose `context: ..`)                           -> COPY sdk/ + infra/gateway/
 #
 # web/.dockerignore only applies when the context is web/, so a root-context build ignored it and

@@ -1,4 +1,4 @@
-# ai-tally demo-deploy-kit - Caddy site config for CLERK auth (CTO-367).
+# ai-tally vm-deploy-kit - Caddy site config for CLERK auth (CTO-367).
 #
 # The sibling `Caddyfile` fronts the synthetic-data demo: authentication is off inside the app and
 # Caddy's HTTP basic-auth is the only thing standing in front of it. This file is for the other

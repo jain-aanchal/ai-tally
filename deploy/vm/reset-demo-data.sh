@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# ai-tally demo-deploy-kit - reset + re-seed the SYNTHETIC demo data (CTO-243).
+# ai-tally vm-deploy-kit - reset + re-seed the SYNTHETIC demo data (CTO-243).
 #
 # Run nightly so the demo always shows a fresh, backdated "last 30 days". It:
 #   1. Re-runs `make seed` (idempotent: tenant + API key + price catalog), so a stack whose control
@@ -28,7 +28,7 @@
 #
 # Cron example (nightly at 03:15, logging to a file) - `crontab -e` on the VM:
 #
-#   15 3 * * * /opt/ai-tally/deploy/demo/reseed.sh >> /var/log/ai-tally-reseed.log 2>&1
+#   15 3 * * * /opt/ai-tally/deploy/vm/reset-demo-data.sh >> /var/log/ai-tally-reseed.log 2>&1
 #
 # (Point the path at wherever you checked the repo out on the VM.)
 
@@ -38,12 +38,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-ENV_FILE="deploy/demo/.env"
+ENV_FILE="deploy/vm/.env"
 BASE_COMPOSE="infra/docker-compose.yml"
-PROD_COMPOSE="deploy/demo/docker-compose.prod.yml"
+PROD_COMPOSE="deploy/vm/docker-compose.prod.yml"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "ERROR: ${ENV_FILE} not found. Copy deploy/demo/.env.example to ${ENV_FILE} first." >&2
+  echo "ERROR: ${ENV_FILE} not found. Copy deploy/vm/.env.example to ${ENV_FILE} first." >&2
   exit 1
 fi
 set -a
@@ -65,7 +65,7 @@ command -v make >/dev/null 2>&1 || {
 COMPOSE=(docker compose --env-file "${ENV_FILE}" -f "${BASE_COMPOSE}" -f "${PROD_COMPOSE}")
 
 # Tenant-UUID resolution and the service-token preflight, shared with deploy.sh.
-# shellcheck source=deploy/demo/lib-tenant.sh
+# shellcheck source=deploy/vm/lib-tenant.sh
 source "${SCRIPT_DIR}/lib-tenant.sh"
 
 require_service_token_if_auth_on

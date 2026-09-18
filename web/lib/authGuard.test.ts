@@ -102,7 +102,7 @@ describe("the refusal message", () => {
   it("states the consequence and gives a fix for each of the two situations", () => {
     expect(message).toContain("disables authentication");
     expect(message).toContain("CLERK_SECRET_KEY");
-    expect(message).toContain("deploy/demo/");
+    expect(message).toContain("deploy/vm/");
   });
 });
 

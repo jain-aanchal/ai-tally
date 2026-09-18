@@ -1,11 +1,11 @@
-# ai-tally demo-deploy-kit - single-VM production overlay (CTO-243).
+# ai-tally vm-deploy-kit - single-VM production overlay (CTO-243).
 #
 # Layered ON TOP of the base stack, never instead of it:
 #
-#   docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml up -d --build
+#   docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml up -d --build
 #
 # What this overlay does:
-#   - Adds a `web` service (the Next.js dashboard) built from deploy/demo/web.Dockerfile.
+#   - Adds a `web` service (the Next.js dashboard) built from deploy/vm/web.Dockerfile.
 #   - Adds a `caddy` service that terminates TLS and enforces HTTP basic-auth. Caddy is the ONLY
 #     service that publishes host ports (80/443).
 #   - Removes the host port publishing from clickhouse / postgres / redpanda / minio / gateway so
@@ -16,7 +16,7 @@
 # than merged (a plain `ports: []` is ignored by the merge). Requires Docker Compose v2.24.4+; if
 # your Compose is older, replace `!reset []` with `expose:`-only by hand.
 #
-# The demo data this stack serves is SYNTHETIC (see deploy.sh / reseed.sh). No real tenant traffic.
+# The demo data this stack serves is SYNTHETIC (see deploy.sh / reset-demo-data.sh). No real tenant traffic.
 
 services:
   # --- Base services: keep them internal-only (no host ports on a public VM) -------------------
@@ -40,9 +40,9 @@ services:
     build:
       # Relative paths in a compose overlay resolve against the FIRST -f file's directory (infra/),
       # not this file's location. So `..` is the repo root and the Dockerfile path is repo-relative.
-      # Always invoke as: docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml
+      # Always invoke as: docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml
       context: ..
-      dockerfile: deploy/demo/web.Dockerfile
+      dockerfile: deploy/vm/web.Dockerfile
       args:
         # Inlined by `next build`, so it must be a build arg. See the Dockerfile.
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
@@ -96,7 +96,7 @@ services:
       # not only pin the tenant, it turns the dashboard's auth off completely, and this kit is the
       # thing operators copy when standing up a REAL instance. So the web image refuses to boot on
       # TALLY_DEV_TENANT alone in a production build; disabling auth for real takes this second
-      # variable too. The demo sets it deliberately (deploy.sh / reseed.sh, via pin_dashboard_tenant)
+      # variable too. The demo sets it deliberately (deploy.sh / reset-demo-data.sh, via pin_dashboard_tenant)
       # because the data here is synthetic and Caddy basic auth is the access control. Do NOT carry
       # this line into a deployment that serves real tenant data.
       TALLY_ALLOW_INSECURE_NO_AUTH: ${TALLY_ALLOW_INSECURE_NO_AUTH:-}
@@ -181,15 +181,15 @@ services:
       # synthetic demo with HTTP basic-auth because the app itself runs with auth off. `clerk` mounts
       # a file with no basic_auth block, because Clerk's redirects and its organization.created
       # webhook cannot pass a basic-auth challenge. deploy.sh exports CADDY_SITE_FILE.
-      - ../deploy/demo/${CADDY_SITE_FILE:-Caddyfile}:/etc/caddy/Caddyfile:ro   # relative to infra/ (first -f file)
+      - ../deploy/vm/${CADDY_SITE_FILE:-Caddyfile}:/etc/caddy/Caddyfile:ro   # relative to infra/ (first -f file)
       # Optional sites. `off` (the default) holds no *.caddy files; deploy.sh selects `on` only when
       # INGEST_DOMAIN is set, which also enables the edge-proxy profile. Default off so a bare
       # `docker compose up` never serves an ingest site it was not asked for.
-      - ../deploy/demo/caddy-extra/${CADDY_EXTRA:-off}:/etc/caddy/extra:ro
+      - ../deploy/vm/caddy-extra/${CADDY_EXTRA:-off}:/etc/caddy/extra:ro
       # CTO-369: the SDK and OTLP ingest routes on the ingest site. `off` (the default) holds no
       # *.caddy files; deploy.sh selects `on` only when INGEST_DOMAIN is set AND TALLY_REQUIRE_API_KEY
       # is true, because with gateway auth off those routes would accept spans for any tenant.
-      - ../deploy/demo/caddy-ingest-api/${INGEST_API:-off}:/etc/caddy/ingest-api:ro
+      - ../deploy/vm/caddy-ingest-api/${INGEST_API:-off}:/etc/caddy/ingest-api:ro
       - caddy_data:/data    # ACME account + issued certs; persist so restarts do not re-issue
       - caddy_config:/config
     restart: unless-stopped

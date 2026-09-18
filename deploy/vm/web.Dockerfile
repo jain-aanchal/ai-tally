@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# ai-tally dashboard (Next.js 15 / React 19) - demo-deploy-kit production image (CTO-243).
+# ai-tally dashboard (Next.js 15 / React 19) - vm-deploy-kit production image (CTO-243).
 #
 # Unlike web/Dockerfile (whose build context is web/), this image builds from the REPO ROOT so the
 # whole kit can be built with one command from the checkout:
 #
-#   docker build -f deploy/demo/web.Dockerfile -t ai-tally-web-demo .
+#   docker build -f deploy/vm/web.Dockerfile -t ai-tally-web-demo .
 #
 # It is functionally the same standalone build as web/Dockerfile, just re-pathed for a root context.
 #

@@ -24,8 +24,8 @@ would do once something is deployed. That is worth knowing precisely, because th
 customer who gets past signup then hits a page that hands them placeholder credentials for a proxy
 hostname that no deployment config in this repo stands up.
 
-The one thing that is deployed is `deploy/demo/`, and it is deliberately not a template. It sets
-`TALLY_DEV_TENANT` **and** `TALLY_ALLOW_INSECURE_NO_AUTH=1` (`deploy/demo/deploy.sh`, the
+The one thing that is deployed is `deploy/vm/`, and it is deliberately not a template. It sets
+`TALLY_DEV_TENANT` **and** `TALLY_ALLOW_INSECURE_NO_AUTH=1` (`deploy/vm/deploy.sh`, the
 `pin_dashboard_tenant` call), which turns authentication off entirely, and it serves synthetic
 backfilled data behind Caddy basic auth. It is a showroom, not a product instance.
 

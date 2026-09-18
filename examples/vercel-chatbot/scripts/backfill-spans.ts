@@ -158,7 +158,7 @@ function parseArgs(argv: string[]): Args {
     throw new Error("--accounts must be a non-negative integer");
   }
   // Honest under uncertainty: refuse a missing or name-shaped tenant rather than write invisible
-  // rows. Mirrors deploy/demo/lib-tenant.sh's resolve_tenant_uuid and infra/Makefile's guard.
+  // rows. Mirrors deploy/vm/lib-tenant.sh's resolve_tenant_uuid and infra/Makefile's guard.
   if (!UUID_RE.test(out.tenant)) {
     throw new Error(
       `--tenant must be the tenant UUID, got '${out.tenant || "<empty>"}'.\n` +
