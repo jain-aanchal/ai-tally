@@ -13,11 +13,38 @@ export interface CostSeries {
   days: CostDayPoint[];
   /** Boundary: data on or before this date is reconciled; after is estimated. */
   reconciledThrough: string;
+  /**
+   * Spans observed per layer across the whole window (CTO-431).
+   *
+   * The partial-data banner asks whether a connector is DELIVERING, and cost cannot answer it: a
+   * layer whose spans all lack a catalog rate sums to 0 exactly like a layer that sent nothing.
+   *
+   * It lives on the series rather than on the feature rows because the series is the right
+   * population for that question. `queryFeatureCostRows` filters to `FeatureTag != ''`, so a
+   * connector emitting only untagged spans would look silent there, which is the same false
+   * accusation by a different route.
+   *
+   * Optional, so an older payload or a fixture reads as "nobody counted" and the page declines to
+   * make the claim instead of falling back to the reading that was wrong.
+   */
+  spansByLayer?: Record<Layer, number>;
 }
 
 export interface FeatureCostRow {
   feature: string;
   byLayer: SpendByLayer;
+  /**
+   * Spans and unpriced spans per layer for THIS feature (CTO-431).
+   *
+   * `byLayer` is a sum, so on the default slice the breakdown table could not tell a measured zero
+   * from a layer whose every span went unpriced, and blanked both for want of a count (see
+   * `layerCoverage`). These are what let it say which.
+   *
+   * Scoped to tagged spans like the row itself, which is correct here: this feeds a per-feature
+   * table, not a connector-health claim.
+   */
+  spansByLayer?: Record<Layer, number>;
+  unpricedByLayer?: Record<Layer, number>;
 }
 
 export interface HiddenCostAlert {
@@ -89,6 +116,26 @@ export interface LayerCoverage {
  * blanks too. The threshold comes from the formatter (see `isZeroRoundingLowerBound`), never from a
  * constant kept here.
  */
+/**
+ * Roll a per-feature count map up to one figure per layer (CTO-431), or null when the rows carry no
+ * counts at all (an older payload, or the fixtures). Null means "nobody counted", which the callers
+ * turn into a blank or a withheld claim; it must never collapse to a map of zeros, because a map of
+ * zeros reads as "every layer delivered nothing".
+ */
+export function sumLayerCounts(
+  rows: FeatureCostRow[],
+  pick: (r: FeatureCostRow) => Record<Layer, number> | undefined,
+): Record<Layer, number> | null {
+  if (!rows.some((r) => pick(r) !== undefined)) return null;
+  return LAYERS.reduce<Record<Layer, number>>(
+    (acc, l) => {
+      acc[l] = rows.reduce((s, r) => s + (pick(r)?.[l] ?? 0), 0);
+      return acc;
+    },
+    { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
+  );
+}
+
 export function layerCoverage(
   byLayer: Readonly<Record<Layer, number>>,
   enabled: readonly Layer[],

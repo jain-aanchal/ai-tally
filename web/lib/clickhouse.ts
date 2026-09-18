@@ -503,9 +503,14 @@ export async function queryCostSeries(
     // headline /cost view byte-for-byte unchanged; the day list below reuses `w` so both the SQL
     // predicate and the pivot buckets stay on the one ClickHouse clock.
     const w = clampWindowDays(windowDays);
-    const out = await rowsP<{ day: string; layer: Layer; cost: string }>(
+    // CTO-431: `spans` rides along on the same scan. The partial-data banner asks whether a
+    // connector is delivering, and sum() cannot answer it: a layer whose spans all went unpriced
+    // sums to 0 exactly like a layer that sent nothing. Counted here rather than off the feature
+    // rows because this query has no `FeatureTag != ''` restriction, so it sees every span the
+    // tenant sent; a connector emitting only untagged spans must not read as silent.
+    const out = await rowsP<{ day: string; layer: Layer; cost: string; spans: string }>(
       db,
-      `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+      `SELECT toString(toDate(Timestamp)) AS day, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost, count() AS spans
        FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY ${tagClause}
        GROUP BY day, layer
@@ -533,15 +538,19 @@ export async function queryCostSeries(
     for (const iso of isoDaysFrom(windowStart, w)) {
       byDay.set(iso, { date: iso, byLayer: zeroLayers() });
     }
+    // CTO-431: summed across every day in the window, so a layer that delivered on any day is not
+    // reported as silent because it was quiet today.
+    const spansByLayer = zeroLayers();
     for (const r of out) {
+      if (!(LAYERS as readonly string[]).includes(r.layer)) continue;
+      spansByLayer[r.layer] += parseInt(r.spans, 10) || 0;
       const point = byDay.get(r.day);
-      if (point && (LAYERS as readonly string[]).includes(r.layer)) {
-        point.byLayer[r.layer] = micro(r.cost);
-      }
+      if (point) point.byLayer[r.layer] = micro(r.cost);
     }
     return {
       reconciledThrough: "1970-01-01", // nothing reconciled yet
       days: [...byDay.values()],
+      spansByLayer,
     };
   });
 }
@@ -556,9 +565,18 @@ export async function queryFeatureCostRows(
     // Same user-selectable window as queryCostSeries (CTO-226) so the By-feature table matches the
     // headline tiles at any range. `w - 1` back from toDate(now()) keeps the CTO-203 calendar form.
     const w = clampWindowDays(windowDays);
-    const out = await rowsP<{ feature: string; layer: Layer; cost: string }>(
+    // CTO-431: the counts ride along, so the by-feature breakdown can tell a measured zero from a
+    // layer whose every span went unpriced instead of blanking both for want of a count.
+    const out = await rowsP<{
+      feature: string;
+      layer: Layer;
+      cost: string;
+      spans: string;
+      unpriced: string;
+    }>(
       db,
-      `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost
+      `SELECT FeatureTag AS feature, ${LAYER_CASE} AS layer, sum(EstimatedCost) AS cost,
+              count() AS spans, countIf(EstimatedCost IS NULL) AS unpriced
        FROM otel_spans FINAL
        WHERE TenantId = {tenant:String} AND Timestamp >= toDate(now()) - INTERVAL ${w - 1} DAY AND FeatureTag != '' ${tagClause}
        GROUP BY feature, layer`,
@@ -568,10 +586,19 @@ export async function queryFeatureCostRows(
     for (const r of out) {
       let row = byFeature.get(r.feature);
       if (!row) {
-        row = { feature: r.feature, byLayer: zeroLayers() };
+        row = {
+          feature: r.feature,
+          byLayer: zeroLayers(),
+          spansByLayer: zeroLayers(),
+          unpricedByLayer: zeroLayers(),
+        };
         byFeature.set(r.feature, row);
       }
-      if ((LAYERS as readonly string[]).includes(r.layer)) row.byLayer[r.layer] = micro(r.cost);
+      if ((LAYERS as readonly string[]).includes(r.layer)) {
+        row.byLayer[r.layer] = micro(r.cost);
+        row.spansByLayer![r.layer] = parseInt(r.spans, 10) || 0;
+        row.unpricedByLayer![r.layer] = parseInt(r.unpriced, 10) || 0;
+      }
     }
     return [...byFeature.values()].sort(
       (a, b) =>
