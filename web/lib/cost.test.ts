@@ -9,6 +9,7 @@ import {
   totalForDay,
   totalRange,
   type Layer,
+  sumLayerCounts,
 } from "./cost";
 import { formatUSD } from "./types";
 
@@ -148,5 +149,48 @@ describe("layerCoverage: a lower bound that rounds to zero (CTO-423)", () => {
     )!;
     expect(tools.totalMicroUsd).toBe(0);
     expect(tools.reason).toBe("");
+  });
+});
+
+// CTO-431. The banner and the breakdown both decide from per-layer counts now, so "nobody counted"
+// has to stay distinguishable from "counted, and it was zero". A map of zeros is the dangerous
+// collapse: it reads as every layer having delivered nothing, which would accuse every connector
+// the tenant has at once, and would license a confident $0.00 on every layer of the breakdown.
+describe("sumLayerCounts (CTO-431)", () => {
+  const row = (feature: string, spans?: Partial<Record<Layer, number>>) => ({
+    feature,
+    byLayer: { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0 },
+    ...(spans
+      ? { spansByLayer: { llm: 0, vector: 0, tools: 0, compute: 0, embeddings: 0, egress: 0, ...spans } }
+      : {}),
+  });
+
+  it("returns null when no row carries counts, never a map of zeros", () => {
+    expect(sumLayerCounts([row("chat"), row("search")], (r) => r.spansByLayer)).toBeNull();
+  });
+
+  it("returns null for no rows at all", () => {
+    expect(sumLayerCounts([], (r) => r.spansByLayer)).toBeNull();
+  });
+
+  it("sums a layer across every feature that reported it", () => {
+    const out = sumLayerCounts(
+      [row("chat", { llm: 10, vector: 7 }), row("search", { llm: 5, vector: 3 })],
+      (r) => r.spansByLayer,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.llm).toBe(15);
+    expect(out!.vector).toBe(10);
+  });
+
+  it("keeps a real zero as zero once anything counted", () => {
+    // tools counted and was genuinely silent. That is a finding, and distinct from the null above.
+    const out = sumLayerCounts([row("chat", { llm: 10 })], (r) => r.spansByLayer)!;
+    expect(out.tools).toBe(0);
+  });
+
+  it("treats a row with no counts as contributing nothing, not as cancelling the others", () => {
+    const out = sumLayerCounts([row("chat", { llm: 10 }), row("legacy")], (r) => r.spansByLayer)!;
+    expect(out.llm).toBe(10);
   });
 });

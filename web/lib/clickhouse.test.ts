@@ -1035,6 +1035,52 @@ describe("CTO-244 - reading a mix of known and unknown", () => {
     expect(out.unpricedSpanCount).toBe(0);
   });
 
+  // CTO-431. The banner reads span counts off the SERIES, because queryCostSeries has no
+  // `FeatureTag != ''` restriction: a connector emitting only untagged spans must not read as
+  // silent, which it would if these counts came off the feature rows.
+  it("queryCostSeries counts spans per layer across the whole window", async () => {
+    const { queryCostSeries } = await freshSut();
+    // vector delivered on two separate days and priced nothing: cost 0, plainly alive.
+    respondRows([
+      { day: "2026-09-16", layer: "llm", cost: "1.50", spans: "10" },
+      { day: "2026-09-16", layer: "vector", cost: "0", spans: "7" },
+      { day: "2026-09-17", layer: "vector", cost: "0", spans: "5" },
+    ]);
+    respondRows([{ windowStart: "2026-09-16" }]);
+    const out = (await queryCostSeries({}, 2))!;
+    // Summed across days, so a layer quiet TODAY but busy yesterday is not called silent.
+    expect(out.spansByLayer?.vector).toBe(12);
+    expect(out.spansByLayer?.llm).toBe(10);
+    // A layer with no row at all is zero spans, which is the real "not producing" case.
+    expect(out.spansByLayer?.tools).toBe(0);
+  });
+
+  it("queryCostSeries SELECTs the span count, and does not restrict to tagged spans", async () => {
+    const { queryCostSeries } = await freshSut();
+    respondRows([]);
+    respondRows([{ windowStart: "2026-09-16" }]);
+    await queryCostSeries({}, 2);
+    const [seriesSql] = queryMock.mock.calls.map((c) => (c[0] as { query: string }).query);
+    expect(seriesSql).toContain("count() AS spans");
+    // The population is every span the tenant sent. A FeatureTag restriction here would make an
+    // untagged-only connector look dead, which is the same false accusation by another route.
+    expect(seriesSql).not.toContain("FeatureTag != ''");
+  });
+
+  it("queryFeatureCostRows carries per-layer span and unpriced counts", async () => {
+    const { queryFeatureCostRows } = await freshSut();
+    respondRows([
+      { feature: "chat", layer: "llm", cost: "1.50", spans: "10", unpriced: "0" },
+      { feature: "chat", layer: "vector", cost: "0", spans: "9", unpriced: "9" },
+    ]);
+    const [chat] = (await queryFeatureCostRows({}, 30))!;
+    expect(chat.byLayer.vector).toBe(0);
+    // The pair that separates "spent nothing" from "we could not price any of it".
+    expect(chat.spansByLayer?.vector).toBe(9);
+    expect(chat.unpricedByLayer?.vector).toBe(9);
+    expect(chat.unpricedByLayer?.llm).toBe(0);
+  });
+
   // CTO-431, the SQL half. The test above feeds rows straight to the mock, so it cannot catch the
   // SELECT losing its count: the query text is never executed here. Asserted directly instead, the
   // same way the queryAccountCosts SQL contract above is, because a per-layer count that is not

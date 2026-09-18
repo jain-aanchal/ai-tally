@@ -54,6 +54,7 @@ import {
   layerCoverage,
   reconciledTotal,
   totalRange,
+  sumLayerCounts,
 } from "@/lib/cost";
 import {
   asOfLabel,
@@ -106,6 +107,7 @@ const NO_SERIES: CostSeries = { reconciledThrough: "1970-01-01", days: [] };
 function sumLayer(rows: FeatureCostRow[], layer: Layer) {
   return rows.reduce((s, r) => s + r.byLayer[layer], 0);
 }
+
 
 /** Every known layer at zero, the accumulator both layer-total reductions start from. */
 function zeroLayerRecord(): Record<Layer, number> {
@@ -229,6 +231,39 @@ export function CostLive({
   const reconciled = reconciledTotal(costSeries);
   const estimated = estimatedTotal(costSeries);
 
+  // #364 review: a layer reads zero either because it genuinely cost nothing or because the read
+  // failed and we are looking at an empty fallback. Only the first is a finding; claiming "vector is
+  // reporting zero, that connector isn't producing data" over an unreadable source is the same
+  // collapse that change removed from the API.
+  //
+  // CTO-431: the banner's claim is about DELIVERY, so it reads span counts off the SERIES. Two
+  // reasons it is the series and not the feature rows. The series has no `FeatureTag != ''`
+  // restriction, so a connector emitting only untagged spans is not mistaken for a silent one; and
+  // it is one population, where an earlier attempt tested the FILTERED slice's unpriced count
+  // against the DEFAULT slice's layer totals and let the original bug back in through a filter.
+  //
+  // No counts (an older payload, a fixture) means no claim, rather than the per-layer cost reading
+  // this ticket removed.
+  //
+  // The unreadable-source case needs no clause of its own, for two independent reasons: the render
+  // below returns SourceUnavailable before the banner on `sources.series === "unavailable"`, and a
+  // failed read leaves `costSeries` as NO_SERIES, which carries no counts and so lands on the same
+  // null. Stated rather than guarded a third time, because a test here could never fire and would
+  // read as though it protected something. The invariant it rests on: NO_SERIES has no counts, and
+  // giving that constant a zeroed map would be the bug, since a map of zeros reads as every layer
+  // having delivered nothing.
+  const seriesSpans = costSeries.spansByLayer ?? null;
+  const trippedLayers = seriesSpans === null ? [] : zeroEnabledLayers(seriesSpans, enabledLayers);
+  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
+  // and a window nothing was recorded in are different facts, and the read is what tells them
+  // apart. This derivation is left with staleness and partial connector coverage.
+  const state = deriveDataState({
+    isEmpty: false,
+    isPartial: trippedLayers.length > 0,
+    reconciledThrough: costSeries.reconciledThrough,
+  });
+  const asOf = asOfLabel(costSeries.reconciledThrough);
+
   const layerTotals = LAYERS.reduce<Record<Layer, number>>((acc, l) => {
     acc[l] = sumLayer(featureRows, l);
     return acc;
@@ -322,49 +357,24 @@ export function CostLive({
       return { totals, spans, unpriced };
     }
     if (isDefaultSlice) {
-      // CTO-431: null, NOT {}. An empty map is truthy, and a truthy-but-empty span map reads as
-      // "every layer delivered nothing", which would put the partial-data banner on every connector
-      // the tenant has. Null makes that state unrepresentable instead of guarded.
+      // CTO-431: real per-layer counts, summed from the feature rows these totals come from, so the
+      // offline / default view can tell a measured zero from an all-unpriced layer instead of
+      // blanking both for want of a count. Null (not {}) when the rows carry none: an empty map is
+      // truthy and would read as "every layer delivered nothing".
       return {
         totals: layerTotals,
-        spans: null as Partial<Record<Layer, number>> | null,
-        unpriced: null as Partial<Record<Layer, number>> | null,
+        spans: sumLayerCounts(featureRows, (r) => r.spansByLayer) as
+          | Partial<Record<Layer, number>>
+          | null,
+        unpriced: sumLayerCounts(featureRows, (r) => r.unpricedByLayer) as
+          | Partial<Record<Layer, number>>
+          | null,
       };
     }
     return null;
-    // layerTotals is rebuilt from featureRows each render; depend on its values, not its identity.
-  }, [breakdownGroupBy, explore.series, isDefaultSlice, layerTotals]);
-
-  // #364 review: a layer reads zero either because it genuinely cost nothing or because the
-  // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
-  // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
-  // unreadable source is the same collapse that change removes from the API.
-  //
-  // CTO-431: read from ONE population. `layerFigures` carries totals and per-layer span counts that
-  // both come out of the same explore breakdown, and the banner's claim is about spans. This used to
-  // sit above, testing `layerTotals` (summed from feature rows, which are the DEFAULT slice and
-  // carry no span count) against the FILTERED slice's unpriced count. Those are different
-  // populations, and the mismatch put the original bug back within reach: filtering to a fully
-  // priced feature made the unpriced count zero, which licensed the cost reading over unfiltered
-  // totals that could be entirely unpriced, and the banner blamed a working connector again.
-  //
-  // With no per-layer counts (not grouping by layer, or explore idle) this page says nothing rather
-  // than guessing. That costs a genuinely silent connector its banner HERE; Home still names it,
-  // and does so from exact counts. An accusation we cannot support is the worse of the two.
-  const layerSpans = (layerFigures?.spans ?? null) as Record<Layer, number> | null;
-  const trippedLayers =
-    sources.featureRows === "unavailable" || layerSpans === null
-      ? []
-      : zeroEnabledLayers(layerSpans, enabledLayers);
-  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
-  // and a window nothing was recorded in are different facts, and the read is what tells them
-  // apart. This derivation is left with staleness and partial connector coverage.
-  const state = deriveDataState({
-    isEmpty: false,
-    isPartial: trippedLayers.length > 0,
-    reconciledThrough: costSeries.reconciledThrough,
-  });
-  const asOf = asOfLabel(costSeries.reconciledThrough);
+    // layerTotals is rebuilt from featureRows each render, so depending on it already re-runs this
+    // on every render; featureRows is listed because the CTO-431 counts are read straight off it.
+  }, [breakdownGroupBy, explore.series, isDefaultSlice, layerTotals, featureRows]);
 
   // Memoized because the breakdown rows below derive from it: an identity that changed every render
   // would defeat their useMemo.
