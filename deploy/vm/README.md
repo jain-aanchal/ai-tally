@@ -1,20 +1,33 @@
-# ai-tally demo-deploy-kit
+# ai-tally vm-deploy-kit
 
-Drop-in kit to host the **whole ai-tally stack on one cloud VM**, behind Caddy (automatic HTTPS +
-HTTP basic-auth), so testers get a single private link to the seeded demo. (CTO-243)
+Drop-in kit to host the **whole ai-tally stack on one cloud VM**, behind Caddy with automatic HTTPS.
+(CTO-243)
+
+It runs in two modes, set by `AUTH_MODE` in `.env`, and the difference is not cosmetic:
+
+| `AUTH_MODE` | What it is | Auth | Data |
+| --- | --- | --- | --- |
+| `basic` (default) | The synthetic demo this kit was first written for. A single private link for testers. | Caddy HTTP basic-auth; the dashboard's own auth is OFF (`TALLY_DEV_TENANT` is pinned) | Seeded and backfilled by this kit |
+| `clerk` | A real instance. | Clerk sign-in; the tenant resolves from the signed-in organization | Whatever its tenants send it |
+
+This directory was called `deploy/demo/` until CTO-433. The name described one of those two modes
+and was read as describing both, which is how a real instance ended up being told at the end of
+every deploy that its data was synthetic and safe to share (CTO-432). Read `demo` here as the
+`basic` mode, never as the kit.
 
 Everything runs from `docker compose`, layered on top of the existing local stack:
 
 ```
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml up -d --build
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml up -d --build
 ```
 
 The overlay adds a `web` (Next.js dashboard) and a `caddy` service, and makes **Caddy the only
 service that publishes host ports** (80/443). ClickHouse, Postgres, Redpanda, MinIO and the gateway
 keep talking to each other over the compose network but are not reachable from the internet.
 
-> The demo dataset is **synthetic** - seeded and backfilled by this kit (no real users, no real LLM
-> calls, no API keys). See `deploy.sh` / `reseed.sh`.
+> In `basic` mode the dataset is **synthetic**, seeded and backfilled by this kit (no real users, no
+> real LLM calls, no API keys). In `clerk` mode this kit generates no data at all and makes no claim
+> about what is there. See `deploy.sh` / `reset-demo-data.sh`.
 
 ## What's in here
 
@@ -25,7 +38,7 @@ keep talking to each other over the compose network but are not reachable from t
 | `Caddyfile` | `${DOMAIN}` site: automatic TLS, basic-auth, `reverse_proxy web:3000`. Commented gateway-ingest and local-HTTP variants. |
 | `.env.example` | Per-host config: domain, basic-auth user + bcrypt hash, stack creds, service token. |
 | `deploy.sh` | Bring the stack up, wait for health, apply DDL, seed + backfill, print the link. |
-| `reseed.sh` | Reset + re-seed the synthetic data (run nightly via cron). |
+| `reset-demo-data.sh` | Reset + re-seed the synthetic data (run nightly via cron). |
 | `lib-tenant.sh` | Sourced by both scripts: tenant-UUID resolution and the service-token preflight. |
 
 ## Two modes: `basic` and `clerk`
@@ -81,6 +94,20 @@ and a poor long-term one. The retention policy applied by `make ch-apply-retenti
 lifecycle here, so put a snapshot schedule on the volume. `deploy/aws/terraform/` is the managed
 alternative when you outgrow this.
 
+## Upgrading a host that was deployed as `deploy/demo/`
+
+`git pull` moves the tracked files for you. It does NOT move `.env`, which is deliberately untracked
+and holds this host's secrets, so on an existing box it stays behind in the old directory and the
+next deploy stops at "deploy/vm/.env not found". Move it first:
+
+```
+cd /opt/ai-tally && git pull origin main && mv deploy/demo/.env deploy/vm/.env && rmdir deploy/demo
+```
+
+Then deploy as usual with `./deploy/vm/deploy.sh`. Anything else you scripted against the old path
+(a cron entry, a shell alias, a runbook) needs the same edit; nothing in the repo resolves the old
+path at runtime, so the rename is the only thing that breaks.
+
 ## Operator runbook
 
 ### 1. Provision a VM
@@ -114,10 +141,10 @@ challenge. Wait for it to propagate before the first deploy.
 ### 3. Configure `.env`
 
 ```
-cp deploy/demo/.env.example deploy/demo/.env
+cp deploy/vm/.env.example deploy/vm/.env
 ```
 
-Edit `deploy/demo/.env`:
+Edit `deploy/vm/.env`:
 
 - Set `DOMAIN` to your record.
 - Set `BASIC_AUTH_USER` (e.g. `tester`).
@@ -134,13 +161,13 @@ Edit `deploy/demo/.env`:
   (`TALLY_REQUIRE_API_KEY=true`). If you do turn it on, generate a real token and never commit it:
 
   ```
-  echo "TALLY_GATEWAY_SERVICE_TOKEN=$(openssl rand -hex 32)" >> deploy/demo/.env
+  echo "TALLY_GATEWAY_SERVICE_TOKEN=$(openssl rand -hex 32)" >> deploy/vm/.env
   ```
 
   One key covers both tiers: the compose overlay hands the same value to the gateway as
   `TALLY_GATEWAY_SERVICE_TOKEN` and to the web server as `GATEWAY_SERVICE_TOKEN`. With auth on and
   the token empty the gateway refuses to boot rather than serve an open control plane, so
-  `deploy.sh` and `reseed.sh` stop up front and say so.
+  `deploy.sh` and `reset-demo-data.sh` stop up front and say so.
 
   **This kit's seeding path does not support auth on.** The synthetic backfill
   (`examples/vercel-chatbot/scripts/backfill-spans.ts`) posts to `/v1/batches` with no
@@ -163,7 +190,7 @@ Edit `deploy/demo/.env`:
   It is a disaster on an instance holding real tenant data, and this kit is the most copyable thing
   in the repo, so the web image now **refuses to boot** on `TALLY_DEV_TENANT` alone in a production
   build. Turning auth off takes a second, deliberate variable, `TALLY_ALLOW_INSECURE_NO_AUTH=1`,
-  which `deploy.sh` and `reseed.sh` set for you (`pin_dashboard_tenant` in `lib-tenant.sh`) and
+  which `deploy.sh` and `reset-demo-data.sh` set for you (`pin_dashboard_tenant` in `lib-tenant.sh`) and
   which every boot then warns about in the web container's logs. **If you are adapting this kit to
   stand up a real instance, delete both variables and configure Clerk** (see `deploy/aws/README.md`
   or `deploy/vercel/README.md`); do not carry them across.
@@ -171,7 +198,7 @@ Edit `deploy/demo/.env`:
 ### 4. Deploy
 
 ```
-./deploy/demo/deploy.sh
+./deploy/vm/deploy.sh
 ```
 
 This builds the images, starts the stack, waits for the gateway to be healthy, applies the
@@ -191,7 +218,7 @@ the tenant's existing spans in ClickHouse first and skips the step when there ar
 | `SKIP_BACKFILL=1` | Never back-fill, even on an empty tenant. |
 | `FORCE_BACKFILL=1` | Back-fill anyway, on top of what is already there. |
 
-Use `./deploy/demo/reseed.sh` rather than `FORCE_BACKFILL=1` when you want a clean dataset: it
+Use `./deploy/vm/reset-demo-data.sh` rather than `FORCE_BACKFILL=1` when you want a clean dataset: it
 truncates first, so the spans are replaced instead of doubled.
 
 ### 5. Share privately
@@ -216,7 +243,7 @@ site; stop the container with `docker compose ... --profile ingest stop edge-pro
 2. In `.env`, set `INGEST_DOMAIN=ingest.ai-tally.com` and make sure `TALLY_GATEWAY_SERVICE_TOKEN`
    is set (`openssl rand -hex 32`, generated on the box). With `INGEST_DOMAIN` set and no token,
    `deploy.sh` stops before building.
-3. Run `./deploy/demo/deploy.sh`. It enables the `ingest` compose profile, mounts the ingest Caddy
+3. Run `./deploy/vm/deploy.sh`. It enables the `ingest` compose profile, mounts the ingest Caddy
    site, and prints the endpoint.
 
 No firewall change is needed: the proxy has no host port and is reached only through Caddy on 443.
@@ -324,7 +351,7 @@ If testers should send **their own** telemetry, expose only the ingest endpoint 
 same basic-auth) by uncommenting the `handle /v1/batches*` block in the `Caddyfile`, then:
 
 ```
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml up -d caddy
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml up -d caddy
 ```
 
 Point their SDK / edge-proxy at `https://${DOMAIN}/v1/batches` with the basic-auth credentials. Do
@@ -332,20 +359,20 @@ Point their SDK / edge-proxy at `https://${DOMAIN}/v1/batches` with the basic-au
 
 ## Resetting the data
 
-> **Demo instances only (CTO-432).** `reseed.sh` TRUNCATEs the telemetry tables. That is the point
+> **Demo instances only (CTO-432).** `reset-demo-data.sh` TRUNCATEs the telemetry tables. That is the point
 > on a demo box, whose data is regenerable from a seed, and it destroys customer spans anywhere
 > else. The nightly cron below is the sharp edge: it removes the data every night whether or not
-> anyone meant it to. `reseed.sh` refuses to run when `AUTH_MODE=clerk`, which this kit treats as a
+> anyone meant it to. `reset-demo-data.sh` refuses to run when `AUTH_MODE=clerk`, which this kit treats as a
 > real instance, but that guard reads the mode and not the data, so do not add the cron to a box
 > that serves anyone real.
 
 The demo data is synthetic and backdated relative to "now", so re-running keeps the window current.
 
-- **On demand:** `./deploy/demo/reseed.sh` truncates the telemetry tables and re-seeds + re-backfills.
-- **Nightly:** add a cron entry (see the comment block in `reseed.sh`):
+- **On demand:** `./deploy/vm/reset-demo-data.sh` truncates the telemetry tables and re-seeds + re-backfills.
+- **Nightly:** add a cron entry (see the comment block in `reset-demo-data.sh`):
 
   ```
-  15 3 * * * /opt/ai-tally/deploy/demo/reseed.sh >> /var/log/ai-tally-reseed.log 2>&1
+  15 3 * * * /opt/ai-tally/deploy/vm/reset-demo-data.sh >> /var/log/ai-tally-reseed.log 2>&1
   ```
 
 ## Local smoke test (no VM, no TLS)
@@ -354,13 +381,13 @@ You can validate the pieces on a laptop without binding 80/443 or owning a domai
 
 ```
 # Config resolves:
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml config
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml config
 
 # The dashboard image builds:
-docker build -f deploy/demo/web.Dockerfile -t ai-tally-web-demo .
+docker build -f deploy/vm/web.Dockerfile -t ai-tally-web-demo .
 
 # Caddy config is valid:
-docker run --rm -v "$PWD/deploy/demo/Caddyfile:/etc/caddy/Caddyfile:ro" \
+docker run --rm -v "$PWD/deploy/vm/Caddyfile:/etc/caddy/Caddyfile:ro" \
   -e DOMAIN=:8088 -e BASIC_AUTH_USER=tester -e BASIC_AUTH_HASH='<hash>' \
   caddy:2 caddy validate --config /etc/caddy/Caddyfile
 ```
@@ -376,31 +403,31 @@ written under one `TenantId` and the dashboard is reading another. Check the two
 
 ```
 # What the control plane says the tenant UUID is:
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml \
   exec -T postgres psql -U tally -d tally -tAc "SELECT id, name FROM tenants"
 
 # What the web tier is actually reading:
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml \
   exec -T web printenv TALLY_DEV_TENANT
 
 # What ClickHouse actually holds:
-docker compose -f infra/docker-compose.yml -f deploy/demo/docker-compose.prod.yml \
+docker compose -f infra/docker-compose.yml -f deploy/vm/docker-compose.prod.yml \
   exec -T clickhouse clickhouse-client -u tally --password tally -d default \
   --query "SELECT TenantId, count() FROM otel_spans GROUP BY TenantId"
 ```
 
 (Those commands assume the `.env.example` defaults `POSTGRES_USER=tally` / `POSTGRES_DB=tally` and
-`CLICKHOUSE_USER=tally`. If you changed them in `deploy/demo/.env`, substitute your own values; the
+`CLICKHOUSE_USER=tally`. If you changed them in `deploy/vm/.env`, substitute your own values; the
 scripts themselves read the env vars, only these copy-paste one-liners are literal.)
 
 All three must show the same **UUID**. A `local-dev` (the name) in either of the last two means
-something bypassed `deploy.sh`; re-running `./deploy/demo/reseed.sh` re-resolves and repairs it.
+something bypassed `deploy.sh`; re-running `./deploy/vm/reset-demo-data.sh` re-resolves and repairs it.
 
 **The `web` container restarts in a loop and its logs say "REFUSES TO START".** The image was
 started with `TALLY_DEV_TENANT` set but without `TALLY_ALLOW_INSECURE_NO_AUTH`, so it stopped rather
 than serve with authentication disabled. That happens when something bypassed the scripts, typically
 a bare `docker compose up` with a stale `TALLY_DEV_TENANT` still exported in the shell. Re-run
-`./deploy/demo/deploy.sh` (or `./deploy/demo/reseed.sh`), which set both variables together. If you
+`./deploy/vm/deploy.sh` (or `./deploy/vm/reset-demo-data.sh`), which set both variables together. If you
 are adapting this kit to serve REAL data, that message is telling you the truth: unset both and
 configure Clerk instead.
 
@@ -418,7 +445,7 @@ credentials.
 
 - Runs on any Docker-capable VM; per-host specifics (domain, password, creds) live in `.env`.
 - This kit does not modify `infra/docker-compose.yml` or the app; it is additive under
-  `deploy/demo/`.
+  `deploy/vm/`.
 - The `chatbot-demo-backfill` make target runs on the host and hits `localhost:8080`; on a
-  locked-down VM (no host Node, gateway not published) `deploy.sh`/`reseed.sh` instead run the same
+  locked-down VM (no host Node, gateway not published) `deploy.sh`/`reset-demo-data.sh` instead run the same
   backfill script inside a throwaway `node:22` container attached to the compose network.

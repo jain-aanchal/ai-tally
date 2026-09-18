@@ -1,4 +1,4 @@
-# ai-tally demo-deploy-kit - Caddy site config (CTO-243).
+# ai-tally vm-deploy-kit - Caddy site config (CTO-243).
 #
 # Caddy is the only public surface. It gets a real Let's Encrypt certificate for ${DOMAIN}
 # automatically (ACME HTTP-01 over port 80), terminates TLS, challenges every request with HTTP

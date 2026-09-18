@@ -179,7 +179,7 @@ set. The second is the dev escape hatch, and it is the only way the dashboard se
 Clerk organization resolved (`web/lib/getTenant.ts`), so "a real tenant is signed in" and "fixtures
 render" are mutually exclusive by construction. A production build refuses to boot on that hatch
 alone (CTO-268, `web/instrumentation.ts`), which closes it a second time. Where fixtures do render
-they stay behind the SAMPLE DATA banner. The synthetic-data demo kit in `deploy/demo/` is the
+they stay behind the SAMPLE DATA banner. The VM kit in `deploy/vm/`, run in its basic mode, is the
 supported way to show a populated dashboard with no real stores behind it.
 
 ## 5. Preview deploys
@@ -187,7 +187,7 @@ supported way to show a populated dashboard with no real stores behind it.
 Every pull request gets an automatic **Preview Deployment** at a unique URL. Previews use the
 **Preview**-scoped Environment Variables from §2: point them at a **staging** ClickHouse/gateway.
 Leaving them unset previews the "source unavailable" state, not a populated dashboard; for that, use
-the `deploy/demo/` kit. Never point Preview at production credentials.
+the `deploy/vm/` kit. Never point Preview at production credentials.
 `web/vercel.json` sets `git.deploymentEnabled.main = true`; PR previews remain on by default.
 
 ---

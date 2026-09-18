@@ -6,7 +6,7 @@ from its own marketing site.
 
 This is live at `https://app.ai-tally.com`, and the deployment is real: a single VM (DigitalOcean,
 not the AWS path this doc and `docs/aws-bundle-scope.md` argue for), the compose stack from
-`deploy/demo/` in `AUTH_MODE=clerk`, Caddy terminating Let's Encrypt TLS, and a Clerk production
+`deploy/vm/` in `AUTH_MODE=clerk`, Caddy terminating Let's Encrypt TLS, and a Clerk production
 instance on `accounts.ai-tally.com`. The single-VM route was chosen over ECS Fargate for operational
 weight, not because the argument below is wrong.
 
@@ -83,10 +83,10 @@ because ClickHouse dashboard queries are the expensive thing and an unauthentica
 denial-of-wallet. Beyond the engineering, a demo showing our real spend is a disclosure of our model
 mix, our traffic volume, and our unit economics.
 
-There is already a better answer for B, and it exists in the repo. `deploy/demo/` is a single-VM kit
+There is already a better answer for B, and it exists in the repo. `deploy/vm/` is a single-VM kit
 that stands the whole stack up behind Caddy with automatic TLS and HTTP basic auth, seeded with an
-explicitly synthetic dataset. `deploy/demo/deploy.sh` brings compose up, waits for gateway health,
-applies the ClickHouse DDL, seeds and backfills, and prints the link; `reseed.sh` resets the data on
+explicitly synthetic dataset. `deploy/vm/deploy.sh` brings compose up, waits for gateway health,
+applies the ClickHouse DDL, seeds and backfills, and prints the link; `reset-demo-data.sh` resets the data on
 a cron; `lib-tenant.sh` does the tenant-UUID resolution and the service-token preflight both need.
 That is the closest thing in the repo to a one-command deploy, and it is the right shape for a
 shopfront: a separate host, separate data, synthetic numbers, and a shared password we hand out. It
@@ -215,7 +215,7 @@ on some plans and this deployment depends on organizations. Check before assumin
 
 The correct next step is to price these against current rate cards, not to guess. If the total
 matters more than the operational simplicity, the honest cheaper alternative is the single-VM shape
-in `deploy/demo/`, which trades managed backups and elasticity for one instance running everything
+in `deploy/vm/`, which trades managed backups and elasticity for one instance running everything
 and is defensible for a private tool serving a handful of people.
 
 ## The data path, end to end
@@ -305,8 +305,8 @@ apply it, which is the same problem as above.
 ## Phased plan
 
 **Phase 0, a weekend.** Prove the whole shape on the single-VM kit before touching AWS. Follow
-`deploy/demo/README.md`: a 4 vCPU / 8-16 GB VM, DNS for one subdomain, a filled-in `.env`, and
-`./deploy/demo/deploy.sh`. That gives a real TLS URL with the synthetic dataset behind basic auth,
+`deploy/vm/README.md`: a 4 vCPU / 8-16 GB VM, DNS for one subdomain, a filled-in `.env`, and
+`./deploy/vm/deploy.sh`. That gives a real TLS URL with the synthetic dataset behind basic auth,
 end to end, in an afternoon, and it answers the questions that matter (does the dashboard render,
 does ingest work, what does it feel like) before any of the AWS work. This is also, unmodified, the
 public demo host for reading B later.

@@ -67,7 +67,7 @@ def test_an_unrecognized_environment_is_treated_as_deployed() -> None:
 
 
 def test_truthiness_matches_the_web_tier_spelling() -> None:
-    # Same spelling web/lib/authGuard.ts and deploy/demo/lib-tenant.sh accept, so one operator
+    # Same spelling web/lib/authGuard.ts and deploy/vm/lib-tenant.sh accept, so one operator
     # sentence covers both tiers of one deployment.
     assert [is_truthy(v) for v in ("1", "true", "yes", "on")] == [True] * 4
     assert [is_truthy(v) for v in ("0", "false", "off", "", None, 3)] == [False] * 6
