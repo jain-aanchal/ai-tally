@@ -154,3 +154,58 @@ describe("zeroEnabledLayers (CTO-107)", () => {
     expect(zeroEnabledLayers({ llm: 5, vector: 0, tools: 0 }, ["llm"])).toEqual([]);
   });
 });
+
+// CTO-431. The banner this feeds says "that connector isn't producing data right now", a claim about
+// SPANS, and it was answered with COST. sum() skips NULLs, so a layer whose spans all lack a catalog
+// rate sums to 0 and was named as a dead connector, three lines under a tile already saying that sum
+// was unknown. Sending a customer to debug what is working is worse than an unexplained blank.
+describe("zeroEnabledLayers vs unpriced spans (CTO-431)", () => {
+  it("does not blame a connector that delivered spans we could not price", () => {
+    // vector cost 0 because every vector span was unpriced, not because nothing arrived.
+    expect(
+      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], {
+        spansByLayer: { llm: 40, vector: 260 },
+      }),
+    ).toEqual([]);
+  });
+
+  it("still names a connector that really delivered nothing", () => {
+    // The guard must not swallow a genuine outage: zero spans is the finding it exists for.
+    expect(
+      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], {
+        spansByLayer: { llm: 40, vector: 0 },
+      }),
+    ).toEqual(["vector"]);
+  });
+
+  it("prefers the span count over the cost, even for a layer with spans and real spend", () => {
+    // A layer can cost zero with spans present for reasons other than pricing (a zero-rated model).
+    // The count answers the banner's question directly, so cost is not consulted at all.
+    expect(
+      zeroEnabledLayers({ llm: 0, vector: 0 }, ["llm", "vector"], {
+        spansByLayer: { llm: 12, vector: 0 },
+      }),
+    ).toEqual(["vector"]);
+  });
+
+  it("names nothing when spans went unpriced and no per-layer count says where", () => {
+    // The /cost page's layer totals come from feature rows, which carry no span count. With unpriced
+    // spans in the window a zero layer is unreadable, so it reports nothing rather than guessing.
+    // The Spend tile still discloses the unpriced count (CTO-244), so the reader is not left blind.
+    expect(
+      zeroEnabledLayers({ llm: 0, vector: 0 }, ["llm", "vector"], { unpricedSpanCount: 531 }),
+    ).toEqual([]);
+  });
+
+  it("keeps the cost reading when nothing in the window went unpriced", () => {
+    // Every span carried a cost, so a zero really is an absence and CTO-107's behaviour stands.
+    expect(
+      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], { unpricedSpanCount: 0 }),
+    ).toEqual(["vector"]);
+  });
+
+  it("keeps the cost reading when no coverage is supplied at all", () => {
+    // An older payload or a mock: nobody counted, and there is no evidence of unpriced spans.
+    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
+  });
+});

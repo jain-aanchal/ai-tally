@@ -233,12 +233,26 @@ export function CostLive({
     acc[l] = sumLayer(featureRows, l);
     return acc;
   }, zeroLayerRecord());
+  // Hoisted above the layer derivation below (CTO-431), which needs the slice's unpriced count.
+  // Tile values further down: the filter-aware slice totals when /api/explore answered, else the
+  // shipped /api/cost figures on the default slice (so the byte-for-byte default and the offline
+  // view hold), else an honest blank (null) on a non-default slice we could not read, never a zero.
+  const slice = explore.totals;
+
   // #364 review: a layer reads zero either because it genuinely cost nothing or because the
   // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
   // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
   // unreadable source is the same collapse this change removes from the API.
+  // CTO-431: these layer totals are summed from feature rows, which carry cost per layer and no
+  // span count, so this page cannot tell a silent connector from a busy unpriced one. It passes the
+  // window's unpriced count and zeroEnabledLayers declines to name a layer when that is non-zero,
+  // rather than blaming a connector for a missing rate.
   const trippedLayers =
-    sources.featureRows === "unavailable" ? [] : zeroEnabledLayers(layerTotals, enabledLayers);
+    sources.featureRows === "unavailable"
+      ? []
+      : zeroEnabledLayers(layerTotals, enabledLayers, {
+          unpricedSpanCount: slice?.unpricedSpanCount,
+        });
   // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
   // and a window nothing was recorded in are different facts, and the read is what tells them
   // apart. This derivation is left with staleness and partial connector coverage.
@@ -249,10 +263,6 @@ export function CostLive({
   });
   const asOf = asOfLabel(costSeries.reconciledThrough);
 
-  // Tile values: the filter-aware slice totals when /api/explore answered, else the shipped
-  // /api/cost figures on the default slice (so the byte-for-byte default and the offline view hold),
-  // else an honest blank (null) on a non-default slice we could not read, never a zero.
-  const slice = explore.totals;
   // CTO-244 follow-up: a slice in which NOTHING could be priced has an unknown total, not a zero
   // one, and the tile must say so or it contradicts the breakdown footer directly beneath it.
   const sliceAllUnpriced =

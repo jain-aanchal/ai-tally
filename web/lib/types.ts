@@ -84,6 +84,17 @@ export interface SpendSummary {
   unpricedSpanCount?: number;
   /** Total spans in the same window, so `unpricedSpanCount` can be stated as a share. */
   spanCount?: number;
+  /**
+   * Spans observed per layer in the window (CTO-431).
+   *
+   * `byLayer` above is a sum and cannot answer "did this connector deliver anything", because a
+   * layer whose spans were all unpriced sums to 0 exactly like a layer that sent nothing. Only a
+   * count separates them, and the partial-data banner's claim is about delivery, not spend.
+   *
+   * Optional for the same reason as the two counts above: an older payload or a mock reads as
+   * "nobody counted", and `zeroEnabledLayers` then declines to name a layer rather than guessing.
+   */
+  spansByLayer?: SpendByLayer;
 }
 
 export interface CostOutlier {
