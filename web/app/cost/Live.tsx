@@ -239,30 +239,6 @@ export function CostLive({
   // view hold), else an honest blank (null) on a non-default slice we could not read, never a zero.
   const slice = explore.totals;
 
-  // #364 review: a layer reads zero either because it genuinely cost nothing or because the
-  // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
-  // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
-  // unreadable source is the same collapse this change removes from the API.
-  // CTO-431: these layer totals are summed from feature rows, which carry cost per layer and no
-  // span count, so this page cannot tell a silent connector from a busy unpriced one. It passes the
-  // window's unpriced count and zeroEnabledLayers declines to name a layer when that is non-zero,
-  // rather than blaming a connector for a missing rate.
-  const trippedLayers =
-    sources.featureRows === "unavailable"
-      ? []
-      : zeroEnabledLayers(layerTotals, enabledLayers, {
-          unpricedSpanCount: slice?.unpricedSpanCount,
-        });
-  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
-  // and a window nothing was recorded in are different facts, and the read is what tells them
-  // apart. This derivation is left with staleness and partial connector coverage.
-  const state = deriveDataState({
-    isEmpty: false,
-    isPartial: trippedLayers.length > 0,
-    reconciledThrough: costSeries.reconciledThrough,
-  });
-  const asOf = asOfLabel(costSeries.reconciledThrough);
-
   // CTO-244 follow-up: a slice in which NOTHING could be priced has an unknown total, not a zero
   // one, and the tile must say so or it contradicts the breakdown footer directly beneath it.
   const sliceAllUnpriced =
@@ -334,8 +310,8 @@ export function CostLive({
     if (breakdownGroupBy !== "layer") return null;
     if (explore.series) {
       const totals = zeroLayerRecord();
-      const spans: Partial<Record<Layer, number>> = {};
-      const unpriced: Partial<Record<Layer, number>> = {};
+      const spans: Partial<Record<Layer, number>> | null = {};
+      const unpriced: Partial<Record<Layer, number>> | null = {};
       for (const r of explore.series.breakdown) {
         if (!(LAYERS as readonly string[]).includes(r.group)) continue;
         const l = r.group as Layer;
@@ -346,15 +322,49 @@ export function CostLive({
       return { totals, spans, unpriced };
     }
     if (isDefaultSlice) {
+      // CTO-431: null, NOT {}. An empty map is truthy, and a truthy-but-empty span map reads as
+      // "every layer delivered nothing", which would put the partial-data banner on every connector
+      // the tenant has. Null makes that state unrepresentable instead of guarded.
       return {
         totals: layerTotals,
-        spans: {} as Partial<Record<Layer, number>>,
-        unpriced: {} as Partial<Record<Layer, number>>,
+        spans: null as Partial<Record<Layer, number>> | null,
+        unpriced: null as Partial<Record<Layer, number>> | null,
       };
     }
     return null;
     // layerTotals is rebuilt from featureRows each render; depend on its values, not its identity.
   }, [breakdownGroupBy, explore.series, isDefaultSlice, layerTotals]);
+
+  // #364 review: a layer reads zero either because it genuinely cost nothing or because the
+  // feature-rows read failed and `featureRows` is the empty fallback. Only the first is a finding.
+  // Claiming "llm, vector, tools are reporting zero, that connector isn't producing data" over an
+  // unreadable source is the same collapse that change removes from the API.
+  //
+  // CTO-431: read from ONE population. `layerFigures` carries totals and per-layer span counts that
+  // both come out of the same explore breakdown, and the banner's claim is about spans. This used to
+  // sit above, testing `layerTotals` (summed from feature rows, which are the DEFAULT slice and
+  // carry no span count) against the FILTERED slice's unpriced count. Those are different
+  // populations, and the mismatch put the original bug back within reach: filtering to a fully
+  // priced feature made the unpriced count zero, which licensed the cost reading over unfiltered
+  // totals that could be entirely unpriced, and the banner blamed a working connector again.
+  //
+  // With no per-layer counts (not grouping by layer, or explore idle) this page says nothing rather
+  // than guessing. That costs a genuinely silent connector its banner HERE; Home still names it,
+  // and does so from exact counts. An accusation we cannot support is the worse of the two.
+  const layerSpans = (layerFigures?.spans ?? null) as Record<Layer, number> | null;
+  const trippedLayers =
+    sources.featureRows === "unavailable" || layerSpans === null
+      ? []
+      : zeroEnabledLayers(layerSpans, enabledLayers);
+  // #364: `isEmpty` no longer comes from "the total is zero". A window that genuinely cost nothing
+  // and a window nothing was recorded in are different facts, and the read is what tells them
+  // apart. This derivation is left with staleness and partial connector coverage.
+  const state = deriveDataState({
+    isEmpty: false,
+    isPartial: trippedLayers.length > 0,
+    reconciledThrough: costSeries.reconciledThrough,
+  });
+  const asOf = asOfLabel(costSeries.reconciledThrough);
 
   // Memoized because the breakdown rows below derive from it: an identity that changed every render
   // would defeat their useMemo.
@@ -364,8 +374,8 @@ export function CostLive({
         ? layerCoverage(
             layerFigures.totals,
             enabledLayers,
-            layerFigures.spans,
-            layerFigures.unpriced,
+            layerFigures.spans ?? undefined,
+            layerFigures.unpriced ?? undefined,
           )
         : [],
     [layerFigures, enabledLayers],

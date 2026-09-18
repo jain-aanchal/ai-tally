@@ -245,6 +245,17 @@ describe("the partial-data banner vs unpriced spans (CTO-431)", () => {
     expect(screen.queryByText(/reporting zero/i)).toBeNull();
   });
 
+  it("claims nothing when the payload carries no per-layer counts at all", () => {
+    // An older payload, or a mock. The page used to fall back to the per-layer COST here, which is
+    // the reading this ticket removed, so the fallback would have reinstated the bug on exactly the
+    // deployments least likely to notice. Spend is zero across every layer and the banner stays off.
+    const spend = allUnpricedSpend();
+    delete spend.spansByLayer;
+    renderHome(payload({}, spend));
+
+    expect(screen.queryByText(/isn.t producing data right now/i)).toBeNull();
+  });
+
   it("still raises the banner for a connector that really delivered nothing", () => {
     // The guard must not swallow a real outage. vector goes silent; every other layer keeps its
     // spans, so the only thing that changed is the one fact the banner is about.

@@ -127,56 +127,33 @@ export function someZero(values: Record<string, number>): boolean {
 }
 
 /**
- * Connector-aware partial detection (CTO-107).
+ * Connector-aware partial detection (CTO-107, corrected in CTO-431).
  *
- * Returns the subset of *enabled* layers that report zero; those are the real gaps. Layers the
- * tenant never enabled don't count: a tenant who only declared the LLM connector should never see
- * the banner for vector/tools/etc., because they were never expected to fire. With the empty
+ * Returns the subset of *enabled* layers that delivered NO SPANS; those are the real gaps. Layers
+ * the tenant never enabled don't count: a tenant who only declared the LLM connector should never
+ * see the banner for vector/tools/etc., because they were never expected to fire. With the empty
  * input (no enabled connectors declared) we return [], i.e. nothing partial, by design.
+ *
+ * CTO-431: this takes SPAN COUNTS, and deliberately cannot see cost at all. It used to take the
+ * per-layer cost, and the banner it feeds says "that connector isn't producing data right now",
+ * which is a claim about delivery. ClickHouse sum() skips NULLs, so a layer whose spans all lack a
+ * catalog rate sums to 0 exactly like a layer that sent nothing, and working connectors were named
+ * as dead, three lines above a tile already saying that sum was unknown. Showing a wrong number is
+ * bad; sending someone to go fix infrastructure that is not broken is worse.
+ *
+ * Counts are REQUIRED rather than optional-with-a-cost-fallback, so a caller that cannot supply
+ * them has to decide for itself whether to make the claim instead of silently getting the old
+ * wrong answer. Both call sites now gate on having them.
  */
-export interface LayerCoverage<L extends string = string> {
-  /**
-   * Spans observed per layer. When present this is the answer, and cost is not consulted at all:
-   * a connector that delivered spans is producing data whether or not we could price them.
-   */
-  spansByLayer?: Readonly<Record<L, number>>;
-  /**
-   * Unpriced spans anywhere in the window. Read ONLY when `spansByLayer` is absent, to decide
-   * whether a zero cost is safe to read as silence.
-   */
-  unpricedSpanCount?: number;
-}
-
 export function zeroEnabledLayers<L extends string>(
-  // Keys are decoupled from L: byLayer carries every layer the system knows
-  // about (LLM/vector/tools/…); `enabled` is just the subset we're checking.
-  // Without the widening the call site would have to narrow byLayer to the
-  // exact enabled set, which is the opposite of how the data flows.
-  byLayer: Readonly<Record<string, number>>,
+  // Keyed by L rather than by `string`. A caller passes a map it already holds (a variable, not a
+  // fresh literal), so extra layers beyond `enabled` are accepted as they always were; what this
+  // does buy is that a map MISSING an enabled layer no longer type-checks, and a missing key here
+  // would silently read as "delivered nothing" and accuse that connector.
+  spansByLayer: Readonly<Record<L, number>>,
   enabled: readonly L[],
-  coverage: LayerCoverage<L> = {},
 ): L[] {
-  // CTO-431: the banner this feeds says "that connector isn't producing data right now", which is a
-  // claim about SPANS, and this used to answer it with COST. ClickHouse sum() skips NULLs, so a
-  // layer whose spans all lack a catalog rate sums to 0 and was reported as a dead connector. On a
-  // subscription-covered or unpriced-model workload that is every layer, so the page told the
-  // customer to go debug connectors that were working perfectly, three lines above a tile already
-  // saying the same sum was unknown. Sending someone to fix what is not broken is worse than an
-  // unexplained blank.
-  const spans = coverage.spansByLayer;
-  if (spans) return enabled.filter((l) => (spans[l] ?? 0) === 0);
-
-  // No per-layer counts. If nothing in the window went unpriced then every span carried a cost, so
-  // a zero really is an absence and the old reading holds.
-  if ((coverage.unpricedSpanCount ?? 0) === 0) {
-    return enabled.filter((l) => (byLayer[l] ?? 0) === 0);
-  }
-
-  // Unpriced spans exist and we cannot say which layers they landed on, so we cannot tell a silent
-  // connector from a busy unpriced one. Report nothing rather than name a layer we would be
-  // guessing about: the Spend tile already discloses the unpriced count (CTO-244), so the reader is
-  // told what we do know.
-  return [];
+  return enabled.filter((l) => (spansByLayer[l] ?? 0) === 0);
 }
 
 // --- Source state: unavailable vs empty vs live (#364) -------------------------------------------

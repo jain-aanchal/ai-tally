@@ -136,11 +136,13 @@ describe("labels", () => {
   });
 });
 
-describe("zeroEnabledLayers (CTO-107)", () => {
+describe("zeroEnabledLayers (CTO-107, on span counts since CTO-431)", () => {
   it("stays silent when only the enabled layer has data", () => {
-    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm"])).toEqual([]);
+    // Typed as a variable, the way a caller holds it: layers beyond `enabled` are fine.
+    const spans = { llm: 100, vector: 0 };
+    expect(zeroEnabledLayers(spans, ["llm"])).toEqual([]);
   });
-  it("fires for an enabled layer reporting zero", () => {
+  it("fires for an enabled layer that delivered nothing", () => {
     expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
   });
   it("stays silent when every enabled layer has data", () => {
@@ -149,63 +151,38 @@ describe("zeroEnabledLayers (CTO-107)", () => {
   it("returns empty when no connectors are declared (LLM-only demos)", () => {
     expect(zeroEnabledLayers({}, [])).toEqual([]);
   });
-  it("ignores layers that aren't declared, even when zero", () => {
-    // tools is zero but never declared: it's by-design partial, not a real gap.
-    expect(zeroEnabledLayers({ llm: 5, vector: 0, tools: 0 }, ["llm"])).toEqual([]);
+  it("ignores layers that aren't declared, even when silent", () => {
+    // tools sent nothing but was never declared: by-design partial, not a real gap.
+    const spans = { llm: 5, vector: 0, tools: 0 };
+    expect(zeroEnabledLayers(spans, ["llm"])).toEqual([]);
   });
 });
 
 // CTO-431. The banner this feeds says "that connector isn't producing data right now", a claim about
 // SPANS, and it was answered with COST. sum() skips NULLs, so a layer whose spans all lack a catalog
-// rate sums to 0 and was named as a dead connector, three lines under a tile already saying that sum
-// was unknown. Sending a customer to debug what is working is worse than an unexplained blank.
-describe("zeroEnabledLayers vs unpriced spans (CTO-431)", () => {
+// rate summed to 0 and was named as a dead connector, three lines under a tile already saying that
+// sum was unknown. Sending a customer to debug what is working is worse than an unexplained blank.
+//
+// The counts are now the ONLY input: cost is not a parameter, so the old reading is unreachable
+// rather than merely unused, and a caller without counts has to decide for itself whether to make
+// the claim (both call sites gate, and the page tests below pin what they decided).
+describe("zeroEnabledLayers reads delivery, not spend (CTO-431)", () => {
   it("does not blame a connector that delivered spans we could not price", () => {
-    // vector cost 0 because every vector span was unpriced, not because nothing arrived.
-    expect(
-      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], {
-        spansByLayer: { llm: 40, vector: 260 },
-      }),
-    ).toEqual([]);
+    // 260 vector spans arrived and not one could be priced, so the cost is 0 and the connector is
+    // plainly alive. Under the old signature this was the input that produced ["vector"].
+    expect(zeroEnabledLayers({ llm: 40, vector: 260 }, ["llm", "vector"])).toEqual([]);
   });
 
   it("still names a connector that really delivered nothing", () => {
-    // The guard must not swallow a genuine outage: zero spans is the finding it exists for.
-    expect(
-      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], {
-        spansByLayer: { llm: 40, vector: 0 },
-      }),
-    ).toEqual(["vector"]);
+    // The correction must not swallow a genuine outage: no spans is the finding it exists for.
+    expect(zeroEnabledLayers({ llm: 40, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
   });
 
-  it("prefers the span count over the cost, even for a layer with spans and real spend", () => {
-    // A layer can cost zero with spans present for reasons other than pricing (a zero-rated model).
-    // The count answers the banner's question directly, so cost is not consulted at all.
-    expect(
-      zeroEnabledLayers({ llm: 0, vector: 0 }, ["llm", "vector"], {
-        spansByLayer: { llm: 12, vector: 0 },
-      }),
-    ).toEqual(["vector"]);
-  });
-
-  it("names nothing when spans went unpriced and no per-layer count says where", () => {
-    // The /cost page's layer totals come from feature rows, which carry no span count. With unpriced
-    // spans in the window a zero layer is unreadable, so it reports nothing rather than guessing.
-    // The Spend tile still discloses the unpriced count (CTO-244), so the reader is not left blind.
-    expect(
-      zeroEnabledLayers({ llm: 0, vector: 0 }, ["llm", "vector"], { unpricedSpanCount: 531 }),
-    ).toEqual([]);
-  });
-
-  it("keeps the cost reading when nothing in the window went unpriced", () => {
-    // Every span carried a cost, so a zero really is an absence and CTO-107's behaviour stands.
-    expect(
-      zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"], { unpricedSpanCount: 0 }),
-    ).toEqual(["vector"]);
-  });
-
-  it("keeps the cost reading when no coverage is supplied at all", () => {
-    // An older payload or a mock: nobody counted, and there is no evidence of unpriced spans.
-    expect(zeroEnabledLayers({ llm: 100, vector: 0 }, ["llm", "vector"])).toEqual(["vector"]);
+  it("cannot be handed a cost to be misled by", () => {
+    // Regression guard on the SHAPE, not just the values. The defect was a caller passing per-layer
+    // COST into this position, which type-checked because both are Record<Layer, number>. The only
+    // defence left is that there is now exactly one numeric argument and its name says spans, so
+    // this pins the arity: a third argument would not compile.
+    expect(zeroEnabledLayers.length).toBe(2);
   });
 });
